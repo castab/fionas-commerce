@@ -86,8 +86,17 @@ class ArchitectureSpec :
                 .shouldBeEmpty()
         }
 
-        test("Fiona ships no migration in the runtime-owned commerce location") {
+        test("Fiona runs no migration lifecycle of its own; commerce-runtime orchestrates both streams") {
+            sources().containing(listOf("org.flywaydb", "Flyway", "MigrationLifecycle")).shouldBeEmpty()
+            // No Flyway dependency of Fiona's own: it arrives only through commerce-runtime.
+            File("build.gradle.kts").readText().contains("org.flywaydb") shouldBe false
+            File("gradle/libs.versions.toml").readText().contains("flyway", ignoreCase = true) shouldBe false
+        }
+
+        test("Fiona ships no runtime migrations and its migrations never touch the commerce schema") {
             File("src/main/resources/db/commerce").exists() shouldBe false
+            // Deliberately blunt: the first reference to a runtime structure that commerce-runtime
+            // publishes as a persistence contract must update this guard on purpose.
             File("src/main/resources/db/fionas")
                 .listFiles()
                 .orEmpty()

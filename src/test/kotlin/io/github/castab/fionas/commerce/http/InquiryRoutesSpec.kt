@@ -30,7 +30,7 @@ class InquiryRoutesSpec :
 
         fun Response.error() = CommerceJson.asA(bodyString(), ErrorResponse.serializer())
 
-        fun rows() = application.database.count("public.customers") to application.database.count("public.inquiries")
+        fun rows() = application.database.count("fionas.customers") to application.database.count("fionas.inquiries")
 
         test("POST /inquiries records the inquiry and returns it, with its location") {
             val email = "jane-${UUID.randomUUID()}@example.com"

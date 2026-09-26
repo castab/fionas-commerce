@@ -6,7 +6,7 @@ import org.jdbi.v3.core.mapper.RowMapper
 import java.time.OffsetDateTime
 import java.util.UUID
 
-/** [InquiryRepository] on `public.inquiries`, through the transaction's JDBI handle. */
+/** [InquiryRepository] on `fionas.inquiries`, through the transaction's JDBI handle. */
 class JdbiInquiryRepository : InquiryRepository {
     override fun insert(
         transaction: Transaction,
@@ -15,7 +15,7 @@ class JdbiInquiryRepository : InquiryRepository {
         transaction.handle
             .createUpdate(
                 """
-                INSERT INTO public.inquiries (id, customer_id, message, created_at)
+                INSERT INTO fionas.inquiries (id, customer_id, message, created_at)
                 VALUES (:id, :customerId, :message, :createdAt)
                 """.trimIndent(),
             ).bind("id", inquiry.id.value)
@@ -30,7 +30,7 @@ class JdbiInquiryRepository : InquiryRepository {
         id: InquiryId,
     ): Inquiry? =
         transaction.handle
-            .createQuery("SELECT id, customer_id, message, created_at FROM public.inquiries WHERE id = :id")
+            .createQuery("SELECT id, customer_id, message, created_at FROM fionas.inquiries WHERE id = :id")
             .bind("id", id.value)
             .map(inquiryRow)
             .findOne()

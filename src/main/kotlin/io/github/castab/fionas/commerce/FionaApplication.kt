@@ -8,11 +8,15 @@ import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import java.time.Clock
 
-/** Where Fiona's own Flyway migrations live. Never `db/commerce`, which commerce-runtime owns. */
+/**
+ * Where Fiona's own migrations live: Fiona's migration stream, applied by commerce-runtime
+ * after its own. Never `db/commerce`; the runtime discovers and applies its migrations itself.
+ */
 const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
 
 /**
- * Everything Fiona's contributes to commerce-runtime: its migrations and its routes.
+ * Everything Fiona's contributes to commerce-runtime: the location of its own migrations
+ * (never the runtime's) and its routes.
  *
  * This is the application's composition root. Repositories and operations are built here
  * with ordinary Kotlin from the runtime's `CommerceRuntimeContext`, so every Fiona write

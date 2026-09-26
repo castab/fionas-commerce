@@ -56,7 +56,7 @@ class InquiryOperationsSpec :
         test("an inquiry with a known email reuses that customer and does not overwrite its name") {
             val email = "returning-${UUID.randomUUID()}@example.com"
             val first = createInquiry()(command(email, name = "Jane Doe"))
-            val customersAfterFirst = application.database.count("public.customers")
+            val customersAfterFirst = application.database.count("fionas.customers")
 
             val second = createInquiry()(command(email.uppercase(), name = "J. Doe", message = null))
 
@@ -65,7 +65,7 @@ class InquiryOperationsSpec :
             second.inquiry.customerId shouldBe first.customer.id
             second.inquiry.message.shouldBeNull()
             getInquiry()(second.inquiry.id) shouldBe second
-            application.database.count("public.customers") shouldBe customersAfterFirst
+            application.database.count("fionas.customers") shouldBe customersAfterFirst
         }
 
         test("when the inquiry cannot be recorded, the new customer is not recorded either") {

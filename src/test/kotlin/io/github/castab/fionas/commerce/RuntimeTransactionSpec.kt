@@ -50,19 +50,19 @@ class RuntimeTransactionSpec :
         test("repository writes are invisible to other connections until the runtime transaction commits") {
             val customer = customer()
             val inquiry = inquiry(customer)
-            val customersBefore = application.database.count("public.customers")
-            val inquiriesBefore = application.database.count("public.inquiries")
+            val customersBefore = application.database.count("fionas.customers")
+            val inquiriesBefore = application.database.count("fionas.inquiries")
 
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
                 inquiries.insert(transaction, inquiry)
                 // A repository that auto-committed or used its own transaction would already
                 // have made these rows visible to another connection.
-                application.database.count("public.customers") shouldBe customersBefore
-                application.database.count("public.inquiries") shouldBe inquiriesBefore
+                application.database.count("fionas.customers") shouldBe customersBefore
+                application.database.count("fionas.inquiries") shouldBe inquiriesBefore
             }
 
-            application.database.count("public.customers") shouldBe customersBefore + 1
-            application.database.count("public.inquiries") shouldBe inquiriesBefore + 1
+            application.database.count("fionas.customers") shouldBe customersBefore + 1
+            application.database.count("fionas.inquiries") shouldBe inquiriesBefore + 1
         }
     })

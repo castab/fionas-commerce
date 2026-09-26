@@ -34,6 +34,11 @@ class TestDatabase private constructor(
             }
         }
 
+    /** Executes [sql] directly, outside commerce-runtime. */
+    fun execute(sql: String) {
+        connect { connection -> connection.createStatement().use { it.execute(sql) } }
+    }
+
     /** The values of the first column of [sql], one per row. */
     fun strings(sql: String): List<String> =
         connect { connection ->

@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
+import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -32,8 +33,23 @@ class FionaApplicationSpec :
 
             configuration.server.port shouldBe 9090
             configuration.database.jdbcUrl shouldBe "jdbc:postgresql://db.internal:5432/fionas"
-            configuration.flyway.enabled shouldBe false
+            configuration.migrations.onStartup shouldBe OnStartup.MIGRATE
             configuration.toString() shouldNotContain "not-a-real-secret"
+        }
+
+        test("a deployment that migrates separately switches instances to validation through the environment") {
+            val configuration =
+                CommerceRuntimeConfiguration.load(
+                    environment =
+                        mapOf(
+                            "DATABASE_JDBC_URL" to "jdbc:postgresql://db.internal:5432/fionas",
+                            "DATABASE_USERNAME" to "fionas",
+                            "DATABASE_PASSWORD" to "not-a-real-secret",
+                            "MIGRATIONS_ON_STARTUP" to "validate",
+                        ),
+                )
+
+            configuration.migrations.onStartup shouldBe OnStartup.VALIDATE
         }
 
         test("the runtime's liveness and readiness routes are served by the Fiona application") {

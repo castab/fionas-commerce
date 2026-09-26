@@ -7,7 +7,7 @@ import org.jdbi.v3.core.mapper.RowMapper
 import java.time.OffsetDateTime
 import java.util.UUID
 
-/** [CustomerRepository] on `public.customers`, through the transaction's JDBI handle. */
+/** [CustomerRepository] on `fionas.customers`, through the transaction's JDBI handle. */
 class JdbiCustomerRepository : CustomerRepository {
     override fun insert(
         transaction: Transaction,
@@ -17,7 +17,7 @@ class JdbiCustomerRepository : CustomerRepository {
             transaction.handle
                 .createUpdate(
                     """
-                    INSERT INTO public.customers (id, name, email, created_at)
+                    INSERT INTO fionas.customers (id, name, email, created_at)
                     VALUES (:id, :name, :email, :createdAt)
                     """.trimIndent(),
                 ).bind("id", customer.id.value)
@@ -38,7 +38,7 @@ class JdbiCustomerRepository : CustomerRepository {
         id: CustomerId,
     ): Customer? =
         transaction.handle
-            .createQuery("SELECT id, name, email, created_at FROM public.customers WHERE id = :id")
+            .createQuery("SELECT id, name, email, created_at FROM fionas.customers WHERE id = :id")
             .bind("id", id.value)
             .map(customerRow)
             .findOne()
@@ -49,7 +49,7 @@ class JdbiCustomerRepository : CustomerRepository {
         email: Email,
     ): Customer? =
         transaction.handle
-            .createQuery("SELECT id, name, email, created_at FROM public.customers WHERE email = :email")
+            .createQuery("SELECT id, name, email, created_at FROM fionas.customers WHERE email = :email")
             .bind("email", email.value)
             .map(customerRow)
             .findOne()

@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.5/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.5/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.6/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.6/domain)
 artifacts.
 
 > **Status: first vertical slice.** The application currently implements only
@@ -23,8 +23,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        tables, application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.5`, which brings
-`commerce-domain:0.0.5` with it. It contributes its migrations and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.6`, which brings
+`commerce-domain:0.0.6` with it. It contributes its migrations and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -44,7 +44,7 @@ Fiona operation      inquiry/CreateInquiry.kt  opens one runtime transaction
    └── InquiryRepository   ─┴── SQL on transaction.handle, same Transaction
                                    │
                                    ▼
-                     PostgreSQL: public.customers, public.inquiries (Fiona)
+                     PostgreSQL: fionas.customers, fionas.inquiries (Fiona)
                                  commerce.*                          (runtime)
 ```
 
@@ -132,7 +132,7 @@ environment. Credentials come only from the environment.
 | `DATABASE_MINIMUM_IDLE` | Idle connections kept | `1` |
 | `DATABASE_CONNECTION_TIMEOUT_MS` | Connection timeout | `500` |
 | `DATABASE_VALIDATION_TIMEOUT_MS` | Validation timeout | `1000` |
-| `FLYWAY_ENABLED` | Apply migrations at startup | `false` |
+| `MIGRATIONS_ON_STARTUP` | `migrate`: apply pending migrations, then serve. `validate`: only check that they are applied | `migrate` (Fiona's `application.conf`) |
 | `LOG_LEVEL` | Level of the application's and runtime's own logs | `INFO` |
 
 Logging is Logback ([`logback.xml`](src/main/resources/logback.xml)): `key=value` lines
@@ -140,16 +140,34 @@ on stdout, with library logging at `WARN`/`INFO`. The database password is never
 
 ## Database and migrations
 
-- Fiona's migrations live in [`src/main/resources/db/fionas`](src/main/resources/db/fionas)
-  (`classpath:db/fionas`), tracked in `public.flyway_schema_history`.
-- Fiona's tables are in the `public` schema: `customers` and `inquiries`
-  (`inquiries.customer_id → customers.id`, `customers.email` unique).
-- commerce-runtime owns the `commerce` schema and its own history table
-  (`commerce.flyway_schema_history`). Fiona never writes there.
+commerce-runtime owns migration orchestration; Fiona owns only its own migrations.
 
-**Running migrations.** Start the application with `FLYWAY_ENABLED=true`: commerce-runtime
-applies its own migrations, then Fiona's, before serving HTTP. Re-running is a no-op when
-the database is current. There is no separate migration command yet.
+```text
+commerce-runtime migrations    commerce schema    commerce.flyway_schema_history   first
+Fiona migrations               fionas schema      public.flyway_schema_history     second
+```
+
+- Fiona's migrations live in [`src/main/resources/db/fionas`](src/main/resources/db/fionas)
+  and are contributed as `classpath:db/fionas`. The runtime's migrations come inside the
+  `commerce-runtime` jar; Fiona never lists or copies them.
+- The two streams have independent version spaces: Fiona's migrations are `V1`, `V2`, …
+  regardless of the runtime's numbering.
+- Fiona's tables are in the `fionas` schema: `customers` and `inquiries`
+  (`inquiries.customer_id → customers.id`, `customers.email` unique). Fiona never creates or
+  changes anything in `commerce`.
+- Composing the runtime runs the migration phase before anything is served. By default
+  (`MIGRATIONS_ON_STARTUP=migrate`) it applies the runtime's pending migrations, then
+  Fiona's; re-running against a current database applies nothing. A deployment that
+  migrates in a separate release step sets `MIGRATIONS_ON_STARTUP=validate` on its
+  instances. There is no separate migration command yet.
+- If any migration fails, or validation finds the database behind, the process logs
+  `event=startup_failed` and exits without serving.
+
+> **Upgrading from commerce 0.0.5.** commerce-runtime 0.0.6 reset its own migration history,
+> and Fiona's first migration moved its tables to `fionas`. Databases created before this
+> change fail validation and must be recreated, for example `docker compose down -v`.
+
+The rules for writing migrations are in [`AGENTS.md`](AGENTS.md#application-migrations).
 
 ## Running locally
 
@@ -158,7 +176,7 @@ docker compose up -d db
 ```
 
 ```bash
-export DATABASE_JDBC_URL=jdbc:postgresql://localhost:5432/fionas DATABASE_USERNAME=fionas DATABASE_PASSWORD=fionas FLYWAY_ENABLED=true
+export DATABASE_JDBC_URL=jdbc:postgresql://localhost:5432/fionas DATABASE_USERNAME=fionas DATABASE_PASSWORD=fionas
 ```
 
 ```bash
@@ -203,7 +221,8 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | Spec | Proves |
 |---|---|
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
-| `DatabaseSchemaSpec` | Migrations create Fiona's tables and keys in `public`, nothing in `commerce` |
+| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`, nothing Fiona-owned in `commerce` or `public` |
+| `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: runtime migrations first (an application migration depending on them succeeds), independent version spaces, repeat startup applies nothing, failures prevent composition |
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email lookup, unique email conflict, foreign key |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, atomic failure, not found |

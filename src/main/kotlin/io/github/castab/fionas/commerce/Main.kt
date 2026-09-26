@@ -11,6 +11,11 @@ import kotlin.system.exitProcess
  * commerce-runtime with Fiona's contributions, serves HTTP, and keeps the process alive
  * until the JVM is asked to stop. commerce-runtime manages its server and connection pool;
  * this function owns the process around them.
+ *
+ * Composing the runtime begins with its migration phase, as `migrations.onStartup`
+ * configures: the runtime's migrations, then Fiona's (or only validation that both are
+ * current). If that phase fails, no runtime exists: the failure is logged and the process
+ * exits without serving.
  */
 fun main() {
     // Every log line goes through Logback; kotlin-logging would otherwise announce itself

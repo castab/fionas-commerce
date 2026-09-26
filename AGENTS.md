@@ -84,7 +84,7 @@ own table, purgeable independently of the customer.
   name does **not** overwrite the stored name, and the differing name is not retained
   anywhere.
 - Otherwise a new customer is created, in the same transaction as the inquiry.
-- `public.customers.email` is unique, because this policy needs "the customer with this
+- `fionas.customers.email` is unique, because this policy needs "the customer with this
   email" to be unambiguous. A concurrent request that loses the race for a new email
   gets `409 conflict` and may retry.
 
@@ -119,7 +119,8 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
 
 - `Transactor` and `Transaction`;
 - the JDBI root and the HikariCP connection pool;
-- Flyway orchestration (`DatabaseMigrations`) and the `commerce` schema;
+- migration orchestration (`MigrationLifecycle`, run by `commerceRuntime(...)`), the
+  runtime's own migrations, and the `commerce` schema;
 - the error model (`CommerceFailure`, `validating`, `CommerceErrorHandling`,
   `ErrorResponse`);
 - http4k/Jetty composition (`commerceRuntime(...)`), `CommerceJson`, `jsonBody`;
@@ -136,8 +137,9 @@ only to *observe* the database from outside the runtime (see `TestDatabase`).
 `FionaApplication.kt` is the composition root. `fionaApplication()` returns the
 `ApplicationContributions` (Fiona's migration location and route factory); the route
 factory builds repositories and operations from the `CommerceRuntimeContext` with
-ordinary Kotlin. `Main.kt` loads configuration, calls `commerceRuntime(...)`, starts it,
-installs the shutdown hook, and blocks. There is no DI framework, no annotation scanning,
+ordinary Kotlin. `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
+the migration phase before composing anything), starts it, installs the shutdown hook,
+and blocks. Keep `main()` thin: no schema, Flyway, or migration decisions belong in it. There is no DI framework, no annotation scanning,
 no service locator. Keep wiring visible.
 
 ## Transaction rule
@@ -171,20 +173,52 @@ Routes translate transport. Operations orchestrate. Repositories persist.
   Repositories translate a unique violation into `CommerceFailure.Conflict`
   (`isUniqueViolation()`); everything unexpected becomes `internal_failure`.
 
-## Migration rule
+## Application migrations
 
-- Fiona migrations live in `src/main/resources/db/fionas` (`FIONA_MIGRATION_LOCATION`)
-  and are applied by commerce-runtime after its own migrations, tracked in
-  `public.flyway_schema_history`.
-- Fiona tables live in the application schema, `public` (the only application schema
-  `commerceRuntime(...)` currently supports), and SQL names it explicitly
-  (`public.customers`). Never rely on `search_path`.
-- Never create a Fiona table in the `commerce` schema, never add files under
-  `db/commerce`, and never alter runtime-owned commerce tables. Fiona migrations may
-  reference commerce tables once they exist (for example a foreign key to a commerce
-  financial-document table), but must not change them.
-- Migrations are append-only. Never edit a migration that has been applied anywhere.
-  Versions are timestamps (`VyyyyMMddHHmmss__description.sql`), like upstream.
+**Database migrations in this repository are application-owned migrations only.**
+`commerce-runtime` owns migration orchestration and its own persistence migrations. Do not
+instantiate an independent Flyway startup lifecycle, copy runtime migrations into this
+repository, modify `commerce`-owned objects from Fiona's migrations, or coordinate
+application migration version numbers with runtime migration versions. Application
+migrations live in Fiona's migration location and schema, and are executed by the runtime
+after runtime-owned migrations.
+
+- **The runtime orchestrates; Fiona owns only the contents.** Fiona contributes one
+  location, `classpath:db/fionas` (`FIONA_MIGRATION_LOCATION`), through
+  `ApplicationContributions.migrationLocations`. The runtime discovers its own migrations
+  inside its jar; Fiona never lists, copies, or depends on their files or versions.
+- **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
+  before anything is composed or served. A Fiona migration may therefore depend on
+  runtime-owned structures, never the reverse.
+- **Independent version space.** Fiona's migrations are `V1__…`, `V2__…`, the next integer
+  in Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
+  branches add the same `V<n>`, the one merged second renumbers before merging.
+- **Fiona's objects live in the `fionas` schema**, created by Fiona's `V1`. SQL names it
+  explicitly (`fionas.customers`); never rely on `search_path`. `public` holds only the
+  history table the runtime keeps for Fiona's stream.
+- **Never create, alter, or drop anything in `commerce`**, and never add files under
+  `db/commerce`. If Fiona needs a runtime-owned structure to change, stop and raise it as
+  a runtime requirement (see [Commerce-runtime gap rule](#commerce-runtime-gap-rule)).
+- **Reference runtime structures only when they are a published contract.** A foreign key
+  to a runtime table is legitimate when commerce-runtime publishes that table for
+  applications; never depend on incidental runtime tables, indexes, or Flyway metadata.
+  As of 0.0.6 the runtime publishes no table. `ArchitectureSpec` rejects any `commerce.`
+  reference in Fiona migrations; the first sanctioned one updates that guard deliberately.
+- **History is immutable.** Never edit a migration that has run outside a disposable
+  database; correct it with a new migration. (One pre-release exception, before any
+  deployment: the original `V20260926210000` migration was rewritten as `V1`, moving the
+  tables from `public` to `fionas`, alongside commerce 0.0.6's own history reset.)
+- **Expand → migrate → contract** for any change to a deployed schema: add the new
+  structure, move code and data to it in a later release, remove the old one only after
+  no running version uses it. Old and new instances overlap during rolling deploys.
+- **Migration failure prevents startup.** `commerceRuntime(...)` throws and no runtime is
+  returned; `main()` logs `event=startup_failed` and exits. Never catch a migration failure
+  to keep booting.
+- **Startup mode is the runtime's setting.** Fiona's `application.conf` sets
+  `migrations.onStartup = MIGRATE` (migrate, then serve). A deployment that migrates in a
+  separate release step sets `MIGRATIONS_ON_STARTUP=validate`. Never add Fiona-specific
+  migration switches. A future migration-only entry point would call the runtime's
+  `MigrationLifecycle`; none exists yet, deliberately.
 
 ## Kotlin conventions
 
@@ -255,18 +289,20 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (as of commerce 0.0.5)
+### Known upstream gaps (as of commerce 0.0.6)
 
-- **Application schema is fixed to `public`.** `DatabaseMigrations` accepts an
-  application schema, but `commerceRuntime(...)` and `ApplicationContributions` do not
-  let an application choose it. Fiona would prefer a dedicated `fionas` schema.
+- **Application history schema is fixed.** Fiona's tables live in `fionas`, but the
+  runtime keeps every application's migration history in `public.flyway_schema_history`
+  (`ApplicationMigrations.SCHEMA`), with no way to choose another schema.
+- **No published runtime table.** The runtime owns no table yet, so nothing Fiona could
+  legitimately reference exists; `MigrationLifecycleSpec` proves runtime-first ordering
+  through the `commerce` schema itself.
+- **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
+  validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
 - **Hoplite prints a deprecation notice to stdout** on every
   `CommerceRuntimeConfiguration.load()` (sealed-type inference), bypassing the
   application's logging. The fix belongs in the runtime's `ConfigLoaderBuilder`
   (`withExplicitSealedTypes()`).
-- **No separate migration entry point.** Migrations run only when `FLYWAY_ENABLED=true`
-  at startup; running them as a separate deployment step would need application code
-  around `DatabaseMigrations`, which Fiona does not have yet.
 - **No reusable test support.** The Docker-CLI PostgreSQL build service and
   `TestDatabase` follow upstream's pattern but are re-implemented here, because the
   runtime publishes no test fixtures.
@@ -283,8 +319,9 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   exactly as `main()` does and exposes the runtime's own `Transactor`.
 - Keep: value-object tests, repository integration tests, operation tests (including
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
-  invisible until commit), HTTP tests through the complete handler, schema tests, and
-  `ArchitectureSpec`.
+  invisible until commit), HTTP tests through the complete handler, schema tests,
+  `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
+  the lifecycle internals), and `ArchitectureSpec`.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
 
 ## Documentation synchronization

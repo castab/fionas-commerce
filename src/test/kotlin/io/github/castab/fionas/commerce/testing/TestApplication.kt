@@ -5,6 +5,7 @@ import io.github.castab.commerce.runtime.CommerceRuntime
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
+import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.fionaApplication
 import org.http4k.core.HttpHandler
@@ -19,8 +20,8 @@ val testClock: Clock = Clock.fixed(TEST_INSTANT, ZoneOffset.UTC)
 
 /**
  * fionas-commerce composed as `main()` composes it, `commerceRuntime(configuration,
- * fionaApplication())`, against a throwaway database, with commerce-runtime applying the
- * commerce and Fiona migrations.
+ * fionaApplication())`, against a throwaway database, with commerce-runtime migrating on
+ * startup: its own migrations, then Fiona's.
  *
  * [transactor] is the runtime's own `Transactor`, taken from the `CommerceRuntimeContext`
  * the runtime hands to Fiona's route factory, so specs drive repositories and operations
@@ -51,7 +52,7 @@ class TestApplication private constructor(
                             CommerceRuntimeConfiguration(
                                 server = CommerceRuntimeConfiguration.Server(port = 0),
                                 database = database.configuration,
-                                flyway = CommerceRuntimeConfiguration.Flyway(enabled = true),
+                                migrations = CommerceRuntimeConfiguration.Migrations(onStartup = OnStartup.MIGRATE),
                             ),
                         application =
                             ApplicationContributions(

@@ -1,7 +1,7 @@
 [versions]
 # The commerce artifacts this application is built on. commerce-runtime exposes the
 # matching commerce-domain version transitively, so the domain is not declared separately.
-commerce = "0.0.5"
+commerce = "0.0.6"
 
 # Build and test tooling, matching the commerce repository's conventions.
 kotlin = "2.4.20"

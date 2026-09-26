@@ -52,7 +52,7 @@ class JdbiInquiryRepositorySpec :
         }
 
         test("an inquiry cannot reference a customer that does not exist") {
-            val before = application.database.count("public.inquiries")
+            val before = application.database.count("fionas.inquiries")
 
             val failure =
                 shouldThrowAny {
@@ -60,6 +60,6 @@ class JdbiInquiryRepositorySpec :
                 }
 
             failure.sqlState() shouldBe "23503"
-            application.database.count("public.inquiries") shouldBe before
+            application.database.count("fionas.inquiries") shouldBe before
         }
     })
