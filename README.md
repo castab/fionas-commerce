@@ -35,7 +35,7 @@ HTTP request
 commerce-runtime error handling (one {"code","message"} error contract)
    │
    ▼
-Fiona route          http/InquiryRoutes.kt     JSON DTO → application values
+Fiona contract route http/InquiryRoutes.kt     JSON DTO → application values
    │
    ▼
 Fiona operation      inquiry/CreateInquiry.kt  opens one runtime transaction
@@ -56,8 +56,12 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 |---|---|
 | `POST /inquiries` | Records an inquiry, establishing its customer. `201` with the inquiry and a `Location` header. |
 | `GET /inquiries/{inquiryId}` | The persisted inquiry. `404` when unknown, `400` when the id is not a UUID. |
-| `GET /health` | Liveness, served by commerce-runtime: `200 {"status":"ok"}`. |
-| `GET /ready` | Readiness, served by commerce-runtime: `200 {"status":"ready"}` when the database is reachable, `503` otherwise. |
+| `GET /openapi.json` | The OpenAPI 3.1 document of the two endpoints above, rendered from the running contract. |
+| `GET /docs` | Swagger UI for that document (redirects to `/docs/index.html`). |
+| `GET /health` | Liveness, served by commerce-runtime: `200 {"status":"ok"}`. Not in the OpenAPI document. |
+| `GET /ready` | Readiness, served by commerce-runtime: `200 {"status":"ready"}` when the database is reachable, `503` otherwise. Not in the OpenAPI document. |
+
+A method an API path does not declare is `405` with an empty body.
 
 ```bash
 curl -i -X POST localhost:8080/inquiries -H 'Content-Type: application/json' \
@@ -84,6 +88,42 @@ customer's stored name, which a later inquiry does not change (see
 Errors use commerce-runtime's contract, `{"code": "...", "message": "..."}`:
 `malformed_request` (400), `validation_failed` (422), `not_found` (404), `conflict` (409),
 `internal_failure` (500, never describing the cause).
+
+## API contract and OpenAPI
+
+The Fiona API describes itself. Each endpoint is an http4k contract route that carries its
+own OpenAPI metadata next to its handler: path, method, `operationId`, summary, tag,
+request and response bodies with examples, and every status it answers. The OpenAPI
+document is rendered from those routes; there is no hand-maintained `openapi.json` or YAML,
+so changing an endpoint changes its documentation in the same place.
+
+- **`GET /openapi.json`** is the machine-readable contract, served live by the application.
+  It needs no database and describes only Fiona's own API (`/inquiries`), not the
+  runtime's `/health` and `/ready` or the documentation routes.
+
+  ```bash
+  curl http://localhost:8080/openapi.json
+  ```
+
+- **`GET /docs`** is Swagger UI reading `/openapi.json`, with "Try it out" against the
+  same origin. Its assets come from the Swagger UI WebJar inside the application jar,
+  never from a CDN.
+- **`./gradlew generateOpenApi`** writes the same document, pretty-printed, to
+  `build/openapi/fionas-commerce-openapi.json`, without a database, Docker, a server, or
+  network access. `./gradlew build` runs it, and CI keeps the file as the
+  `fionas-commerce-openapi` workflow artifact of every successful build, so other
+  applications can use the contract without a deployed instance.
+
+The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
+(`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
+`-Pversion=<version>`). It declares no server host, so it is the same in every
+environment. The stable `operationId`s are `createInquiry` and `getInquiry`.
+
+Schemas are derived from the kotlinx.serialization descriptors of the transport DTOs, the
+wire format itself, so `required` matches what the server reads and writes. One gap
+remains: the `Location` header of `201` is described in prose only, because http4k 6.58's
+contract metadata cannot declare response headers. Every Fiona endpoint must be part of
+the contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
 
 ## Requirements
 
@@ -201,8 +241,9 @@ and closes the connection pool.
 ### Packaging
 
 `./gradlew shadowJar` produces `build/libs/fionas-commerce-all.jar`: one executable jar
-with the application, its dependencies, `application.conf`, `logback.xml`, and the Fiona
-migrations (Flyway's service files are merged). This is the deployable artifact. The
+with the application, its dependencies, `application.conf`, `logback.xml`, the Fiona
+migrations (Flyway's service files are merged), and the Swagger UI assets served at
+`/docs`. This is the deployable artifact. The
 Gradle `application` plugin also provides `./gradlew run` and `installDist` for local
 use. No Spring Boot or container image is involved yet.
 
@@ -226,11 +267,14 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email lookup, unique email conflict, foreign key |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, atomic failure, not found |
-| `InquiryRoutesSpec` | The HTTP API through the complete runtime handler, including errors |
+| `InquiryRoutesSpec` | The HTTP API through the complete runtime handler, including errors: the contract leaves every error body to commerce-runtime, and undeclared methods stay `405` |
+| `OpenApiDocumentSpec` | The OpenAPI document: paths, operationIds, tags, statuses, request and response schemas, the shared error schema, no host (rendered without a database) |
+| `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json` and loads nothing external |
+| `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |
-| `ArchitectureSpec` | Repositories take a `Transaction` and build no transaction infrastructure; no SQL in routes; no HTTP in persistence |
+| `ArchitectureSpec` | Repositories take a `Transaction` and build no transaction infrastructure; no SQL in routes; no HTTP in persistence; every endpoint is a contract route with an `operationId`; no hand-written OpenAPI file; one http4k version |
 
-Full verification, as CI runs it:
+Full verification, as CI runs it (`build` also generates the OpenAPI document):
 
 ```bash
 ./gradlew ktlintCheck test build

@@ -3,12 +3,19 @@ package io.github.castab.fionas.commerce
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.http.FionaOperations
+import io.github.castab.fionas.commerce.http.fionaApiRoutes
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.collections.shouldBeUnique
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
+import io.kotest.matchers.collections.shouldHaveSingleElement
+import io.kotest.matchers.collections.shouldNotBeEmpty
+import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import java.io.File
 
 /**
@@ -91,6 +98,56 @@ class ArchitectureSpec :
             // No Flyway dependency of Fiona's own: it arrives only through commerce-runtime.
             File("build.gradle.kts").readText().contains("org.flywaydb") shouldBe false
             File("gradle/libs.versions.toml").readText().contains("flyway", ignoreCase = true) shouldBe false
+        }
+
+        test("every Fiona endpoint is a contract route, so none can escape the OpenAPI document") {
+            // Ordinary http4k routing is documentation and routing plumbing only, all of it in
+            // FionaApi.kt: Swagger UI, and the 405 answer derived from the contract's own paths.
+            sources { it.name != "FionaApi.kt" }.containing(listOf(" bind ", "routes(", "RoutingHttpHandler(")).shouldBeEmpty()
+            File(mainSources, "http/FionaApi.kt")
+                .readLines()
+                .map { it.trim() }
+                .filter { " bind" in it } shouldContainExactlyInAnyOrder
+                listOf(
+                    "API_DOCS_PATH bind",
+                    ".map { path -> path bind Method.OPTIONS to { Response(Status.METHOD_NOT_ALLOWED) } },",
+                )
+        }
+
+        test("every Fiona endpoint states its stable operationId, summary, tags, and responses") {
+            val routes = fionaApiRoutes(FionaOperations(createInquiry = { error("not called") }, getInquiry = { error("not called") }))
+
+            routes.map { it.meta.operationId.shouldNotBeNull() }.shouldBeUnique()
+            routes.forEach { route ->
+                route.meta.summary shouldNotBe "<unknown>"
+                route.meta.tags.shouldNotBeEmpty()
+                route.meta.responses.shouldNotBeEmpty()
+            }
+        }
+
+        test("no OpenAPI document is maintained by hand; it is always rendered from the contract") {
+            File(".")
+                .walkTopDown()
+                .onEnter { it.name !in setOf("build", ".gradle", ".git", ".kotlin", ".idea") }
+                .filter { it.isFile && Regex("""(openapi|swagger).*\.(json|ya?ml)""", RegexOption.IGNORE_CASE).matches(it.name) }
+                .toList()
+                .shouldBeEmpty()
+        }
+
+        test("every http4k module is the one version commerce-runtime is built against") {
+            val versions =
+                Thread
+                    .currentThread()
+                    .contextClassLoader
+                    .getResources("META-INF/MANIFEST.MF")
+                    .toList()
+                    .mapNotNull { Regex("""/(http4k-[a-z-]+)-(\d[^/]*)\.jar!""").find(it.toString())?.destructured }
+                    .map { (module, version) -> "$module:$version" }
+            versions.shouldNotBeEmpty()
+            versions.map { it.substringAfter(':') }.distinct() shouldHaveSingleElement
+                Regex("""^http4k = "(.+)"$""", RegexOption.MULTILINE)
+                    .find(File("gradle/libs.versions.toml").readText())!!
+                    .groupValues[1]
         }
 
         test("Fiona ships no runtime migrations and its migrations never touch the commerce schema") {

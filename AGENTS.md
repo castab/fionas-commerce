@@ -137,7 +137,8 @@ only to *observe* the database from outside the runtime (see `TestDatabase`).
 `FionaApplication.kt` is the composition root. `fionaApplication()` returns the
 `ApplicationContributions` (Fiona's migration location and route factory); the route
 factory builds repositories and operations from the `CommerceRuntimeContext` with
-ordinary Kotlin. `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
+ordinary Kotlin, hands the operations to the API as `FionaOperations`, and contributes
+exactly two route handlers: `fionaApi(...)` (the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
 the migration phase before composing anything), starts it, installs the shutdown hook,
 and blocks. Keep `main()` thin: no schema, Flyway, or migration decisions belong in it. There is no DI framework, no annotation scanning,
 no service locator. Keep wiring visible.
@@ -162,8 +163,11 @@ estimate, and the relationship between them). Preserve it. `ArchitectureSpec` an
 
 Routes translate transport. Operations orchestrate. Repositories persist.
 
-- Route: request DTO → application values (inside `validating { }`) → one operation →
-  response DTO.
+- Route: a `ContractRoute` (see [API contract and OpenAPI](#api-contract-and-openapi)):
+  request DTO → application values (inside `validating { }`) → one operation → response
+  DTO.
+- Routes receive operations as plain functions (`(CreateInquiry.Command) -> InquiryDetails`),
+  never repositories or the `Transactor`.
 - No SQL in routes. No HTTP in repositories or operations. No persistence in routes.
 - Transport DTOs are `@Serializable` classes in the `http` package. Never put
   serialization annotations on application types, and never let DTOs leak into
@@ -172,6 +176,96 @@ Routes translate transport. Operations orchestrate. Repositories persist.
   constraint names, stack traces, and exception details never reach a response.
   Repositories translate a unique violation into `CommerceFailure.Conflict`
   (`isUniqueViolation()`); everything unexpected becomes `internal_failure`.
+
+## API contract and OpenAPI
+
+Fiona's HTTP API is **one http4k contract**, and its OpenAPI document is an **output** of
+that contract, never a second source of truth:
+
+```text
+new Fiona endpoint
+      │
+      ▼
+ContractRoute in the feature's routes file (http/InquiryRoutes.kt)
+      ├── path, method, request and response lenses
+      ├── operationId, summary, description, tag
+      ├── every status it answers, errors through returningError(ErrorCategory…)
+      └── the handler
+      │
+      ▼
+listed in fionaApiRoutes (http/FionaApi.kt)
+      ├──► the running API                              fionaApi(...)
+      ├──► GET /openapi.json                            rendered by that same contract
+      └──► build/openapi/fionas-commerce-openapi.json   generateOpenApi, same fionaApi(...)
+```
+
+There is no later step called "update the spec". The rules:
+
+1. **OpenAPI is rendered from executable contract routes.** Never add or maintain an
+   `openapi.json`, `openapi.yaml`, `swagger.*`, or any document describing routes
+   separately, and never describe a route anywhere but on its own `ContractRoute`.
+   `ArchitectureSpec` rejects such files.
+2. **Every externally supported Fiona endpoint is a `ContractRoute` in `fionaApiRoutes`.**
+   Never add an ordinary http4k route (`bind`, `routes(`) for an endpoint because it is
+   quicker. The only ordinary routing is plumbing in `http/FionaApi.kt`, each piece listed
+   in `ArchitectureSpec`: Swagger UI at `/docs`, and the `405` answer for methods a
+   contract path does not declare (derived from the contract's own paths). A new exception
+   needs a stated reason and a deliberate change to that guard.
+3. **Every operation has a deliberate, stable `operationId`** (`createInquiry`,
+   `getInquiry`), chosen by hand, never derived from class or function names. Code
+   generators name client methods after it, so **changing one is a breaking API change**.
+4. **Metadata changes with the implementation, in the same change**: statuses, request
+   and response bodies, examples, and property facts (`@ApiProperty`). A route documents
+   every status it can answer; errors use `returningError(ErrorCategory.…)`, which takes
+   status and code from commerce-runtime and the body from its `ErrorResponse`. Never
+   define a Fiona error model.
+5. **The served and the generated document are one rendering** of `fionaApi(...)`. The
+   generator (`src/openapi`, `generateOpenApi`) calls the contract with `FionaOperations`
+   that are never invoked; it must never need a database, Docker, a server, or the
+   network. Adding an operation to `FionaOperations` forces the generator's stub to name
+   it.
+6. **Runtime-owned routes are not Fiona routes.** Never redeclare `/health` or `/ready` as
+   contract routes to make them appear in the document: that would be a second
+   implementation. They join the document only if commerce-runtime publishes metadata for
+   them.
+7. **kotlinx.serialization stays the wire format.** Never switch to Jackson, or add a
+   second JSON representation, for documentation. Schemas are derived from the DTOs'
+   serial descriptors (`KotlinxSchemas` in `http/OpenApi.kt`); what a type cannot say goes
+   in `@ApiProperty` on the transport DTO property, referencing the domain's constants
+   (for example `maxLength = CustomerName.MAX_LENGTH`). `@ApiProperty` is for
+   `@Serializable` DTOs in `http` only, never for application or domain types.
+8. **Document only what the server enforces or guarantees.** No `format` the server does
+   not produce or check (the request email is shallowly validated text, so it has no
+   `email` format); limits the server applies after normalizing say so. `KotlinxSchemas`
+   fails loudly on a property kind it does not support rather than emit a vague schema;
+   extend it when a DTO needs it.
+9. **An API contract change includes OpenAPI tests** (`OpenApiDocumentSpec`) alongside the
+   behavior tests (`InquiryRoutesSpec`).
+10. **Breaking changes are intentional.** Removing or renaming a path, method, property,
+    `operationId`, or status, making an optional property required, or changing a type or
+    format breaks clients; it is never a side effect of refactoring. There is no URL
+    versioning (`/v1`); introducing it is a separate decision.
+
+Also:
+
+- **Contract routing must not change error semantics.** The contract's own failures go to
+  commerce-runtime (`RuntimeErrorHandling`): unreadable input is rethrown as its
+  `LensFailure` (`400 malformed_request`), and an unmatched request is an empty `404`
+  (`not_found`). A contract treats a path value its lens rejects as an unmatched route
+  (`404`), so contract path lenses are plain strings; identifiers are parsed in the
+  handler, where a bad one is a `LensFailure` (`400`), and documented with
+  `format: uuid`. Request bodies are read once, by the handler (no pre-flight extraction).
+- **The document names no server host.** It is identical in every environment; Swagger UI
+  calls the origin that served it.
+- **`info.version` is the Gradle project version**, written by the build into
+  `fionas-commerce.properties` and read by `fionaVersion()`: `0.0.0-SNAPSHOT` in
+  `gradle.properties` until a release sets `-Pversion`.
+- **Swagger UI is self-contained**: its WebJar is packaged in the fat jar, and `/docs`
+  never loads assets from a CDN. No authentication options are configured, because the API
+  has none.
+- **http4k modules stay at commerce-runtime's http4k version** (`http4k` in
+  `libs.versions.toml`), never a newer BOM; `ArchitectureSpec` fails when two http4k
+  versions meet on the classpath.
 
 ## Application migrations
 
@@ -248,7 +342,8 @@ Organize by cohesive feature, not by layer. Current packages:
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
-| `...http` | Routes and transport DTOs |
+| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), and each feature's contract routes and transport DTOs (`InquiryRoutes.kt`) |
+| `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
 Do not create empty packages or layers for future work. Avoid `service`, `manager`,
 `handler`, `util`, `common`, `base`, or `framework` packages and classes unless they
@@ -306,9 +401,28 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 - **No reusable test support.** The Docker-CLI PostgreSQL build service and
   `TestDatabase` follow upstream's pattern but are re-implemented here, because the
   runtime publishes no test fixtures.
+- **Runtime routes carry no API metadata.** `/health` and `/ready` are plain http4k routes,
+  so they cannot join Fiona's OpenAPI document without being redeclared here, which the
+  API contract rules forbid. A combined document needs the runtime to publish contract
+  metadata for them.
+- **The error body lens is private.** `CommerceErrorHandling` renders `ErrorResponse`
+  through a private lens, so Fiona builds its own `jsonBody(ErrorResponse.serializer())`
+  to document error responses. It is the same runtime type, not a second error model; a
+  public lens (or documented error responses) upstream would remove it.
+- **`ErrorResponse` has no schema descriptions.** Its OpenAPI schema says `code` and
+  `message` are required strings but cannot describe them, because the type is upstream.
 - **Cross-boundary atomicity is unproven.** The runtime has no commerce repository yet,
   so no test writes a Fiona row and a commerce row in one transaction. When the first
   commerce repository ships, add that test here.
+
+### Known http4k 6.58 limitations (not to be fixed by upgrading here)
+
+- `OpenApi3(info, kotlinxJson)` selects the reflective `ApiRenderer.Auto`, which fails on
+  kotlinx.serialization models (`Serializer for class 'JsonLiteral' is not found`), and the
+  example-based renderer infers neither `required` nor formats. Hence `KotlinxSchemas`.
+- Contract response metadata has no headers, so `201`'s `Location` is described in prose.
+- A contract answers OPTIONS on a declared path with `200` and an undeclared method with
+  `404`; `fionaApi` keeps the API's established `405`.
 
 ## Testing expectations
 
@@ -321,10 +435,14 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
   invisible until commit), HTTP tests through the complete handler, schema tests,
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
-  the lifecycle internals), and `ArchitectureSpec`.
+  the lifecycle internals), `OpenApiDocumentSpec` (the document's paths, operationIds,
+  statuses, and schemas), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
+  complete handler, and parity with the generator), `GenerateOpenApiSpec` (the build
+  artifact, byte-deterministic), and `ArchitectureSpec`.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
 
 ## Documentation synchronization
 
-Changes to endpoints, configuration, migrations, packages, the customer-matching policy,
-or the upstream version must update `README.md` and this file in the same change.
+Changes to endpoints, the API contract, configuration, migrations, packages, the
+customer-matching policy, the version convention, or the upstream version must update
+`README.md` and this file in the same change.

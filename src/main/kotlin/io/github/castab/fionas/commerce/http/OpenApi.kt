@@ -1,0 +1,194 @@
+@file:OptIn(ExperimentalSerializationApi::class)
+
+package io.github.castab.fionas.commerce.http
+
+import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.http.ErrorCategory
+import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.jsonBody
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialInfo
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.StructureKind
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+import kotlinx.serialization.serializer
+import org.http4k.contract.ContractRenderer
+import org.http4k.contract.ErrorResponseRenderer
+import org.http4k.contract.RouteMetaDsl
+import org.http4k.contract.jsonschema.JsonSchema
+import org.http4k.contract.openapi.ApiInfo
+import org.http4k.contract.openapi.ApiRenderer
+import org.http4k.contract.openapi.OpenApiVersion
+import org.http4k.contract.openapi.v3.Api
+import org.http4k.contract.openapi.v3.OpenApi3
+import org.http4k.contract.openapi.v3.OpenApi3ApiRenderer
+import org.http4k.core.Response
+import org.http4k.core.Status
+import org.http4k.lens.LensFailure
+import java.util.concurrent.ConcurrentHashMap
+
+const val API_TITLE = "Fiona's Commerce API"
+
+/**
+ * Renders the Fiona API contract as an OpenAPI 3.1 document, the one served at
+ * [OPENAPI_PATH] and generated into `build/openapi` alike.
+ *
+ * - No `servers`: the document describes paths only, so it is the same for every
+ *   deployment, and Swagger UI calls the origin that served it.
+ * - Schemas come from the transport DTOs' kotlinx.serialization descriptors, the wire
+ *   format itself ([KotlinxSchemas]).
+ * - Errors the contract itself detects are left to commerce-runtime ([RuntimeErrorHandling]).
+ */
+fun fionaOpenApi(version: String): ContractRenderer =
+    OpenApi3(
+        apiInfo =
+            ApiInfo(
+                title = API_TITLE,
+                version = version,
+                description =
+                    "The HTTP API of the fionas-commerce application, the commerce backend of Fiona's Ice Cream and its " +
+                        "catering business. Every error is `{\"code\": \"...\", \"message\": \"...\"}`: `code` is stable " +
+                        "and machine-readable, `message` is for people and may change. The runtime's `/health` and " +
+                        "`/ready` are not part of this API.",
+            ),
+        json = CommerceJson,
+        apiRenderer = KotlinxSchemas(OpenApi3ApiRenderer(CommerceJson)),
+        errorResponseRenderer = RuntimeErrorHandling,
+        version = OpenApiVersion._3_1_0,
+    )
+
+/**
+ * Leaves every failure the contract detects to commerce-runtime's `CommerceErrorHandling`,
+ * which owns the error contract: an unreadable input is rethrown as the [LensFailure] it
+ * is (`400 malformed_request`), and an unmatched request is an empty `404` (`not_found`).
+ * A contract would otherwise answer with http4k's own error bodies.
+ */
+private object RuntimeErrorHandling : ErrorResponseRenderer {
+    override fun badRequest(lensFailure: LensFailure): Response = throw lensFailure
+
+    override fun notFound(): Response = Response(Status.NOT_FOUND)
+}
+
+private val errorBody = jsonBody(ErrorResponse.serializer())
+
+/**
+ * Documents that the route answers [category] with commerce-runtime's error body. Status
+ * and code come from the runtime's own [ErrorCategory], never restated here.
+ */
+fun RouteMetaDsl.returningError(
+    category: ErrorCategory,
+    description: String,
+    exampleMessage: String,
+) = returning(
+    category.status,
+    errorBody to ErrorResponse(category.code, exampleMessage),
+    "`${category.code}`: $description",
+)
+
+/**
+ * What a transport DTO property means beyond its Kotlin type, for its OpenAPI schema. It
+ * belongs on `@Serializable` DTOs in this package only, never on application types, and
+ * states only what the server enforces or guarantees. It is read from the DTO's serial
+ * descriptor, so it moves and renames with the property it describes. Empty strings and
+ * negative numbers mean "not stated".
+ */
+@SerialInfo
+@Target(AnnotationTarget.PROPERTY)
+annotation class ApiProperty(
+    val description: String = "",
+    val format: String = "",
+    val minLength: Int = -1,
+    val maxLength: Int = -1,
+)
+
+/**
+ * JSON Schemas for `@Serializable` bodies, derived from their kotlinx.serialization
+ * descriptors: property names as serialized, and `required` exactly as [CommerceJson]
+ * reads and writes them. [CommerceJson] omits nulls and treats an absent nullable property
+ * as null, so a property is required only when it is neither nullable nor defaulted, and a
+ * nullable one is described as optional rather than as possibly `null`.
+ *
+ * http4k 6.58's reflective `ApiRenderer.Auto` cannot render kotlinx.serialization models
+ * (it fails to serialize its own schema nodes), and its example-based renderer, [fallback],
+ * infers neither `required` nor formats. Anything that is not a serializable class, such
+ * as an enum path parameter, still goes to [fallback].
+ *
+ * Only what the API uses is supported: objects with string properties. Anything else fails
+ * rendering loudly, rather than publishing a schema that misdescribes the wire format;
+ * extend it when a DTO needs more.
+ */
+private class KotlinxSchemas(
+    private val fallback: ApiRenderer<Api<JsonElement>, JsonElement>,
+) : ApiRenderer<Api<JsonElement>, JsonElement> by fallback {
+    // Definition name → DTO serial name, so two DTOs can never share one component.
+    private val definitions = ConcurrentHashMap<String, String>()
+
+    override fun toSchema(
+        obj: Any,
+        overrideDefinitionId: String?,
+        refModelNamePrefix: String?,
+    ): JsonSchema<JsonElement> {
+        val descriptor =
+            serializerOf(obj)?.descriptor?.takeIf { it.kind == StructureKind.CLASS }
+                ?: return fallback.toSchema(obj, overrideDefinitionId, refModelNamePrefix)
+        val name = refModelNamePrefix.orEmpty() + (overrideDefinitionId ?: descriptor.serialName.substringAfterLast('.'))
+        val owner = definitions.putIfAbsent(name, descriptor.serialName) ?: descriptor.serialName
+        check(owner == descriptor.serialName) { "OpenAPI schema $name would describe both $owner and ${descriptor.serialName}" }
+        return JsonSchema(
+            buildJsonObject { put("\$ref", "#/components/schemas/$name") },
+            mapOf(name to objectSchema(descriptor)),
+        )
+    }
+
+    private fun serializerOf(obj: Any): KSerializer<Any>? =
+        if (obj is JsonElement) {
+            null
+        } else {
+            try {
+                CommerceJson.json.serializersModule.serializer(obj.javaClass)
+            } catch (_: SerializationException) {
+                null
+            }
+        }
+
+    private fun objectSchema(descriptor: SerialDescriptor): JsonObject =
+        buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                for (index in 0 until descriptor.elementsCount) {
+                    put(descriptor.getElementName(index), propertySchema(descriptor, index))
+                }
+            }
+            val required =
+                (0 until descriptor.elementsCount)
+                    .filterNot { descriptor.isElementOptional(it) || descriptor.getElementDescriptor(it).isNullable }
+                    .map(descriptor::getElementName)
+            if (required.isNotEmpty()) putJsonArray("required") { required.forEach(::add) }
+        }
+
+    private fun propertySchema(
+        owner: SerialDescriptor,
+        index: Int,
+    ): JsonObject {
+        val property = "${owner.serialName}.${owner.getElementName(index)}"
+        val kind = owner.getElementDescriptor(index).kind
+        check(kind == PrimitiveKind.STRING) { "OpenAPI schemas support only string properties so far; $property is $kind" }
+        val facts = owner.getElementAnnotations(index).filterIsInstance<ApiProperty>().singleOrNull()
+        return buildJsonObject {
+            put("type", "string")
+            facts?.description?.takeIf { it.isNotEmpty() }?.let { put("description", it) }
+            facts?.format?.takeIf { it.isNotEmpty() }?.let { put("format", it) }
+            facts?.minLength?.takeIf { it >= 0 }?.let { put("minLength", it) }
+            facts?.maxLength?.takeIf { it >= 0 }?.let { put("maxLength", it) }
+        }
+    }
+}

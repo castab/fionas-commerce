@@ -15,6 +15,11 @@ plugins {
 
 group = "io.github.castab"
 
+// The application's version is the Gradle project version: `version` in gradle.properties,
+// a development default, overridden by a release build with -Pversion=<version>. The build
+// writes it into fionas-commerce.properties, where the application (and the OpenAPI
+// document's info.version) reads it.
+
 // ---------------------------------------------------------------------------
 // Java 25 is a hard requirement, as it is for commerce-runtime.
 //
@@ -46,6 +51,12 @@ dependencies {
     // kotlinx.serialization, JDBI, and HikariCP.
     implementation(libs.commerce.runtime)
 
+    // http4k's contract routing and OpenAPI 3 renderer, from which /openapi.json and the
+    // generated build/openapi document are both rendered, and Swagger UI served from its
+    // WebJar (no CDN) at /docs. Same http4k version as commerce-runtime.
+    implementation(libs.http4k.api.openapi)
+    implementation(libs.http4k.api.ui.swagger)
+
     // The facade commerce-runtime logs through, for the application's own lifecycle logs.
     implementation(libs.kotlin.logging.jvm)
 
@@ -61,14 +72,58 @@ application {
     mainClass = "io.github.castab.fionas.commerce.MainKt"
 }
 
+tasks.processResources {
+    val version = project.version.toString()
+    inputs.property("version", version)
+    filesMatching("fionas-commerce.properties") { expand("version" to version) }
+}
+
 // The deployable artifact: one executable jar holding the application, its dependencies,
 // application.conf, logback.xml, and the Fiona migrations. build/libs/fionas-commerce-all.jar
 tasks.shadowJar {
     archiveClassifier = "all"
+    // The deployable path stays build/libs/fionas-commerce-all.jar whatever the version.
+    archiveVersion = ""
     // Flyway discovers its PostgreSQL support through ServiceLoader files, which must be
     // merged rather than overwritten when dependencies are combined.
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()
+}
+
+// ---------------------------------------------------------------------------
+// The OpenAPI document as a build artifact: build/openapi/fionas-commerce-openapi.json.
+//
+// Rendered by the `openapi` source set from the very contract the running application
+// serves at /openapi.json (fionaApi), never from a hand-maintained file. Rendering calls no
+// operation, so it needs no database, Docker, server, or network. The generator lives in
+// its own source set so the deployable jar carries no second main().
+// ---------------------------------------------------------------------------
+val openapi by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output
+    runtimeClasspath += sourceSets.main.get().output
+}
+configurations[openapi.implementationConfigurationName].extendsFrom(configurations.implementation.get())
+configurations[openapi.runtimeOnlyConfigurationName].extendsFrom(configurations.runtimeOnly.get())
+
+// The specs compare the generator's output with what the running application serves.
+sourceSets.test {
+    compileClasspath += openapi.output
+    runtimeClasspath += openapi.output
+}
+
+val generateOpenApi by tasks.registering(JavaExec::class) {
+    group = "documentation"
+    description = "Generates build/openapi/fionas-commerce-openapi.json from the Fiona API contract."
+    val document = layout.buildDirectory.file("openapi/fionas-commerce-openapi.json")
+    classpath = openapi.runtimeClasspath
+    mainClass = "io.github.castab.fionas.commerce.openapi.GenerateOpenApiKt"
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(requiredJavaVersion) }
+    outputs.file(document)
+    argumentProviders.add(CommandLineArgumentProvider { listOf(document.get().asFile.absolutePath) })
+}
+
+tasks.assemble {
+    dependsOn(generateOpenApi)
 }
 
 ktlint {

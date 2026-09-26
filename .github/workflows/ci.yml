@@ -66,6 +66,17 @@ jobs:
         run: ./gradlew test --no-build-cache
 
       # Everything else in `build`, including the executable jar
-      # (build/libs/fionas-commerce-all.jar). Tests that already ran above are up to date.
+      # (build/libs/fionas-commerce-all.jar) and the OpenAPI document (generateOpenApi).
+      # Tests that already ran above are up to date.
       - name: Full build
         run: ./gradlew build --no-build-cache
+
+      # The Fiona API's OpenAPI document, rendered from the same contract the application
+      # serves at /openapi.json, so other applications and tooling can use the contract
+      # without a deployed instance. Retained only when the build succeeded.
+      - name: Upload OpenAPI document
+        uses: actions/upload-artifact@v7
+        with:
+          name: fionas-commerce-openapi
+          path: build/openapi/fionas-commerce-openapi.json
+          if-no-files-found: error

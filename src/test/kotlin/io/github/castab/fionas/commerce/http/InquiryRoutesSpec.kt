@@ -116,4 +116,33 @@ class InquiryRoutesSpec :
                 it.error() shouldBe ErrorResponse("not_found", "Inquiry $missing was not found")
             }
         }
+
+        // The routes are http4k contract routes, which would otherwise validate inputs and
+        // render failures themselves; commerce-runtime still owns every error response.
+        test("inputs the contract cannot read keep commerce-runtime's error body") {
+            listOf(post(""), post("""{not json"""), post("""{"name":1,"email":"jane@example.com"}""")).forEach {
+                it.status shouldBe Status.BAD_REQUEST
+                it.header("Content-Type") shouldBe "application/json; charset=utf-8"
+                it.error() shouldBe ErrorResponse("malformed_request", "Malformed request: body 'body'")
+            }
+            get("/inquiries/not-a-uuid").error() shouldBe ErrorResponse("malformed_request", "Malformed request: path 'inquiryId'")
+            get("/inquiries/${UUID.randomUUID()}/more").error().code shouldBe "not_found"
+        }
+
+        test("a method an inquiry path does not declare is not allowed, OPTIONS included") {
+            val id = UUID.randomUUID()
+            listOf(
+                Request(Method.GET, "/inquiries"),
+                Request(Method.PUT, "/inquiries"),
+                Request(Method.OPTIONS, "/inquiries"),
+                Request(Method.POST, "/inquiries/$id"),
+                Request(Method.DELETE, "/inquiries/$id"),
+                Request(Method.HEAD, "/inquiries/$id"),
+                Request(Method.OPTIONS, "/inquiries/$id"),
+            ).forEach { request ->
+                val response = application.http(request)
+                response.status shouldBe Status.METHOD_NOT_ALLOWED
+                response.bodyString() shouldBe ""
+            }
+        }
     })
