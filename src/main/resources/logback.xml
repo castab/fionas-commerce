@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  fionas-commerce logging: key=value lines on stdout, for the platform's log collector.
+  commerce-runtime logs through SLF4J and selects no backend; this application owns both
+  the backend (logback-classic) and this configuration.
+
+  LOG_LEVEL raises or lowers the application's own and the runtime's logs (default INFO).
+  Libraries stay at INFO or quieter; their DEBUG output is never on by default.
+-->
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSX,UTC} level=%-5level thread=%thread logger=%logger{36} message=%msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+  <logger name="io.github.castab" level="${LOG_LEVEL:-INFO}" />
+
+  <!-- Library chatter that adds nothing in production. -->
+  <logger name="com.sksamuel.hoplite" level="WARN" />
+  <logger name="com.zaxxer.hikari" level="WARN" />
+  <logger name="org.eclipse.jetty" level="WARN" />
+  <logger name="org.jdbi" level="WARN" />
+</configuration>

@@ -1,0 +1,23 @@
+# Local development database. Tests do not use this: `./gradlew test` starts and removes
+# its own throwaway PostgreSQL container.
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: fionas
+      POSTGRES_PASSWORD: fionas
+      POSTGRES_DB: fionas
+    ports:
+      - "5432:5432"
+    volumes:
+      # PostgreSQL 18 images keep data in a version subdirectory under
+      # /var/lib/postgresql, so mount the parent rather than .../data.
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fionas -d fionas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  db-data:

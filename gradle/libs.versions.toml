@@ -1,0 +1,28 @@
+[versions]
+# The commerce artifacts this application is built on. commerce-runtime exposes the
+# matching commerce-domain version transitively, so the domain is not declared separately.
+commerce = "0.0.5"
+
+# Build and test tooling, matching the commerce repository's conventions.
+kotlin = "2.4.20"
+kotest = "6.2.5"
+ktlint-gradle = "14.2.0"
+shadow = "9.6.1"
+
+# Application-owned logging: the SLF4J provider (commerce-runtime selects none) and the
+# facade commerce-runtime itself logs through.
+logback = "1.6.3"
+kotlin-logging = "8.0.4"
+
+[libraries]
+commerce-runtime = { module = "io.github.castab:commerce-runtime", version.ref = "commerce" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+kotlin-logging-jvm = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = "kotlin-logging" }
+kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-gradle" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
