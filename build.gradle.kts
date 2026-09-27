@@ -57,6 +57,12 @@ dependencies {
     implementation(libs.http4k.api.openapi)
     implementation(libs.http4k.api.ui.swagger)
 
+    // http4k's Jackson, for one purpose only: commerce-runtime's offeringsOpenApiRenderer,
+    // which describes the offerings routes' price union, renders schemas only through a
+    // reflective format, and kotlinx.serialization is not one. Jackson never reads or writes
+    // a request or response; CommerceJson (kotlinx.serialization) stays the wire format.
+    implementation(libs.http4k.format.jackson)
+
     // The facade commerce-runtime logs through, for the application's own lifecycle logs.
     implementation(libs.kotlin.logging.jvm)
 

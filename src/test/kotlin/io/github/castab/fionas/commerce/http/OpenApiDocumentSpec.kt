@@ -26,6 +26,10 @@ import kotlinx.serialization.json.jsonPrimitive
  * What the Fiona API's OpenAPI document says, rendered from the contract as the build
  * generates it (no database). [OpenApiRoutesSpec] proves the running application serves the
  * same document. An API change that changes these expectations is an API contract change.
+ *
+ * The Offerings catalog's routes and schemas are commerce-runtime's, and its suite covers
+ * them; these specs prove only that Fiona composed them: where they are served, their
+ * operationIds, and that the runtime's price union survives Fiona's renderer.
  */
 class OpenApiDocumentSpec :
     FunSpec({
@@ -51,6 +55,24 @@ class OpenApiDocumentSpec :
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "404", "500"),
             )
 
+        // commerce-runtime's Offerings operations, where Fiona binds them and as Fiona's prefix names them.
+        val offeringOperations =
+            listOf(
+                Triple("/offering-catalog", "get", "fionasOfferingsGetCatalog"),
+                Triple("/offering-catalog", "post", "fionasOfferingsCreateCatalog"),
+                Triple("/offering-catalog/revisions/{revision}", "get", "fionasOfferingsGetCatalogRevision"),
+                Triple("/offering-catalog/categories", "get", "fionasOfferingsListCategories"),
+                Triple("/offering-catalog/categories", "post", "fionasOfferingsAddCategory"),
+                Triple("/offering-catalog/categories/{categoryKey}", "get", "fionasOfferingsGetCategory"),
+                Triple("/offering-catalog/categories/{categoryKey}/offerings", "get", "fionasOfferingsListCategoryOfferings"),
+                Triple("/offering-catalog/offerings", "get", "fionasOfferingsListOfferings"),
+                Triple("/offering-catalog/offerings", "post", "fionasOfferingsAddOffering"),
+                Triple("/offering-catalog/offerings/{offeringKey}", "get", "fionasOfferingsGetOffering"),
+            )
+
+        // The schemas Fiona itself describes; every other one is commerce-runtime's.
+        val fionaSchemas = listOf("CreateInquiryRequest", "InquiryResponse", "ErrorResponse")
+
         test("is an OpenAPI 3.1 document of Fiona's Commerce API at the application's version") {
             document.text("openapi") shouldBe "3.1.0"
             document.text("info", "title") shouldBe "Fiona's Commerce API"
@@ -67,9 +89,34 @@ class OpenApiDocumentSpec :
             fionaOpenApiDocument().contains("://localhost") shouldBe false
         }
 
-        test("describes exactly Fiona's API operations, not the documentation or the runtime's routes") {
+        test("describes exactly Fiona's operations and its Offerings catalog's, not the documentation or /health and /ready") {
             document.at("paths").jsonObject.mapValues { (_, methods) -> methods.jsonObject.keys } shouldBe
-                operations.keys.groupBy({ it.first }, { it.second }).mapValues { it.value.toSet() }
+                (operations.keys + offeringOperations)
+                    .groupBy({ it.first }, { it.second })
+                    .mapValues { it.value.toSet() }
+        }
+
+        test("serves commerce-runtime's Offerings operations under Fiona's base path and operationId prefix") {
+            offeringOperations.forEach { (path, method, operationId) ->
+                operation(path, method).text("operationId") shouldBe operationId
+            }
+            document
+                .at("paths")
+                .jsonObject
+                .filterKeys { it.startsWith("/offering-catalog") }
+                .values
+                .flatMap { methods -> methods.jsonObject.values.map { it.text("operationId") } }
+                .forEach { it shouldStartWith "fionasOfferings" }
+        }
+
+        test("keeps commerce-runtime's strict OfferingPrice union through Fiona's renderer") {
+            val price = schema("OfferingPriceDto")
+            price.at("oneOf").jsonArray.map { it.text("\$ref") } shouldContainExactly
+                listOf("FixedOfferingPrice", "PerQuantityOfferingPrice", "PerDurationOfferingPrice").map { "#/components/schemas/$it" }
+            price.text("discriminator", "propertyName") shouldBe "kind"
+            price.at("discriminator", "mapping").jsonObject.keys shouldContainExactlyInAnyOrder
+                listOf("FIXED", "PER_QUANTITY", "PER_DURATION")
+            schema("OfferingDto").text("properties", "price", "\$ref") shouldBe "#/components/schemas/OfferingPriceDto"
         }
 
         test("gives every operation its stable operationId and tag") {
@@ -153,16 +200,28 @@ class OpenApiDocumentSpec :
             parameter.text("schema", "format") shouldBe "uuid"
         }
 
-        test("gives every schema property a type and resolves every reference") {
-            val schemas = document.at("components", "schemas").jsonObject
-            schemas.keys shouldContainExactlyInAnyOrder listOf("CreateInquiryRequest", "InquiryResponse", "ErrorResponse")
-            schemas.values.forEach { schema ->
-                schema
+        test("gives every property of Fiona's schemas a type") {
+            fionaSchemas.forEach { name ->
+                schema(name)
                     .at("properties")
                     .jsonObject.values
                     .forEach { it.jsonObject shouldContainKey "type" }
             }
+        }
+
+        test("resolves every reference, and holds no schema but Fiona's and those its Offerings routes use") {
+            val schemas = document.at("components", "schemas").jsonObject
             references(document).forEach { schemas shouldContainKey it.removePrefix("#/components/schemas/") }
+
+            // Every schema the Offerings routes reach, directly or through other schemas.
+            val offeringPaths = document.at("paths").jsonObject.filterKeys { it.startsWith("/offering-catalog") }
+            val reached = mutableSetOf<String>()
+            var frontier = references(JsonObject(offeringPaths)).map { it.substringAfterLast('/') }.toSet()
+            while (frontier.isNotEmpty()) {
+                reached += frontier
+                frontier = frontier.flatMap { references(schemas.getValue(it)) }.map { it.substringAfterLast('/') }.toSet() - reached
+            }
+            schemas.keys shouldBe fionaSchemas.toSet() + reached
         }
 
         test("gives each body an example that satisfies its schema's required properties") {

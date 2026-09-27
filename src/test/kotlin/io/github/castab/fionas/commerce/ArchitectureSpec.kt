@@ -1,5 +1,8 @@
 package io.github.castab.fionas.commerce
 
+import io.github.castab.commerce.offering.OfferingsCatalogId
+import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
+import io.github.castab.commerce.runtime.offering.OfferingsHttpBinding
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
@@ -7,9 +10,12 @@ import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_BINDING
+import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldBeUnique
+import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.collections.shouldHaveSingleElement
 import io.kotest.matchers.collections.shouldNotBeEmpty
@@ -17,6 +23,7 @@ import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import java.io.File
+import java.util.UUID
 
 /**
  * Structural guards for the boundaries in AGENTS.md. They are deliberately blunt: a
@@ -148,6 +155,44 @@ class ArchitectureSpec :
                 Regex("""^http4k = "(.+)"$""", RegexOption.MULTILINE)
                     .find(File("gradle/libs.versions.toml").readText())!!
                     .groupValues[1]
+        }
+
+        test("Fiona's catalog is commerce-runtime's Offerings capability, bound once to Fiona's stable catalog id") {
+            // The id is data: every revision of Fiona's catalog is recorded under it. Never change it.
+            FIONA_OFFERINGS_CATALOG_ID shouldBe OfferingsCatalogId(UUID.fromString("0cde8e0b-aa9c-4129-9853-8db2cbbb909b"))
+            FIONA_OFFERINGS_BINDING shouldBe
+                OfferingsHttpBinding(FIONA_OFFERINGS_CATALOG_ID, "/offering-catalog", "fionasOfferings", OfferingsHttpAccess.READ_WRITE)
+            sources().containing(listOf("offeringsHttpCapability(")) shouldContainExactly
+                listOf("FionaApplication.kt: offeringsHttpCapability(")
+        }
+
+        test("Fiona implements no Offerings mechanics: no types, repositories, operations, DTOs, or SQL of its own") {
+            // Generic catalog behavior is commerce-runtime's. A need it does not meet is a runtime
+            // requirement (AGENTS.md, commerce-runtime gap rule), never a local copy. The one
+            // Offerings declaration is documentation plumbing: it hands the runtime's bodies to
+            // the runtime's own schema renderer.
+            sources()
+                .flatMap { file ->
+                    Regex("""\b(class|interface|object|typealias|fun)\s+(\w+\.)?\w*Offering\w*""")
+                        .findAll(file.readText())
+                        .map { "${file.name}: ${it.value}" }
+                }.shouldContainExactly("OpenApi.kt: class OfferingsSchemas")
+            sources().containing(listOf("OfferingsSnapshotRepository", "offeringsSnapshotRepository")).shouldBeEmpty()
+            // SQL naming a runtime Offerings table (`commerce.offerings…`), as opposed to the
+            // `io.github.castab.commerce.offering` package.
+            sources()
+                .filter { Regex("""(?<![\w.])commerce\.offering""").containsMatchIn(it.readText()) }
+                .shouldBeEmpty()
+            File("src/main/resources/db/fionas")
+                .listFiles()
+                .orEmpty()
+                .filter { it.readText().contains("offering", ignoreCase = true) }
+                .shouldBeEmpty()
+        }
+
+        test("Jackson renders only the Offerings schemas; kotlinx.serialization stays the wire format") {
+            sources().containing(listOf("org.http4k.format.Jackson", "com.fasterxml")) shouldContainExactlyInAnyOrder
+                listOf("http/OpenApi.kt: org.http4k.format.Jackson", "http/OpenApi.kt: com.fasterxml")
         }
 
         test("Fiona ships no runtime migrations and its migrations never touch the commerce schema") {

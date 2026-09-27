@@ -2,10 +2,13 @@
 
 package io.github.castab.fionas.commerce.http
 
+import com.fasterxml.jackson.databind.JsonNode
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
+import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
+import io.github.castab.commerce.runtime.offering.offeringsOpenApiRenderer
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialInfo
@@ -33,6 +36,7 @@ import org.http4k.contract.openapi.v3.OpenApi3
 import org.http4k.contract.openapi.v3.OpenApi3ApiRenderer
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.format.Jackson
 import org.http4k.lens.LensFailure
 import java.util.concurrent.ConcurrentHashMap
 
@@ -45,7 +49,8 @@ const val API_TITLE = "Fiona's Commerce API"
  * - No `servers`: the document describes paths only, so it is the same for every
  *   deployment, and Swagger UI calls the origin that served it.
  * - Schemas come from the transport DTOs' kotlinx.serialization descriptors, the wire
- *   format itself ([KotlinxSchemas]).
+ *   format itself ([KotlinxSchemas]), except the Offerings catalog's, which
+ *   commerce-runtime's own `offeringsOpenApiRenderer` describes ([OfferingsSchemas]).
  * - Errors the contract itself detects are left to commerce-runtime ([RuntimeErrorHandling]).
  */
 fun fionaOpenApi(version: String): ContractRenderer =
@@ -57,11 +62,12 @@ fun fionaOpenApi(version: String): ContractRenderer =
                 description =
                     "The HTTP API of the fionas-commerce application, the commerce backend of Fiona's Ice Cream and its " +
                         "catering business. Every error is `{\"code\": \"...\", \"message\": \"...\"}`: `code` is stable " +
-                        "and machine-readable, `message` is for people and may change. The runtime's `/health` and " +
-                        "`/ready` are not part of this API.",
+                        "and machine-readable, `message` is for people and may change. The Offerings catalog routes " +
+                        "are implemented by commerce-runtime's reusable Offerings capability; Fiona chooses the catalog " +
+                        "and where it is served. The runtime's `/health` and `/ready` are not part of this API.",
             ),
         json = CommerceJson,
-        apiRenderer = KotlinxSchemas(OpenApi3ApiRenderer(CommerceJson)),
+        apiRenderer = KotlinxSchemas(OpenApi3ApiRenderer(CommerceJson), OfferingsSchemas()),
         errorResponseRenderer = RuntimeErrorHandling,
         version = OpenApiVersion._3_1_0,
     )
@@ -122,14 +128,19 @@ annotation class ApiProperty(
  * infers neither `required` nor formats. Anything that is not a serializable class, such
  * as an enum path parameter, still goes to [fallback].
  *
+ * The bodies of commerce-runtime's Offerings routes are not Fiona DTOs: they go to
+ * [offerings], so the runtime alone describes them.
+ *
  * Only what the API uses is supported: objects with string properties. Anything else fails
  * rendering loudly, rather than publishing a schema that misdescribes the wire format;
  * extend it when a DTO needs more.
  */
 private class KotlinxSchemas(
     private val fallback: ApiRenderer<Api<JsonElement>, JsonElement>,
+    private val offerings: OfferingsSchemas,
 ) : ApiRenderer<Api<JsonElement>, JsonElement> by fallback {
-    // Definition name → DTO serial name, so two DTOs can never share one component.
+    // Definition name → what it describes (a DTO's serial name, or the Offerings
+    // capability), so two bodies can never share one component.
     private val definitions = ConcurrentHashMap<String, String>()
 
     override fun toSchema(
@@ -137,16 +148,28 @@ private class KotlinxSchemas(
         overrideDefinitionId: String?,
         refModelNamePrefix: String?,
     ): JsonSchema<JsonElement> {
+        if (offerings.describes(obj)) {
+            return offerings.toSchema(obj, overrideDefinitionId, refModelNamePrefix).also { schema ->
+                schema.definitions.keys.forEach { own(it, OfferingsSchemas.OWNER) }
+            }
+        }
         val descriptor =
             serializerOf(obj)?.descriptor?.takeIf { it.kind == StructureKind.CLASS }
                 ?: return fallback.toSchema(obj, overrideDefinitionId, refModelNamePrefix)
         val name = refModelNamePrefix.orEmpty() + (overrideDefinitionId ?: descriptor.serialName.substringAfterLast('.'))
-        val owner = definitions.putIfAbsent(name, descriptor.serialName) ?: descriptor.serialName
-        check(owner == descriptor.serialName) { "OpenAPI schema $name would describe both $owner and ${descriptor.serialName}" }
+        own(name, descriptor.serialName)
         return JsonSchema(
             buildJsonObject { put("\$ref", "#/components/schemas/$name") },
             mapOf(name to objectSchema(descriptor)),
         )
+    }
+
+    private fun own(
+        name: String,
+        owner: String,
+    ) {
+        val existing = definitions.putIfAbsent(name, owner) ?: owner
+        check(existing == owner) { "OpenAPI schema $name would describe both $existing and $owner" }
     }
 
     private fun serializerOf(obj: Any): KSerializer<Any>? =
@@ -190,5 +213,40 @@ private class KotlinxSchemas(
             facts?.minLength?.takeIf { it >= 0 }?.let { put("minLength", it) }
             facts?.maxLength?.takeIf { it >= 0 }?.let { put("maxLength", it) }
         }
+    }
+}
+
+/**
+ * The schemas of commerce-runtime's Offerings bodies, exactly as the runtime's own
+ * `offeringsOpenApiRenderer` renders them: it alone knows that `OfferingPriceDto` is a
+ * `kind`-discriminated `oneOf` of three price forms, which no descriptor or example can say.
+ * Fiona never restates an Offerings schema.
+ *
+ * `offeringsOpenApiRenderer` builds schemas through http4k's reflective schema generator,
+ * which fails on kotlinx.serialization's JSON (as `ApiRenderer.Auto` does, see
+ * [KotlinxSchemas]), so it renders with http4k's Jackson, and each schema joins this
+ * document as the JSON it is. Jackson only renders these schemas: it never reads or writes a
+ * request or response.
+ */
+private class OfferingsSchemas {
+    private val renderer = offeringsOpenApiRenderer(Jackson)
+
+    /** Whether [obj] is a body of commerce-runtime's Offerings routes. */
+    fun describes(obj: Any) = obj.javaClass.packageName == OFFERINGS_PACKAGE
+
+    fun toSchema(
+        obj: Any,
+        overrideDefinitionId: String?,
+        refModelNamePrefix: String?,
+    ): JsonSchema<JsonElement> {
+        val schema = renderer.toSchema(obj, overrideDefinitionId, refModelNamePrefix)
+        return JsonSchema(schema.node.toJsonElement(), schema.definitions.mapValues { (_, node) -> node.toJsonElement() })
+    }
+
+    private fun JsonNode.toJsonElement(): JsonElement = CommerceJson.parse(Jackson.compact(this))
+
+    companion object {
+        const val OWNER = "commerce-runtime's Offerings capability"
+        private val OFFERINGS_PACKAGE = OfferingsCatalogDto::class.java.packageName
     }
 }

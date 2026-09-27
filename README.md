@@ -2,13 +2,14 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.6/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.6/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.8/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.8/domain)
 artifacts.
 
-> **Status: first vertical slice.** The application currently implements only
-> inquiries: a prospective customer submits an inquiry, and it can be read back. There
-> are no quotes, bookings, invoices, payments, or authentication yet.
+> **Status: early slices.** The application implements inquiries (a prospective customer
+> submits an inquiry, and it can be read back) and serves Fiona's Offerings catalog through
+> commerce-runtime's reusable Offerings capability. There is no pricing engine, and no
+> quotes, estimates, bookings, invoices, payments, or authentication yet.
 
 ## How it fits together
 
@@ -17,14 +18,17 @@ commerce-domain       reusable commerce vocabulary and invariants
       │                (financial documents, payments, booking lifecycle, principals)
       ▼
 commerce-runtime      reusable runtime: PostgreSQL/HikariCP, JDBI, Flyway, Transactor,
-      │                http4k on Jetty, configuration, error contract, /health, /ready
+      │                http4k on Jetty, configuration, error contract, /health, /ready,
+      │                Offerings snapshots (commerce.offering*) and the Offerings
+      │                catalog capability: operations, HTTP contract routes, DTOs, schemas
       ▼
 fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP API and
-                       tables, application.conf, Logback, main(), deployable jar
+                       tables, Fiona's catalog id and where its catalog is served,
+                       application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.6`, which brings
-`commerce-domain:0.0.6` with it. It contributes its migrations and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.8`, which brings
+`commerce-domain:0.0.8` with it. It contributes its migrations and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -48,20 +52,63 @@ Fiona operation      inquiry/CreateInquiry.kt  opens one runtime transaction
                                  commerce.*                          (runtime)
 ```
 
+The Offerings catalog takes the same path, except that every piece below the error
+handling is commerce-runtime's; Fiona supplies only the binding:
+
+```text
+commerce-runtime Offerings contract route      bound by Fiona at /offering-catalog
+   │
+   ▼
+commerce-runtime Offerings operation           one runtime transaction, derives rN+1
+   │
+   ▼
+OfferingsSnapshotRepository (runtime)  ──────  commerce.offerings_snapshots,
+                                               commerce.offering_categories, commerce.offerings
+```
+
 The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 
 ## Endpoints
+
+**Inquiry API**, implemented by Fiona:
 
 | Endpoint | Behavior |
 |---|---|
 | `POST /inquiries` | Records an inquiry, establishing its customer. `201` with the inquiry and a `Location` header. |
 | `GET /inquiries/{inquiryId}` | The persisted inquiry. `404` when unknown, `400` when the id is not a UUID. |
-| `GET /openapi.json` | The OpenAPI 3.1 document of the two endpoints above, rendered from the running contract. |
-| `GET /docs` | Swagger UI for that document (redirects to `/docs/index.html`). |
-| `GET /health` | Liveness, served by commerce-runtime: `200 {"status":"ok"}`. Not in the OpenAPI document. |
-| `GET /ready` | Readiness, served by commerce-runtime: `200 {"status":"ready"}` when the database is reachable, `503` otherwise. Not in the OpenAPI document. |
 
-A method an API path does not declare is `405` with an empty body.
+**Offerings Catalog API**, exposed by Fiona and implemented by commerce-runtime's Offerings
+capability (see [Offerings catalog](#offerings-catalog)):
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /offering-catalog` | The latest revision of the whole catalog: categories in order, each with its offerings in order. |
+| `POST /offering-catalog` | Initializes the empty catalog as revision 1. `409` if it exists. |
+| `GET /offering-catalog/revisions/{revision}` | Exactly the catalog as that revision recorded it. |
+| `GET /offering-catalog/categories` | The latest revision's categories, in order. |
+| `POST /offering-catalog/categories` | Appends a category in a new revision. |
+| `GET /offering-catalog/categories/{categoryKey}` | One category of the latest revision. |
+| `GET /offering-catalog/categories/{categoryKey}/offerings` | That category and its offerings, in order. |
+| `GET /offering-catalog/offerings` | The latest revision's offerings, in order. |
+| `POST /offering-catalog/offerings` | Appends an offering to an existing category in a new revision. |
+| `GET /offering-catalog/offerings/{offeringKey}` | One offering of the latest revision. |
+
+**Runtime infrastructure**, served by commerce-runtime and not in the OpenAPI document:
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /health` | Liveness: `200 {"status":"ok"}`. |
+| `GET /ready` | Readiness: `200 {"status":"ready"}` when the database is reachable, `503` otherwise. |
+
+**API documentation**:
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /openapi.json` | The OpenAPI 3.1 document of the Inquiry and Offerings Catalog APIs, rendered from the running contract. |
+| `GET /docs` | Swagger UI for that document (redirects to `/docs/index.html`). |
+
+A method an API path does not declare is `405` with an empty body; in particular, no
+catalog route replaces or deletes anything.
 
 ```bash
 curl -i -X POST localhost:8080/inquiries -H 'Content-Type: application/json' \
@@ -89,6 +136,87 @@ Errors use commerce-runtime's contract, `{"code": "...", "message": "..."}`:
 `malformed_request` (400), `validation_failed` (422), `not_found` (404), `conflict` (409),
 `internal_failure` (500, never describing the cause).
 
+## Offerings catalog
+
+Fiona's catalog of what it sells (flavors, toppings, services) is a commerce-runtime
+Offerings catalog. The split is deliberate:
+
+- **Fiona chooses the catalog identity and where it is served.** Its primary catalog is
+  `FIONA_OFFERINGS_CATALOG_ID`, `0cde8e0b-aa9c-4129-9853-8db2cbbb909b`, a constant in
+  [`offering/FionaOfferings.kt`](src/main/kotlin/io/github/castab/fionas/commerce/offering/FionaOfferings.kt).
+  It is never generated, configured, or stored in a Fiona table; every environment has its
+  own database, so each uses this same id. `FIONA_OFFERINGS_BINDING` mounts the catalog at
+  `/offering-catalog` with the operationId prefix `fionasOfferings` and `READ_WRITE` access.
+- **commerce-runtime implements the catalog machinery**: the operations, the contract routes
+  and their DTOs and schemas, validation, and the append-only snapshot tables in its
+  `commerce` schema. Fiona has no Offerings tables, repositories, DTOs, or SQL of its own.
+
+The catalog is **immutable and revisioned**. Every change appends a complete new snapshot,
+`r1`, `r2`, …; nothing is updated or deleted, and any earlier revision can be read back
+exactly with `GET /offering-catalog/revisions/{revision}`.
+
+On a fresh database **the catalog does not exist**: startup applies migrations and nothing
+else, so `GET /offering-catalog` is `404 not_found` until it is initialized, once:
+
+```bash
+curl -i -X POST localhost:8080/offering-catalog
+```
+
+That creates the empty revision 1 (a second initialization is `409 conflict`). Categories
+and offerings are then appended, each in its own new revision:
+
+```bash
+curl -i -X POST localhost:8080/offering-catalog/categories -H 'Content-Type: application/json' \
+  -d '{"key":"soft-serve-flavor","displayName":"Soft Serve","minimumSelections":2,"maximumSelections":2}'
+```
+
+```bash
+curl -i -X POST localhost:8080/offering-catalog/offerings -H 'Content-Type: application/json' \
+  -d '{"key":"vanilla","category":"soft-serve-flavor","displayName":"Vanilla","description":"Classic vanilla soft serve"}'
+```
+
+`GET /offering-catalog` returns the latest revision in one request, offerings grouped under
+their categories in order:
+
+```json
+{
+  "catalogId": "0cde8e0b-aa9c-4129-9853-8db2cbbb909b",
+  "revision": 3,
+  "previousRevision": 2,
+  "categories": [
+    {
+      "key": "soft-serve-flavor",
+      "displayName": "Soft Serve",
+      "minimumSelections": 2,
+      "maximumSelections": 2,
+      "offerings": [
+        { "key": "vanilla", "category": "soft-serve-flavor", "displayName": "Vanilla", "description": "Classic vanilla soft serve" }
+      ]
+    }
+  ]
+}
+```
+
+An offering's `price` is optional descriptive metadata in one of three forms, discriminated
+by `kind`:
+
+| `kind` | Fields | Example |
+|---|---|---|
+| `FIXED` | `amount`, `currency` | `{"kind":"FIXED","amount":"120.00","currency":"USD"}` |
+| `PER_QUANTITY` | `amount`, `currency`, `dimension` | `{"kind":"PER_QUANTITY","amount":"0.75","currency":"USD","dimension":"guest"}` |
+| `PER_DURATION` | `amount`, `currency`, `interval` (ISO-8601) | `{"kind":"PER_DURATION","amount":"50.00","currency":"USD","interval":"PT1H"}` |
+
+Amounts are exact decimal strings. A price describes an offering; it is not a pricing rule.
+Fiona's pricing and selection policy (guest counts, included items, minimums, travel) is
+future work for a Fiona offerings engine, not part of the catalog.
+
+Production catalog contents are administrative data, entered through the API (for example
+from Swagger UI at `/docs`) after deployment. Neither startup nor a migration seeds them.
+
+> **The catalog's write routes are not protected.** `READ_WRITE` only decides that the three
+> `POST` routes exist; the API has no authentication or authorization yet. Expose
+> `/offering-catalog` writes only inside the deployment's trusted boundary until it does.
+
 ## API contract and OpenAPI
 
 The Fiona API describes itself. Each endpoint is an http4k contract route that carries its
@@ -98,8 +226,8 @@ document is rendered from those routes; there is no hand-maintained `openapi.jso
 so changing an endpoint changes its documentation in the same place.
 
 - **`GET /openapi.json`** is the machine-readable contract, served live by the application.
-  It needs no database and describes only Fiona's own API (`/inquiries`), not the
-  runtime's `/health` and `/ready` or the documentation routes.
+  It needs no database and describes Fiona's API, `/inquiries` and `/offering-catalog`,
+  not the runtime's `/health` and `/ready` or the documentation routes.
 
   ```bash
   curl http://localhost:8080/openapi.json
@@ -117,13 +245,28 @@ so changing an endpoint changes its documentation in the same place.
 The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
 `-Pversion=<version>`). It declares no server host, so it is the same in every
-environment. The stable `operationId`s are `createInquiry` and `getInquiry`.
+environment. The stable `operationId`s are `createInquiry` and `getInquiry`, and for the
+catalog `fionasOfferingsGetCatalog`, `fionasOfferingsCreateCatalog`,
+`fionasOfferingsGetCatalogRevision`, `fionasOfferingsListCategories`,
+`fionasOfferingsAddCategory`, `fionasOfferingsGetCategory`,
+`fionasOfferingsListCategoryOfferings`, `fionasOfferingsListOfferings`,
+`fionasOfferingsAddOffering`, and `fionasOfferingsGetOffering`.
 
-Schemas are derived from the kotlinx.serialization descriptors of the transport DTOs, the
-wire format itself, so `required` matches what the server reads and writes. One gap
-remains: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers. Every Fiona endpoint must be part of
-the contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
+The Offerings routes are commerce-runtime's own contract routes, mounted in the same
+contract, so their documentation is the runtime's: the same routes serve requests and
+describe themselves. Their schemas come from the runtime's `offeringsOpenApiRenderer`,
+which keeps `OfferingPriceDto` a strict `oneOf` of `FixedOfferingPrice`,
+`PerQuantityOfferingPrice`, and `PerDurationOfferingPrice`, discriminated by `kind`. That
+renderer works only with http4k's Jackson, so `http4k-format-jackson` is a dependency, used
+for nothing else: requests and responses stay kotlinx.serialization.
+
+Fiona's own schemas are derived from the kotlinx.serialization descriptors of the transport
+DTOs, the wire format itself, so `required` matches what the server reads and writes. Known
+gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
+contract metadata cannot declare response headers; and, as commerce-runtime 0.0.8 renders
+them, the catalog's operations carry no tag (Swagger UI lists them under an unnamed group)
+and their schemas contain `"format": null`. Every Fiona endpoint must be part of the
+contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
 
 ## Requirements
 
@@ -194,7 +337,9 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
   regardless of the runtime's numbering.
 - Fiona's tables are in the `fionas` schema: `customers` and `inquiries`
   (`inquiries.customer_id → customers.id`, `customers.email` unique). Fiona never creates or
-  changes anything in `commerce`.
+  changes anything in `commerce`, where the runtime keeps its own tables, including the
+  Offerings snapshot tables that hold Fiona's catalog. The catalog needs no Fiona
+  migration.
 - Composing the runtime runs the migration phase before anything is served. By default
   (`MIGRATIONS_ON_STARTUP=migrate`) it applies the runtime's pending migrations, then
   Fiona's; re-running against a current database applies nothing. A deployment that
@@ -203,6 +348,9 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
 - If any migration fails, or validation finds the database behind, the process logs
   `event=startup_failed` and exits without serving.
 
+> **Upgrading from commerce 0.0.6.** commerce-runtime 0.0.8 only adds a runtime migration
+> (the Offerings tables), so a database created with 0.0.6 migrates forward on startup.
+>
 > **Upgrading from commerce 0.0.5.** commerce-runtime 0.0.6 reset its own migration history,
 > and Fiona's first migration moved its tables to `fionas`. Databases created before this
 > change fail validation and must be recreated, for example `docker compose down -v`.
@@ -262,17 +410,18 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | Spec | Proves |
 |---|---|
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
-| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`, nothing Fiona-owned in `commerce` or `public` |
+| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates on its own (its Offerings tables included); nothing Fiona-owned in `commerce` or `public` |
 | `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: runtime migrations first (an application migration depending on them succeeds), independent version spaces, repeat startup applies nothing, failures prevent composition |
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email lookup, unique email conflict, foreign key |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, atomic failure, not found |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler, including errors: the contract leaves every error body to commerce-runtime, and undeclared methods stay `405` |
-| `OpenApiDocumentSpec` | The OpenAPI document: paths, operationIds, tags, statuses, request and response schemas, the shared error schema, no host (rendered without a database) |
-| `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json` and loads nothing external |
+| `OfferingsCatalogSpec` | Fiona's Offerings catalog through the complete handler: absent until initialized; revisions 1–4 from initialization, a category, and two offerings; ordered reads; exact historical revisions; every price form round-trips; no update or delete route |
+| `OpenApiDocumentSpec` | The OpenAPI document: paths, operationIds, tags, statuses, request and response schemas, the shared error schema, no host (rendered without a database); the Offerings routes at `/offering-catalog` with the `fionasOfferings` prefix, and the runtime's strict `OfferingPrice` `oneOf` |
+| `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |
-| `ArchitectureSpec` | Repositories take a `Transaction` and build no transaction infrastructure; no SQL in routes; no HTTP in persistence; every endpoint is a contract route with an `operationId`; no hand-written OpenAPI file; one http4k version |
+| `ArchitectureSpec` | Repositories take a `Transaction` and build no transaction infrastructure; no SQL in routes; no HTTP in persistence; every endpoint is a contract route with an `operationId`; no hand-written OpenAPI file; one http4k version; the stable catalog id and binding; no Fiona Offerings types, repositories, or SQL; Jackson only for the Offerings schemas |
 
 Full verification, as CI runs it (`build` also generates the OpenAPI document):
 

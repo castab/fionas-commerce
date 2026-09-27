@@ -3,12 +3,15 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.fionas.commerce.openapi.fionaOpenApiDocument
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldContainAll
 import io.kotest.matchers.ints.shouldBeGreaterThan
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import io.kotest.matchers.string.shouldStartWith
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
@@ -45,6 +48,32 @@ class OpenApiRoutesSpec :
                 it.header("Content-Type")!! shouldStartWith "text/html"
                 it.bodyString() shouldContain """<div id="swagger-ui"></div>"""
             }
+        }
+
+        test("the document Swagger UI reads offers the Offerings catalog's operations alongside Fiona's") {
+            val document = Json.parseToJsonElement(get("/openapi.json").bodyString()).jsonObject
+            val operationIds =
+                document
+                    .getValue("paths")
+                    .jsonObject.values
+                    .flatMap { methods ->
+                        methods.jsonObject.values.map {
+                            it.jsonObject
+                                .getValue("operationId")
+                                .jsonPrimitive.content
+                        }
+                    }
+
+            operationIds shouldContainAll
+                listOf(
+                    "createInquiry",
+                    "getInquiry",
+                    "fionasOfferingsCreateCatalog",
+                    "fionasOfferingsAddCategory",
+                    "fionasOfferingsAddOffering",
+                    "fionasOfferingsGetCatalog",
+                    "fionasOfferingsGetCatalogRevision",
+                )
         }
 
         test("Swagger UI reads /openapi.json and loads nothing from outside the application") {

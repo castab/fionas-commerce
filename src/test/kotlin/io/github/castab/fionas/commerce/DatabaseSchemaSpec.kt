@@ -1,9 +1,15 @@
 package io.github.castab.fionas.commerce
 
+import io.github.castab.commerce.runtime.ApplicationContributions
+import io.github.castab.commerce.runtime.commerceRuntime
+import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
+import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.TestDatabase
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
+import io.kotest.matchers.string.shouldStartWith
 
 /** The database shape fionas-commerce ends up with after commerce-runtime's migration phase. */
 class DatabaseSchemaSpec :
@@ -13,19 +19,59 @@ class DatabaseSchemaSpec :
         beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
 
-        fun tables(schema: String) =
-            application.database.strings(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = '$schema' ORDER BY table_name",
+        fun TestDatabase.tables(schema: String) =
+            strings("SELECT table_name FROM information_schema.tables WHERE table_schema = '$schema' ORDER BY table_name")
+
+        /** Every object in [schema] (relations, indexes, sequences, constraints, functions, types), by kind and name. */
+        fun TestDatabase.objects(schema: String) =
+            strings(
+                """
+                SELECT 'relation ' || c.relkind::text || ' ' || c.relname FROM pg_class c WHERE c.relnamespace = '$schema'::regnamespace
+                UNION ALL
+                SELECT 'constraint ' || con.conname FROM pg_constraint con WHERE con.connamespace = '$schema'::regnamespace
+                UNION ALL
+                SELECT 'function ' || p.proname FROM pg_proc p WHERE p.pronamespace = '$schema'::regnamespace
+                UNION ALL
+                SELECT 'type ' || t.typname FROM pg_type t WHERE t.typnamespace = '$schema'::regnamespace
+                ORDER BY 1
+                """.trimIndent(),
             )
 
         test("Fiona's tables live in the fionas schema, which Fiona owns") {
-            tables("fionas") shouldContainExactlyInAnyOrder listOf("customers", "inquiries")
+            application.database.tables("fionas") shouldContainExactlyInAnyOrder listOf("customers", "inquiries")
         }
 
-        test("no Fiona table is created in the runtime-owned commerce schema or left in public") {
-            // Each schema holds only the migration history commerce-runtime keeps for its stream.
-            tables("commerce") shouldContainExactly listOf("flyway_schema_history")
-            tables("public") shouldContainExactly listOf("flyway_schema_history")
+        test("the commerce schema holds exactly what commerce-runtime creates on its own, nothing of Fiona's") {
+            // Composing the runtime with no application contributions creates the runtime's
+            // own structures (its migration history and published tables, such as the Offerings
+            // snapshot tables). Fiona adds, changes, and removes nothing in that schema, and
+            // this spec never needs to know which structures a runtime release owns.
+            val runtimeOnly =
+                TestDatabase.create().use { database ->
+                    commerceRuntime(
+                        CommerceRuntimeConfiguration(
+                            server = CommerceRuntimeConfiguration.Server(port = 0),
+                            database = database.configuration,
+                            migrations = CommerceRuntimeConfiguration.Migrations(onStartup = OnStartup.MIGRATE),
+                        ),
+                        ApplicationContributions(),
+                    ).close()
+                    database.objects("commerce")
+                }
+
+            application.database.objects("commerce") shouldContainExactly runtimeOnly
+        }
+
+        test("no Fiona table is left in public, which holds only the history commerce-runtime keeps for Fiona's stream") {
+            application.database.tables("public") shouldContainExactly listOf("flyway_schema_history")
+        }
+
+        test("Fiona creates no Offerings persistence: the catalog lives only in commerce-runtime's tables") {
+            application.database
+                .strings(
+                    "SELECT table_schema || '.' || table_name FROM information_schema.tables " +
+                        "WHERE table_name LIKE '%offering%' ORDER BY 1",
+                ).forEach { it shouldStartWith "commerce." }
         }
 
         test("inquiries reference their customer, and customer emails are unique") {

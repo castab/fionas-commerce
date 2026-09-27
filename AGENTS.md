@@ -29,7 +29,8 @@ business. It is an **application**, not a framework and not a library:
 fionas-commerce          Fiona's application: entities, relationships, policy, HTTP, process
       │
       ▼
-commerce-runtime         reusable runtime: PostgreSQL, JDBI, Flyway, Transactor, http4k, errors
+commerce-runtime         reusable runtime: PostgreSQL, JDBI, Flyway, Transactor, http4k, errors,
+      │                  Offerings snapshots and the Offerings catalog capability
       │
       ▼
 commerce-domain          reusable vocabulary and invariants
@@ -51,6 +52,8 @@ Fiona owns, and persists in its own tables:
 
 - customers;
 - inquiries;
+- the identity of Fiona's primary Offerings catalog and where it is served (its contents
+  are persisted by commerce-runtime; see [Offerings catalog](#offerings-catalog));
 - Fiona bookings (future);
 - contacts (future);
 - event and service details, and service locations (future);
@@ -99,6 +102,8 @@ verifying ownership of the address. Decide these explicitly before changing the 
 Do not duplicate or re-model anything `commerce-domain` defines:
 
 - financial documents (`Estimate`, `Quote`, `Invoice`), versions, money, line items;
+- offerings: `OfferingsSnapshot`, `OfferingCategory`, `Offering`, `OfferingPrice`, catalog
+  ids and revisions, and the `OfferingsEngine` contract;
 - payments, allocations, reversals, refunds, reconciliation;
 - the payment-adapter contract;
 - principals, roles, permissions;
@@ -125,7 +130,13 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
   `ErrorResponse`);
 - http4k/Jetty composition (`commerceRuntime(...)`), `CommerceJson`, `jsonBody`;
 - configuration loading (`CommerceRuntimeConfiguration.load()`);
-- `/health` and `/ready`.
+- `/health` and `/ready`;
+- Offerings persistence (`OfferingsSnapshotRepository`, the `commerce.offerings_snapshots`,
+  `commerce.offering_categories`, and `commerce.offerings` tables), the Offerings
+  operations (`CreateOfferingsCatalog`, `AddOfferingCategory`, `AddOffering`,
+  `GetOfferingsCatalog`, `GetOfferingsCatalogRevision`, and the list and get reads), and
+  the Offerings HTTP capability (`offeringsHttpCapability`, `OfferingsHttpBinding`,
+  `OfferingsHttpAccess`, its contract routes and DTOs, and `offeringsOpenApiRenderer`).
 
 Never create another connection pool, another `Jdbi` instance, another transaction
 manager, Spring transactions, a nested transaction abstraction, a second configuration
@@ -137,8 +148,10 @@ only to *observe* the database from outside the runtime (see `TestDatabase`).
 `FionaApplication.kt` is the composition root. `fionaApplication()` returns the
 `ApplicationContributions` (Fiona's migration location and route factory); the route
 factory builds repositories and operations from the `CommerceRuntimeContext` with
-ordinary Kotlin, hands the operations to the API as `FionaOperations`, and contributes
-exactly two route handlers: `fionaApi(...)` (the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
+ordinary Kotlin, hands the operations to the API as `FionaOperations`, binds the runtime's
+Offerings capability to Fiona's catalog (`offeringsHttpCapability(context,
+FIONA_OFFERINGS_BINDING)`), and contributes exactly two route handlers:
+`fionaApi(operations, offerings, version)` (the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
 the migration phase before composing anything), starts it, installs the shutdown hook,
 and blocks. Keep `main()` thin: no schema, Flyway, or migration decisions belong in it. There is no DI framework, no annotation scanning,
 no service locator. Keep wiring visible.
@@ -154,9 +167,12 @@ no service locator. Keep wiring visible.
   `inTransaction` call. Never nest `inTransaction`; it opens a separate transaction. Pass
   the `Transaction` down instead.
 
-The shared runtime transaction is the seam that will let one Fiona operation atomically
-write Fiona-owned rows and runtime-owned commerce facts (for example an inquiry, its
-estimate, and the relationship between them). Preserve it. `ArchitectureSpec` and
+The shared runtime transaction is the seam that lets one Fiona operation atomically write
+Fiona-owned rows and runtime-owned commerce facts (for example an inquiry, its estimate,
+and the relationship between them). commerce-runtime's `OfferingsSnapshotRepository`
+already participates in caller-owned transactions, and upstream proves a commerce write and
+an application write commit and roll back together; no Fiona operation does so yet.
+Preserve the seam. `ArchitectureSpec` and
 `RuntimeTransactionSpec` guard this rule; never loosen them to make a change pass.
 
 ## HTTP rule
@@ -193,7 +209,8 @@ ContractRoute in the feature's routes file (http/InquiryRoutes.kt)
       └── the handler
       │
       ▼
-listed in fionaApiRoutes (http/FionaApi.kt)
+listed in fionaApiRoutes (http/FionaApi.kt), composed by fionaApi(...) with the
+contract routes of runtime capabilities Fiona binds (offerings.contractRoutes)
       ├──► the running API                              fionaApi(...)
       ├──► GET /openapi.json                            rendered by that same contract
       └──► build/openapi/fionas-commerce-openapi.json   generateOpenApi, same fionaApi(...)
@@ -205,7 +222,9 @@ There is no later step called "update the spec". The rules:
    `openapi.json`, `openapi.yaml`, `swagger.*`, or any document describing routes
    separately, and never describe a route anywhere but on its own `ContractRoute`.
    `ArchitectureSpec` rejects such files.
-2. **Every externally supported Fiona endpoint is a `ContractRoute` in `fionaApiRoutes`.**
+2. **Every externally supported Fiona endpoint is a `ContractRoute` in `fionaApiRoutes`**,
+   or a contract route of a runtime capability Fiona binds (the Offerings catalog), which
+   joins the same contract unchanged.
    Never add an ordinary http4k route (`bind`, `routes(`) for an endpoint because it is
    quicker. The only ordinary routing is plumbing in `http/FionaApi.kt`, each piece listed
    in `ArchitectureSpec`: Swagger UI at `/docs`, and the `405` answer for methods a
@@ -221,16 +240,21 @@ There is no later step called "update the spec". The rules:
    define a Fiona error model.
 5. **The served and the generated document are one rendering** of `fionaApi(...)`. The
    generator (`src/openapi`, `generateOpenApi`) calls the contract with `FionaOperations`
-   that are never invoked; it must never need a database, Docker, a server, or the
-   network. Adding an operation to `FionaOperations` forces the generator's stub to name
-   it.
-6. **Runtime-owned routes are not Fiona routes.** Never redeclare `/health` or `/ready` as
-   contract routes to make them appear in the document: that would be a second
+   that are never invoked, and the Offerings capability built with the same
+   `FIONA_OFFERINGS_BINDING` from a rendering-only context; it must never need a database,
+   Docker, a server, or the network. Adding an operation to `FionaOperations` forces the
+   generator's stub to name it.
+6. **Runtime infrastructure routes are not Fiona routes.** Never redeclare `/health` or
+   `/ready` as contract routes to make them appear in the document: that would be a second
    implementation. They join the document only if commerce-runtime publishes metadata for
-   them.
+   them. Runtime *capability* routes are different: the Offerings capability publishes
+   contract routes for the host to mount, so they are part of Fiona's API and document.
 7. **kotlinx.serialization stays the wire format.** Never switch to Jackson, or add a
-   second JSON representation, for documentation. Schemas are derived from the DTOs'
-   serial descriptors (`KotlinxSchemas` in `http/OpenApi.kt`); what a type cannot say goes
+   second JSON representation, for documentation. The one sanctioned use of
+   `http4k-format-jackson` is rendering the Offerings schemas through commerce-runtime's
+   `offeringsOpenApiRenderer`, which only works on a reflective JSON (`OfferingsSchemas` in
+   `http/OpenApi.kt`); `ArchitectureSpec` confines Jackson there. Fiona's own schemas are
+   derived from the DTOs' serial descriptors (`KotlinxSchemas`); what a type cannot say goes
    in `@ApiProperty` on the transport DTO property, referencing the domain's constants
    (for example `maxLength = CustomerName.MAX_LENGTH`). `@ApiProperty` is for
    `@Serializable` DTOs in `http` only, never for application or domain types.
@@ -296,8 +320,11 @@ after runtime-owned migrations.
 - **Reference runtime structures only when they are a published contract.** A foreign key
   to a runtime table is legitimate when commerce-runtime publishes that table for
   applications; never depend on incidental runtime tables, indexes, or Flyway metadata.
-  As of 0.0.6 the runtime publishes no table. `ArchitectureSpec` rejects any `commerce.`
-  reference in Fiona migrations; the first sanctioned one updates that guard deliberately.
+  As of 0.0.8 the runtime publishes the Offerings snapshot tables
+  (`commerce.offerings_snapshots`, `commerce.offering_categories`, `commerce.offerings`),
+  but no Fiona migration references them, and Fiona reaches the catalog only through the
+  runtime's Offerings operations. `ArchitectureSpec` rejects any `commerce.` reference in
+  Fiona migrations; the first sanctioned one updates that guard deliberately.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
   deployment: the original `V20260926210000` migration was rewritten as `V1`, moving the
@@ -313,6 +340,51 @@ after runtime-owned migrations.
   separate release step sets `MIGRATIONS_ON_STARTUP=validate`. Never add Fiona-specific
   migration switches. A future migration-only entry point would call the runtime's
   `MigrationLifecycle`; none exists yet, deliberately.
+
+## Offerings catalog
+
+Fiona's catalog of what it sells is a commerce-runtime Offerings catalog. Fiona chooses the
+catalog and where it is served; commerce-runtime implements everything else.
+
+1. **The catalog id is Fiona's, stable, and checked in.** `FIONA_OFFERINGS_CATALOG_ID`
+   (`offering/FionaOfferings.kt`, `0cde8e0b-aa9c-4129-9853-8db2cbbb909b`) identifies
+   Fiona's primary Offerings catalog. It is never generated at startup, configured through
+   the environment, or stored in a Fiona table. Every environment has its own database and
+   the same logical id. Changing it orphans every recorded revision; `ArchitectureSpec`
+   pins it.
+2. **Fiona mounts the runtime capability; it never reimplements it.**
+   `FIONA_OFFERINGS_BINDING` binds the catalog at `/offering-catalog` with the operationId
+   prefix `fionasOfferings` (operationIds are API contract, rule 3 above) and
+   `READ_WRITE` access. The composition root calls `offeringsHttpCapability` once, with no
+   wrapper.
+3. **Generic Offerings behavior stays upstream**: operations, DTOs, routes, validation,
+   revision derivation, and persistence. Never add Fiona Offering DTOs, repositories,
+   operations, or commands (update, delete, replace, retire) of Fiona's own.
+4. **Fiona never writes SQL against `commerce.offering*`**, reading or writing.
+5. **Fiona creates no Offerings tables or migrations.** The runtime's own migration stream
+   creates its tables; Fiona knows neither their migration file names nor versions.
+6. **The runtime's contract routes join Fiona's one contract** (`fionaApi`), so the
+   aggregate OpenAPI document, `/docs`, and `generateOpenApi` include them with no second
+   document, Swagger UI, or generation task.
+7. **The Offerings schemas come from `offeringsOpenApiRenderer`.** Fiona's renderer hands
+   every Offerings body to it (`OfferingsSchemas`), so `OfferingPriceDto` stays a
+   `kind`-discriminated `oneOf`. A default renderer would silently degrade that contract;
+   `OpenApiDocumentSpec` guards it. Never restate an Offerings schema.
+8. **`READ_WRITE` is route exposure, not authentication.** The three `POST` routes exist
+   so the catalog can be administered through the API, and nothing protects them: they
+   must stay inside the deployment's trusted boundary until authentication and
+   authorization exist. Never invent an API key, shared secret, or password to close that
+   gap; it is a deliberate future slice.
+9. **Pricing and selection policy is not the catalog.** A price is descriptive metadata.
+   Fiona's rules (guest counts, included selections, minimums, travel) belong in a future
+   Fiona `OfferingsEngine` implementation, a separate slice.
+10. **Catalog contents are administrative data.** Startup mutates nothing beyond
+    migrations: it never creates or seeds the catalog. `POST /offering-catalog` initializes
+    it (revision 1), and production contents are entered through the API after deployment.
+    No seeding or import mechanism exists; adding one is a separate decision.
+11. **A missing capability is a runtime requirement.** If Fiona needs Offerings behavior
+    the runtime does not expose, apply the
+    [commerce-runtime gap rule](#commerce-runtime-gap-rule); never copy generic code here.
 
 ## Kotlin conventions
 
@@ -342,7 +414,8 @@ Organize by cohesive feature, not by layer. Current packages:
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
-| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), and each feature's contract routes and transport DTOs (`InquiryRoutes.kt`) |
+| `...offering` | `FionaOfferings.kt`: Fiona's catalog id and its binding to commerce-runtime's Offerings capability, nothing else |
+| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`, including the bridge to the runtime's Offerings schemas), and each feature's contract routes and transport DTOs (`InquiryRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
 Do not create empty packages or layers for future work. Avoid `service`, `manager`,
@@ -360,7 +433,8 @@ Not in scope until a dedicated slice decides otherwise: quotes, estimates, invoi
 any financial-document persistence, payments, refunds, allocations, reconciliation,
 Stripe or any payment provider, authentication, authorization, role persistence, event
 publishing, outbox, NATS, projections, CQRS, booking conversion, lifecycle transitions,
-pricing, deposits, and customer merge or deduplication. Do not add placeholders for them.
+pricing, a Fiona `OfferingsEngine`, customer offering selections, catalog seeding or
+import, deposits, and customer merge or deduplication. Do not add placeholders for them.
 
 Also never introduce Spring or Spring Boot, Hibernate/JPA, a DI framework, event
 sourcing, H2, or Testcontainers.
@@ -384,14 +458,11 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (as of commerce 0.0.6)
+### Known upstream gaps (as of commerce 0.0.8)
 
 - **Application history schema is fixed.** Fiona's tables live in `fionas`, but the
   runtime keeps every application's migration history in `public.flyway_schema_history`
   (`ApplicationMigrations.SCHEMA`), with no way to choose another schema.
-- **No published runtime table.** The runtime owns no table yet, so nothing Fiona could
-  legitimately reference exists; `MigrationLifecycleSpec` proves runtime-first ordering
-  through the `commerce` schema itself.
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
 - **Hoplite prints a deprecation notice to stdout** on every
@@ -411,9 +482,30 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   public lens (or documented error responses) upstream would remove it.
 - **`ErrorResponse` has no schema descriptions.** Its OpenAPI schema says `code` and
   `message` are required strings but cannot describe them, because the type is upstream.
-- **Cross-boundary atomicity is unproven.** The runtime has no commerce repository yet,
-  so no test writes a Fiona row and a commerce row in one transaction. When the first
-  commerce repository ships, add that test here.
+- **Offerings routes need a composed runtime.** `offeringsHttpCapability` takes a
+  `CommerceRuntimeContext`, whose constructor is `internal`, and only `commerceRuntime(...)`,
+  which needs a database, creates one. Rendering the document offline needs only route
+  metadata, so the generator (`src/openapi`, never the deployable jar) builds a
+  rendering-only context reflectively, with a transactor that opens no connection and a
+  repository that refuses every call. Upstream fix: build the contract routes from a
+  `Transactor` and `OfferingsSnapshotRepository`, or offer a documentation-only form.
+- **`offeringsOpenApiRenderer` needs Jackson.** It builds schemas through http4k's
+  reflective schema generator, which fails on `CommerceJson`
+  (`Serializer for class 'JsonLiteral' is not found`), so Fiona renders the Offerings
+  schemas with `http4k-format-jackson` and carries them into its kotlinx-rendered document
+  (`OfferingsSchemas`). Upstream fix: a schema hook that works on `CommerceJson`, or
+  descriptor-derived Offerings schemas.
+- **Offerings route metadata is minimal.** The routes have no tags (the document renders
+  `tags: [""]`, an unnamed Swagger UI group) and no descriptions, and the binding cannot
+  supply either; their error examples all say `Request failed`, and no route documents
+  `500`.
+- **Offerings schemas contain `"format": null`.** http4k's reflective generator emits it
+  for every property, as commerce-runtime's own sample host renders it too. JSON Schema
+  requires `format` to be a string, so strict validators may reject the document.
+- **Fiona has not written across the boundary.** Upstream proves an Offerings snapshot and
+  an application row commit and roll back together, but no Fiona operation writes a Fiona
+  row and a commerce row in one transaction yet. When the first one does, add that test
+  here.
 
 ### Known http4k 6.58 limitations (not to be fixed by upgrading here)
 
@@ -435,7 +527,9 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
   invisible until commit), HTTP tests through the complete handler, schema tests,
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
-  the lifecycle internals), `OpenApiDocumentSpec` (the document's paths, operationIds,
+  the lifecycle internals), `OfferingsCatalogSpec` (Fiona's catalog through the complete
+  handler: initialization, revisions, historical reads, price forms; integration only, the
+  runtime's suite owns the capability), `OpenApiDocumentSpec` (the document's paths, operationIds,
   statuses, and schemas), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
   complete handler, and parity with the generator), `GenerateOpenApiSpec` (the build
   artifact, byte-deterministic), and `ArchitectureSpec`.
@@ -444,5 +538,6 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 ## Documentation synchronization
 
 Changes to endpoints, the API contract, configuration, migrations, packages, the
-customer-matching policy, the version convention, or the upstream version must update
+customer-matching policy, the Offerings binding, the version convention, or the upstream
+version must update
 `README.md` and this file in the same change.

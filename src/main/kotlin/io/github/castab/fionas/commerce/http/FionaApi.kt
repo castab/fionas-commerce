@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -41,9 +42,10 @@ fun fionaApiRoutes(operations: FionaOperations): List<ContractRoute> =
     )
 
 /**
- * The Fiona API: one http4k contract of [fionaApiRoutes], which also serves its own
- * OpenAPI document at [OPENAPI_PATH], rendered from those same routes. [version] is the
- * document's `info.version`.
+ * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of Fiona's
+ * Offerings catalog, which commerce-runtime's [offerings] capability implements and
+ * describes. The contract also serves its own OpenAPI document at [OPENAPI_PATH], rendered
+ * from those same routes. [version] is the document's `info.version`.
  *
  * Only the route handlers read request bodies, once (no pre-flight extraction), and
  * failures reach commerce-runtime's error handling as they did before the API was a
@@ -51,9 +53,10 @@ fun fionaApiRoutes(operations: FionaOperations): List<ContractRoute> =
  */
 fun fionaApi(
     operations: FionaOperations,
+    offerings: OfferingsHttpCapability,
     version: String,
 ): RoutingHttpHandler {
-    val apiRoutes = fionaApiRoutes(operations)
+    val apiRoutes = fionaApiRoutes(operations) + offerings.contractRoutes
     return routes(
         undeclaredMethods(apiRoutes),
         contract {

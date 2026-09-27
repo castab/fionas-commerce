@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.ApplicationContributions
+import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.apiDocs
@@ -8,6 +9,7 @@ import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_BINDING
 import java.time.Clock
 import java.util.Properties
 
@@ -23,7 +25,9 @@ const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
  *
  * This is the application's composition root. Repositories and operations are built here
  * with ordinary Kotlin from the runtime's `CommerceRuntimeContext`, so every Fiona write
- * goes through the runtime's single `Transactor`.
+ * goes through the runtime's single `Transactor`. Fiona's Offerings catalog is
+ * commerce-runtime's Offerings capability bound to Fiona's catalog; its contract routes join
+ * the same API contract as Fiona's own.
  */
 fun fionaApplication(clock: Clock = Clock.systemUTC()): ApplicationContributions =
     ApplicationContributions(
@@ -36,7 +40,8 @@ fun fionaApplication(clock: Clock = Clock.systemUTC()): ApplicationContributions
                     createInquiry = CreateInquiry(context.transactor, customers, inquiries, clock)::invoke,
                     getInquiry = GetInquiry(context.transactor, customers, inquiries)::invoke,
                 )
-            listOf(fionaApi(operations, fionaVersion()), apiDocs())
+            val offerings = offeringsHttpCapability(context, FIONA_OFFERINGS_BINDING)
+            listOf(fionaApi(operations, offerings, fionaVersion()), apiDocs())
         },
     )
 
