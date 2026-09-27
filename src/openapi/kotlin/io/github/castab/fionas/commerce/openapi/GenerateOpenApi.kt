@@ -30,6 +30,7 @@ private val notInvoked =
     FionaOperations(
         createInquiry = { error("Rendering the OpenAPI document never creates an inquiry") },
         getInquiry = { error("Rendering the OpenAPI document never reads an inquiry") },
+        previewEstimate = { error("Rendering the OpenAPI document never prices an estimate") },
     )
 
 /**

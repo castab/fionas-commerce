@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.ApplicationContributions
+import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
@@ -9,7 +10,10 @@ import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_BINDING
+import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
+import io.github.castab.fionas.commerce.offering.PreviewEstimate
 import java.time.Clock
 import java.util.Properties
 
@@ -27,7 +31,9 @@ const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
  * with ordinary Kotlin from the runtime's `CommerceRuntimeContext`, so every Fiona write
  * goes through the runtime's single `Transactor`. Fiona's Offerings catalog is
  * commerce-runtime's Offerings capability bound to Fiona's catalog; its contract routes join
- * the same API contract as Fiona's own.
+ * the same API contract as Fiona's own. Estimate previews read exact catalog revisions
+ * through the runtime's own `GetOfferingsCatalogRevision` and price them with Fiona's
+ * [FionasOfferingsEngine].
  */
 fun fionaApplication(clock: Clock = Clock.systemUTC()): ApplicationContributions =
     ApplicationContributions(
@@ -39,6 +45,11 @@ fun fionaApplication(clock: Clock = Clock.systemUTC()): ApplicationContributions
                 FionaOperations(
                     createInquiry = CreateInquiry(context.transactor, customers, inquiries, clock)::invoke,
                     getInquiry = GetInquiry(context.transactor, customers, inquiries)::invoke,
+                    previewEstimate =
+                        PreviewEstimate(
+                            getRevision = GetOfferingsCatalogRevision(context.transactor, context.offeringsSnapshotRepository)::invoke,
+                            engine = FionasOfferingsEngine(FIONAS_PRICING_POLICY),
+                        )::invoke,
                 )
             val offerings = offeringsHttpCapability(context, FIONA_OFFERINGS_BINDING)
             listOf(fionaApi(operations, offerings, fionaVersion()), apiDocs())

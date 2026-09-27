@@ -16,6 +16,7 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.descriptors.StructureKind
+import kotlinx.serialization.descriptors.nonNullOriginal
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
@@ -86,6 +87,9 @@ private object RuntimeErrorHandling : ErrorResponseRenderer {
 
 private val errorBody = jsonBody(ErrorResponse.serializer())
 
+/** The example message of an `internal_failure`, which never describes its cause. */
+internal const val INTERNAL_FAILURE = "The request could not be completed"
+
 /**
  * Documents that the route answers [category] with commerce-runtime's error body. Status
  * and code come from the runtime's own [ErrorCategory], never restated here.
@@ -131,9 +135,11 @@ annotation class ApiProperty(
  * The bodies of commerce-runtime's Offerings routes are not Fiona DTOs: they go to
  * [offerings], so the runtime alone describes them.
  *
- * Only what the API uses is supported: objects with string properties. Anything else fails
- * rendering loudly, rather than publishing a schema that misdescribes the wire format;
- * extend it when a DTO needs more.
+ * Only what the API's DTOs use is supported: objects whose properties are strings, `Int`s
+ * (`integer`, `int32`), booleans, lists of those or of objects, and nested `@Serializable`
+ * objects, each its own component. Anything else (other numbers, maps, enums, polymorphic
+ * or nullable list items) fails rendering loudly, rather than publishing a schema that
+ * misdescribes the wire format; extend it when a DTO needs more.
  */
 private class KotlinxSchemas(
     private val fallback: ApiRenderer<Api<JsonElement>, JsonElement>,
@@ -157,12 +163,25 @@ private class KotlinxSchemas(
             serializerOf(obj)?.descriptor?.takeIf { it.kind == StructureKind.CLASS }
                 ?: return fallback.toSchema(obj, overrideDefinitionId, refModelNamePrefix)
         val name = refModelNamePrefix.orEmpty() + (overrideDefinitionId ?: descriptor.serialName.substringAfterLast('.'))
-        own(name, descriptor.serialName)
-        return JsonSchema(
-            buildJsonObject { put("\$ref", "#/components/schemas/$name") },
-            mapOf(name to objectSchema(descriptor)),
-        )
+        val components = linkedMapOf<String, JsonElement>()
+        define(name, descriptor, refModelNamePrefix, components)
+        return JsonSchema(reference(name), components)
     }
+
+    /** Adds the component [name] describing [descriptor], and those of the objects it contains, to [components]. */
+    private fun define(
+        name: String,
+        descriptor: SerialDescriptor,
+        prefix: String?,
+        components: MutableMap<String, JsonElement>,
+    ) {
+        own(name, descriptor.serialName)
+        if (name in components) return
+        components[name] = JsonObject(emptyMap()) // Reserved while its properties are described.
+        components[name] = objectSchema(descriptor, prefix, components)
+    }
+
+    private fun reference(name: String) = buildJsonObject { put("\$ref", "#/components/schemas/$name") }
 
     private fun own(
         name: String,
@@ -183,12 +202,16 @@ private class KotlinxSchemas(
             }
         }
 
-    private fun objectSchema(descriptor: SerialDescriptor): JsonObject =
+    private fun objectSchema(
+        descriptor: SerialDescriptor,
+        prefix: String?,
+        components: MutableMap<String, JsonElement>,
+    ): JsonObject =
         buildJsonObject {
             put("type", "object")
             putJsonObject("properties") {
                 for (index in 0 until descriptor.elementsCount) {
-                    put(descriptor.getElementName(index), propertySchema(descriptor, index))
+                    put(descriptor.getElementName(index), propertySchema(descriptor, index, prefix, components))
                 }
             }
             val required =
@@ -201,17 +224,60 @@ private class KotlinxSchemas(
     private fun propertySchema(
         owner: SerialDescriptor,
         index: Int,
+        prefix: String?,
+        components: MutableMap<String, JsonElement>,
     ): JsonObject {
         val property = "${owner.serialName}.${owner.getElementName(index)}"
-        val kind = owner.getElementDescriptor(index).kind
-        check(kind == PrimitiveKind.STRING) { "OpenAPI schemas support only string properties so far; $property is $kind" }
+        val value = owner.getElementDescriptor(index)
         val facts = owner.getElementAnnotations(index).filterIsInstance<ApiProperty>().singleOrNull()
+        if (facts != null) {
+            check(facts.minLength < 0 && facts.maxLength < 0 || value.kind == PrimitiveKind.STRING) {
+                "$property states a length, but is not a string"
+            }
+            check(facts.format.isEmpty() || value.kind == PrimitiveKind.STRING) { "$property states a format, but is not a string" }
+        }
         return buildJsonObject {
-            put("type", "string")
+            valueSchema(value, property, prefix, components).forEach { (key, node) -> put(key, node) }
             facts?.description?.takeIf { it.isNotEmpty() }?.let { put("description", it) }
             facts?.format?.takeIf { it.isNotEmpty() }?.let { put("format", it) }
             facts?.minLength?.takeIf { it >= 0 }?.let { put("minLength", it) }
             facts?.maxLength?.takeIf { it >= 0 }?.let { put("maxLength", it) }
+        }
+    }
+
+    /**
+     * The schema of one value. A nullable value is described by its non-null form: whether
+     * it may be absent is its property's `required`, not its schema.
+     */
+    private fun valueSchema(
+        descriptor: SerialDescriptor,
+        property: String,
+        prefix: String?,
+        components: MutableMap<String, JsonElement>,
+    ): JsonObject {
+        val value = if (descriptor.isNullable) descriptor.nonNullOriginal else descriptor
+        return when (value.kind) {
+            PrimitiveKind.STRING -> buildJsonObject { put("type", "string") }
+            PrimitiveKind.INT ->
+                buildJsonObject {
+                    put("type", "integer")
+                    put("format", "int32")
+                }
+            PrimitiveKind.BOOLEAN -> buildJsonObject { put("type", "boolean") }
+            StructureKind.LIST -> {
+                val item = value.getElementDescriptor(0)
+                check(!item.isNullable) { "OpenAPI schemas do not support nullable list items; $property has them" }
+                buildJsonObject {
+                    put("type", "array")
+                    put("items", valueSchema(item, "$property[]", prefix, components))
+                }
+            }
+            StructureKind.CLASS -> {
+                val name = prefix.orEmpty() + value.serialName.substringAfterLast('.')
+                define(name, value, prefix, components)
+                reference(name)
+            }
+            else -> error("OpenAPI schemas do not support ${value.kind} values yet; $property is one")
         }
     }
 }

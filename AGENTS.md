@@ -54,6 +54,8 @@ Fiona owns, and persists in its own tables:
 - inquiries;
 - the identity of Fiona's primary Offerings catalog and where it is served (its contents
   are persisted by commerce-runtime; see [Offerings catalog](#offerings-catalog));
+- Fiona's pricing: `FionasOfferingsContext`, `FionasPricingPolicy`,
+  `FionasOfferingsEngine`, and estimate previews (see [Fiona's pricing](#fionas-pricing));
 - Fiona bookings (future);
 - contacts (future);
 - event and service details, and service locations (future);
@@ -254,7 +256,9 @@ There is no later step called "update the spec". The rules:
    `http4k-format-jackson` is rendering the Offerings schemas through commerce-runtime's
    `offeringsOpenApiRenderer`, which only works on a reflective JSON (`OfferingsSchemas` in
    `http/OpenApi.kt`); `ArchitectureSpec` confines Jackson there. Fiona's own schemas are
-   derived from the DTOs' serial descriptors (`KotlinxSchemas`); what a type cannot say goes
+   derived from the DTOs' serial descriptors (`KotlinxSchemas`: strings, `Int`s as `int32`
+   integers, booleans, lists, and nested `@Serializable` objects as components; anything
+   else fails loudly until a DTO needs it); what a type cannot say goes
    in `@ApiProperty` on the transport DTO property, referencing the domain's constants
    (for example `maxLength = CustomerName.MAX_LENGTH`). `@ApiProperty` is for
    `@Serializable` DTOs in `http` only, never for application or domain types.
@@ -360,7 +364,9 @@ catalog and where it is served; commerce-runtime implements everything else.
 3. **Generic Offerings behavior stays upstream**: operations, DTOs, routes, validation,
    revision derivation, and persistence. Never add Fiona Offering DTOs, repositories,
    operations, or commands (update, delete, replace, retire) of Fiona's own.
-4. **Fiona never writes SQL against `commerce.offering*`**, reading or writing.
+4. **Fiona never writes SQL against `commerce.offering*`**, reading or writing, and never
+   calls `OfferingsSnapshotRepository`: the composition root hands it only to the
+   runtime's own `GetOfferingsCatalogRevision`.
 5. **Fiona creates no Offerings tables or migrations.** The runtime's own migration stream
    creates its tables; Fiona knows neither their migration file names nor versions.
 6. **The runtime's contract routes join Fiona's one contract** (`fionaApi`), so the
@@ -376,8 +382,8 @@ catalog and where it is served; commerce-runtime implements everything else.
    authorization exist. Never invent an API key, shared secret, or password to close that
    gap; it is a deliberate future slice.
 9. **Pricing and selection policy is not the catalog.** A price is descriptive metadata.
-   Fiona's rules (guest counts, included selections, minimums, travel) belong in a future
-   Fiona `OfferingsEngine` implementation, a separate slice.
+   Fiona's rules (base fee, duration, guests, included toppings) are
+   `FionasOfferingsEngine`'s; see [Fiona's pricing](#fionas-pricing).
 10. **Catalog contents are administrative data.** Startup mutates nothing beyond
     migrations: it never creates or seeds the catalog. `POST /offering-catalog` initializes
     it (revision 1), and production contents are entered through the API after deployment.
@@ -385,6 +391,66 @@ catalog and where it is served; commerce-runtime implements everything else.
 11. **A missing capability is a runtime requirement.** If Fiona needs Offerings behavior
     the runtime does not expose, apply the
     [commerce-runtime gap rule](#commerce-runtime-gap-rule); never copy generic code here.
+
+## Fiona's pricing
+
+`FionasOfferingsEngine` is the first Fiona-specific commerce policy: given one exact,
+immutable catalog revision, a structurally valid selection, and a `FionasOfferingsContext`,
+it produces the commerce `LineItem`s of Fiona's estimate. The split:
+
+```text
+commerce-domain     Offering vocabulary, OfferingsEngine and its structural validation,
+                    LineItem, Money
+commerce-runtime    catalog persistence, catalog operations (GetOfferingsCatalogRevision),
+                    catalog HTTP and OpenAPI
+fionas-commerce     FionasOfferingsContext, FionasPricingPolicy, FionasOfferingsEngine,
+                    PreviewEstimate and POST /estimate-preview
+```
+
+**The catalog says what is selectable and carries simple per-offering prices. Fiona's engine
+owns the relationships between selections and the event context**: base-event pricing, the
+service duration, per-guest pricing, and the first-four-toppings-included rule.
+
+1. **The engine knows no offering by name.** Never write `if (offering == "waffle-cone")`
+   or give a premium flavor a rule: its price is a catalog `PER_QUANTITY` `guest` price,
+   entered through `POST /offering-catalog/offerings`, and priced with no deployment. The
+   engine understands the event context, Fiona's base pricing, the topping category's
+   aggregate rule, and the generic `OfferingPrice` forms; `ArchitectureSpec` rejects an
+   `OfferingKey` built in its sources.
+2. **Structural rules stay commerce-domain's.** Unknown categories or offerings, wrong
+   categories, selection counts, and duplicates are `OfferingsEngine`'s checks, run before
+   `evaluateValid`; never repeat them. Category cardinalities (how many flavors, at most six
+   toppings, one cone option) are catalog data, never engine constants.
+   `includedToppingCount` is different: how many selections the price covers, not how many
+   are legal.
+3. **Policy values live in one immutable `FionasPricingPolicy`** (`FIONAS_PRICING_POLICY`):
+   one currency (USD), base fee, hourly rate, per-guest rate, included toppings, extra
+   topping rate, offered durations, the topping category key (`topping`), and the per-guest
+   quantity dimension (`guest`). It is not a pricing framework; never add a rules DSL, and
+   never push Fiona's rules upstream.
+4. **The engine is pure**: no persistence, HTTP, runtime, serialization, or clock, and its
+   sources import only commerce-domain and the JDK (`ArchitectureSpec`). Line ids come from
+   an injected `() -> UUID`, so tests are deterministic.
+5. **Expected rejections are results, not exceptions.** Fiona's violations are
+   `FionasOfferingsViolation`s with stable codes: `INVALID_GUEST_COUNT`,
+   `UNSUPPORTED_DURATION`, `UNSUPPORTED_CURRENCY`, `UNSUPPORTED_QUANTITY_DIMENSION`,
+   `INCOMPATIBLE_DURATION_PRICE`. Never rename a code; clients may match on them. A broken
+   policy or snapshot invariant still fails loudly.
+6. **Money is exact.** `BigDecimal` and `Money` only, never `Double` or `Float`; nothing is
+   rounded (a duration price that does not divide the service duration exactly is
+   rejected); no currency is converted or mixed; tax is zero until a tax slice decides
+   otherwise. Totals are always derived from the lines.
+7. **Lines have a stable order**: base service, ice cream service, priced selections in
+   submitted order, extra toppings.
+8. **The catalog revision is exact.** `PreviewEstimate` evaluates the revision the request
+   names, loaded with `OfferingsSnapshotReference(FIONA_OFFERINGS_CATALOG_ID, revision)`,
+   never the latest. A preview records nothing and performs no Fiona write, so it reads the
+   snapshot through the runtime's `GetOfferingsCatalogRevision`, which opens its own
+   transaction. A future persisted estimate must run the same pure engine inside the one
+   transaction that writes it.
+9. **A preview is not an estimate document.** No `FinancialDocument` is created or
+   persisted, and Fiona has no financial-document tables; that capability belongs in
+   commerce-runtime first (commerce-runtime gap rule).
 
 ## Kotlin conventions
 
@@ -414,8 +480,8 @@ Organize by cohesive feature, not by layer. Current packages:
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
-| `...offering` | `FionaOfferings.kt`: Fiona's catalog id and its binding to commerce-runtime's Offerings capability, nothing else |
-| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`, including the bridge to the runtime's Offerings schemas), and each feature's contract routes and transport DTOs (`InquiryRoutes.kt`) |
+| `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
+| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`, including the bridge to the runtime's Offerings schemas), and each feature's contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
 Do not create empty packages or layers for future work. Avoid `service`, `manager`,
@@ -433,8 +499,9 @@ Not in scope until a dedicated slice decides otherwise: quotes, estimates, invoi
 any financial-document persistence, payments, refunds, allocations, reconciliation,
 Stripe or any payment provider, authentication, authorization, role persistence, event
 publishing, outbox, NATS, projections, CQRS, booking conversion, lifecycle transitions,
-pricing, a Fiona `OfferingsEngine`, customer offering selections, catalog seeding or
-import, deposits, and customer merge or deduplication. Do not add placeholders for them.
+persisted estimates or selections, tax, travel fees, minimum orders, inventory,
+availability, catalog seeding or import, deposits, and customer merge or deduplication. Do
+not add placeholders for them.
 
 Also never introduce Spring or Spring Boot, Hibernate/JPA, a DI framework, event
 sourcing, H2, or Testcontainers.
@@ -506,6 +573,17 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   an application row commit and roll back together, but no Fiona operation writes a Fiona
   row and a commerce row in one transaction yet. When the first one does, add that test
   here.
+- **Violations carry only a code.** `OfferingsViolation` has no message or details, so
+  `PreviewEstimate` describes commerce-domain's structural violations itself, with a
+  fallback for any it does not know. Upstream fix: a caller-safe description on each
+  violation.
+- **Rejections cannot be structured over HTTP.** `CommerceFailure.ValidationFailed` and
+  `ErrorResponse` carry only a message, so an estimate rejection names its violation codes
+  in the message rather than as a list. Upstream fix: optional structured details in the
+  error contract.
+- **No line-sum helper.** Totals of a list of `LineItem`s are summed in Fiona
+  (`EstimatePreview`); `FinancialDocument` will need the same, so a shared helper belongs in
+  commerce-domain.
 
 ### Known http4k 6.58 limitations (not to be fixed by upgrading here)
 
@@ -529,7 +607,10 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
   the lifecycle internals), `OfferingsCatalogSpec` (Fiona's catalog through the complete
   handler: initialization, revisions, historical reads, price forms; integration only, the
-  runtime's suite owns the capability), `OpenApiDocumentSpec` (the document's paths, operationIds,
+  runtime's suite owns the capability), `FionasOfferingsEngineSpec` (Fiona's pricing,
+  purely, with exact `BigDecimal` amounts), `EstimatePreviewRoutesSpec` (the preview through
+  the complete handler over a catalog built with the Offerings API, including revision
+  pinning), `OpenApiDocumentSpec` (the document's paths, operationIds,
   statuses, and schemas), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
   complete handler, and parity with the generator), `GenerateOpenApiSpec` (the build
   artifact, byte-deterministic), and `ArchitectureSpec`.

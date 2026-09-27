@@ -4,6 +4,8 @@ import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.offering.EstimatePreview
+import io.github.castab.fionas.commerce.offering.PreviewEstimate
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
 import org.http4k.contract.Root
@@ -29,6 +31,7 @@ const val API_DOCS_PATH = "/docs"
 class FionaOperations(
     val createInquiry: (CreateInquiry.Command) -> InquiryDetails,
     val getInquiry: (InquiryId) -> InquiryDetails,
+    val previewEstimate: (PreviewEstimate.Command) -> EstimatePreview,
 )
 
 /**
@@ -39,6 +42,7 @@ fun fionaApiRoutes(operations: FionaOperations): List<ContractRoute> =
     listOf(
         createInquiryRoute(operations.createInquiry),
         getInquiryRoute(operations.getInquiry),
+        previewEstimateRoute(operations.previewEstimate),
     )
 
 /**

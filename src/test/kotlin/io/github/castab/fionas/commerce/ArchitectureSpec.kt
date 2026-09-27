@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.offering.OfferingsCatalogId
+import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
 import io.github.castab.commerce.runtime.offering.OfferingsHttpBinding
 import io.github.castab.commerce.runtime.persistence.Transaction
@@ -24,6 +25,7 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import java.io.File
 import java.util.UUID
+import java.util.jar.JarFile
 
 /**
  * Structural guards for the boundaries in AGENTS.md. They are deliberately blunt: a
@@ -122,7 +124,14 @@ class ArchitectureSpec :
         }
 
         test("every Fiona endpoint states its stable operationId, summary, tags, and responses") {
-            val routes = fionaApiRoutes(FionaOperations(createInquiry = { error("not called") }, getInquiry = { error("not called") }))
+            val routes =
+                fionaApiRoutes(
+                    FionaOperations(
+                        createInquiry = { error("not called") },
+                        getInquiry = { error("not called") },
+                        previewEstimate = { error("not called") },
+                    ),
+                )
 
             routes.map { it.meta.operationId.shouldNotBeNull() }.shouldBeUnique()
             routes.forEach { route ->
@@ -166,18 +175,36 @@ class ArchitectureSpec :
                 listOf("FionaApplication.kt: offeringsHttpCapability(")
         }
 
-        test("Fiona implements no Offerings mechanics: no types, repositories, operations, DTOs, or SQL of its own") {
+        test("Fiona implements no Offerings mechanics: no repositories, operations, DTOs, or SQL of its own") {
             // Generic catalog behavior is commerce-runtime's. A need it does not meet is a runtime
-            // requirement (AGENTS.md, commerce-runtime gap rule), never a local copy. The one
-            // Offerings declaration is documentation plumbing: it hands the runtime's bodies to
-            // the runtime's own schema renderer.
+            // requirement (AGENTS.md, commerce-runtime gap rule), never a local copy. No Fiona
+            // type re-declares one of the runtime's Offerings operations, DTOs, or bindings.
+            val runtimeOfferingTypes =
+                JarFile(
+                    File(
+                        GetOfferingsCatalogRevision::class.java.protectionDomain.codeSource.location
+                            .toURI(),
+                    ),
+                ).use { jar ->
+                    val directory = GetOfferingsCatalogRevision::class.java.packageName.replace('.', '/') + "/"
+                    jar
+                        .entries()
+                        .toList()
+                        .map { it.name }
+                        .filter { it.startsWith(directory) && it.endsWith(".class") }
+                        .map { it.removePrefix(directory).removeSuffix(".class").substringBefore('$') }
+                        .filterNot { it.endsWith("Kt") }
+                        .toSet()
+                }
+            runtimeOfferingTypes.shouldNotBeEmpty()
             sources()
-                .flatMap { file ->
-                    Regex("""\b(class|interface|object|typealias|fun)\s+(\w+\.)?\w*Offering\w*""")
-                        .findAll(file.readText())
-                        .map { "${file.name}: ${it.value}" }
-                }.shouldContainExactly("OpenApi.kt: class OfferingsSchemas")
-            sources().containing(listOf("OfferingsSnapshotRepository", "offeringsSnapshotRepository")).shouldBeEmpty()
+                .flatMap { file -> Regex("""\b(?:class|interface|object)\s+(\w+)""").findAll(file.readText()).map { it.groupValues[1] } }
+                .filter { it in runtimeOfferingTypes }
+                .shouldBeEmpty()
+            // The runtime's snapshot repository only reaches the runtime's own read operation, in
+            // the composition root; Fiona never calls it.
+            sources().containing(listOf("OfferingsSnapshotRepository", "offeringsSnapshotRepository")) shouldContainExactly
+                listOf("FionaApplication.kt: offeringsSnapshotRepository")
             // SQL naming a runtime Offerings table (`commerce.offerings…`), as opposed to the
             // `io.github.castab.commerce.offering` package.
             sources()
@@ -188,6 +215,58 @@ class ArchitectureSpec :
                 .orEmpty()
                 .filter { it.readText().contains("offering", ignoreCase = true) }
                 .shouldBeEmpty()
+        }
+
+        test("Fiona's pricing is pure policy: it knows nothing of HTTP, persistence, the runtime, or serialization") {
+            // The engine, its policy, and its context depend only on commerce-domain and the JDK.
+            val allowed =
+                listOf(
+                    "io.github.castab.commerce.financial.",
+                    "io.github.castab.commerce.offering.",
+                    "java.math.",
+                    "java.time.",
+                    "java.util.",
+                )
+            listOf("FionasOfferingsEngine.kt", "FionasPricingPolicy.kt", "FionasOfferingsContext.kt")
+                .map { File(mainSources, "offering/$it") }
+                .flatMap { file ->
+                    file
+                        .readLines()
+                        .filter { it.startsWith("import ") }
+                        .map { it.removePrefix("import ") }
+                        .filterNot { import -> allowed.any(import::startsWith) }
+                        .map { "${file.name}: $it" }
+                }.shouldBeEmpty()
+        }
+
+        test("Fiona's pricing names no offering: every per-offering price comes from the catalog") {
+            // No `if (offering == "waffle-cone")`: the policy knows the event and the topping
+            // category, never an individual offering, so new surcharges need no deployment.
+            listOf("FionasOfferingsEngine.kt", "FionasPricingPolicy.kt", "FionasOfferingsContext.kt", "PreviewEstimate.kt")
+                .map { File(mainSources, "offering/$it") }
+                .filter { "OfferingKey(" in it.readText() }
+                .shouldBeEmpty()
+        }
+
+        test("an estimate preview reads the catalog through commerce-runtime and records nothing") {
+            File(mainSources, "offering/PreviewEstimate.kt")
+                .readText()
+                .let { preview ->
+                    listOf("Repository", "persistence", "Transactor", "Transaction", "org.jdbi", "SELECT ").filter {
+                        it in
+                            preview
+                    }
+                }.shouldBeEmpty()
+        }
+
+        test("Fiona has no financial-document persistence: estimates are previews until commerce-runtime persists them") {
+            sources().containing(listOf("FinancialDocument")).shouldBeEmpty()
+            File("src/main/resources/db/fionas")
+                .listFiles()
+                .orEmpty()
+                .filter { file ->
+                    listOf("financial", "estimate", "line_item", "quote", "invoice").any { file.readText().contains(it, ignoreCase = true) }
+                }.shouldBeEmpty()
         }
 
         test("Jackson renders only the Offerings schemas; kotlinx.serialization stays the wire format") {

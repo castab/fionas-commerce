@@ -163,8 +163,6 @@ fun getInquiryRoute(getInquiry: (InquiryId) -> InquiryDetails): ContractRoute =
         { _: Request -> Response(Status.OK).with(inquiryResponse of getInquiry(inquiryId(id)).toResponse()) }
     }
 
-private const val INTERNAL_FAILURE = "The request could not be completed"
-
 /** The id in the path segment; one that is not a UUID is reported as the unreadable path value it is. */
 private fun inquiryId(segment: String): InquiryId =
     try {

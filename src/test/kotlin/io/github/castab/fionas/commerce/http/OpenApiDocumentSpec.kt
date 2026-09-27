@@ -53,7 +53,11 @@ class OpenApiDocumentSpec :
             mapOf(
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "404", "500"),
+                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "404", "422", "500"),
             )
+
+        // Each Fiona operation's tag.
+        val tags = mapOf("createInquiry" to "Inquiries", "getInquiry" to "Inquiries", "previewEstimate" to "Estimates")
 
         // commerce-runtime's Offerings operations, where Fiona binds them and as Fiona's prefix names them.
         val offeringOperations =
@@ -71,13 +75,22 @@ class OpenApiDocumentSpec :
             )
 
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
-        val fionaSchemas = listOf("CreateInquiryRequest", "InquiryResponse", "ErrorResponse")
+        val fionaSchemas =
+            listOf(
+                "CreateInquiryRequest",
+                "InquiryResponse",
+                "EstimatePreviewRequest",
+                "EstimatePreviewSelection",
+                "EstimatePreviewResponse",
+                "EstimatePreviewLine",
+                "ErrorResponse",
+            )
 
         test("is an OpenAPI 3.1 document of Fiona's Commerce API at the application's version") {
             document.text("openapi") shouldBe "3.1.0"
             document.text("info", "title") shouldBe "Fiona's Commerce API"
             document.text("info", "version") shouldBe fionaVersion()
-            document.at("tags").jsonArray.map { it.text("name") } shouldContainExactly listOf("Inquiries")
+            document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder listOf("Inquiries", "Estimates")
         }
 
         test("names no host, so every deployment serves the same document") {
@@ -122,7 +135,7 @@ class OpenApiDocumentSpec :
         test("gives every operation its stable operationId and tag") {
             operations.keys.forEach { (path, method, operationId) ->
                 operation(path, method).text("operationId") shouldBe operationId
-                operation(path, method).strings("tags") shouldContainExactly listOf("Inquiries")
+                operation(path, method).strings("tags") shouldContainExactly listOf(tags.getValue(operationId))
             }
         }
 
@@ -200,13 +213,54 @@ class OpenApiDocumentSpec :
             parameter.text("schema", "format") shouldBe "uuid"
         }
 
-        test("gives every property of Fiona's schemas a type") {
+        test("gives every property of Fiona's schemas a type or a reference") {
             fionaSchemas.forEach { name ->
                 schema(name)
                     .at("properties")
                     .jsonObject.values
-                    .forEach { it.jsonObject shouldContainKey "type" }
+                    .forEach { (it.jsonObject.keys intersect setOf("type", "\$ref")).size shouldBe 1 }
             }
+        }
+
+        test("describes the estimate preview request from its serial descriptors: integers, a boolean, and nested lists") {
+            val body = operation("/estimate-preview", "post").at("requestBody")
+            body.text("content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/EstimatePreviewRequest"
+
+            val request = schema("EstimatePreviewRequest")
+            request.strings("required") shouldContainExactly listOf("catalogRevision", "guestCount", "durationMinutes", "selections")
+            val properties = request.at("properties").jsonObject
+            properties.keys.toList() shouldContainExactly
+                listOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
+            listOf("catalogRevision", "guestCount", "durationMinutes").forEach {
+                properties.getValue(it).text("type") shouldBe "integer"
+                properties.getValue(it).text("format") shouldBe "int32"
+            }
+            properties.getValue("guestCountIsMinimum").text("type") shouldBe "boolean"
+            properties.getValue("selections").text("type") shouldBe "array"
+            properties.getValue("selections").text("items", "\$ref") shouldBe "#/components/schemas/EstimatePreviewSelection"
+
+            val selection = schema("EstimatePreviewSelection")
+            selection.strings("required") shouldContainExactly listOf("category", "offerings")
+            selection.text("properties", "offerings", "type") shouldBe "array"
+            selection.text("properties", "offerings", "items", "type") shouldBe "string"
+        }
+
+        test("describes the estimate preview response: every amount an exact decimal string, quantity optional") {
+            operation("/estimate-preview", "post").text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/EstimatePreviewResponse"
+
+            val response = schema("EstimatePreviewResponse")
+            response.strings("required") shouldContainExactly
+                listOf("catalogRevision", "guestCountIsMinimum", "lines", "subtotal", "taxAmount", "total", "currency")
+            response.text("properties", "lines", "items", "\$ref") shouldBe "#/components/schemas/EstimatePreviewLine"
+            listOf("subtotal", "taxAmount", "total").forEach { response.text("properties", it, "type") shouldBe "string" }
+
+            val line = schema("EstimatePreviewLine")
+            line.strings("required") shouldContainExactly listOf("description", "unitPrice", "subtotal", "taxAmount", "total", "currency")
+            line
+                .at("properties")
+                .jsonObject.values
+                .forEach { it.text("type") shouldBe "string" }
         }
 
         test("resolves every reference, and holds no schema but Fiona's and those its Offerings routes use") {

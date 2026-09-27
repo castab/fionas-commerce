@@ -7,9 +7,10 @@ application built on the reusable
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
-> submits an inquiry, and it can be read back) and serves Fiona's Offerings catalog through
-> commerce-runtime's reusable Offerings capability. There is no pricing engine, and no
-> quotes, estimates, bookings, invoices, payments, or authentication yet.
+> submits an inquiry, and it can be read back), serves Fiona's Offerings catalog through
+> commerce-runtime's reusable Offerings capability, and prices selections from it with
+> Fiona's own pricing (`POST /estimate-preview`, which records nothing). There are no stored
+> estimates, quotes, bookings, invoices, payments, or authentication yet.
 
 ## How it fits together
 
@@ -24,6 +25,7 @@ commerce-runtime      reusable runtime: PostgreSQL/HikariCP, JDBI, Flyway, Trans
       ▼
 fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP API and
                        tables, Fiona's catalog id and where its catalog is served,
+                       Fiona's pricing (FionasOfferingsEngine) and estimate previews,
                        application.conf, Logback, main(), deployable jar
 ```
 
@@ -93,6 +95,12 @@ capability (see [Offerings catalog](#offerings-catalog)):
 | `POST /offering-catalog/offerings` | Appends an offering to an existing category in a new revision. |
 | `GET /offering-catalog/offerings/{offeringKey}` | One offering of the latest revision. |
 
+**Estimate preview API**, implemented by Fiona (see [Estimate preview](#estimate-preview)):
+
+| Endpoint | Behavior |
+|---|---|
+| `POST /estimate-preview` | Prices a selection from an exact catalog revision for a guest count and service duration. `200` with the lines and totals; records nothing. |
+
 **Runtime infrastructure**, served by commerce-runtime and not in the OpenAPI document:
 
 | Endpoint | Behavior |
@@ -104,7 +112,7 @@ capability (see [Offerings catalog](#offerings-catalog)):
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /openapi.json` | The OpenAPI 3.1 document of the Inquiry and Offerings Catalog APIs, rendered from the running contract. |
+| `GET /openapi.json` | The OpenAPI 3.1 document of the Inquiry, Offerings Catalog, and Estimate preview APIs, rendered from the running contract. |
 | `GET /docs` | Swagger UI for that document (redirects to `/docs/index.html`). |
 
 A method an API path does not declare is `405` with an empty body; in particular, no
@@ -207,8 +215,9 @@ by `kind`:
 | `PER_DURATION` | `amount`, `currency`, `interval` (ISO-8601) | `{"kind":"PER_DURATION","amount":"50.00","currency":"USD","interval":"PT1H"}` |
 
 Amounts are exact decimal strings. A price describes an offering; it is not a pricing rule.
-Fiona's pricing and selection policy (guest counts, included items, minimums, travel) is
-future work for a Fiona offerings engine, not part of the catalog.
+Fiona's pricing of a whole event (base fee, duration, guests, included toppings) is
+[Fiona's engine](#estimate-preview), which applies these prices without knowing any
+offering by name.
 
 Production catalog contents are administrative data, entered through the API (for example
 from Swagger UI at `/docs`) after deployment. Neither startup nor a migration seeds them.
@@ -216,6 +225,106 @@ from Swagger UI at `/docs`) after deployment. Neither startup nor a migration se
 > **The catalog's write routes are not protected.** `READ_WRITE` only decides that the three
 > `POST` routes exist; the API has no authentication or authorization yet. Expose
 > `/offering-catalog` writes only inside the deployment's trusted boundary until it does.
+
+## Estimate preview
+
+`POST /estimate-preview` prices a selection the way Fiona's booking page does, with the
+server as the authority. It is **not a quote, is never recorded, and creates no financial
+document**: it creates no customer, inquiry, or anything else, and the same request prices
+the same every time.
+
+```text
+catalog revision + guest count + duration + selections
+        │
+        ▼
+commerce-runtime: that exact catalog revision (GetOfferingsCatalogRevision)
+        │
+        ▼
+commerce-domain OfferingsEngine: is the selection structurally valid for that revision?
+        │
+        ▼
+FionasOfferingsEngine: Fiona's pricing → LineItems
+        │
+        ▼
+estimated lines + totals
+```
+
+The work is split three ways:
+
+- **The catalog** (commerce-runtime) says what can be selected, how many selections each
+  category allows, and what single offerings cost: a premium flavor at `+$0.50` per guest, a
+  waffle cone at `+$0.75` per guest.
+- **commerce-domain's `OfferingsEngine`** rejects a structurally invalid selection: an
+  unknown category or offering, one in the wrong category, too few or too many selections,
+  duplicates.
+- **`FionasOfferingsEngine`** (Fiona) prices the event: the base fee and hourly rate, the
+  per-guest ice cream service, each selected offering's catalog price, and the extra-topping
+  rule. It knows no offering by name, so a new premium flavor added through
+  `POST /offering-catalog/offerings` with a `PER_QUANTITY` `guest` price is priced at once,
+  with no deployment.
+
+Fiona's pricing policy (`FIONAS_PRICING_POLICY` in
+[`offering/FionasPricingPolicy.kt`](src/main/kotlin/io/github/castab/fionas/commerce/offering/FionasPricingPolicy.kt)):
+
+| Rule | Current value |
+|---|---|
+| Base service | `$150.00` per event plus `$50.00` per hour of service, one line |
+| Service durations | 90, 120, 150, or 180 minutes |
+| Ice cream service | `$4.00` per guest |
+| Toppings | the first 4 selections of the `topping` category included; each further selection `$0.25` per guest, as one "Extra toppings" line |
+| Tax | none yet: every line's tax is `0` |
+
+Catalog prices are applied as follows: `FIXED` is one flat line; `PER_QUANTITY` with the
+dimension `guest` is charged per guest (another dimension is rejected); `PER_DURATION` is
+charged per interval of the service duration, only when the interval divides it exactly.
+Every amount is in USD; an offering priced in another currency is rejected. Unpriced
+selections add no line. A premium topping's own price and the extra-topping charge are
+different facts, and both apply.
+
+Lines come in a stable order: base service, ice cream service, priced selections in the
+order submitted, extra toppings. Totals are the sums of the lines.
+
+**The catalog revision is required and exact.** A page renders its choices from one revision
+(`GET /offering-catalog` returns it) and submits that revision; the preview is priced from
+it even after the catalog has changed, and a selection naming something the revision lacks
+is rejected. A preview is never silently repriced from a later revision.
+
+For example, with a catalog at revision 15 holding soft-serve flavors (Vanilla, Chocolate,
+Horchata at `$0.50` per guest), six toppings, and cones (Cups, Waffle cones at `$0.75` per
+guest):
+
+```bash
+curl -s -X POST localhost:8080/estimate-preview -H 'Content-Type: application/json' -d '{
+  "catalogRevision": 15, "guestCount": 75, "durationMinutes": 120,
+  "selections": [
+    {"category": "soft-serve-flavor", "offerings": ["vanilla", "horchata"]},
+    {"category": "topping", "offerings": ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"]},
+    {"category": "cone-option", "offerings": ["waffle-cone"]}
+  ]}'
+```
+
+```text
+Base service         2 hours · setup, staff & local travel     250.00   ($150 + 2 × $50)
+Ice cream service    75 × 4.00                                  300.00
+Horchata             75 × 0.50                                   37.50   (catalog price)
+Waffle cones         75 × 0.75                                   56.25   (catalog price)
+Extra toppings (2)   150 × 0.25                                  37.50   (2 extra × 75 guests)
+                                                    total       681.25
+```
+
+The response lists each line's `description`, `subDescription`, `quantity` (absent for a
+flat line), `unitPrice`, `subtotal`, `taxAmount`, `total`, and `currency`, then `subtotal`,
+`taxAmount`, `total`, and `currency` for the estimate, with the `catalogRevision` it was
+priced from. Every amount and quantity is an exact decimal string, never a JSON number.
+`"guestCountIsMinimum": true` marks a guest count like "100+": the price uses exactly the
+stated count, and the response echoes the flag so the page can say "from $X".
+
+Errors use commerce-runtime's contract: `400 malformed_request` for a body that cannot be
+read, `404 not_found` for a catalog revision that does not exist, and `422 validation_failed`
+for a selection that does not fit the revision or Fiona's pricing. The message names each
+violation's stable code, for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`,
+`INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`, `UNSUPPORTED_CURRENCY`,
+`UNSUPPORTED_QUANTITY_DIMENSION`, or `INCOMPATIBLE_DURATION_PRICE`.
 
 ## API contract and OpenAPI
 
@@ -245,8 +354,8 @@ so changing an endpoint changes its documentation in the same place.
 The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
 `-Pversion=<version>`). It declares no server host, so it is the same in every
-environment. The stable `operationId`s are `createInquiry` and `getInquiry`, and for the
-catalog `fionasOfferingsGetCatalog`, `fionasOfferingsCreateCatalog`,
+environment. The stable `operationId`s are `createInquiry`, `getInquiry`, and
+`previewEstimate`, and for the catalog `fionasOfferingsGetCatalog`, `fionasOfferingsCreateCatalog`,
 `fionasOfferingsGetCatalogRevision`, `fionasOfferingsListCategories`,
 `fionasOfferingsAddCategory`, `fionasOfferingsGetCategory`,
 `fionasOfferingsListCategoryOfferings`, `fionasOfferingsListOfferings`,
@@ -261,7 +370,8 @@ renderer works only with http4k's Jackson, so `http4k-format-jackson` is a depen
 for nothing else: requests and responses stay kotlinx.serialization.
 
 Fiona's own schemas are derived from the kotlinx.serialization descriptors of the transport
-DTOs, the wire format itself, so `required` matches what the server reads and writes. Known
+DTOs, the wire format itself, so `required` matches what the server reads and writes: strings,
+`int32` integers, booleans, arrays, and nested objects, each its own component. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
 contract metadata cannot declare response headers; and, as commerce-runtime 0.0.8 renders
 them, the catalog's operations carry no tag (Swagger UI lists them under an unnamed group)
@@ -416,12 +526,14 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, atomic failure, not found |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler, including errors: the contract leaves every error body to commerce-runtime, and undeclared methods stay `405` |
+| `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
+| `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded, minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |
 | `OfferingsCatalogSpec` | Fiona's Offerings catalog through the complete handler: absent until initialized; revisions 1–4 from initialization, a category, and two offerings; ordered reads; exact historical revisions; every price form round-trips; no update or delete route |
-| `OpenApiDocumentSpec` | The OpenAPI document: paths, operationIds, tags, statuses, request and response schemas, the shared error schema, no host (rendered without a database); the Offerings routes at `/offering-catalog` with the `fionasOfferings` prefix, and the runtime's strict `OfferingPrice` `oneOf` |
+| `OpenApiDocumentSpec` | The OpenAPI document: paths, operationIds, tags, statuses, request and response schemas (the estimate preview's integers, booleans, and nested lists included), the shared error schema, no host (rendered without a database); the Offerings routes at `/offering-catalog` with the `fionasOfferings` prefix, and the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |
-| `ArchitectureSpec` | Repositories take a `Transaction` and build no transaction infrastructure; no SQL in routes; no HTTP in persistence; every endpoint is a contract route with an `operationId`; no hand-written OpenAPI file; one http4k version; the stable catalog id and binding; no Fiona Offerings types, repositories, or SQL; Jackson only for the Offerings schemas |
+| `ArchitectureSpec` | Repositories take a `Transaction` and build no transaction infrastructure; no SQL in routes; no HTTP in persistence; every endpoint is a contract route with an `operationId`; no hand-written OpenAPI file; one http4k version; the stable catalog id and binding; no Fiona Offerings types, repositories, or SQL; pricing depends only on commerce-domain and names no offering; previews record nothing; no financial-document persistence; Jackson only for the Offerings schemas |
 
 Full verification, as CI runs it (`build` also generates the OpenAPI document):
 
