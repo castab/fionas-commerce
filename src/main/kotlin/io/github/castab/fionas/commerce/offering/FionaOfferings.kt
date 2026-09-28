@@ -4,6 +4,7 @@ import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
 import io.github.castab.commerce.runtime.offering.OfferingsHttpBinding
+import org.http4k.contract.Tag
 import java.util.UUID
 
 /**
@@ -20,7 +21,7 @@ val FIONA_OFFERINGS_CATALOG_ID = OfferingsCatalogId(UUID.fromString("0cde8e0b-aa
 /**
  * Where Fiona serves its catalog through commerce-runtime's Offerings HTTP capability, which
  * implements every route, body, and revision rule: Fiona chooses only the catalog, the base
- * path, and the operationId prefix (operationIds are part of the API contract).
+ * path, the operationId prefix (part of the API contract), and its OpenAPI group.
  *
  * [OfferingsHttpAccess.ReadWrite] exposes the three routes that append revisions and asks
  * the runtime to require `CommercePermissions.OfferingsManage` through [accessControl].
@@ -31,4 +32,5 @@ fun fionaOfferingsBinding(accessControl: AccessControl) =
         basePath = "/offering-catalog",
         operationIdPrefix = "fionasOfferings",
         access = OfferingsHttpAccess.ReadWrite(accessControl),
+        tags = setOf(Tag("Offerings catalog", "Fiona's primary Offerings catalog.")),
     )

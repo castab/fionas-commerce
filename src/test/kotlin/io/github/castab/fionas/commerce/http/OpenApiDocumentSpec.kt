@@ -57,6 +57,8 @@ class OpenApiDocumentSpec :
                 Triple("/auth/login", "post", "login") to listOf("204", "400", "401", "403", "500"),
                 Triple("/auth/logout", "post", "logout") to listOf("204", "403", "500"),
                 Triple("/auth/me", "get", "getCurrentUser") to listOf("200", "401", "403", "500"),
+                Triple("/admin/users/{userId}/credentials/password", "put", "setStaffPassword") to
+                    listOf("204", "400", "401", "403", "404", "422", "500"),
             )
 
         // Each Fiona operation's tag.
@@ -68,6 +70,7 @@ class OpenApiDocumentSpec :
                 "login" to "Authentication",
                 "logout" to "Authentication",
                 "getCurrentUser" to "Authentication",
+                "setStaffPassword" to "Staff administration",
             )
 
         // commerce-runtime's Offerings operations, where Fiona binds them and as Fiona's prefix names them.
@@ -85,6 +88,33 @@ class OpenApiDocumentSpec :
                 Triple("/offering-catalog/offerings/{offeringKey}", "get", "fionasOfferingsGetOffering"),
             )
 
+        val adminOperations =
+            listOf(
+                Triple("/admin/access/users", "get", "authorizationListUsers"),
+                Triple("/admin/access/users", "post", "authorizationCreateUser"),
+                Triple("/admin/access/users/{userId}", "get", "authorizationGetUser"),
+                Triple("/admin/access/users/{userId}", "patch", "authorizationUpdateUser"),
+                Triple("/admin/access/users/{userId}/status", "put", "authorizationSetUserStatus"),
+                Triple("/admin/access/users/{userId}/roles", "get", "authorizationUserRoles"),
+                Triple("/admin/access/users/{userId}/roles/{roleKey}", "put", "authorizationAssignUserRole"),
+                Triple("/admin/access/users/{userId}/roles/{roleKey}", "delete", "authorizationUnassignUserRole"),
+                Triple("/admin/access/services", "get", "authorizationListServices"),
+                Triple("/admin/access/services", "post", "authorizationCreateService"),
+                Triple("/admin/access/services/{serviceId}", "get", "authorizationGetService"),
+                Triple("/admin/access/services/{serviceId}", "patch", "authorizationRenameService"),
+                Triple("/admin/access/services/{serviceId}/status", "put", "authorizationSetServiceStatus"),
+                Triple("/admin/access/services/{serviceId}/roles", "get", "authorizationServiceRoles"),
+                Triple("/admin/access/services/{serviceId}/roles/{roleKey}", "put", "authorizationAssignServiceRole"),
+                Triple("/admin/access/services/{serviceId}/roles/{roleKey}", "delete", "authorizationUnassignServiceRole"),
+                Triple("/admin/access/roles", "get", "authorizationListRoles"),
+                Triple("/admin/access/roles", "post", "authorizationCreateRole"),
+                Triple("/admin/access/roles/{roleKey}", "get", "authorizationGetRole"),
+                Triple("/admin/access/roles/{roleKey}", "patch", "authorizationUpdateRole"),
+                Triple("/admin/access/roles/{roleKey}", "delete", "authorizationDeleteRole"),
+                Triple("/admin/access/roles/{roleKey}/permissions", "put", "authorizationReplaceRolePermissions"),
+                Triple("/admin/access/permissions", "get", "authorizationListPermissions"),
+            )
+
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
@@ -97,6 +127,26 @@ class OpenApiDocumentSpec :
                 "ErrorResponse",
                 "LoginRequest",
                 "CurrentUserResponse",
+                "SetStaffPasswordRequest",
+            )
+
+        val adminSchemas =
+            setOf(
+                "UsersDto",
+                "UserDto",
+                "UserWriteDto",
+                "StatusDto",
+                "AssignmentsDto",
+                "ServicesDto",
+                "ServiceDto",
+                "ServiceWriteDto",
+                "RolesDto",
+                "RoleDto",
+                "RoleWriteDto",
+                "RoleProfileDto",
+                "PermissionKeysDto",
+                "PermissionsDto",
+                "PermissionDto",
             )
 
         test("is an OpenAPI 3.1 document of Fiona's Commerce API at the application's version") {
@@ -104,7 +154,7 @@ class OpenApiDocumentSpec :
             document.text("info", "title") shouldBe "Fiona's Commerce API"
             document.text("info", "version") shouldBe fionaVersion()
             document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder
-                listOf("Inquiries", "Estimates", "Authentication")
+                listOf("Inquiries", "Estimates", "Authentication", "Staff administration", "Offerings catalog")
         }
 
         test("names no host, so every deployment serves the same document") {
@@ -116,9 +166,9 @@ class OpenApiDocumentSpec :
             fionaOpenApiDocument().contains("://localhost") shouldBe false
         }
 
-        test("describes exactly Fiona's operations and its Offerings catalog's, not the documentation or /health and /ready") {
+        test("describes exactly Fiona and bound runtime capability routes, excluding /health and /ready") {
             document.at("paths").jsonObject.mapValues { (_, methods) -> methods.jsonObject.keys } shouldBe
-                (operations.keys + offeringOperations)
+                (operations.keys + offeringOperations + adminOperations)
                     .groupBy({ it.first }, { it.second })
                     .mapValues { it.value.toSet() }
         }
@@ -126,6 +176,7 @@ class OpenApiDocumentSpec :
         test("serves commerce-runtime's Offerings operations under Fiona's base path and operationId prefix") {
             offeringOperations.forEach { (path, method, operationId) ->
                 operation(path, method).text("operationId") shouldBe operationId
+                operation(path, method).strings("tags") shouldContainExactly listOf("Offerings catalog")
             }
             document
                 .at("paths")
@@ -134,6 +185,21 @@ class OpenApiDocumentSpec :
                 .values
                 .flatMap { methods -> methods.jsonObject.values.map { it.text("operationId") } }
                 .forEach { it shouldStartWith "fionasOfferings" }
+        }
+
+        test("mounts commerce-runtime's authorization administration contract unchanged") {
+            adminOperations.forEach { (path, method, operationId) ->
+                operation(path, method).text("operationId") shouldBe operationId
+                operation(path, method).strings("tags") shouldContainExactly listOf("Staff administration")
+            }
+        }
+
+        test("has no unnamed Swagger UI operation group") {
+            document.at("paths").jsonObject.values.forEach { methods ->
+                methods.jsonObject.values.forEach { route ->
+                    route.strings("tags").single().isNotBlank() shouldBe true
+                }
+            }
         }
 
         test("keeps commerce-runtime's strict OfferingPrice union through Fiona's renderer") {
@@ -289,7 +355,7 @@ class OpenApiDocumentSpec :
                 reached += frontier
                 frontier = frontier.flatMap { references(schemas.getValue(it)) }.map { it.substringAfterLast('/') }.toSet() - reached
             }
-            schemas.keys shouldBe fionaSchemas.toSet() + reached
+            schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + reached
         }
 
         test("gives each body an example that satisfies its schema's required properties") {

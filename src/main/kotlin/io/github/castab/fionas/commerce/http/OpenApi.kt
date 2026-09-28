@@ -50,8 +50,8 @@ const val API_TITLE = "Fiona's Commerce API"
  * - No `servers`: the document describes paths only, so it is the same for every
  *   deployment, and Swagger UI calls the origin that served it.
  * - Schemas come from the transport DTOs' kotlinx.serialization descriptors, the wire
- *   format itself ([KotlinxSchemas]), except the Offerings catalog's, which
- *   commerce-runtime's own `offeringsOpenApiRenderer` describes ([OfferingsSchemas]).
+ *   format itself ([KotlinxSchemas]), including runtime authorization DTOs. The Offerings
+ *   catalog uses commerce-runtime's `offeringsOpenApiRenderer` ([OfferingsSchemas]).
  * - Errors the contract itself detects are left to commerce-runtime ([RuntimeErrorHandling]).
  */
 fun fionaOpenApi(version: String): ContractRenderer =
@@ -65,7 +65,8 @@ fun fionaOpenApi(version: String): ContractRenderer =
                         "catering business. Every error is `{\"code\": \"...\", \"message\": \"...\"}`: `code` is stable " +
                         "and machine-readable, `message` is for people and may change. The Offerings catalog routes " +
                         "are implemented by commerce-runtime's reusable Offerings capability; Fiona chooses the catalog " +
-                        "and where it is served. The runtime's `/health` and `/ready` are not part of this API.",
+                        "and where it is served. The runtime authorization administration capability is mounted at " +
+                        "`/admin/access`. The runtime's `/health` and `/ready` are not part of this API.",
             ),
         json = CommerceJson,
         apiRenderer = KotlinxSchemas(OpenApi3ApiRenderer(CommerceJson), OfferingsSchemas()),

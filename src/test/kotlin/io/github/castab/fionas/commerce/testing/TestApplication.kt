@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.testing
 import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.CommerceRuntime
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
+import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
 import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
@@ -39,6 +40,7 @@ class TestApplication private constructor(
     val runtime: CommerceRuntime,
     val transactor: Transactor,
     val sessions: SessionManager,
+    val authorization: AuthorizationDirectory,
 ) : AutoCloseable {
     /** The complete HTTP handler, including the runtime's error handling, without a server. */
     val http: HttpHandler get() = runtime.http
@@ -73,13 +75,17 @@ class TestApplication private constructor(
     }
 
     companion object {
-        fun create(clock: Clock = testClock): TestApplication {
+        fun create(
+            clock: Clock = testClock,
+            bootstrap: BootstrapAdmin? =
+                BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
+        ): TestApplication {
             val database = TestDatabase.create()
             try {
                 val fiona =
                     fionaApplication(
                         clock,
-                        BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
+                        bootstrap,
                         setOf(TEST_ORIGIN),
                     )
                 var context: CommerceRuntimeContext? = null
@@ -94,13 +100,20 @@ class TestApplication private constructor(
                         application =
                             ApplicationContributions(
                                 migrationLocations = fiona.migrationLocations,
+                                permissionDefinitions = fiona.permissionDefinitions,
                                 routes = { runtimeContext ->
                                     context = runtimeContext
                                     fiona.routes(runtimeContext)
                                 },
                             ),
                     )
-                return TestApplication(database, runtime, checkNotNull(context).transactor, checkNotNull(context).sessions)
+                return TestApplication(
+                    database,
+                    runtime,
+                    checkNotNull(context).transactor,
+                    checkNotNull(context).sessions,
+                    checkNotNull(context).authorization,
+                )
             } catch (e: Exception) {
                 database.close()
                 throw e

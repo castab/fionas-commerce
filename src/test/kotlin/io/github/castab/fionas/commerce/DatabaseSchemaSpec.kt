@@ -39,7 +39,20 @@ class DatabaseSchemaSpec :
 
         test("Fiona's tables live in the fionas schema, which Fiona owns") {
             application.database.tables("fionas") shouldContainExactlyInAnyOrder
-                listOf("customers", "inquiries", "users", "user_credentials", "principal_role_assignments", "service_identities")
+                listOf("customers", "inquiries", "user_credentials")
+        }
+
+        test("Fiona credentials reference the runtime-owned human user") {
+            application.database.strings(
+                """
+                SELECT ccu.table_schema || '.' || ccu.table_name || '(' || ccu.column_name || ')'
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.constraint_column_usage ccu
+                  ON ccu.constraint_schema = tc.constraint_schema AND ccu.constraint_name = tc.constraint_name
+                WHERE tc.table_schema = 'fionas' AND tc.table_name = 'user_credentials'
+                  AND tc.constraint_type = 'FOREIGN KEY'
+                """.trimIndent(),
+            ) shouldContainExactly listOf("commerce.users(principal_id)")
         }
 
         test("the commerce schema holds exactly what commerce-runtime creates on its own, nothing of Fiona's") {

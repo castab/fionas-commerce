@@ -4,6 +4,10 @@ import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
+import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
+import io.github.castab.commerce.runtime.authorization.PermissionCatalog
+import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
+import io.github.castab.commerce.runtime.authorization.commercePermissionDefinitions
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
@@ -22,7 +26,9 @@ import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.OPENAPI_PATH
 import io.github.castab.fionas.commerce.http.fionaApi
+import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import org.http4k.core.Filter
 import org.http4k.core.Method
 import org.http4k.core.NoOp
@@ -43,6 +49,7 @@ private val notInvoked =
         previewEstimate = { error("Rendering the OpenAPI document never prices an estimate") },
         login = { _, _ -> error("Rendering the OpenAPI document never logs in") },
         currentUser = { error("Rendering the OpenAPI document never reads a user") },
+        setStaffPassword = { _, _ -> error("Rendering the OpenAPI document never sets a password") },
     )
 
 private val notInvokedSessions =
@@ -78,11 +85,10 @@ private val renderingAuth = FionaAuthRoutes(notInvokedSessions, SessionCookie("_
  * A `CommerceRuntimeContext` for rendering only: its transactor opens no connection and its
  * repository refuses every call, and rendering calls neither.
  *
- * A workaround for a commerce-runtime 0.0.9 gap (AGENTS.md, "Known upstream gaps"): the
- * Offerings capability builds its contract routes only from a context, and only a composed
- * runtime, which needs a database, creates one; the constructor is `internal` to Kotlin
- * callers, so it is called reflectively. It lives in this source set, never in the
- * deployable jar, and goes away once the runtime can describe its routes without a database.
+ * The Offerings and authorization capabilities require a runtime context even to describe
+ * their contract routes. A composed runtime needs a database, so this source set builds a
+ * rendering-only context reflectively. The transactor opens no connection, and route
+ * rendering invokes no repository or operation. This code never enters the deployable jar.
  */
 private fun renderingOnlyContext(): CommerceRuntimeContext {
     val configuration =
@@ -112,13 +118,21 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
                 catalogId: OfferingsCatalogId,
             ) = error("Rendering the OpenAPI document never reads a catalog")
         }
+    val catalog = PermissionCatalog(commercePermissionDefinitions + FionaPermissions.definitions)
+    val repositoryType = Class.forName("io.github.castab.commerce.runtime.persistence.AuthorizationRepository")
+    val repository = repositoryType.getConstructor().newInstance()
+    val authorization =
+        AuthorizationDirectory::class.java
+            .getConstructor(Transactor::class.java, repositoryType, SessionManager::class.java, PermissionCatalog::class.java)
+            .newInstance(transactor, repository, notInvokedSessions, catalog)
     return CommerceRuntimeContext::class.java
         .getConstructor(
             CommerceRuntimeConfiguration::class.java,
             Transactor::class.java,
             OfferingsSnapshotRepository::class.java,
             SessionManager::class.java,
-        ).newInstance(configuration, transactor, snapshots, notInvokedSessions)
+            AuthorizationDirectory::class.java,
+        ).newInstance(configuration, transactor, snapshots, notInvokedSessions, authorization)
 }
 
 /**
@@ -127,8 +141,11 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
  * same request, with no database, server, or network.
  */
 fun fionaOpenApiDocument(version: String = fionaVersion()): String {
-    val offerings = offeringsHttpCapability(renderingOnlyContext(), fionaOfferingsBinding(renderingAccess))
-    val response = fionaApi(notInvoked, offerings, version, renderingAuth)(Request(Method.GET, OPENAPI_PATH))
+    val context = renderingOnlyContext()
+    val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(renderingAccess))
+    val authorizationAdmin =
+        authorizationAdministrationHttpCapability(context, renderingAccess, "/admin/access", setOf(staffAdministrationTag))
+    val response = fionaApi(notInvoked, offerings, authorizationAdmin, version, renderingAuth)(Request(Method.GET, OPENAPI_PATH))
     check(response.status == Status.OK) { "Rendering the OpenAPI document failed: ${response.status}" }
     return response.bodyString()
 }

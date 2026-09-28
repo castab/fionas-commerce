@@ -52,8 +52,8 @@ Fiona owns, and persists in its own tables:
 
 - customers;
 - inquiries;
-- staff users, password credentials, service identities, principal role assignments, and
-  Fiona's explicit role definitions;
+- password credentials, verification, login, browser Origin policy, and first-admin
+  bootstrap policy; commerce-runtime owns staff users and authorization;
 - the identity of Fiona's primary Offerings catalog and where it is served (its contents
   are persisted by commerce-runtime; see [Offerings catalog](#offerings-catalog));
 - Fiona's pricing: `FionasOfferingsContext`, `FionasPricingPolicy`,
@@ -144,6 +144,9 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
 - principal session lifecycle and persistence (`context.sessions`, `SessionManager`,
   `commerce.principal_sessions`, `SessionCookie`, `sessionAuthentication`), the
   `authenticatedPrincipal` request lens, and `AccessControl` permission enforcement.
+- human users, service identities, principal status, roles, role permissions, role
+  assignments, live permission resolution, and the permission catalog
+  (`context.authorization`); the authorization administration HTTP capability.
 
 Never create another connection pool, another `Jdbi` instance, another transaction
 manager, Spring transactions, a nested transaction abstraction, a second configuration
@@ -157,8 +160,10 @@ only to *observe* the database from outside the runtime (see `TestDatabase`).
 factory builds repositories and operations from the `CommerceRuntimeContext` with
 ordinary Kotlin, hands the operations to the API as `FionaOperations`, binds the runtime's
 Offerings capability to Fiona's catalog (`offeringsHttpCapability(context,
-fionaOfferingsBinding(accessControl))`), and contributes exactly two route handlers:
-`fionaApi(operations, offerings, version, auth)` (the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
+fionaOfferingsBinding(accessControl))`), mounts the runtime's authorization administration
+capability at `/admin/access` with that same `AccessControl`, and contributes exactly two
+route handlers: `fionaApi(operations, offerings, authorizationAdmin, version, auth)`
+(the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
 the migration phase before composing anything), starts it, installs the shutdown hook,
 and blocks. Keep `main()` thin: no schema, Flyway, or migration decisions belong in it. There is no DI framework, no annotation scanning,
 no service locator. Keep wiring visible.
@@ -329,15 +334,18 @@ after runtime-owned migrations.
 - **Reference runtime structures only when they are a published contract.** A foreign key
   to a runtime table is legitimate when commerce-runtime publishes that table for
   applications; never depend on incidental runtime tables, indexes, or Flyway metadata.
-  As of 0.0.9 the runtime publishes the Offerings snapshot tables
+  The runtime publishes the Offerings snapshot tables
   (`commerce.offerings_snapshots`, `commerce.offering_categories`, `commerce.offerings`),
   but no Fiona migration references them, and Fiona reaches the catalog only through the
-  runtime's Offerings operations. `ArchitectureSpec` rejects any `commerce.` reference in
-  Fiona migrations; the first sanctioned one updates that guard deliberately.
+  runtime's Offerings operations. Fiona's `V2` references the published
+  `commerce.users(principal_id)` for the credential foreign key; `ArchitectureSpec`
+  confines runtime schema references to this purpose.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
   deployment: the original `V20260926210000` migration was rewritten as `V1`, moving the
-  tables from `public` to `fionas`, alongside commerce 0.0.6's own history reset.)
+  tables from `public` to `fionas`, alongside commerce 0.0.6's own history reset.
+  The unreleased staff `V2` was also rewritten for commerce 0.0.10 because all development
+  data and volumes are intentionally reset.)
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
   structure, move code and data to it in a later release, remove the old one only after
   no running version uses it. Old and new instances overlap during rolling deploys.
@@ -363,8 +371,8 @@ catalog and where it is served; commerce-runtime implements everything else.
    pins it.
 2. **Fiona mounts the runtime capability; it never reimplements it.**
    `fionaOfferingsBinding(accessControl)` binds the catalog at `/offering-catalog` with the operationId
-   prefix `fionasOfferings` (operationIds are API contract, rule 3 above) and
-   `ReadWrite(accessControl)` access. The composition root calls `offeringsHttpCapability` once, with no
+   prefix `fionasOfferings` (operationIds are API contract, rule 3 above),
+   `ReadWrite(accessControl)` access, and the `Offerings catalog` OpenAPI tag. The composition root calls `offeringsHttpCapability` once, with no
    wrapper.
 3. **Generic Offerings behavior stays upstream**: operations, DTOs, routes, validation,
    revision derivation, and persistence. Never add Fiona Offering DTOs, repositories,
@@ -397,35 +405,44 @@ catalog and where it is served; commerce-runtime implements everything else.
 
 ## Staff authentication and authorization
 
-Fiona verifies credentials and supplies principals and roles; commerce-runtime owns
-session tokens, their digest storage, expiry, resolution, and revocation; commerce-domain
-defines `PrincipalId`, principals, role definitions, and permission evaluation.
+Fiona verifies passwords and owns login, cookie choice, browser Origin policy, and
+bootstrap policy. Commerce-runtime owns the human and service principal directory,
+persisted roles and grants, live permission resolution, administration HTTP capability,
+and sessions. Commerce-domain defines the principal and permission vocabulary.
 
 ```text
-POST /auth/login → PasswordAuthenticator → UserId → context.sessions.create(...)
+POST /auth/login → context.authorization.findUserByUsername → Fiona credential verification
+                 → UserId → context.sessions.create(...)
                  → __Host-fionas_session cookie
 later request    → sessionAuthentication(...) → authenticatedPrincipal
-                 → AccessControl → RoleBasedPermissionResolver → handler
+                 → AccessControl → context.authorization.permissionResolver → handler
 ```
 
-- Fiona's `V2` migration owns `fionas.users`, `fionas.user_credentials`,
-  `fionas.principal_role_assignments`, and `fionas.service_identities`. No Fiona session
-  table exists. Profile, credential hash, and role assignments remain separate.
-- Usernames are trimmed, lowercased with `Locale.ROOT`, constrained to 1–100 ASCII
-  letters, digits, dots, underscores, or hyphens, and unique in normalized form.
+- Fiona's unreleased `V2` was rewritten for disposable development data. It owns only
+  `fionas.user_credentials`: `user_id` references `commerce.users(principal_id)`, plus
+  an Argon2id hash and change timestamp. It owns no user, role, assignment, or session table.
+- The runtime normalizes usernames and enforces uniqueness in its directory.
 - Passwords are Argon2id hashes encoded by `argon2-jvm`. Raw passwords enter only the
   login/bootstrap credential path and are never logged or persisted. Wrong username,
   wrong password, and disabled status receive the same `401` response.
 - The first administrator is provisioned only when explicit bootstrap environment
-  credentials are provided and no users exist. Its creation, credential hash, and role
-  assignment share one transaction. Remove the secret from the environment afterward.
-- `FionaPrincipalResolver` reads a current `UserId` or `ServiceId`; `FionaRoles` resolves
-  explicit role definitions; `RoleBasedPermissionResolver` computes permissions afresh
-  on every request. `CommerceRoles.Administrator` currently grants only
-  `CommercePermissions.OfferingsManage`.
+  credentials are provided and no runtime users exist. Runtime role creation, runtime
+  user creation, Fiona credential insertion, and role assignment share one transaction
+  after both migration streams and permission validation. There is no default password;
+  later startup never overwrites an existing credential.
+- The Administrator role grants exactly OfferingsManage, PrincipalRead, PrincipalManage,
+  RoleRead, RoleManage, RoleAssign, and Fiona's `fionas.credentials.manage`. It has no
+  wildcard or automatic future grants.
+- Fiona contributes `fionas.credentials.manage` through
+  `ApplicationContributions.permissionDefinitions`. The runtime permission catalog and
+  live resolver remain the only authorization source.
 - Fiona composes one `AccessControl` from cookie `sessionAuthentication(context.sessions,
   SessionCookie("__Host-fionas_session"))` and the permission resolver. The runtime's
-  `OfferingsHttpAccess.ReadWrite(accessControl)` protects its write routes. Public
+  `OfferingsHttpAccess.ReadWrite(accessControl)` protects its write routes. The same
+  control guards runtime administration at `/admin/access` and Fiona's
+  `PUT /admin/users/{userId}/credentials/password`. The credential endpoint verifies the
+  runtime user, stores a new hash, returns no secret material, and does not revoke existing
+  sessions. Public
   inquiries, estimate previews, Offerings reads, health, and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
   cookie-authenticated methods require a matching `Origin` and fail closed if none is
@@ -522,7 +539,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
-| `...staff` | Fiona's staff persistence, human password verification, explicit roles, principal resolution, and first-admin bootstrap |
+| `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
@@ -539,7 +556,7 @@ real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: quotes, estimates, invoices or
 any financial-document persistence, payments, refunds, allocations, reconciliation,
-Stripe or any payment provider, service credentials, OAuth/OIDC, password resets, event
+Stripe or any payment provider, service credentials, OAuth/OIDC, self-service password resets, event
 publishing, outbox, NATS, projections, CQRS, booking conversion, lifecycle transitions,
 persisted estimates or selections, tax, travel fees, minimum orders, inventory,
 availability, catalog seeding or import, deposits, and customer merge or deduplication. Do
@@ -567,7 +584,7 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (as of commerce 0.0.9)
+### Known upstream gaps (as of commerce 0.0.11)
 
 - **Application history schema is fixed.** Fiona's tables live in `fionas`, but the
   runtime keeps every application's migration history in `public.flyway_schema_history`
@@ -596,18 +613,18 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   which needs a database, creates one. Rendering the document offline needs only route
   metadata, so the generator (`src/openapi`, never the deployable jar) builds a
   rendering-only context reflectively, with a transactor that opens no connection and a
-  repository that refuses every call. Upstream fix: build the contract routes from a
-  `Transactor` and `OfferingsSnapshotRepository`, or offer a documentation-only form.
+  repository that refuses every call. The authorization admin capability
+  also needs this context; the rendering-only authorization directory is assembled
+  reflectively. Upstream fix: expose documentation-only capability routes.
 - **`offeringsOpenApiRenderer` needs Jackson.** It builds schemas through http4k's
   reflective schema generator, which fails on `CommerceJson`
   (`Serializer for class 'JsonLiteral' is not found`), so Fiona renders the Offerings
   schemas with `http4k-format-jackson` and carries them into its kotlinx-rendered document
   (`OfferingsSchemas`). Upstream fix: a schema hook that works on `CommerceJson`, or
   descriptor-derived Offerings schemas.
-- **Offerings route metadata is minimal.** The routes have no tags (the document renders
-  `tags: [""]`, an unnamed Swagger UI group) and no descriptions, and the binding cannot
-  supply either; their error examples all say `Request failed`, and no route documents
-  `500`.
+- **Offerings route metadata is minimal.** Commerce 0.0.11 lets Fiona supply the
+  `Offerings catalog` tag through its binding, but routes still have no descriptions;
+  their error examples all say `Request failed`, and no route documents `500`.
 - **Offerings schemas contain `"format": null`.** http4k's reflective generator emits it
   for every property, as commerce-runtime's own sample host renders it too. JSON Schema
   requires `format` to be a string, so strict validators may reject the document.

@@ -80,8 +80,8 @@ class MigrationLifecycleSpec :
                 // Both streams have a version 1; neither numbers its migrations after the other's.
                 database.history("public").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2")
                 database.history("public").first() shouldContain "V1__customers_and_inquiries.sql"
-                database.history("public").last() shouldContain "V2__staff_identities.sql"
-                database.count("fionas.users") shouldBe 0
+                database.history("public").last() shouldContain "V2__user_credentials.sql"
+                database.count("commerce.users") shouldBe 0
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
                 database
                     .strings(

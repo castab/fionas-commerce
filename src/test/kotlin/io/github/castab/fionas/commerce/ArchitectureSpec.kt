@@ -12,8 +12,8 @@ import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
-import io.github.castab.fionas.commerce.staff.JdbiStaffRepository
-import io.github.castab.fionas.commerce.staff.StaffRepository
+import io.github.castab.fionas.commerce.staff.CredentialRepository
+import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.testing.metadataAuth
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -70,7 +70,7 @@ class ArchitectureSpec :
             )
 
         test("every repository operation takes the caller's Transaction first") {
-            listOf(CustomerRepository::class.java, InquiryRepository::class.java, StaffRepository::class.java).forEach { repository ->
+            listOf(CustomerRepository::class.java, InquiryRepository::class.java, CredentialRepository::class.java).forEach { repository ->
                 repository.declaredMethods.forEach { method ->
                     method.parameterTypes.first() shouldBe Transaction::class.java
                 }
@@ -81,7 +81,7 @@ class ArchitectureSpec :
             listOf(
                 JdbiCustomerRepository::class.java,
                 JdbiInquiryRepository::class.java,
-                JdbiStaffRepository::class.java,
+                JdbiCredentialRepository::class.java,
             ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
                 repository.declaredConstructors.single().parameterCount shouldBe 0
@@ -96,7 +96,6 @@ class ArchitectureSpec :
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
-                    "staff/FionaAuthorization.kt: inTransaction",
                 )
             sources().containing(transactionInfrastructure - "inTransaction" - "Handle").shouldBeEmpty()
         }
@@ -108,8 +107,12 @@ class ArchitectureSpec :
         }
 
         test("repositories and operations know nothing of HTTP") {
-            sources { !it.path.contains("${File.separator}http${File.separator}") && it.name != "FionaApplication.kt" }
-                .containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
+            // FionaOfferings.kt owns the runtime HTTP binding; its pricing operations stay pure.
+            sources {
+                !it.path.contains("${File.separator}http${File.separator}") &&
+                    it.name != "FionaApplication.kt" &&
+                    it.name != "FionaOfferings.kt"
+            }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
         }
 
@@ -143,6 +146,7 @@ class ArchitectureSpec :
                         previewEstimate = { error("not called") },
                         login = { _, _ -> error("not called") },
                         currentUser = { error("not called") },
+                        setStaffPassword = { _, _ -> error("not called") },
                     ),
                     metadataAuth,
                 )
@@ -187,6 +191,7 @@ class ArchitectureSpec :
             binding.catalogId shouldBe FIONA_OFFERINGS_CATALOG_ID
             binding.basePath shouldBe "/offering-catalog"
             binding.operationIdPrefix shouldBe "fionasOfferings"
+            binding.tags.map { it.name }.toSet() shouldBe setOf("Offerings catalog")
             (binding.access is OfferingsHttpAccess.ReadWrite) shouldBe true
             sources().containing(listOf("offeringsHttpCapability(")) shouldContainExactly
                 listOf("FionaApplication.kt: offeringsHttpCapability(")
@@ -299,15 +304,14 @@ class ArchitectureSpec :
             File(mainSources, "FionaApplication.kt").readText().contains("context.sessions") shouldBe true
         }
 
-        test("Fiona ships no runtime migrations and its migrations never touch the commerce schema") {
+        test("Fiona ships no runtime migrations and references only the published runtime user identity") {
             File("src/main/resources/db/commerce").exists() shouldBe false
-            // Deliberately blunt: the first reference to a runtime structure that commerce-runtime
-            // publishes as a persistence contract must update this guard on purpose.
+            // Fiona's credential FK is the one sanctioned runtime schema reference.
             File("src/main/resources/db/fionas")
                 .listFiles()
                 .orEmpty()
-                .map { it.readText() }
-                .filter { "commerce." in it }
+                .flatMap { file -> Regex("""commerce\.[a-z_]+""").findAll(file.readText()).map { it.value }.toList() }
+                .filterNot { it == "commerce.users" }
                 .shouldBeEmpty()
         }
     })

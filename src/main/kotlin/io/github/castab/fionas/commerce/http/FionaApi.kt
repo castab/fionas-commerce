@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.runtime.authorization.AuthorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
@@ -42,6 +43,7 @@ class FionaOperations(
     val previewEstimate: (PreviewEstimate.Command) -> EstimatePreview,
     val login: (String, SecretPassword) -> IssuedSession?,
     val currentUser: (UserId) -> User?,
+    val setStaffPassword: (UserId, SecretPassword) -> Unit,
 )
 
 class FionaAuthRoutes(
@@ -66,6 +68,7 @@ fun fionaApiRoutes(
         loginRoute(operations.login, auth.cookie, auth.access, auth.origin),
         logoutRoute(auth.sessions, auth.cookie, auth.access),
         currentUserRoute(operations.currentUser, auth.access),
+        setStaffPasswordRoute(operations.setStaffPassword, auth.access),
     )
 
 /**
@@ -81,10 +84,11 @@ fun fionaApiRoutes(
 fun fionaApi(
     operations: FionaOperations,
     offerings: OfferingsHttpCapability,
+    authorizationAdmin: AuthorizationAdministrationHttpCapability,
     version: String,
     auth: FionaAuthRoutes,
 ): RoutingHttpHandler {
-    val apiRoutes = fionaApiRoutes(operations, auth) + offerings.contractRoutes
+    val apiRoutes = fionaApiRoutes(operations, auth) + offerings.contractRoutes + authorizationAdmin.contractRoutes
     return routes(
         undeclaredMethods(apiRoutes),
         contract {

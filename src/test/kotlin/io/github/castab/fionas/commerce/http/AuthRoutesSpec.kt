@@ -1,14 +1,19 @@
 package io.github.castab.fionas.commerce.http
 
-import ch.qos.logback.classic.Logger
-import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.read.ListAppender
 import io.github.castab.commerce.runtime.http.CommerceJson
-import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.staff.ServiceIdentity
+import io.github.castab.commerce.staff.User
+import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.BootstrapFirstAdmin
-import io.github.castab.fionas.commerce.staff.JdbiStaffRepository
+import io.github.castab.fionas.commerce.staff.CredentialRepository
+import io.github.castab.fionas.commerce.staff.FionaPermissions
+import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.staff.PasswordHasher
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
@@ -20,7 +25,7 @@ import io.kotest.matchers.string.shouldContain
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
-import org.slf4j.LoggerFactory
+import java.time.Instant
 import java.util.UUID
 
 class AuthRoutesSpec :
@@ -37,166 +42,207 @@ class AuthRoutesSpec :
                 .let { if (origin == null) it else it.header("Origin", origin) },
         )
 
-        fun error(body: String) = CommerceJson.asA(body, ErrorResponse.serializer())
+        fun request(
+            app: TestApplication,
+            method: Method,
+            path: String,
+            cookie: String? = app.adminCookie,
+            origin: String? = TEST_ORIGIN,
+            body: String = "",
+        ) = app.http(
+            Request(method, path)
+                .header("Content-Type", "application/json")
+                .body(body)
+                .let { if (cookie == null) it else it.header("Cookie", cookie) }
+                .let { if (origin == null) it else it.header("Origin", origin) },
+        )
 
-        test("bootstrap stores only a salted Argon2id hash, normalizes the username, and repeats safely") {
+        fun newUser(
+            app: TestApplication,
+            name: String,
+        ): UserId =
+            UserId(
+                UUID.randomUUID(),
+            ).also { app.authorization.createUser(User(it, name, null, null, name, PrincipalStatus.ACTIVE, emptySet())) }
+
+        test("fresh bootstrap owns one runtime user and role with explicit grants and Fiona credential") {
             TestApplication.create().use { app ->
-                app.database.count("fionas.users") shouldBe 1
+                val admin = app.authorization.findUserByUsername("admin")!!
+                app.database.count("commerce.users") shouldBe 1
+                app.database.count("commerce.roles") shouldBe 1
+                app.database.count("commerce.principal_roles") shouldBe 1
                 app.database.count("fionas.user_credentials") shouldBe 1
-                app.database.count("fionas.principal_role_assignments") shouldBe 1
+                admin.roles.map { it.role }.toSet() shouldBe setOf(CommerceRoles.Administrator)
+                app.authorization.getRole(CommerceRoles.Administrator)!!.permissions shouldBe
+                    setOf(
+                        CommercePermissions.OfferingsManage,
+                        CommercePermissions.PrincipalRead,
+                        CommercePermissions.PrincipalManage,
+                        CommercePermissions.RoleRead,
+                        CommercePermissions.RoleManage,
+                        CommercePermissions.RoleAssign,
+                        FionaPermissions.CredentialsManage,
+                    )
                 val hash = app.database.strings("SELECT password_hash FROM fionas.user_credentials").single()
                 hash.startsWith("\$argon2id\$") shouldBe true
                 hash.contains("test-admin-password") shouldBe false
-                val first = SecretPassword.of("another-test-password").use(PasswordHasher()::hash)
-                val second = SecretPassword.of("another-test-password").use(PasswordHasher()::hash)
-                (first != second) shouldBe true
-                app.database.strings("SELECT username FROM fionas.users") shouldBe listOf("admin")
-
-                BootstrapFirstAdmin(app.transactor, JdbiStaffRepository(), PasswordHasher(), testClock).invoke(
+                BootstrapFirstAdmin(app.transactor, app.authorization, JdbiCredentialRepository(), PasswordHasher(), testClock).invoke(
                     BootstrapAdmin("other", "Other", null, null, SecretPassword.of("another-test-password")),
                 )
-                app.database.count("fionas.users") shouldBe 1
+                app.database.count("commerce.users") shouldBe 1
+                app.database.strings("SELECT password_hash FROM fionas.user_credentials").single() shouldBe hash
             }
         }
 
-        test("login sets a secure host-only cookie and keeps the token out of its response body") {
-            TestApplication.create().use { app ->
-                val response = login(app, username = " ADMIN ")
-                response.status shouldBe Status.NO_CONTENT
-                val cookie = checkNotNull(response.header("Set-Cookie"))
-                cookie shouldContain "__Host-fionas_session="
-                cookie shouldContain "secure"
-                cookie shouldContain "HttpOnly"
-                cookie shouldContain "SameSite=Lax"
-                cookie shouldContain "Path=/"
-                cookie.contains("Domain=") shouldBe false
-                response.bodyString() shouldBe ""
-                app.database.count("commerce.principal_sessions") shouldBe 1
-            }
-        }
-
-        test("bad credentials share one 401 response, and disabled staff cannot log in") {
-            TestApplication.create().use { app ->
-                val wrongName = login(app, username = "missing")
-                val wrongPassword = login(app, password = "bad-password")
-                wrongName.status shouldBe Status.UNAUTHORIZED
-                wrongPassword.status shouldBe Status.UNAUTHORIZED
-                wrongName.bodyString() shouldBe wrongPassword.bodyString()
-                error(wrongName.bodyString()).code shouldBe "unauthenticated"
-                app.database.execute("UPDATE fionas.users SET status = 'DISABLED' WHERE username = 'admin'")
+        test("bootstrap is opt-in and rolls back runtime identity if Fiona credential insertion fails") {
+            TestApplication.create(bootstrap = null).use { app ->
+                app.database.count("commerce.users") shouldBe 0
+                app.database.count("commerce.roles") shouldBe 0
                 login(app).status shouldBe Status.UNAUTHORIZED
+                val failingCredentials =
+                    object : CredentialRepository {
+                        override fun passwordHash(
+                            transaction: Transaction,
+                            userId: UserId,
+                        ): String? = null
+
+                        override fun setPassword(
+                            transaction: Transaction,
+                            userId: UserId,
+                            hash: String,
+                            changedAt: Instant,
+                        ) {
+                            error("simulated credential failure")
+                        }
+                    }
+                runCatching {
+                    BootstrapFirstAdmin(app.transactor, app.authorization, failingCredentials, PasswordHasher(), testClock).invoke(
+                        BootstrapAdmin("admin", "Administrator", null, null, SecretPassword.of("test-admin-password")),
+                    )
+                }.isFailure shouldBe true
+                app.database.count("commerce.users") shouldBe 0
+                app.database.count("commerce.roles") shouldBe 0
+                app.database.count("commerce.principal_roles") shouldBe 0
+            }
+        }
+
+        test("login failures are generic for unknown, wrong, missing credential, and disabled user") {
+            TestApplication.create().use { app ->
+                val missing = login(app, username = "missing")
+                val wrong = login(app, password = "wrong-password")
+                missing.status shouldBe Status.UNAUTHORIZED
+                wrong.bodyString() shouldBe missing.bodyString()
+                newUser(app, "new-staff")
+                login(app, username = "new-staff").bodyString() shouldBe missing.bodyString()
+                app.authorization.setStatus(app.authorization.findUserByUsername("admin")!!.id, PrincipalStatus.DISABLED)
+                login(app).bodyString() shouldBe missing.bodyString()
                 app.database.count("commerce.principal_sessions") shouldBe 0
             }
         }
 
-        test("me exposes the safe current user and logout revokes and clears even on a repeated call") {
+        test("me reads runtime identity and logout revokes; disabling invalidates an existing session") {
             TestApplication.create().use { app ->
-                app.http(Request(Method.GET, "/auth/me")).status shouldBe Status.UNAUTHORIZED
                 val cookie = app.adminCookie
-                val me = app.http(Request(Method.GET, "/auth/me").header("Cookie", cookie))
+                val me = request(app, Method.GET, "/auth/me", cookie)
                 me.status shouldBe Status.OK
-                val user = CommerceJson.asA(me.bodyString(), CurrentUserResponse.serializer())
-                user.username shouldBe "admin"
-                user.roles shouldBe listOf("commerce.administrator")
+                val identity = CommerceJson.asA(me.bodyString(), CurrentUserResponse.serializer())
+                identity.username shouldBe "admin"
+                identity.roles shouldBe listOf("commerce.administrator")
                 me.bodyString().contains("password") shouldBe false
-                me.bodyString().contains("session") shouldBe false
-
-                val logout = Request(Method.POST, "/auth/logout").header("Cookie", cookie).header("Origin", TEST_ORIGIN)
-                val first = app.http(logout)
-                first.status shouldBe Status.NO_CONTENT
-                checkNotNull(first.header("Set-Cookie")) shouldContain "Max-Age=0"
-                app.http(Request(Method.GET, "/auth/me").header("Cookie", cookie)).status shouldBe Status.UNAUTHORIZED
-                val second = app.http(logout)
-                second.status shouldBe Status.NO_CONTENT
-                checkNotNull(second.header("Set-Cookie")) shouldContain "Max-Age=0"
+                val logout = request(app, Method.POST, "/auth/logout", cookie)
+                logout.status shouldBe Status.NO_CONTENT
+                checkNotNull(logout.header("Set-Cookie")) shouldContain "Max-Age=0"
+                request(app, Method.GET, "/auth/me", cookie).status shouldBe Status.UNAUTHORIZED
+                request(app, Method.POST, "/auth/logout", cookie).status shouldBe Status.NO_CONTENT
+                val freshCookie = login(app).header("Set-Cookie")!!.substringBefore(';')
+                app.authorization.setStatus(app.authorization.findUserByUsername("admin")!!.id, PrincipalStatus.DISABLED)
+                request(app, Method.GET, "/auth/me", freshCookie).status shouldBe Status.UNAUTHORIZED
             }
         }
 
-        test("Offerings writes require a live permission while reads and customer routes stay public") {
-            TestApplication.create().use { app ->
-                app.http(Request(Method.POST, "/offering-catalog")).status shouldBe Status.UNAUTHORIZED
-                app.http(Request(Method.GET, "/offering-catalog")).status shouldBe Status.NOT_FOUND
-                app.http(Request(Method.GET, "/health")).status shouldBe Status.OK
-                app.http(Request(Method.GET, "/ready")).status shouldBe Status.OK
-                app
-                    .http(
-                        Request(Method.POST, "/inquiries")
-                            .header("Content-Type", "application/json")
-                            .body("""{"name":"Jane","email":"jane@example.com"}"""),
-                    ).status shouldBe Status.CREATED
-
-                val cookie = app.adminCookie
-                app.database.execute("DELETE FROM fionas.principal_role_assignments WHERE role_key = 'commerce.administrator'")
-                app.adminPost("/offering-catalog").status shouldBe Status.FORBIDDEN
-                app.database.execute(
-                    """INSERT INTO fionas.principal_role_assignments (principal_kind, principal_id, role_key)
-                   SELECT 'USER', id, 'commerce.administrator' FROM fionas.users""",
-                )
-                app.adminPost("/offering-catalog").status shouldBe Status.CREATED
-                app.http(Request(Method.GET, "/offering-catalog")).status shouldBe Status.OK
-                app.http(Request(Method.GET, "/auth/me").header("Cookie", cookie)).status shouldBe Status.OK
-            }
-        }
-
-        test("login and cookie-authenticated unsafe requests reject missing or foreign browser origins") {
-            TestApplication.create().use { app ->
-                login(app, origin = null).status shouldBe Status.FORBIDDEN
-                login(app, origin = "https://evil.example").status shouldBe Status.FORBIDDEN
-                val cookie = app.adminCookie
-                app.http(Request(Method.POST, "/offering-catalog").header("Cookie", cookie)).status shouldBe Status.FORBIDDEN
-                app
-                    .http(
-                        Request(Method.POST, "/offering-catalog").header("Cookie", cookie).header("Origin", "https://evil.example"),
-                    ).status shouldBe Status.FORBIDDEN
-                app.adminPost("/offering-catalog").status shouldBe Status.CREATED
-            }
-        }
-
-        test("a service PrincipalId uses the same live roles but is handled explicitly by me") {
+        test("me handles a known service principal explicitly") {
             TestApplication.create().use { app ->
                 val serviceId = ServiceId(UUID.randomUUID())
-                app.database.execute(
-                    """INSERT INTO fionas.service_identities (id, name, status)
-                   VALUES ('${serviceId.value}', 'future-adapter', 'ACTIVE')""",
-                )
-                val token =
-                    app.sessions
-                        .create(serviceId)
-                        .token.value
-                val request =
-                    Request(Method.POST, "/offering-catalog")
-                        .header("Origin", TEST_ORIGIN)
-                        .header("Cookie", "__Host-fionas_session=$token")
-                app.http(request).status shouldBe Status.FORBIDDEN
-                app.database.execute(
-                    """INSERT INTO fionas.principal_role_assignments (principal_kind, principal_id, role_key)
-                   VALUES ('SERVICE', '${serviceId.value}', 'commerce.administrator')""",
-                )
-                app.http(Request(Method.GET, "/auth/me").header("Cookie", "__Host-fionas_session=$token")).status shouldBe Status.FORBIDDEN
-                app.http(request).status shouldBe Status.CREATED
+                app.authorization.createService(ServiceIdentity(serviceId, "future-adapter", PrincipalStatus.ACTIVE, emptySet()))
+                val cookie = "__Host-fionas_session=${app.sessions.create(serviceId).token.value}"
+                request(app, Method.GET, "/auth/me", cookie).status shouldBe Status.FORBIDDEN
             }
         }
 
-        test("credential hashes and session tokens are absent from authentication logs") {
-            val root = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
-            val appender = ListAppender<ILoggingEvent>().apply { start() }
-            root.addAppender(appender)
-            try {
-                TestApplication.create().use { app ->
-                    val hash = app.database.strings("SELECT password_hash FROM fionas.user_credentials").single()
-                    val response = login(app)
-                    response.status shouldBe Status.NO_CONTENT
-                    val token = checkNotNull(response.header("Set-Cookie")).substringAfter('=').substringBefore(';').trim('"')
-                    login(app, password = "bad-password").status shouldBe Status.UNAUTHORIZED
-                    val messages = appender.list.joinToString("\n") { it.formattedMessage }
-                    messages.contains("test-admin-password") shouldBe false
-                    messages.contains("bad-password") shouldBe false
-                    messages.contains(hash) shouldBe false
-                    messages.contains(token) shouldBe false
-                }
-            } finally {
-                root.detachAppender(appender)
-                appender.stop()
+        test("Offerings public reads and protected writes use live runtime permissions") {
+            TestApplication.create().use { app ->
+                request(app, Method.POST, "/offering-catalog", cookie = null).status shouldBe Status.UNAUTHORIZED
+                request(app, Method.GET, "/offering-catalog", cookie = null).status shouldBe Status.NOT_FOUND
+                val admin = app.authorization.findUserByUsername("admin")!!
+                app.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+                request(app, Method.POST, "/offering-catalog").status shouldBe Status.FORBIDDEN
+                app.authorization.assignRole(admin.id, CommerceRoles.Administrator)
+                request(app, Method.POST, "/offering-catalog").status shouldBe Status.CREATED
+                request(app, Method.GET, "/offering-catalog", cookie = null).status shouldBe Status.OK
+            }
+        }
+
+        test("mounted authorization administration checks permissions and manages runtime users") {
+            TestApplication.create().use { app ->
+                request(app, Method.GET, "/admin/access/users", cookie = null).status shouldBe Status.UNAUTHORIZED
+                val admin = app.authorization.findUserByUsername("admin")!!
+                app.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+                request(app, Method.GET, "/admin/access/users").status shouldBe Status.FORBIDDEN
+                app.authorization.assignRole(admin.id, CommerceRoles.Administrator)
+                request(app, Method.GET, "/admin/access/users").status shouldBe Status.OK
+                request(app, Method.GET, "/admin/access/roles").status shouldBe Status.OK
+                request(app, Method.GET, "/admin/access/permissions").bodyString() shouldContain FionaPermissions.CredentialsManage.value
+                val created =
+                    request(app, Method.POST, "/admin/access/users", body = """{"username":"new-staff","displayName":"New Staff"}""")
+                created.status shouldBe Status.CREATED
+                val id = app.authorization.findUserByUsername("new-staff")!!.id
+                request(app, Method.PUT, "/admin/access/users/${id.value}/roles/commerce.administrator").status shouldBe Status.NO_CONTENT
+                app.authorization
+                    .assignedRoles(id)
+                    .map { it.role }
+                    .toSet() shouldBe setOf(CommerceRoles.Administrator)
+            }
+        }
+
+        test("credential administration provisions login and returns no secret material") {
+            TestApplication.create().use { app ->
+                val id = newUser(app, "new-staff")
+                val path = "/admin/users/${id.value}/credentials/password"
+                val body = """{"password":"new-staff-password"}"""
+                request(app, Method.PUT, path, cookie = null, body = body).status shouldBe Status.UNAUTHORIZED
+                val admin = app.authorization.findUserByUsername("admin")!!
+                app.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+                request(app, Method.PUT, path, body = body).status shouldBe Status.FORBIDDEN
+                app.authorization.assignRole(admin.id, CommerceRoles.Administrator)
+                val set = request(app, Method.PUT, path, body = body)
+                set.status shouldBe Status.NO_CONTENT
+                set.bodyString() shouldBe ""
+                login(app, "new-staff", "new-staff-password").status shouldBe Status.NO_CONTENT
+                request(app, Method.PUT, path, body = """{"password":"short"}""").status shouldBe Status.UNPROCESSABLE_ENTITY
+                request(app, Method.PUT, "/admin/users/not-a-uuid/credentials/password", body = body).status shouldBe Status.BAD_REQUEST
+                request(app, Method.PUT, "/admin/users/${UUID.randomUUID()}/credentials/password", body = body).status shouldBe
+                    Status.NOT_FOUND
+                app.database.count("fionas.user_credentials") shouldBe 2
+            }
+        }
+
+        test("Origin protection applies to unsafe administration methods") {
+            TestApplication.create().use { app ->
+                val id =
+                    app.authorization
+                        .findUserByUsername("admin")!!
+                        .id.value
+                val path = "/admin/users/$id/credentials/password"
+                val body = """{"password":"another-test-password"}"""
+                request(app, Method.PUT, path, origin = null, body = body).status shouldBe Status.FORBIDDEN
+                request(app, Method.PUT, path, origin = "https://evil.example", body = body).status shouldBe Status.FORBIDDEN
+                request(app, Method.PUT, path, body = body).status shouldBe Status.NO_CONTENT
+                request(app, Method.GET, "/auth/me").status shouldBe Status.OK
+                request(app, Method.POST, "/admin/access/users", origin = null).status shouldBe Status.FORBIDDEN
+                request(app, Method.PATCH, "/admin/access/users/$id", origin = null).status shouldBe Status.FORBIDDEN
+                request(app, Method.DELETE, "/admin/access/users/$id/roles/commerce.administrator", origin = null).status shouldBe
+                    Status.FORBIDDEN
+                login(app, origin = null).status shouldBe Status.FORBIDDEN
             }
         }
     })

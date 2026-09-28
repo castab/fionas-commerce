@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.9/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.9/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.11/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.11/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -29,8 +29,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.9`, which brings
-`commerce-domain:0.0.9` with it. It contributes its migrations and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.11`, which brings
+`commerce-domain:0.0.11` with it. It contributes its migrations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -108,6 +108,11 @@ capability (see [Offerings catalog](#offerings-catalog)):
 | `POST /auth/login` | Verifies a staff password and sets Fiona's secure session cookie. Requires a trusted browser origin. |
 | `POST /auth/logout` | Revokes the runtime session and clears the cookie, including on repeated logout. |
 | `GET /auth/me` | Returns the active human staff profile and current role keys. |
+| `PUT /admin/users/{userId}/credentials/password` | Sets a runtime user's Fiona password; requires `fionas.credentials.manage` and trusted Origin. |
+
+The runtime administration capability is mounted at `/admin/access`: it exposes users,
+services, roles, permission catalog, role grants, and principal role assignments in the
+same OpenAPI document. Its routes use Fiona's session cookie and trusted Origin policy.
 
 **Runtime infrastructure**, served by commerce-runtime and not in the OpenAPI document:
 
@@ -236,11 +241,10 @@ catalog reads remain public.
 
 ## Staff authentication
 
-Fiona authenticates staff credentials. `commerce-runtime` owns the authenticated session,
-its opaque token, digest, expiry, and revocation. `commerce-domain` evaluates roles and
-permissions; Fiona supplies the current principal and role definitions. A session holds
-only identity, so removing a role or disabling a user changes authorization on the next
-request.
+Fiona verifies staff passwords. `commerce-runtime` owns human and service identities,
+roles, role permissions, assignments, live permission resolution, and sessions.
+`commerce-domain` defines the principal and permission vocabulary. A session holds only
+identity, so changing a role or disabling a user takes effect immediately.
 
 ```text
 POST /auth/login → PasswordAuthenticator → UserId → context.sessions.create(...)
@@ -255,18 +259,25 @@ or a disabled user receive the same `401` response. `GET /auth/me` returns the a
 human staff profile and role keys without secrets. `POST /auth/logout` revokes the runtime
 session and clears the cookie; repeating it is safe. No raw session token is sent in JSON.
 
-Usernames are trimmed and lowercased with `Locale.ROOT`; the database enforces unique
-normalized names. `fionas.users` holds the profile, `fionas.user_credentials` holds only
-the encoded Argon2id password hash and change time, and
-`fionas.principal_role_assignments` holds role keys for `PrincipalId` kind and id. Fiona's
-administrator role explicitly grants `CommercePermissions.OfferingsManage`; it does not
-automatically grant future permissions.
+The runtime directory normalizes usernames and stores the profile and status in
+`commerce.users`. Fiona's `fionas.user_credentials` holds only the Argon2id hash and
+change time, with a foreign key to that runtime user. Fiona contributes
+`fionas.credentials.manage` to the runtime permission catalog. The bootstrap
+Administrator role explicitly grants OfferingsManage, PrincipalRead, PrincipalManage,
+RoleRead, RoleManage, RoleAssign, and CredentialsManage. Future permissions are not
+granted automatically.
 
 To provision the first administrator, set `FIONAS_BOOTSTRAP_ADMIN_USERNAME`,
 `FIONAS_BOOTSTRAP_ADMIN_PASSWORD`, and `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` for one startup.
-The app creates the first active administrator in a shared transaction only when no staff
-user exists. Remove the bootstrap password from the environment after provisioning. Later
-startups need no bootstrap variables and never overwrite a staff user.
+After both migration streams and permission validation, the app creates the runtime role,
+runtime user, Fiona credential, and role assignment in one transaction only when no user
+exists. Remove the bootstrap password from the environment after provisioning. Later
+startups never overwrite a credential. No default password exists.
+
+An administrator can create a user with `POST /admin/access/users`, then set its password
+with `PUT /admin/users/{userId}/credentials/password`. The password must have at least 12
+characters. The response contains no credential material. Setting a password does not
+revoke existing sessions; there is no self-service password change in this API.
 
 Set `FIONAS_TRUSTED_ORIGINS` to the exact frontend origin (or a comma-separated list),
 for example `https://shop.example.com`. Login and every unsafe request carrying Fiona's
@@ -427,9 +438,10 @@ Fiona's own schemas are derived from the kotlinx.serialization descriptors of th
 DTOs, the wire format itself, so `required` matches what the server reads and writes: strings,
 `int32` integers, booleans, arrays, and nested objects, each its own component. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers; and, as commerce-runtime 0.0.9 renders
-them, the catalog's operations carry no tag (Swagger UI lists them under an unnamed group)
-and their schemas contain `"format": null`. Every Fiona endpoint must be part of the
+contract metadata cannot declare response headers; and the catalog's schemas contain
+`"format": null`. Commerce-runtime 0.0.11 accepts Fiona's OpenAPI tags: Swagger UI groups
+catalog operations under **Offerings catalog** and runtime administration plus Fiona's
+password route under **Staff administration**. Every Fiona endpoint must be part of the
 contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
 
 ## Requirements
@@ -505,9 +517,9 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
   `commerce-runtime` jar; Fiona never lists or copies them.
 - The two streams have independent version spaces: Fiona's migrations are `V1`, `V2`, …
   regardless of the runtime's numbering.
-- Fiona's tables are in the `fionas` schema: `customers`, `inquiries`, `users`,
-  `user_credentials`, `principal_role_assignments`, and `service_identities`
-  (`inquiries.customer_id → customers.id`, `customers.email` unique). Fiona never creates or
+- Fiona's tables are in the `fionas` schema: `customers`, `inquiries`, and
+  `user_credentials` (`inquiries.customer_id → customers.id`, `customers.email` unique,
+  `user_credentials.user_id → commerce.users.principal_id`). Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog. The catalog needs no Fiona
   migration.
@@ -519,9 +531,10 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
 - If any migration fails, or validation finds the database behind, the process logs
   `event=startup_failed` and exits without serving.
 
-> **Upgrading from commerce 0.0.8.** commerce-runtime 0.0.9 adds its principal session table;
-> Fiona's `V2` adds staff identity, credential, and role assignment tables. Both migration
-> streams run on startup before routes are composed.
+> **Development reset for commerce 0.0.10.** Fiona's unreleased `V2` was rewritten to
+> contain only password credentials. Existing disposable development databases and Docker
+> volumes must be reset before starting this version. Commerce 0.0.10 adds the runtime
+> authorization directory. Both migration streams run before bootstrap or route composition.
 >
 > **Upgrading from commerce 0.0.6.** commerce-runtime 0.0.8 only adds a runtime migration
 > (the Offerings tables), so a database created with 0.0.6 migrates forward on startup.
@@ -591,10 +604,11 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, atomic failure, not found |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler, including errors: the contract leaves every error body to commerce-runtime, and undeclared methods stay `405` |
+| `AuthRoutesSpec` | Fresh bootstrap, generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
 | `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded, minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |
 | `OfferingsCatalogSpec` | Fiona's Offerings catalog through the complete handler: absent until initialized; revisions 1–4 from initialization, a category, and two offerings; ordered reads; exact historical revisions; every price form round-trips; no update or delete route |
-| `OpenApiDocumentSpec` | The OpenAPI document: paths, operationIds, tags, statuses, request and response schemas (the estimate preview's integers, booleans, and nested lists included), the shared error schema, no host (rendered without a database); the Offerings routes at `/offering-catalog` with the `fionasOfferings` prefix, and the runtime's strict `OfferingPrice` `oneOf` |
+| `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes, runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |

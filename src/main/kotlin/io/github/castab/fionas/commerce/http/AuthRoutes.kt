@@ -11,11 +11,14 @@ import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
+import org.http4k.contract.PreFlightExtraction
 import org.http4k.contract.Tag
 import org.http4k.contract.bindContract
+import org.http4k.contract.div
 import org.http4k.contract.meta
 import org.http4k.core.Filter
 import org.http4k.core.Method
@@ -25,6 +28,10 @@ import org.http4k.core.Status
 import org.http4k.core.cookie.cookie
 import org.http4k.core.then
 import org.http4k.core.with
+import org.http4k.lens.Invalid
+import org.http4k.lens.LensFailure
+import org.http4k.lens.Path
+import java.util.UUID
 
 @Serializable
 data class LoginRequest(
@@ -42,9 +49,18 @@ data class CurrentUserResponse(
     val roles: List<String>,
 )
 
+@Serializable
+data class SetStaffPasswordRequest(
+    val password: String,
+)
+
 private val loginBody = jsonBody(LoginRequest.serializer())
 private val currentUserBody = jsonBody(CurrentUserResponse.serializer())
+private val setPasswordBody = jsonBody(SetStaffPasswordRequest.serializer())
 private val authTag = Tag("Authentication", "Fiona staff browser sessions.")
+
+/** Shared by Fiona's password route and the runtime's principal and role administration routes. */
+val staffAdministrationTag = Tag("Staff administration", "Staff accounts, credentials, roles, and permissions.")
 
 fun loginRoute(
     login: (String, SecretPassword) -> IssuedSession?,
@@ -141,3 +157,37 @@ private fun User.toResponse() =
         lastName,
         roles.map { it.role.value }.sorted(),
     )
+
+fun setStaffPasswordRoute(
+    setPassword: (UserId, SecretPassword) -> Unit,
+    access: AccessControl,
+): ContractRoute {
+    val userId = Path.of("userId", "The runtime user's id.", mapOf("schema" to mapOf("format" to "uuid")))
+    return "/admin/users" / userId / "credentials" / "password" meta {
+        operationId = "setStaffPassword"
+        summary = "Set a staff user's password"
+        description =
+            "Sets or resets a runtime user's Fiona password credential. Existing sessions remain active. Requires a trusted Origin."
+        tags += staffAdministrationTag
+        preFlightExtraction = PreFlightExtraction.IgnoreBody
+        receiving(setPasswordBody to SetStaffPasswordRequest("new-password"))
+        returning(Status.NO_CONTENT to "The password credential was stored.")
+        returningError(ErrorCategory.MALFORMED_REQUEST, "the request or user ID is malformed.", "Malformed request")
+        returningError(ErrorCategory.UNAUTHENTICATED, "authentication is required.", "Authentication is required")
+        returningError(ErrorCategory.FORBIDDEN, "permission or browser origin is missing.", "Forbidden")
+        returningError(ErrorCategory.NOT_FOUND, "the target user does not exist.", "User does not exist")
+        returningError(ErrorCategory.VALIDATION_FAILED, "the password is too short.", "Password must have at least 12 characters")
+        returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure.", INTERNAL_FAILURE)
+    } bindContract Method.PUT to { id: String, _: String, _: String ->
+        access.requirePermission(FionaPermissions.CredentialsManage).then { request: Request ->
+            val target =
+                try {
+                    UserId(UUID.fromString(id))
+                } catch (e: IllegalArgumentException) {
+                    throw LensFailure(Invalid(userId.meta), cause = e)
+                }
+            setPassword(target, SecretPassword.of(setPasswordBody(request).password))
+            Response(Status.NO_CONTENT)
+        }
+    }
+}

@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.ApplicationContributions
+import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
@@ -12,6 +13,7 @@ import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.apiDocs
 import io.github.castab.fionas.commerce.http.fionaApi
+import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
@@ -21,12 +23,12 @@ import io.github.castab.fionas.commerce.offering.PreviewEstimate
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.BootstrapFirstAdmin
-import io.github.castab.fionas.commerce.staff.GetCurrentUser
-import io.github.castab.fionas.commerce.staff.JdbiStaffRepository
+import io.github.castab.fionas.commerce.staff.FionaPermissions
+import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.staff.Login
 import io.github.castab.fionas.commerce.staff.PasswordHasher
+import io.github.castab.fionas.commerce.staff.SetStaffPassword
 import io.github.castab.fionas.commerce.staff.StaffPasswordAuthenticator
-import io.github.castab.fionas.commerce.staff.fionaPermissionResolver
 import org.http4k.core.then
 import java.time.Clock
 import java.util.Properties
@@ -63,18 +65,19 @@ fun fionaApplication(
 ): ApplicationContributions =
     ApplicationContributions(
         migrationLocations = listOf(FIONA_MIGRATION_LOCATION),
+        permissionDefinitions = FionaPermissions.definitions,
         routes = { context ->
             val customers = JdbiCustomerRepository()
             val inquiries = JdbiInquiryRepository()
-            val staff = JdbiStaffRepository()
+            val credentials = JdbiCredentialRepository()
             val hasher = PasswordHasher()
-            BootstrapFirstAdmin(context.transactor, staff, hasher, clock).invoke(bootstrap)
+            BootstrapFirstAdmin(context.transactor, context.authorization, credentials, hasher, clock).invoke(bootstrap)
             val cookie = SessionCookie("__Host-fionas_session")
             val origin = BrowserOrigin(trustedOrigins, cookie)
             val access =
                 AccessControl(
                     origin.filter.then(sessionAuthentication(context.sessions, cookie)),
-                    fionaPermissionResolver(context.transactor, staff),
+                    context.authorization.permissionResolver,
                 )
             val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter)
             val operations =
@@ -86,11 +89,17 @@ fun fionaApplication(
                             getRevision = GetOfferingsCatalogRevision(context.transactor, context.offeringsSnapshotRepository)::invoke,
                             engine = FionasOfferingsEngine(FIONAS_PRICING_POLICY),
                         )::invoke,
-                    login = Login(context.transactor, StaffPasswordAuthenticator(staff, hasher), context.sessions)::invoke,
-                    currentUser = GetCurrentUser(context.transactor, staff)::invoke,
+                    login = Login(
+                        StaffPasswordAuthenticator(context.authorization, context.transactor, credentials, hasher),
+                        context.sessions,
+                    )::invoke,
+                    currentUser = context.authorization::getUser,
+                    setStaffPassword = SetStaffPassword(context.authorization, context.transactor, credentials, hasher, clock)::invoke,
                 )
             val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(access))
-            listOf(fionaApi(operations, offerings, fionaVersion(), auth), apiDocs())
+            val authorizationAdmin =
+                authorizationAdministrationHttpCapability(context, access, "/admin/access", setOf(staffAdministrationTag))
+            listOf(fionaApi(operations, offerings, authorizationAdmin, fionaVersion(), auth), apiDocs())
         },
     )
 
