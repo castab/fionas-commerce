@@ -30,7 +30,8 @@ fionas-commerce          Fiona's application: entities, relationships, policy, H
       │
       ▼
 commerce-runtime         reusable runtime: PostgreSQL, JDBI, Flyway, Transactor, http4k, errors,
-      │                  Offerings snapshots and the Offerings catalog capability
+      │                  Offerings snapshots and the Offerings catalog capability, the
+      │                  financial ledger (documents, payments, allocations, reconciliation)
       │
       ▼
 commerce-domain          reusable vocabulary and invariants
@@ -56,13 +57,17 @@ Fiona owns, and persists in its own tables:
   bootstrap policy; commerce-runtime owns staff users and authorization;
 - the identity of Fiona's primary Offerings catalog and where it is served (its contents
   are persisted by commerce-runtime; see [Offerings catalog](#offerings-catalog));
-- Fiona's pricing: `FionasOfferingsContext`, `FionasPricingPolicy`,
-  `FionasOfferingsEngine`, and estimate previews (see [Fiona's pricing](#fionas-pricing));
+- Fiona's pricing: `FionasPricingInputs`, `FionasOfferingsContext`, `FionasPricingPolicy`,
+  `FionasOfferingsEngine`, `FionasPricing`, and estimate previews (see
+  [Fiona's pricing](#fionas-pricing));
+- which inquiry owns each commerce-runtime `FinancialDocument` lineage, the pricing inputs
+  of every financial snapshot, change-order intent, and payment acceptance policy (see
+  [Financial documents and payments](#financial-documents-and-payments));
 - Fiona bookings (future);
 - contacts (future);
 - event and service details, and service locations (future);
-- relationships between these records and generic commerce facts (future), for example
-  which `FinancialDocument` lineage an inquiry or booking produced.
+- further relationships between these records and generic commerce facts (future), for
+  example which lineage a booking produced.
 
 Fiona types live under `io.github.castab.fionas.commerce`. Never place a Fiona type under
 `io.github.castab.commerce`, which belongs to the reusable artifacts.
@@ -114,10 +119,11 @@ Do not duplicate or re-model anything `commerce-domain` defines:
 - the booking lifecycle phase interfaces.
 
 Use the upstream types. A Fiona booking implements the upstream lifecycle phase
-interfaces directly; it does not reinvent phases. Fiona tables may later *reference*
-commerce facts (for example by a financial document's `id`), but generic types never
-acquire Fiona fields: no `bookingId`, `customerId`, or Fiona data on `FinancialDocument`
-or any other upstream type.
+interfaces directly; it does not reinvent phases. Fiona tables *reference* commerce facts
+(an inquiry's financial-document lineage, a snapshot's pricing source, both by
+`(document_id, version)`), but generic types never acquire Fiona fields: no `inquiryId`,
+`bookingId`, `customerId`, pricing inputs, or other Fiona data on `FinancialDocument`,
+`PaymentRecord`, or any other upstream type.
 
 `Inquiry` and `Customer` are Fiona concepts. Do not generalize them, and do not propose
 them upstream as generic types; upstream deliberately removed customers in `0.0.5`.
@@ -147,6 +153,12 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
 - human users, service identities, principal status, roles, role permissions, role
   assignments, live permission resolution, and the permission catalog
   (`context.authorization`); the authorization administration HTTP capability.
+- the financial ledger: `FinancialLedger` (`context.financialLedger`), the
+  `FinancialDocumentRepository` and `PaymentRepository`, their tables
+  (`commerce.financial_document_snapshots`, `commerce.financial_document_lines`,
+  `commerce.payment_records`, `commerce.payment_allocations`), financial-document lifecycle
+  orchestration (`create`, `changeOrder`, `issueQuote`, `issueInvoice`), payment recording
+  and allocation, and derived reconciliation.
 
 Never create another connection pool, another `Jdbi` instance, another transaction
 manager, Spring transactions, a nested transaction abstraction, a second configuration
@@ -161,8 +173,10 @@ factory builds repositories and operations from the `CommerceRuntimeContext` wit
 ordinary Kotlin, hands the operations to the API as `FionaOperations`, binds the runtime's
 Offerings capability to Fiona's catalog (`offeringsHttpCapability(context,
 fionaOfferingsBinding(accessControl))`), mounts the runtime's authorization administration
-capability at `/admin/access` with that same `AccessControl`, and contributes exactly two
-route handlers: `fionaApi(operations, offerings, authorizationAdmin, version, auth)`
+capability at `/admin/access` with that same `AccessControl`, builds Fiona's financial
+operations on `context.financialLedger` with Fiona's own association and pricing-source
+repositories and one `FionasPricing` (the engine plus the runtime's transaction-bound
+catalog read), and contributes exactly two route handlers: `fionaApi(operations, offerings, authorizationAdmin, version, auth)`
 (the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
 the migration phase before composing anything), starts it, installs the shutdown hook,
 and blocks. Keep `main()` thin: no schema, Flyway, or migration decisions belong in it. There is no DI framework, no annotation scanning,
@@ -180,12 +194,21 @@ no service locator. Keep wiring visible.
   the `Transaction` down instead.
 
 The shared runtime transaction is the seam that lets one Fiona operation atomically write
-Fiona-owned rows and runtime-owned commerce facts (for example an inquiry, its estimate,
-and the relationship between them). commerce-runtime's `OfferingsSnapshotRepository`
-already participates in caller-owned transactions, and upstream proves a commerce write and
-an application write commit and roll back together; no Fiona operation does so yet.
-Preserve the seam. `ArchitectureSpec` and
-`RuntimeTransactionSpec` guard this rule; never loosen them to make a change pass.
+Fiona-owned rows and runtime-owned commerce facts. Fiona's financial operations do: a
+persisted estimate writes the runtime's snapshot, Fiona's inquiry association, and Fiona's
+pricing source in one transaction; a transition or change order writes the runtime's
+successor and its pricing source; a payment writes the runtime's payment and allocation.
+
+- **Ledger calls take the operation's `Transaction`.** Inside `inTransaction`, call only the
+  `FinancialLedger` overloads that take a `Transaction`
+  (`context.financialLedger.issueQuote(transaction, id)`), never the convenience overloads
+  (`issueQuote(id)`), which open a second transaction that commits on its own.
+- **Reads that decide a write happen in that transaction too**: the exact catalog revision
+  (through `FionasPricing`, never `GetOfferingsCatalogRevision`, which opens its own), the
+  latest snapshot, and the association.
+
+Preserve the seam. `ArchitectureSpec`, `RuntimeTransactionSpec`, and
+`FinancialDocumentAtomicitySpec` guard this rule; never loosen them to make a change pass.
 
 ## HTTP rule
 
@@ -337,9 +360,11 @@ after runtime-owned migrations.
   The runtime publishes the Offerings snapshot tables
   (`commerce.offerings_snapshots`, `commerce.offering_categories`, `commerce.offerings`),
   but no Fiona migration references them, and Fiona reaches the catalog only through the
-  runtime's Offerings operations. Fiona's `V2` references the published
-  `commerce.users(principal_id)` for the credential foreign key; `ArchitectureSpec`
-  confines runtime schema references to this purpose.
+  runtime's Offerings operations and snapshot read. Fiona's `V2` references the published
+  `commerce.users(principal_id)` for the credential foreign key, and `V3` references the
+  published `commerce.financial_document_snapshots(document_id, version)`: the association
+  names each lineage's first snapshot, and each pricing source its exact snapshot.
+  `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
   deployment: the original `V20260926210000` migration was rewritten as `V1`, moving the
@@ -378,8 +403,10 @@ catalog and where it is served; commerce-runtime implements everything else.
    revision derivation, and persistence. Never add Fiona Offering DTOs, repositories,
    operations, or commands (update, delete, replace, retire) of Fiona's own.
 4. **Fiona never writes SQL against `commerce.offering*`**, reading or writing, and never
-   calls `OfferingsSnapshotRepository`: the composition root hands it only to the
-   runtime's own `GetOfferingsCatalogRevision`.
+   calls `OfferingsSnapshotRepository` itself: the composition root hands it to the
+   runtime's own `GetOfferingsCatalogRevision` (previews) and hands its transaction-bound
+   `retrieveVersion` to `FionasPricing` (persisted documents, which must read the exact
+   revision in the transaction that writes them).
 5. **Fiona creates no Offerings tables or migrations.** The runtime's own migration stream
    creates its tables; Fiona knows neither their migration file names nor versions.
 6. **The runtime's contract routes join Fiona's one contract** (`fionaApi`), so the
@@ -435,9 +462,14 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   user creation, Fiona credential insertion, and role assignment share one transaction
   after both migration streams and permission validation. There is no default password;
   later startup never overwrites an existing credential.
-- The Administrator role grants exactly OfferingsManage, PrincipalRead, PrincipalManage,
-  RoleRead, RoleManage, RoleAssign, and Fiona's `fionas.credentials.manage`. It has no
-  wildcard or automatic future grants.
+- The Administrator role grants exactly OfferingsManage, FinancialDocumentRead,
+  FinancialDocumentCreate, PaymentRecord, PrincipalRead, PrincipalManage, RoleRead,
+  RoleManage, RoleAssign, and Fiona's `fionas.credentials.manage`. It has no wildcard or
+  automatic future grants. Grants are fixed when bootstrap creates the role; startup never
+  mutates an existing Administrator role, whose grants are managed through `/admin/access`.
+- Generic commerce actions use commerce-domain's `CommercePermissions`
+  (`FinancialDocumentRead`, `FinancialDocumentCreate`, `PaymentRecord`); never define a Fiona
+  duplicate. Only Fiona-specific actions get a Fiona permission.
 - Fiona contributes `fionas.credentials.manage` through
   `ApplicationContributions.permissionDefinitions`. The runtime permission catalog and
   live resolver remain the only authorization source.
@@ -447,7 +479,8 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   control guards runtime administration at `/admin/access` and Fiona's
   `PUT /admin/users/{userId}/credentials/password`. The credential endpoint verifies the
   runtime user, stores a new hash, returns no secret material, and does not revoke existing
-  sessions. Public
+  sessions. Every financial-document and payment route requires its commerce permission
+  through the same control. Public
   inquiries, estimate previews, Offerings reads, health, and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
   cookie-authenticated methods require a matching `Origin` and fail closed if none is
@@ -466,8 +499,9 @@ commerce-domain     Offering vocabulary, OfferingsEngine and its structural vali
                     LineItem, Money
 commerce-runtime    catalog persistence, catalog operations (GetOfferingsCatalogRevision),
                     catalog HTTP and OpenAPI
-fionas-commerce     FionasOfferingsContext, FionasPricingPolicy, FionasOfferingsEngine,
-                    PreviewEstimate and POST /estimate-preview
+fionas-commerce     FionasPricingInputs, FionasOfferingsContext, FionasPricingPolicy,
+                    FionasOfferingsEngine, FionasPricing, PreviewEstimate and
+                    POST /estimate-preview; persisted estimates and change orders
 ```
 
 **The catalog says what is selectable and carries simple per-offering prices. Fiona's engine
@@ -505,15 +539,82 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
    otherwise. Totals are always derived from the lines.
 7. **Lines have a stable order**: base service, ice cream service, priced selections in
    submitted order, extra toppings.
-8. **The catalog revision is exact.** `PreviewEstimate` evaluates the revision the request
-   names, loaded with `OfferingsSnapshotReference(FIONA_OFFERINGS_CATALOG_ID, revision)`,
-   never the latest. A preview records nothing and performs no Fiona write, so it reads the
-   snapshot through the runtime's `GetOfferingsCatalogRevision`, which opens its own
-   transaction. A future persisted estimate must run the same pure engine inside the one
-   transaction that writes it.
-9. **A preview is not an estimate document.** No `FinancialDocument` is created or
-   persisted, and Fiona has no financial-document tables; that capability belongs in
-   commerce-runtime first (commerce-runtime gap rule).
+8. **The catalog revision is exact.** Pricing evaluates the revision the request names,
+   loaded with `OfferingsSnapshotReference(FIONA_OFFERINGS_CATALOG_ID, revision)`, never the
+   latest. A preview records nothing and performs no Fiona write, so it reads the snapshot
+   through the runtime's `GetOfferingsCatalogRevision`, which opens its own transaction. A
+   persisted estimate or change order runs the same engine through `FionasPricing` inside
+   the one transaction that writes it.
+9. **One input model, one pricing path.** `FionasPricingInputs` (catalog revision,
+   `OfferingSelections`, `FionasOfferingsContext`) is what previews, persisted estimates,
+   change orders, and pricing-source history share; `FionasPricing` turns it into lines and
+   reports rejections identically everywhere. It is strongly typed Fiona data: never a
+   metadata map or an opaque context.
+10. **A preview is not an estimate document.** `POST /estimate-preview` stays public and
+    stateless and creates no `FinancialDocument`; persisted documents are a separate,
+    staff-only API.
+
+## Financial documents and payments
+
+Financial documents (`Estimate`, `Quote`, `Invoice`) and payments are commerce-runtime's
+financial ledger. Fiona builds its first commercial workflow on it:
+inquiry → persisted estimate → change orders → quote → deposit → invoice → change orders →
+further payments. The split:
+
+```text
+commerce-domain     FinancialDocument / ChangeOrder / LineItem / PaymentRecord /
+                    PaymentAllocation models and invariants
+commerce-runtime    financial snapshot persistence, lifecycle orchestration, payment and
+                    allocation persistence, reconciliation, transaction-aware
+                    FinancialLedger operations
+fionas-commerce     inquiry → document relationship, Fiona pricing inputs and history,
+                    server-authoritative estimate creation, change-order intent, payment
+                    acceptance policy, HTTP, authentication and authorization
+```
+
+1. **Never persist a ledger fact in Fiona.** No Fiona table holds a document, a line, an
+   amount, a total, a stage, a payment, an allocation, a balance, or a payment status;
+   `DatabaseSchemaSpec` and `ArchitectureSpec` reject them. Fiona reaches documents and
+   payments only through `context.financialLedger`, never its repositories or tables.
+2. **Fiona owns the relationship.** `fionas.inquiry_financial_documents`: one inquiry owns
+   any number of lineages (alternative or restarted proposals), a lineage belongs to exactly
+   one inquiry, revisions are versions inside a lineage. A lineage no inquiry owns does not
+   exist in Fiona's API (`404`), even when the ledger holds it; every document route resolves
+   the association first.
+3. **Every snapshot records why it was priced so.** `fionas.financial_document_pricing` (and
+   its ordered categories and selections) stores the `FionasPricingInputs` of each exact
+   `(document_id, version)`, written in the same transaction as the snapshot. A change order
+   records its revised inputs; a transition copies its source's inputs unchanged.
+4. **The server prices; the browser never supplies financial values.** Persisted estimates
+   and change orders accept commercial inputs only, never lines, prices, tax, or totals, and
+   price them with `FionasPricing` from exactly the catalog revision the request names.
+5. **Transitions never reprice**; they go through `issueQuote` and `issueInvoice`, and the
+   runtime reports a transition the stage does not have (`IllegalTransition`). There is no
+   estimate-to-invoice shortcut.
+6. **A change order replaces the line set.** It removes every current line and adds every
+   repriced line in the engine's order (`repricing`); it never matches lines by
+   description or position, and keeps the stage. Inputs that reproduce the current charges
+   (ignoring line ids) are rejected as no financial change. A change to non-financial
+   details is not a change order. A generic line-source identity is future work, decided
+   from real need.
+7. **Every mutation names the version it acts on** (`expectedVersion`, a payment's
+   `documentVersion`); a lineage that has moved on is `Conflict`. Mutations lock the
+   lineage's association row, and the runtime's `(document_id, previous_version)` uniqueness
+   is the final guard.
+8. **Payment policy for this slice:** a payment is recorded against the latest version, a
+   quote or an invoice (never an estimate: `InvariantViolated`); the whole payment is
+   allocated to that exact snapshot through `recordPaymentAgainstDocument`; its currency is
+   the document's; the amount is an exact decimal with at most the currency's minor digits;
+   over-application is allowed. Allocations stay attached to their snapshot; the latest
+   snapshot's reconciliation counts them all. The runtime's external-reference uniqueness is
+   the only idempotency. Unapplied and split payments exist in the runtime but have no Fiona
+   workflow yet.
+9. **Settlement is derived.** Only the latest view carries reconciliation (`grossAllocated`,
+   `netApplied`, `balance`); history shows historical facts and pricing sources, never a
+   reconciliation of an older snapshot. A payment status is presentation, derived by clients.
+10. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
+11. **No `Booking` yet.** Inquiry → financial-document lineage → payments is the model until
+    a slice decides when an inquiry becomes a booking.
 
 ## Kotlin conventions
 
@@ -524,7 +625,9 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
 - Prefer imports over fully qualified identifiers in declarations and code. Do not write
   `io.github.castab.commerce.runtime.persistence.Transaction` inline to avoid an import.
 - Identifiers are distinct UUID-backed value classes (`CustomerId`, `InquiryId`), never
-  raw `UUID`s passed around, and never one generic `EntityId`.
+  raw `UUID`s passed around, and never one generic `EntityId`. A financial-document
+  lineage keeps commerce-domain's own identity (`FinancialDocument.id`, a `UUID`) and
+  versions are its `Version`; Fiona adds no wrapper around upstream identities.
 - Value objects validate in `init` with `require`; their constructors accept only the
   canonical form, and a factory (`Email.of`, `CustomerName.of`,
   `InquiryMessage.ofOptional`) normalizes submitted text.
@@ -543,9 +646,10 @@ Organize by cohesive feature, not by layer. Current packages:
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
-| `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
+| `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
+| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordDocumentPayment`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, and `ListInquiryFinancialDocuments` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
-| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`, `AuthRoutes.kt`) |
+| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
 Do not create empty packages or layers for future work. Avoid `service`, `manager`,
@@ -559,13 +663,14 @@ Do not create generic frameworks, `Repository<T, ID>`, `CrudRepository`,
 future requirements. Repositories are narrow and intention-revealing. Extract only after
 real repetition or a real requirement appears.
 
-Not in scope until a dedicated slice decides otherwise: quotes, estimates, invoices or
-any financial-document persistence, payments, refunds, allocations, reconciliation,
-Stripe or any payment provider, service credentials, OAuth/OIDC, self-service password resets, event
-publishing, outbox, NATS, projections, CQRS, booking conversion, lifecycle transitions,
-persisted estimates or selections, tax, travel fees, minimum orders, inventory,
-availability, catalog seeding or import, deposits, and customer merge or deduplication. Do
-not add placeholders for them.
+Not in scope until a dedicated slice decides otherwise: refunds, allocation reversals,
+unapplied or split-payment workflows, Stripe or any payment provider or SDK, payment
+webhooks, service credentials, OAuth/OIDC, self-service password resets, event publishing,
+outbox, NATS, projections, CQRS, bookings and booking conversion, booking lifecycle
+transitions, a generic line-source identity, stored balances or payment statuses, tax,
+travel fees, minimum orders, inventory, availability, catalog seeding or import, deposit
+requirements or schedules, and customer merge or deduplication. Do not add placeholders for
+them.
 
 Also never introduce Spring or Spring Boot, Hibernate/JPA, a DI framework, event
 sourcing, H2, or Testcontainers.
@@ -589,7 +694,7 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (as of commerce 0.0.11)
+### Known upstream gaps (as of commerce 0.0.12)
 
 - **Application history schema is fixed.** Fiona's tables live in `fionas`, but the
   runtime keeps every application's migration history in `public.flyway_schema_history`
@@ -617,9 +722,10 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   `CommerceRuntimeContext`, whose constructor is `internal`, and only `commerceRuntime(...)`,
   which needs a database, creates one. Rendering the document offline needs only route
   metadata, so the generator (`src/openapi`, never the deployable jar) builds a
-  rendering-only context reflectively, with a transactor that opens no connection and a
-  repository that refuses every call. The authorization admin capability
-  also needs this context; the rendering-only authorization directory is assembled
+  rendering-only context reflectively, with a transactor that opens no connection and
+  repositories that refuse every call. The authorization admin capability
+  also needs this context; the rendering-only authorization directory and, since 0.0.12,
+  the context's `FinancialLedger` (whose constructor is `internal` too) are assembled
   reflectively. This is provisional: commerce-runtime may eventually need a first-class
   contract/OpenAPI composition seam that does not require runtime persistence infrastructure.
 - **`offeringsOpenApiRenderer` needs Jackson.** It builds schemas through http4k's
@@ -628,27 +734,32 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   schemas with `http4k-format-jackson` and carries them into its kotlinx-rendered document
   (`OfferingsSchemas`). Upstream fix: a schema hook that works on `CommerceJson`, or
   descriptor-derived Offerings schemas.
-- **Offerings route metadata is minimal.** Commerce 0.0.11 lets Fiona supply the
+- **Offerings route metadata is minimal.** Commerce lets Fiona supply the
   `Offerings catalog` tag through its binding, but routes still have no descriptions;
   their error examples all say `Request failed`, and no route documents `500`.
 - **Offerings schemas contain `"format": null`.** http4k's reflective generator emits it
   for every property, as commerce-runtime's own sample host renders it too. JSON Schema
   requires `format` to be a string, so strict validators may reject the document.
-- **Fiona has not written across the boundary.** Upstream proves an Offerings snapshot and
-  an application row commit and roll back together, but no Fiona operation writes a Fiona
-  row and a commerce row in one transaction yet. When the first one does, add that test
-  here.
+- **The ledger has no expected-version write.** `FinancialLedger.changeOrder`,
+  `issueQuote`, `issueInvoice`, and `recordPaymentAgainstDocument` act on whatever is
+  latest; only a competing successor is rejected. Fiona checks the caller's version itself
+  and serializes its own mutations by locking its association row. Minimal upstream API:
+  overloads taking the expected `FinancialDocumentReference` that fail with `Conflict` when
+  it is not the latest.
+- **Stage names are not published.** The runtime persists `ESTIMATE`/`QUOTE`/`INVOICE` but
+  keeps the mapping private, so Fiona's HTTP layer maps the sealed stages to the same names
+  itself. A public stage name (or enum) in commerce-domain would remove it.
 - **Violations carry only a code.** `OfferingsViolation` has no message or details, so
-  `PreviewEstimate` describes commerce-domain's structural violations itself, with a
+  `FionasPricing` describes commerce-domain's structural violations itself, with a
   fallback for any it does not know. Upstream fix: a caller-safe description on each
   violation.
 - **Rejections cannot be structured over HTTP.** `CommerceFailure.ValidationFailed` and
   `ErrorResponse` carry only a message, so an estimate rejection names its violation codes
   in the message rather than as a list. Upstream fix: optional structured details in the
   error contract.
-- **No line-sum helper.** Totals of a list of `LineItem`s are summed in Fiona
-  (`EstimatePreview`); `FinancialDocument` will need the same, so a shared helper belongs in
-  commerce-domain.
+- **No line-sum helper for evaluations.** `FinancialDocument` derives its totals, but an
+  `OfferingsEvaluation` has none, so a preview's totals are summed in Fiona
+  (`EstimatePreview`). A shared helper (or evaluation totals) belongs in commerce-domain.
 
 ### Known http4k 6.58 limitations (not to be fixed by upgrading here)
 
@@ -668,7 +779,12 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   exactly as `main()` does and exposes the runtime's own `Transactor`.
 - Keep: value-object tests, repository integration tests, operation tests (including
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
-  invisible until commit), HTTP tests through the complete handler, schema tests,
+  invisible until commit), `FinancialDocumentAtomicitySpec` (a Fiona failure after a ledger
+  write rolls back the runtime's snapshot, payment, and allocation with Fiona's rows),
+  `FinancialDocumentRepositoriesSpec`, `RepricingSpec`, `FinancialDocumentRoutesSpec` (the
+  whole inquiry → estimate → quote → deposit → invoice → change order → payment workflow
+  through the complete handler, with its conflicts, transitions, payment policy, and
+  permissions), HTTP tests through the complete handler, schema tests,
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
   the lifecycle internals), `OfferingsCatalogSpec` (Fiona's catalog through the complete
   handler: initialization, revisions, historical reads, price forms; integration only, the
@@ -684,6 +800,6 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 ## Documentation synchronization
 
 Changes to endpoints, the API contract, configuration, migrations, packages, the
-customer-matching policy, the Offerings binding, the version convention, or the upstream
-version must update
+customer-matching policy, the Offerings binding, the financial-document or payment policy,
+the bootstrap grants, the version convention, or the upstream version must update
 `README.md` and this file in the same change.

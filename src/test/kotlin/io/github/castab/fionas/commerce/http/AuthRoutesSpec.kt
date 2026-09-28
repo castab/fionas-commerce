@@ -76,6 +76,9 @@ class AuthRoutesSpec :
                 app.authorization.getRole(CommerceRoles.Administrator)!!.permissions shouldBe
                     setOf(
                         CommercePermissions.OfferingsManage,
+                        CommercePermissions.FinancialDocumentRead,
+                        CommercePermissions.FinancialDocumentCreate,
+                        CommercePermissions.PaymentRecord,
                         CommercePermissions.PrincipalRead,
                         CommercePermissions.PrincipalManage,
                         CommercePermissions.RoleRead,
@@ -86,9 +89,12 @@ class AuthRoutesSpec :
                 val hash = app.database.strings("SELECT password_hash FROM fionas.user_credentials").single()
                 hash.startsWith("\$argon2id\$") shouldBe true
                 hash.contains("test-admin-password") shouldBe false
+                // A later bootstrap never changes the existing role or its grants.
+                val grants = app.database.strings("SELECT permission_key FROM commerce.role_permissions ORDER BY 1")
                 BootstrapFirstAdmin(app.transactor, app.authorization, JdbiCredentialRepository(), PasswordHasher(), testClock).invoke(
                     BootstrapAdmin("other", "Other", null, null, SecretPassword.of("another-test-password")),
                 )
+                app.database.strings("SELECT permission_key FROM commerce.role_permissions ORDER BY 1") shouldBe grants
                 app.database.count("commerce.users") shouldBe 1
                 app.database.strings("SELECT password_hash FROM fionas.user_credentials").single() shouldBe hash
             }

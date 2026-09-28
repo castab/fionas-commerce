@@ -7,6 +7,7 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Mig
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.TestDatabase
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.string.shouldStartWith
@@ -39,7 +40,88 @@ class DatabaseSchemaSpec :
 
         test("Fiona's tables live in the fionas schema, which Fiona owns") {
             application.database.tables("fionas") shouldContainExactlyInAnyOrder
-                listOf("customers", "inquiries", "user_credentials")
+                listOf(
+                    "customers",
+                    "inquiries",
+                    "user_credentials",
+                    "inquiry_financial_documents",
+                    "financial_document_pricing",
+                    "financial_document_pricing_categories",
+                    "financial_document_pricing_selections",
+                )
+        }
+
+        /** Every foreign key of Fiona's [table], as `columns → referenced table(columns)`. */
+        fun TestDatabase.foreignKeys(table: String) =
+            strings(
+                """
+                SELECT (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+                        FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord)
+                        JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum)
+                    || ' → ' || con.confrelid::regclass::text || '('
+                    || (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+                        FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord)
+                        JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum)
+                    || ')'
+                FROM pg_constraint con
+                WHERE con.contype = 'f' AND con.conrelid = 'fionas.$table'::regclass
+                """.trimIndent(),
+            )
+
+        test("an inquiry owns financial-document lineages, each keyed to commerce-runtime's first snapshot of it") {
+            application.database.foreignKeys("inquiry_financial_documents") shouldContainExactlyInAnyOrder
+                listOf(
+                    "document_id, initial_version → commerce.financial_document_snapshots(document_id, version)",
+                    "inquiry_id → fionas.inquiries(id)",
+                )
+            // One inquiry may own several lineages; a lineage belongs to exactly one inquiry.
+            application.database.strings(
+                """
+                SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                WHERE conrelid = 'fionas.inquiry_financial_documents'::regclass AND contype IN ('p', 'u')
+                """.trimIndent(),
+            ) shouldContainExactly listOf("PRIMARY KEY (document_id)")
+            application.database.strings(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas' AND tablename = 'inquiry_financial_documents' " +
+                    "AND indexname <> 'inquiry_financial_documents_pkey'",
+            ) shouldContainExactly
+                listOf(
+                    "CREATE INDEX inquiry_financial_documents_inquiry_id_idx ON fionas.inquiry_financial_documents " +
+                        "USING btree (inquiry_id, created_at)",
+                )
+        }
+
+        test("every pricing source is keyed to commerce-runtime's exact snapshot of a lineage Fiona owns") {
+            application.database.foreignKeys("financial_document_pricing") shouldContainExactlyInAnyOrder
+                listOf(
+                    "document_id → fionas.inquiry_financial_documents(document_id)",
+                    "document_id, document_version → commerce.financial_document_snapshots(document_id, version)",
+                )
+            application.database.foreignKeys("financial_document_pricing_categories") shouldContainExactlyInAnyOrder
+                listOf("document_id, document_version → fionas.financial_document_pricing(document_id, document_version)")
+            application.database.foreignKeys("financial_document_pricing_selections") shouldContainExactlyInAnyOrder
+                listOf(
+                    "document_id, document_version, category_position → " +
+                        "fionas.financial_document_pricing_categories(document_id, document_version, position)",
+                )
+        }
+
+        test("Fiona duplicates no ledger fact: documents, lines, amounts, payments, and allocations stay in commerce") {
+            application.database
+                .strings(
+                    """
+                    SELECT table_name || '.' || column_name FROM information_schema.columns
+                    WHERE table_schema = 'fionas'
+                      AND column_name ~ '(line|amount|price|total|tax|balance|stage|status|payment|allocation|currency)'
+                    """.trimIndent(),
+                ).shouldBeEmpty()
+            application.database
+                .strings(
+                    """
+                    SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = 'fionas' AND table_name ~ '(line|payment|allocation|reconciliation|snapshot)'
+                    """.trimIndent(),
+                ).shouldBeEmpty()
         }
 
         test("Fiona credentials reference the runtime-owned human user") {

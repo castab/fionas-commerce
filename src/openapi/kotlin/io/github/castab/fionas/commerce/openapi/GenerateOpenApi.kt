@@ -9,10 +9,13 @@ import io.github.castab.commerce.runtime.authorization.PermissionCatalog
 import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.authorization.commercePermissionDefinitions
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
+import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
+import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
+import io.github.castab.commerce.runtime.persistence.PaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.session.IssuedSession
@@ -35,6 +38,7 @@ import org.http4k.core.NoOp
 import org.http4k.core.Request
 import org.http4k.core.Status
 import org.jdbi.v3.core.Jdbi
+import java.lang.reflect.Proxy
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -47,6 +51,14 @@ private val notInvoked =
         createInquiry = { error("Rendering the OpenAPI document never creates an inquiry") },
         getInquiry = { error("Rendering the OpenAPI document never reads an inquiry") },
         previewEstimate = { error("Rendering the OpenAPI document never prices an estimate") },
+        createInquiryEstimate = { _, _ -> error("Rendering the OpenAPI document never persists an estimate") },
+        listInquiryFinancialDocuments = { error("Rendering the OpenAPI document never reads a financial document") },
+        getFinancialDocument = { error("Rendering the OpenAPI document never reads a financial document") },
+        getFinancialDocumentHistory = { error("Rendering the OpenAPI document never reads a financial document") },
+        issueQuote = { _, _ -> error("Rendering the OpenAPI document never issues a quote") },
+        issueInvoice = { _, _ -> error("Rendering the OpenAPI document never issues an invoice") },
+        createChangeOrder = { _, _, _ -> error("Rendering the OpenAPI document never applies a change order") },
+        recordPayment = { error("Rendering the OpenAPI document never records a payment") },
         login = { _, _ -> error("Rendering the OpenAPI document never logs in") },
         currentUser = { error("Rendering the OpenAPI document never reads a user") },
         setStaffPassword = { _, _ -> error("Rendering the OpenAPI document never sets a password") },
@@ -82,15 +94,16 @@ private val renderingAccess = AccessControl(Filter.NoOp, PermissionResolver { em
 private val renderingAuth = FionaAuthRoutes(notInvokedSessions, SessionCookie("__Host-fionas_session"), renderingAccess, Filter.NoOp)
 
 /**
- * A `CommerceRuntimeContext` for rendering only: its transactor opens no connection and its
- * repository refuses every call, and rendering calls neither.
+ * A `CommerceRuntimeContext` for rendering only: its transactor opens no connection, its
+ * repositories refuse every call, and rendering calls none of them.
  *
  * The Offerings and authorization capabilities require a runtime context even to describe
  * their contract routes. A composed runtime needs a database, so this source set builds a
- * rendering-only context reflectively. The transactor opens no connection, and route
- * rendering invokes no repository or operation. This provisional workaround exists only
- * in the OpenAPI source set and never enters the deployable application. Commerce-runtime
- * may eventually offer a first-class contract composition seam without persistence.
+ * rendering-only context reflectively, including the financial ledger the context carries.
+ * The transactor opens no connection, and route rendering invokes no repository or
+ * operation. This provisional workaround exists only in the OpenAPI source set and never
+ * enters the deployable application. Commerce-runtime may eventually offer a first-class
+ * contract composition seam without persistence.
  */
 private fun renderingOnlyContext(): CommerceRuntimeContext {
     val configuration =
@@ -120,6 +133,12 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
                 catalogId: OfferingsCatalogId,
             ) = error("Rendering the OpenAPI document never reads a catalog")
         }
+    val documents = refusing<FinancialDocumentRepository>("Rendering the OpenAPI document never touches a financial document")
+    val payments = refusing<PaymentRepository>("Rendering the OpenAPI document never touches a payment")
+    val ledger =
+        FinancialLedger::class.java
+            .getConstructor(Transactor::class.java, FinancialDocumentRepository::class.java, PaymentRepository::class.java)
+            .newInstance(transactor, documents, payments)
     val catalog = PermissionCatalog(commercePermissionDefinitions + FionaPermissions.definitions)
     val repositoryType = Class.forName("io.github.castab.commerce.runtime.persistence.AuthorizationRepository")
     val repository = repositoryType.getConstructor().newInstance()
@@ -132,10 +151,17 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
             CommerceRuntimeConfiguration::class.java,
             Transactor::class.java,
             OfferingsSnapshotRepository::class.java,
+            FinancialDocumentRepository::class.java,
+            PaymentRepository::class.java,
+            FinancialLedger::class.java,
             SessionManager::class.java,
             AuthorizationDirectory::class.java,
-        ).newInstance(configuration, transactor, snapshots, notInvokedSessions, authorization)
+        ).newInstance(configuration, transactor, snapshots, documents, payments, ledger, notInvokedSessions, authorization)
 }
+
+/** A [T] whose every method fails with [reason]; rendering never calls one. */
+private inline fun <reified T : Any> refusing(reason: String): T =
+    T::class.java.cast(Proxy.newProxyInstance(T::class.java.classLoader, arrayOf<Class<*>>(T::class.java)) { _, _, _ -> error(reason) })
 
 /**
  * The OpenAPI document of the Fiona API, exactly as the running application serves it at

@@ -1,14 +1,10 @@
 package io.github.castab.fionas.commerce.offering
 
 import io.github.castab.commerce.financial.Money
-import io.github.castab.commerce.offering.OfferingSelections
 import io.github.castab.commerce.offering.OfferingsEvaluation
-import io.github.castab.commerce.offering.OfferingsEvaluationResult
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
-import io.github.castab.commerce.offering.OfferingsViolation
-import io.github.castab.commerce.offering.StructuralOfferingsViolation
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import java.util.Currency
 
@@ -43,45 +39,15 @@ class EstimatePreview(
  *
  * [getRevision] is commerce-runtime's `GetOfferingsCatalogRevision`, which reads the
  * snapshot in its own transaction and fails with [CommerceFailure.NotFound] for a revision
- * that does not exist. A selection the [engine] rejects, structurally or by Fiona's policy,
- * fails with [CommerceFailure.ValidationFailed] naming each violation's stable code.
+ * that does not exist. [pricing] is the same Fiona pricing that persisted financial
+ * documents use; a selection it rejects fails with [CommerceFailure.ValidationFailed].
  */
 class PreviewEstimate(
     private val getRevision: (OfferingsSnapshotReference) -> OfferingsSnapshot,
-    private val engine: FionasOfferingsEngine,
+    private val pricing: FionasPricing,
 ) {
-    /** A request to estimate [selections] from [catalogRevision] of Fiona's catalog for the event in [context]. */
-    data class Command(
-        val catalogRevision: OfferingsRevision,
-        val selections: OfferingSelections,
-        val context: FionasOfferingsContext,
-    )
-
-    operator fun invoke(command: Command): EstimatePreview {
-        val snapshot = getRevision(OfferingsSnapshotReference(FIONA_OFFERINGS_CATALOG_ID, command.catalogRevision))
-        return when (val result = engine.evaluate(snapshot, command.selections, command.context)) {
-            is OfferingsEvaluationResult.Accepted -> EstimatePreview(result.evaluation, command.context.guestCountIsMinimum)
-            is OfferingsEvaluationResult.Rejected ->
-                throw CommerceFailure.ValidationFailed(
-                    "The selection cannot be estimated: " + result.violations.joinToString("; ") { "${it.code} (${it.explanation()})" },
-                )
-        }
+    operator fun invoke(inputs: FionasPricingInputs): EstimatePreview {
+        val snapshot = getRevision(fionaCatalogRevision(inputs.catalogRevision))
+        return EstimatePreview(pricing.price(snapshot, inputs), inputs.context.guestCountIsMinimum)
     }
 }
-
-private fun OfferingsViolation.explanation(): String =
-    when (this) {
-        is FionasOfferingsViolation -> message
-        is StructuralOfferingsViolation.UnknownCategory -> "this catalog revision has no category ${category.value}"
-        is StructuralOfferingsViolation.UnknownOffering -> "this catalog revision has no offering ${offering.value}"
-        is StructuralOfferingsViolation.OfferingInWrongCategory ->
-            "offering ${offering.value} does not belong to category ${category.value}"
-        is StructuralOfferingsViolation.TooFewSelections ->
-            "category ${category.value} needs at least $minimum selections, got $actual"
-        is StructuralOfferingsViolation.TooManySelections ->
-            "category ${category.value} allows at most $maximum selections, got $actual"
-        is StructuralOfferingsViolation.DuplicateCategory -> "category ${category.value} is selected from more than once"
-        is StructuralOfferingsViolation.DuplicateOffering ->
-            "offering ${offering.value} is selected more than once in category ${category.value}"
-        else -> "the selection is not allowed"
-    }

@@ -154,6 +154,8 @@ class EstimatePreviewRoutesSpec :
         test("records nothing, and the same request prices the same") {
             val customers = application.database.count("fionas.customers")
             val inquiries = application.database.count("fionas.inquiries")
+            val documents = application.database.count("commerce.financial_document_snapshots")
+            val pricingSources = application.database.count("fionas.financial_document_pricing")
             val catalog = application.http(Request(Method.GET, "/offering-catalog")).bodyString()
 
             val first = preview().preview()
@@ -162,6 +164,9 @@ class EstimatePreviewRoutesSpec :
             second shouldBe first
             application.database.count("fionas.customers") shouldBe customers
             application.database.count("fionas.inquiries") shouldBe inquiries
+            // A preview is not a financial document: the ledger and Fiona's pricing sources are unchanged.
+            application.database.count("commerce.financial_document_snapshots") shouldBe documents
+            application.database.count("fionas.financial_document_pricing") shouldBe pricingSources
             application.http(Request(Method.GET, "/offering-catalog")).bodyString() shouldBe catalog
         }
 

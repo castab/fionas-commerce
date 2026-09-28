@@ -78,15 +78,23 @@ class MigrationLifecycleSpec :
                 compose(database).close()
 
                 // Both streams have a version 1; neither numbers its migrations after the other's.
-                database.history("public").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2")
-                database.history("public").first() shouldContain "V1__customers_and_inquiries.sql"
-                database.history("public").last() shouldContain "V2__user_credentials.sql"
+                database.history("public").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2", "3")
+                database.history("public")[0] shouldContain "V1__customers_and_inquiries.sql"
+                database.history("public")[1] shouldContain "V2__user_credentials.sql"
+                database.history("public")[2] shouldContain "V3__financial_document_context.sql"
                 database.count("commerce.users") shouldBe 0
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
                 database
                     .strings(
                         "SELECT (SELECT max(installed_on) FROM commerce.flyway_schema_history) <= " +
                             "(SELECT min(installed_on) FROM public.flyway_schema_history WHERE type = 'SQL')",
+                    ).single() shouldBe "t"
+                // Fiona's V3 depends on the runtime's financial ledger, which is in place first.
+                database
+                    .strings(
+                        "SELECT (SELECT installed_rank FROM commerce.flyway_schema_history WHERE script LIKE '%financial_ledger%') " +
+                            "IS NOT NULL AND (SELECT max(installed_on) FROM commerce.flyway_schema_history) <= " +
+                            "(SELECT installed_on FROM public.flyway_schema_history WHERE version = '3')",
                     ).single() shouldBe "t"
             }
         }

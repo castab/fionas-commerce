@@ -152,7 +152,13 @@ class BootstrapAdmin(
     }
 }
 
-/** Startup operation: only the first staff user can be provisioned this way. */
+/**
+ * Startup operation: only the first staff user can be provisioned this way.
+ *
+ * The Administrator role it creates lists its grants explicitly. They are fixed when the role
+ * is created: a later release that grants more never changes an Administrator role that
+ * already exists, whose grants are managed through the runtime's administration API.
+ */
 class BootstrapFirstAdmin(
     private val transactor: Transactor,
     private val authorization: AuthorizationDirectory,
@@ -180,9 +186,12 @@ class BootstrapFirstAdmin(
                         RoleDefinition(
                             CommerceRoles.Administrator,
                             "Administrator",
-                            "May administer Fiona's staff access and offerings catalog",
+                            "May administer Fiona's staff access, offerings catalog, financial documents, and payments",
                             setOf(
                                 CommercePermissions.OfferingsManage,
+                                CommercePermissions.FinancialDocumentRead,
+                                CommercePermissions.FinancialDocumentCreate,
+                                CommercePermissions.PaymentRecord,
                                 CommercePermissions.PrincipalRead,
                                 CommercePermissions.PrincipalManage,
                                 CommercePermissions.RoleRead,

@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.authorization.AuthorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
@@ -8,11 +9,15 @@ import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
+import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
+import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
+import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.offering.EstimatePreview
-import io.github.castab.fionas.commerce.offering.PreviewEstimate
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
@@ -26,6 +31,7 @@ import org.http4k.core.Status
 import org.http4k.routing.RoutingHttpHandler
 import org.http4k.routing.bind
 import org.http4k.routing.routes
+import java.util.UUID
 
 /** Where the OpenAPI document of the Fiona API is served. */
 const val OPENAPI_PATH = "/openapi.json"
@@ -40,7 +46,15 @@ const val API_DOCS_PATH = "/docs"
 class FionaOperations(
     val createInquiry: (CreateInquiry.Command) -> InquiryDetails,
     val getInquiry: (InquiryId) -> InquiryDetails,
-    val previewEstimate: (PreviewEstimate.Command) -> EstimatePreview,
+    val previewEstimate: (FionasPricingInputs) -> EstimatePreview,
+    val createInquiryEstimate: (InquiryId, FionasPricingInputs) -> InquiryFinancialDocument,
+    val listInquiryFinancialDocuments: (InquiryId) -> List<InquiryFinancialDocument>,
+    val getFinancialDocument: (UUID) -> InquiryFinancialDocument,
+    val getFinancialDocumentHistory: (UUID) -> InquiryFinancialDocumentHistory,
+    val issueQuote: (UUID, Version) -> InquiryFinancialDocument,
+    val issueInvoice: (UUID, Version) -> InquiryFinancialDocument,
+    val createChangeOrder: (UUID, Version, FionasPricingInputs) -> InquiryFinancialDocument,
+    val recordPayment: (RecordDocumentPayment.Command) -> RecordedPayment,
     val login: (String, SecretPassword) -> IssuedSession?,
     val currentUser: (UserId) -> User?,
     val setStaffPassword: (UserId, SecretPassword) -> Unit,
@@ -65,6 +79,14 @@ fun fionaApiRoutes(
         createInquiryRoute(operations.createInquiry),
         getInquiryRoute(operations.getInquiry),
         previewEstimateRoute(operations.previewEstimate),
+        createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
+        listInquiryFinancialDocumentsRoute(operations.listInquiryFinancialDocuments, auth.access),
+        getFinancialDocumentRoute(operations.getFinancialDocument, auth.access),
+        getFinancialDocumentHistoryRoute(operations.getFinancialDocumentHistory, auth.access),
+        issueQuoteRoute(operations.issueQuote, auth.access),
+        issueInvoiceRoute(operations.issueInvoice, auth.access),
+        createChangeOrderRoute(operations.createChangeOrder, auth.access),
+        recordPaymentRoute(operations.recordPayment, auth.access),
         loginRoute(operations.login, auth.cookie, auth.access, auth.origin),
         logoutRoute(auth.sessions, auth.cookie, auth.access),
         currentUserRoute(operations.currentUser, auth.access),

@@ -6,6 +6,10 @@ import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
@@ -13,6 +17,7 @@ import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.CredentialRepository
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.testing.metadataAuth
 import io.kotest.core.spec.style.FunSpec
@@ -44,6 +49,23 @@ class ArchitectureSpec :
                 .filter { it.isFile && it.extension == "kt" && filter(it) }
                 .toList()
 
+        fun migrations() =
+            File("src/main/resources/db/fionas")
+                .listFiles()
+                .orEmpty()
+                .filter { it.extension == "sql" }
+                .sortedBy { it.name }
+
+        /** The body of every `CREATE TABLE` in [migration], without comments. */
+        fun createdTableDefinitions(migration: File) =
+            Regex("""(?is)CREATE\s+TABLE\s+(.+?)\);""")
+                .findAll(migration.readLines().filterNot { it.trim().startsWith("--") }.joinToString("\n"))
+                .map { it.groupValues[1] }
+                .toList()
+
+        /** The names of the tables [migration] creates. */
+        fun createdTables(migration: File) = createdTableDefinitions(migration).map { it.substringBefore('(').trim() }
+
         fun List<File>.containing(tokens: List<String>) =
             flatMap { file ->
                 val text = file.readText()
@@ -70,7 +92,13 @@ class ArchitectureSpec :
             )
 
         test("every repository operation takes the caller's Transaction first") {
-            listOf(CustomerRepository::class.java, InquiryRepository::class.java, CredentialRepository::class.java).forEach { repository ->
+            listOf(
+                CustomerRepository::class.java,
+                InquiryRepository::class.java,
+                CredentialRepository::class.java,
+                InquiryFinancialDocumentRepository::class.java,
+                FinancialDocumentPricingRepository::class.java,
+            ).forEach { repository ->
                 repository.declaredMethods.forEach { method ->
                     method.parameterTypes.first() shouldBe Transaction::class.java
                 }
@@ -82,6 +110,8 @@ class ArchitectureSpec :
                 JdbiCustomerRepository::class.java,
                 JdbiInquiryRepository::class.java,
                 JdbiCredentialRepository::class.java,
+                JdbiInquiryFinancialDocumentRepository::class.java,
+                JdbiFinancialDocumentPricingRepository::class.java,
             ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
                 repository.declaredConstructors.single().parameterCount shouldBe 0
@@ -96,6 +126,14 @@ class ArchitectureSpec :
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
+                    "financial/CreateInquiryEstimate.kt: inTransaction",
+                    "financial/CreateChangeOrder.kt: inTransaction",
+                    "financial/IssueQuote.kt: inTransaction",
+                    "financial/IssueInvoice.kt: inTransaction",
+                    "financial/RecordDocumentPayment.kt: inTransaction",
+                    "financial/GetFinancialDocument.kt: inTransaction",
+                    "financial/GetFinancialDocumentHistory.kt: inTransaction",
+                    "financial/ListInquiryFinancialDocuments.kt: inTransaction",
                 )
             sources().containing(transactionInfrastructure - "inTransaction" - "Handle").shouldBeEmpty()
         }
@@ -144,6 +182,14 @@ class ArchitectureSpec :
                         createInquiry = { error("not called") },
                         getInquiry = { error("not called") },
                         previewEstimate = { error("not called") },
+                        createInquiryEstimate = { _, _ -> error("not called") },
+                        listInquiryFinancialDocuments = { error("not called") },
+                        getFinancialDocument = { error("not called") },
+                        getFinancialDocumentHistory = { error("not called") },
+                        issueQuote = { _, _ -> error("not called") },
+                        issueInvoice = { _, _ -> error("not called") },
+                        createChangeOrder = { _, _, _ -> error("not called") },
+                        recordPayment = { error("not called") },
                         login = { _, _ -> error("not called") },
                         currentUser = { error("not called") },
                         setStaffPassword = { _, _ -> error("not called") },
@@ -223,20 +269,23 @@ class ArchitectureSpec :
                 .flatMap { file -> Regex("""\b(?:class|interface|object)\s+(\w+)""").findAll(file.readText()).map { it.groupValues[1] } }
                 .filter { it in runtimeOfferingTypes }
                 .shouldBeEmpty()
-            // The runtime's snapshot repository only reaches the runtime's own read operation, in
-            // the composition root; Fiona never calls it.
+            // The runtime's snapshot repository is named only in the composition root, which hands
+            // it to the runtime's own read operation (previews) and its transaction-bound read to
+            // FionasPricing (persisted documents); Fiona never calls it itself.
             sources().containing(listOf("OfferingsSnapshotRepository", "offeringsSnapshotRepository")) shouldContainExactly
                 listOf("FionaApplication.kt: offeringsSnapshotRepository")
             // SQL naming a runtime Offerings table (`commerce.offerings…`), as opposed to the
             // `io.github.castab.commerce.offering` package.
+            val runtimeOfferingsTable = Regex("""(?<![\w.])commerce\.offering""")
             sources()
-                .filter { Regex("""(?<![\w.])commerce\.offering""").containsMatchIn(it.readText()) }
+                .filter { runtimeOfferingsTable.containsMatchIn(it.readText()) }
                 .shouldBeEmpty()
-            File("src/main/resources/db/fionas")
-                .listFiles()
-                .orEmpty()
-                .filter { it.readText().contains("offering", ignoreCase = true) }
-                .shouldBeEmpty()
+            // Fiona's migrations create no catalog tables and never reach the runtime's. The keys
+            // a financial snapshot was priced from are Fiona's pricing source, not a catalog.
+            migrations()
+                .filter { migration ->
+                    runtimeOfferingsTable.containsMatchIn(migration.readText()) || createdTables(migration).any { "offering" in it }
+                }.shouldBeEmpty()
         }
 
         test("Fiona's pricing is pure policy: it knows nothing of HTTP, persistence, the runtime, or serialization") {
@@ -249,7 +298,7 @@ class ArchitectureSpec :
                     "java.time.",
                     "java.util.",
                 )
-            listOf("FionasOfferingsEngine.kt", "FionasPricingPolicy.kt", "FionasOfferingsContext.kt")
+            listOf("FionasOfferingsEngine.kt", "FionasPricingPolicy.kt", "FionasOfferingsContext.kt", "FionasPricingInputs.kt")
                 .map { File(mainSources, "offering/$it") }
                 .flatMap { file ->
                     file
@@ -264,8 +313,14 @@ class ArchitectureSpec :
         test("Fiona's pricing names no offering: every per-offering price comes from the catalog") {
             // No `if (offering == "waffle-cone")`: the policy knows the event and the topping
             // category, never an individual offering, so new surcharges need no deployment.
-            listOf("FionasOfferingsEngine.kt", "FionasPricingPolicy.kt", "FionasOfferingsContext.kt", "PreviewEstimate.kt")
-                .map { File(mainSources, "offering/$it") }
+            listOf(
+                "FionasOfferingsEngine.kt",
+                "FionasPricingPolicy.kt",
+                "FionasOfferingsContext.kt",
+                "FionasPricingInputs.kt",
+                "FionasPricing.kt",
+                "PreviewEstimate.kt",
+            ).map { File(mainSources, "offering/$it") }
                 .filter { "OfferingKey(" in it.readText() }
                 .shouldBeEmpty()
         }
@@ -281,14 +336,38 @@ class ArchitectureSpec :
                 }.shouldBeEmpty()
         }
 
-        test("Fiona has no financial-document persistence: estimates are previews until commerce-runtime persists them") {
-            sources().containing(listOf("FinancialDocument")).shouldBeEmpty()
-            File("src/main/resources/db/fionas")
-                .listFiles()
-                .orEmpty()
-                .filter { file ->
-                    listOf("financial", "estimate", "line_item", "quote", "invoice").any { file.readText().contains(it, ignoreCase = true) }
-                }.shouldBeEmpty()
+        test("financial documents and payments are commerce-runtime's ledger; Fiona stores only its own context") {
+            // Fiona reaches documents and payments only through the runtime's FinancialLedger,
+            // never its repositories or tables, and writes no SQL against them.
+            sources()
+                .containing(listOf("financialDocumentRepository", "paymentRepository", "FinancialDocumentRepository", "PaymentRepository"))
+                .shouldBeEmpty()
+            sources()
+                // Table names, as opposed to permission keys such as `commerce.payment.record`.
+                .filter { Regex("""(?<![\w.])commerce\.(financial_document|payment_)""").containsMatchIn(it.readText()) }
+                .shouldBeEmpty()
+            sources().containing(listOf("financialLedger")) shouldContainExactly listOf("FionaApplication.kt: financialLedger")
+            // No Fiona table restates a ledger fact: no lines, amounts, totals, balances, stages,
+            // payment status, payments, or allocations of its own.
+            val ledgerFacts =
+                Regex("""\b(line_items?|lines|amount|price|subtotal|tax|total|balance|stage|status|payments?|allocations?)\b""")
+            migrations()
+                .flatMap { migration -> createdTableDefinitions(migration).map { migration.name to it } }
+                .filter { (_, definition) -> ledgerFacts.containsMatchIn(definition) }
+                .shouldBeEmpty()
+        }
+
+        test("Fiona writes and reads the ledger only inside its operation's transaction") {
+            // Every ledger call in Fiona passes the operation's Transaction, so ledger writes commit
+            // or roll back with Fiona's. A convenience overload would open a second transaction.
+            val ledgerCall = Regex("""\bledger\s*\.\s*(\w+)\s*\(\s*(\w*)""")
+            val calls =
+                sources { it.path.contains("${File.separator}financial${File.separator}") }
+                    .flatMap { file ->
+                        ledgerCall.findAll(file.readText()).map { "${file.name}: ${it.groupValues[1]}(${it.groupValues[2]}" }
+                    }
+            calls.shouldNotBeEmpty()
+            calls.filterNot { it.endsWith("(transaction") }.shouldBeEmpty()
         }
 
         test("Jackson renders only the Offerings schemas; kotlinx.serialization stays the wire format") {
@@ -304,14 +383,32 @@ class ArchitectureSpec :
             File(mainSources, "FionaApplication.kt").readText().contains("context.sessions") shouldBe true
         }
 
-        test("Fiona ships no runtime migrations and references only the published runtime user identity") {
+        test("Fiona ships no runtime migrations and references only published runtime keys") {
             File("src/main/resources/db/commerce").exists() shouldBe false
-            // Fiona's credential FK is the one sanctioned runtime schema reference.
-            File("src/main/resources/db/fionas")
-                .listFiles()
-                .orEmpty()
+            // The sanctioned runtime schema references: the credential's runtime user, and the
+            // exact financial-document snapshots Fiona's inquiry association and pricing
+            // sources describe.
+            migrations()
                 .flatMap { file -> Regex("""commerce\.[a-z_]+""").findAll(file.readText()).map { it.value }.toList() }
-                .filterNot { it == "commerce.users" }
-                .shouldBeEmpty()
+                .toSet() shouldBe setOf("commerce.users", "commerce.financial_document_snapshots")
+            migrations()
+                .flatMap { file -> Regex("""REFERENCES\s+commerce\.[a-z_]+\s*\([^)]*\)""").findAll(file.readText()).map { it.value } }
+                .map { it.replace(Regex("""\s+"""), " ") }
+                .toSet() shouldBe
+                setOf(
+                    "REFERENCES commerce.users(principal_id)",
+                    "REFERENCES commerce.financial_document_snapshots (document_id, version)",
+                )
+        }
+
+        test("the bootstrap Administrator is granted the financial permissions explicitly, from commerce's own keys") {
+            val bootstrap = File(mainSources, "staff/StaffAuthentication.kt").readText()
+            listOf(
+                "CommercePermissions.FinancialDocumentRead",
+                "CommercePermissions.FinancialDocumentCreate",
+                "CommercePermissions.PaymentRecord",
+            ).filterNot { it in bootstrap }.shouldBeEmpty()
+            // Fiona defines no duplicates of generic commerce permissions.
+            FionaPermissions.definitions.map { it.key } shouldContainExactly listOf(FionaPermissions.CredentialsManage)
         }
     })

@@ -1,0 +1,88 @@
+package io.github.castab.fionas.commerce.testing
+
+import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.offering.OfferingResultDto
+import org.http4k.core.Method
+import org.http4k.core.Request
+import org.http4k.core.Status
+import java.util.UUID
+
+/** The six toppings of the acceptance catalog; the first four are included in the ice cream service. */
+val TOPPINGS = listOf("sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough")
+
+/** A catalog price of [amount] USD per guest. */
+fun perGuest(amount: String) = """{"kind":"PER_QUANTITY","amount":"$amount","currency":"USD","dimension":"guest"}"""
+
+/**
+ * Appends an offering through commerce-runtime's Offerings API, as an administrator would,
+ * and returns the new catalog revision.
+ */
+fun TestApplication.addOffering(
+    key: String,
+    category: String,
+    displayName: String,
+    price: String? = null,
+    description: String? = null,
+): Int {
+    val optional = listOfNotNull(description?.let { ",\"description\":\"$it\"" }, price?.let { ",\"price\":$it" }).joinToString("")
+    val body = """{"key":"$key","category":"$category","displayName":"$displayName"$optional}"""
+    val response = adminPost("/offering-catalog/offerings", body)
+    check(response.status == Status.CREATED) { "Adding offering $key failed: ${response.status} ${response.bodyString()}" }
+    return CommerceJson.asA(response.bodyString(), OfferingResultDto.serializer()).revision
+}
+
+/**
+ * Fiona's acceptance catalog, entered through commerce-runtime's Offerings API: soft-serve
+ * flavors (Horchata at `$0.50` per guest), six toppings, and cones (Waffle cones at `$0.75`
+ * per guest). Returns its revision, from which [pricingBody]'s defaults price `$681.25`.
+ */
+fun TestApplication.createAcceptanceCatalog(): Int {
+    check(adminPost("/offering-catalog").status == Status.CREATED) { "The catalog already exists" }
+    listOf(
+        """{"key":"soft-serve-flavor","displayName":"Soft Serve","minimumSelections":1,"maximumSelections":2}""",
+        """{"key":"topping","displayName":"Toppings","minimumSelections":4,"maximumSelections":6}""",
+        """{"key":"cone-option","displayName":"Cones","minimumSelections":1,"maximumSelections":1}""",
+    ).forEach { check(adminPost("/offering-catalog/categories", it).status == Status.CREATED) }
+    addOffering("vanilla", "soft-serve-flavor", "Vanilla")
+    addOffering("chocolate", "soft-serve-flavor", "Chocolate")
+    addOffering("horchata", "soft-serve-flavor", "Horchata", perGuest("0.50"), description = "Premium soft serve")
+    TOPPINGS.forEach { addOffering(it, "topping", it) }
+    addOffering("cup", "cone-option", "Cups")
+    return addOffering("waffle-cone", "cone-option", "Waffle cones", perGuest("0.75"))
+}
+
+/**
+ * A JSON body of commercial pricing inputs, as `/estimate-preview`, persisted estimates, and
+ * change orders take them. With [expectedVersion], a change-order body.
+ */
+fun pricingBody(
+    revision: Int,
+    guests: Int = 75,
+    minutes: Int = 120,
+    softServe: List<String> = listOf("vanilla", "horchata"),
+    toppings: List<String> = TOPPINGS,
+    cones: List<String> = listOf("waffle-cone"),
+    expectedVersion: Int? = null,
+    extra: String = "",
+): String {
+    fun block(
+        category: String,
+        offerings: List<String>,
+    ) = """{"category":"$category","offerings":[${offerings.joinToString(",") { "\"$it\"" }}]}"""
+    val blocks = listOf(block("soft-serve-flavor", softServe), block("topping", toppings), block("cone-option", cones))
+    return "{" + (expectedVersion?.let { "\"expectedVersion\":$it," } ?: "") +
+        """"catalogRevision":$revision,"guestCount":$guests,"durationMinutes":$minutes,"selections":[${blocks.joinToString(",")}]""" +
+        extra + "}"
+}
+
+/** Records an inquiry through the public API and returns its id. */
+fun TestApplication.createInquiry(email: String = "jane-${UUID.randomUUID()}@example.com"): String {
+    val response =
+        http(
+            Request(Method.POST, "/inquiries")
+                .header("Content-Type", "application/json")
+                .body("""{"name":"Jane Doe","email":"$email","message":"Ice cream for a birthday."}"""),
+        )
+    check(response.status == Status.CREATED) { "Recording an inquiry failed: ${response.status}" }
+    return checkNotNull(response.header("Location")).substringAfterLast('/')
+}

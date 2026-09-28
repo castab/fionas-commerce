@@ -11,7 +11,7 @@ import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.offering.EstimatePreview
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.PreviewEstimate
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.Tag
@@ -164,7 +164,7 @@ private fun exampleLine(
  * nothing. The route only translates between transport and application values;
  * [previewEstimate] loads the revision and evaluates it with Fiona's pricing.
  */
-fun previewEstimateRoute(previewEstimate: (PreviewEstimate.Command) -> EstimatePreview): ContractRoute =
+fun previewEstimateRoute(previewEstimate: (FionasPricingInputs) -> EstimatePreview): ContractRoute =
     "/estimate-preview" meta {
         operationId = "previewEstimate"
         summary = "Preview an estimate"
@@ -193,25 +193,15 @@ fun previewEstimateRoute(previewEstimate: (PreviewEstimate.Command) -> EstimateP
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
     } bindContract Method.POST to { request: Request ->
         val body = estimatePreviewRequest(request)
-        val command =
-            validating {
-                PreviewEstimate.Command(
-                    catalogRevision = OfferingsRevision.of(body.catalogRevision),
-                    selections =
-                        OfferingSelections(
-                            body.selections.map { selection ->
-                                OfferingCategorySelection(OfferingCategoryKey(selection.category), selection.offerings.map(::OfferingKey))
-                            },
-                        ),
-                    context =
-                        FionasOfferingsContext(
-                            guestCount = body.guestCount,
-                            guestCountIsMinimum = body.guestCountIsMinimum,
-                            duration = Duration.ofMinutes(body.durationMinutes.toLong()),
-                        ),
-                )
-            }
-        Response(Status.OK).with(estimatePreviewResponse of previewEstimate(command).toResponse())
+        val inputs =
+            pricingInputs(
+                body.catalogRevision,
+                body.guestCount,
+                body.guestCountIsMinimum,
+                body.durationMinutes,
+                body.selections.map { it.category to it.offerings },
+            )
+        Response(Status.OK).with(estimatePreviewResponse of previewEstimate(inputs).toResponse())
     }
 
 private fun EstimatePreview.toResponse() =
@@ -238,10 +228,40 @@ private fun EstimatePreview.toResponse() =
     )
 
 /**
+ * Fiona's pricing inputs from their transport form, the same for every request that prices:
+ * an estimate preview, a persisted estimate, and a change order. Values the domain rejects
+ * (a revision below 1, a key with whitespace) fail validation.
+ */
+internal fun pricingInputs(
+    catalogRevision: Int,
+    guestCount: Int,
+    guestCountIsMinimum: Boolean,
+    durationMinutes: Int,
+    selections: List<Pair<String, List<String>>>,
+): FionasPricingInputs =
+    validating {
+        FionasPricingInputs(
+            catalogRevision = OfferingsRevision.of(catalogRevision),
+            selections =
+                OfferingSelections(
+                    selections.map { (category, offerings) ->
+                        OfferingCategorySelection(OfferingCategoryKey(category), offerings.map(::OfferingKey))
+                    },
+                ),
+            context =
+                FionasOfferingsContext(
+                    guestCount = guestCount,
+                    guestCountIsMinimum = guestCountIsMinimum,
+                    duration = Duration.ofMinutes(durationMinutes.toLong()),
+                ),
+        )
+    }
+
+/**
  * The exact amount as a decimal string, with at least the currency's minor digits
  * (`250.00`, `0.00`) and more only when the amount has them (`9.375`). Never rounded.
  */
-private fun Money.decimal(): String {
+internal fun Money.decimal(): String {
     val exact = amount.stripTrailingZeros()
     val digits = currency.defaultFractionDigits.coerceAtLeast(0)
     return (if (exact.scale() < digits) exact.setScale(digits) else exact).toPlainString()

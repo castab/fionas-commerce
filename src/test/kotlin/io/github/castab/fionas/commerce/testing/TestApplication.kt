@@ -31,17 +31,20 @@ val testClock: Clock = Clock.fixed(TEST_INSTANT, ZoneOffset.UTC)
  * fionaApplication())`, against a throwaway database, with commerce-runtime migrating on
  * startup: its own migrations, then Fiona's.
  *
- * [transactor] is the runtime's own `Transactor`, taken from the `CommerceRuntimeContext`
- * the runtime hands to Fiona's route factory, so specs drive repositories and operations
- * inside real runtime transactions rather than a test-built stand-in.
+ * [context] is the `CommerceRuntimeContext` the runtime hands to Fiona's route factory, and
+ * [transactor] its own `Transactor`, so specs drive repositories and operations inside real
+ * runtime transactions, with the runtime's own financial ledger, rather than test-built
+ * stand-ins.
  */
 class TestApplication private constructor(
     val database: TestDatabase,
     val runtime: CommerceRuntime,
-    val transactor: Transactor,
-    val sessions: SessionManager,
-    val authorization: AuthorizationDirectory,
+    val context: CommerceRuntimeContext,
 ) : AutoCloseable {
+    val transactor: Transactor get() = context.transactor
+    val sessions: SessionManager get() = context.sessions
+    val authorization: AuthorizationDirectory get() = context.authorization
+
     /** The complete HTTP handler, including the runtime's error handling, without a server. */
     val http: HttpHandler get() = runtime.http
 
@@ -60,9 +63,18 @@ class TestApplication private constructor(
     fun adminPost(
         path: String,
         body: String = "",
+    ): Response = adminRequest(Method.POST, path, body)
+
+    fun adminGet(path: String): Response = adminRequest(Method.GET, path)
+
+    /** A request from the bootstrap administrator's browser session, from a trusted origin. */
+    fun adminRequest(
+        method: Method,
+        path: String,
+        body: String = "",
     ): Response =
         http(
-            Request(Method.POST, path)
+            Request(method, path)
                 .header("Origin", TEST_ORIGIN)
                 .header("Cookie", adminCookie)
                 .header("Content-Type", "application/json")
@@ -107,13 +119,7 @@ class TestApplication private constructor(
                                 },
                             ),
                     )
-                return TestApplication(
-                    database,
-                    runtime,
-                    checkNotNull(context).transactor,
-                    checkNotNull(context).sessions,
-                    checkNotNull(context).authorization,
-                )
+                return TestApplication(database, runtime, checkNotNull(context))
             } catch (e: Exception) {
                 database.close()
                 throw e

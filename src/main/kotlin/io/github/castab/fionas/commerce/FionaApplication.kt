@@ -8,6 +8,16 @@ import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.financial.CreateChangeOrder
+import io.github.castab.fionas.commerce.financial.CreateInquiryEstimate
+import io.github.castab.fionas.commerce.financial.GetFinancialDocument
+import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
+import io.github.castab.fionas.commerce.financial.IssueInvoice
+import io.github.castab.fionas.commerce.financial.IssueQuote
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
+import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
@@ -19,6 +29,7 @@ import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
+import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.offering.PreviewEstimate
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
@@ -49,7 +60,10 @@ const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
  * commerce-runtime's Offerings capability bound to Fiona's catalog; its contract routes join
  * the same API contract as Fiona's own. Estimate previews read exact catalog revisions
  * through the runtime's own `GetOfferingsCatalogRevision` and price them with Fiona's
- * [FionasOfferingsEngine].
+ * [FionasOfferingsEngine]. Persisted financial documents are commerce-runtime's
+ * `FinancialLedger`, called with the caller's transaction; Fiona's own repositories store
+ * only which inquiry owns each lineage and the pricing inputs of each snapshot, and the
+ * operations that write them price from the runtime's snapshot read in that same transaction.
  */
 fun fionaApplication(
     clock: Clock = Clock.systemUTC(),
@@ -80,6 +94,13 @@ fun fionaApplication(
                     context.authorization.permissionResolver,
                 )
             val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter)
+            // Fiona's pricing, over exact catalog revisions read in the caller's transaction.
+            val pricing =
+                FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), context.offeringsSnapshotRepository::retrieveVersion)
+            // Generic financial persistence is commerce-runtime's ledger; Fiona stores only its context.
+            val ledger = context.financialLedger
+            val documentOwners = JdbiInquiryFinancialDocumentRepository()
+            val pricingSources = JdbiFinancialDocumentPricingRepository()
             val operations =
                 FionaOperations(
                     createInquiry = CreateInquiry(context.transactor, customers, inquiries, clock)::invoke,
@@ -87,8 +108,27 @@ fun fionaApplication(
                     previewEstimate =
                         PreviewEstimate(
                             getRevision = GetOfferingsCatalogRevision(context.transactor, context.offeringsSnapshotRepository)::invoke,
-                            engine = FionasOfferingsEngine(FIONAS_PRICING_POLICY),
+                            pricing = pricing,
                         )::invoke,
+                    createInquiryEstimate =
+                        CreateInquiryEstimate(
+                            context.transactor,
+                            inquiries,
+                            ledger,
+                            documentOwners,
+                            pricingSources,
+                            pricing,
+                            clock,
+                        )::invoke,
+                    listInquiryFinancialDocuments =
+                        ListInquiryFinancialDocuments(context.transactor, inquiries, ledger, documentOwners, pricingSources)::invoke,
+                    getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    getFinancialDocumentHistory =
+                        GetFinancialDocumentHistory(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    issueQuote = IssueQuote(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    createChangeOrder = CreateChangeOrder(context.transactor, ledger, documentOwners, pricingSources, pricing)::invoke,
+                    recordPayment = RecordDocumentPayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
                     login = Login(
                         StaffPasswordAuthenticator(context.authorization, context.transactor, credentials, hasher),
                         context.sessions,
