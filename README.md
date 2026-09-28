@@ -269,6 +269,11 @@ granted automatically.
 
 To provision the first administrator, set `FIONAS_BOOTSTRAP_ADMIN_USERNAME`,
 `FIONAS_BOOTSTRAP_ADMIN_PASSWORD`, and `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` for one startup.
+With none of these required variables, bootstrap is disabled. All three must be present
+together; a partial set fails startup. The username and display name must not be blank
+after trimming, and the password must be nonblank and at least 12 characters. The password
+is not trimmed or changed. First and last names are optional. See [`.env.example`](.env.example)
+for local development values; the application does not load that file automatically.
 After both migration streams and permission validation, the app creates the runtime role,
 runtime user, Fiona credential, and role assignment in one transaction only when no user
 exists. Remove the bootstrap password from the environment after provisioning. Later
@@ -408,7 +413,9 @@ so changing an endpoint changes its documentation in the same place.
 
 - **`GET /docs`** is Swagger UI reading `/openapi.json`, with "Try it out" against the
   same origin. Its assets come from the Swagger UI WebJar inside the application jar,
-  never from a CDN.
+  never from a CDN. For `http://localhost:8080/docs`, set
+  `FIONAS_TRUSTED_ORIGINS=http://localhost:8080` to use login and unsafe
+  cookie-authenticated methods.
 - **`./gradlew generateOpenApi`** writes the same document, pretty-printed, to
   `build/openapi/fionas-commerce-openapi.json`, without a database, Docker, a server, or
   network access. `./gradlew build` runs it, and CI keeps the file as the
@@ -494,9 +501,9 @@ environment. Bootstrap staff credentials are supplied only through environment v
 | `MIGRATIONS_ON_STARTUP` | `migrate`: apply pending migrations, then serve. `validate`: only check that they are applied | `migrate` (Fiona's `application.conf`) |
 | `SESSIONS_LIFETIME_MINUTES` | Fixed runtime session lifetime | `720` |
 | `FIONAS_TRUSTED_ORIGINS` | Comma-separated exact browser origins for login and cookie-authenticated mutations | none; browser login is denied until configured |
-| `FIONAS_BOOTSTRAP_ADMIN_USERNAME` | First administrator's username | none |
-| `FIONAS_BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password; remove after provisioning | none |
-| `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` | First administrator's display name | none |
+| `FIONAS_BOOTSTRAP_ADMIN_USERNAME` | First administrator's username; required with password and display name | none |
+| `FIONAS_BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password, at least 12 characters; remove after provisioning | none |
+| `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` | First administrator's nonblank display name; required with username and password | none |
 | `FIONAS_BOOTSTRAP_ADMIN_FIRST_NAME`, `FIONAS_BOOTSTRAP_ADMIN_LAST_NAME` | Optional profile fields | none |
 | `LOG_LEVEL` | Level of the application's and runtime's own logs | `INFO` |
 
@@ -531,9 +538,10 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
 - If any migration fails, or validation finds the database behind, the process logs
   `event=startup_failed` and exits without serving.
 
-> **Development reset for commerce 0.0.10.** Fiona's unreleased `V2` was rewritten to
-> contain only password credentials. Existing disposable development databases and Docker
-> volumes must be reset before starting this version. Commerce 0.0.10 adds the runtime
+> **Development reset for the commerce 0.0.11 integration.** Fiona's unreleased `V2`
+> contains only password credentials. Disposable databases from before the authorization
+> directory integration must be reset before starting this version; databases already
+> reset for commerce 0.0.10 need no second reset. Commerce 0.0.10 introduced the runtime
 > authorization directory. Both migration streams run before bootstrap or route composition.
 >
 > **Upgrading from commerce 0.0.6.** commerce-runtime 0.0.8 only adds a runtime migration

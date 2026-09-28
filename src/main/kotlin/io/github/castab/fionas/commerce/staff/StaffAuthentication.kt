@@ -124,9 +124,23 @@ class BootstrapAdmin(
 ) {
     companion object {
         fun fromEnvironment(environment: Map<String, String> = System.getenv()): BootstrapAdmin? {
-            val username = environment["FIONAS_BOOTSTRAP_ADMIN_USERNAME"] ?: return null
-            val password = environment["FIONAS_BOOTSTRAP_ADMIN_PASSWORD"] ?: return null
-            val displayName = environment["FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME"] ?: return null
+            val required =
+                listOf(
+                    "FIONAS_BOOTSTRAP_ADMIN_USERNAME",
+                    "FIONAS_BOOTSTRAP_ADMIN_PASSWORD",
+                    "FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME",
+                )
+            val missing = required.filterNot(environment::containsKey)
+            if (missing.size == required.size) return null
+            require(missing.isEmpty()) { "Bootstrap configuration is incomplete; missing: ${missing.joinToString()}" }
+
+            val username = environment.getValue("FIONAS_BOOTSTRAP_ADMIN_USERNAME")
+            val password = environment.getValue("FIONAS_BOOTSTRAP_ADMIN_PASSWORD")
+            val displayName = environment.getValue("FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME")
+            require(username.trim().isNotEmpty()) { "FIONAS_BOOTSTRAP_ADMIN_USERNAME must not be blank" }
+            require(displayName.trim().isNotEmpty()) { "FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME must not be blank" }
+            require(password.isNotBlank()) { "FIONAS_BOOTSTRAP_ADMIN_PASSWORD must not be blank" }
+            require(password.length >= 12) { "FIONAS_BOOTSTRAP_ADMIN_PASSWORD must have at least 12 characters" }
             return BootstrapAdmin(
                 username,
                 displayName,

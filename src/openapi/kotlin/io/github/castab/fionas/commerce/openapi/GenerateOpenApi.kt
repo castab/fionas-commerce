@@ -88,7 +88,9 @@ private val renderingAuth = FionaAuthRoutes(notInvokedSessions, SessionCookie("_
  * The Offerings and authorization capabilities require a runtime context even to describe
  * their contract routes. A composed runtime needs a database, so this source set builds a
  * rendering-only context reflectively. The transactor opens no connection, and route
- * rendering invokes no repository or operation. This code never enters the deployable jar.
+ * rendering invokes no repository or operation. This provisional workaround exists only
+ * in the OpenAPI source set and never enters the deployable application. Commerce-runtime
+ * may eventually offer a first-class contract composition seam without persistence.
  */
 private fun renderingOnlyContext(): CommerceRuntimeContext {
     val configuration =

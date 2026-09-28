@@ -344,8 +344,8 @@ after runtime-owned migrations.
   database; correct it with a new migration. (One pre-release exception, before any
   deployment: the original `V20260926210000` migration was rewritten as `V1`, moving the
   tables from `public` to `fionas`, alongside commerce 0.0.6's own history reset.
-  The unreleased staff `V2` was also rewritten for commerce 0.0.10 because all development
-  data and volumes are intentionally reset.)
+  The unreleased staff `V2` was also rewritten for the commerce 0.0.11 integration
+  because all development data and volumes are intentionally reset.)
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
   structure, move code and data to it in a later release, remove the old one only after
   no running version uses it. Old and new instances overlap during rolling deploys.
@@ -425,7 +425,12 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
 - Passwords are Argon2id hashes encoded by `argon2-jvm`. Raw passwords enter only the
   login/bootstrap credential path and are never logged or persisted. Wrong username,
   wrong password, and disabled status receive the same `401` response.
-- The first administrator is provisioned only when explicit bootstrap environment
+- Bootstrap is disabled when none of `FIONAS_BOOTSTRAP_ADMIN_USERNAME`,
+  `FIONAS_BOOTSTRAP_ADMIN_PASSWORD`, and `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` is present.
+  All three enable bootstrap; a partial set fails startup. Username and display name must
+  be nonblank after trimming; the password is never trimmed and must be nonblank and at
+  least 12 characters. First and last names are optional.
+- The first administrator is provisioned only when complete bootstrap environment
   credentials are provided and no runtime users exist. Runtime role creation, runtime
   user creation, Fiona credential insertion, and role assignment share one transaction
   after both migration streams and permission validation. There is no default password;
@@ -615,7 +620,8 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   rendering-only context reflectively, with a transactor that opens no connection and a
   repository that refuses every call. The authorization admin capability
   also needs this context; the rendering-only authorization directory is assembled
-  reflectively. Upstream fix: expose documentation-only capability routes.
+  reflectively. This is provisional: commerce-runtime may eventually need a first-class
+  contract/OpenAPI composition seam that does not require runtime persistence infrastructure.
 - **`offeringsOpenApiRenderer` needs Jackson.** It builds schemas through http4k's
   reflective schema generator, which fails on `CommerceJson`
   (`Serializer for class 'JsonLiteral' is not found`), so Fiona renders the Offerings
