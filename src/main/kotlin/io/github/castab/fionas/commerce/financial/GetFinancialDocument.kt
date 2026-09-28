@@ -7,7 +7,8 @@ import java.util.UUID
 
 /**
  * Reads the latest snapshot of a Fiona lineage, its pricing source, and its current
- * settlement, in one consistent transaction. A lineage no inquiry owns is
+ * settlement, in one transaction holding the lineage lock, so all three describe one
+ * lineage state. A lineage no inquiry owns is
  * [CommerceFailure.NotFound], even when commerce-runtime's ledger holds it.
  */
 class GetFinancialDocument(
@@ -20,6 +21,6 @@ class GetFinancialDocument(
 
     operator fun invoke(documentId: UUID): InquiryFinancialDocument =
         transactor.inTransaction { transaction ->
-            documents.current(transaction, documents.inquiryOf(transaction, documentId), documentId)
+            documents.current(transaction, documentId)
         }
 }

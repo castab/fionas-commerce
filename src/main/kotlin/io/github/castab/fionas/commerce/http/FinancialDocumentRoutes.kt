@@ -709,7 +709,13 @@ fun recordPaymentRoute(
         returning(Status.CREATED, recordedPaymentResponse to exampleRecordedPayment, "The recorded payment and the settlement after it.")
         malformed("`documentId`")
         returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
-        staleVersion(" A provider and reference already recorded for another payment answer the same.")
+        returningError(
+            ErrorCategory.CONFLICT,
+            "one of two conflicts: `documentVersion` is no longer the document's latest version (reload the " +
+                "document before retrying against its current version); or the external provider and reference pair " +
+                "is already recorded for another payment (reloading does not resolve it).",
+            STALE_DOCUMENT,
+        )
         returningError(
             ErrorCategory.VALIDATION_FAILED,
             "a value is invalid: an amount that is not a positive exact decimal with at most the currency's minor-unit " +

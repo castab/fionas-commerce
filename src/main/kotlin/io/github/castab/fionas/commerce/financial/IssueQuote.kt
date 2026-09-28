@@ -32,6 +32,6 @@ class IssueQuote(
             val current = documents.expectLatest(transaction, documentId, expectedVersion)
             val quote = ledger.issueQuote(transaction, documentId)
             pricingSources.copy(transaction, current.document.reference, quote.reference)
-            documents.current(transaction, current.inquiryId, documentId)
+            documents.describeLocked(transaction, current.inquiryId, documentId)
         }
 }

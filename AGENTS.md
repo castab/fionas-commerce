@@ -601,6 +601,12 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    `documentVersion`); a lineage that has moved on is `Conflict`. Mutations lock the
    lineage's association row, and the runtime's `(document_id, previous_version)` uniqueness
    is the final guard.
+   `fionas.inquiry_financial_documents` is the serialization point for one Fiona-owned
+   financial lineage: mutations and multi-query financial reads (`FionaFinancialDocuments`
+   `current` and `history`) lock that row, so document, pricing-source, and
+   reconciliation or history reads stay coherent under PostgreSQL READ COMMITTED. Reads
+   remain read-only, and the current view reconciles the exact snapshot it returns. Never
+   raise the isolation level for this.
 8. **Payment policy for this slice:** a payment is recorded against the latest version, a
    quote or an invoice (never an estimate: `InvariantViolated`); the whole payment is
    allocated to that exact snapshot through `recordPaymentAgainstDocument`; its currency is
@@ -781,7 +787,9 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
   invisible until commit), `FinancialDocumentAtomicitySpec` (a Fiona failure after a ledger
   write rolls back the runtime's snapshot, payment, and allocation with Fiona's rows),
-  `FinancialDocumentRepositoriesSpec`, `RepricingSpec`, `FinancialDocumentRoutesSpec` (the
+  `FinancialDocumentRepositoriesSpec`, `RepricingSpec`, `FinancialDocumentReadConsistencySpec`
+  (a paused read holds the lineage lock, a concurrent writer waits, and the read returns one
+  coherent state), `FinancialDocumentRoutesSpec` (the
   whole inquiry → estimate → quote → deposit → invoice → change order → payment workflow
   through the complete handler, with its conflicts, transitions, payment policy, and
   permissions), HTTP tests through the complete handler, schema tests,

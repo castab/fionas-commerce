@@ -33,6 +33,6 @@ class IssueInvoice(
             val current = documents.expectLatest(transaction, documentId, expectedVersion)
             val invoice = ledger.issueInvoice(transaction, documentId)
             pricingSources.copy(transaction, current.document.reference, invoice.reference)
-            documents.current(transaction, current.inquiryId, documentId)
+            documents.describeLocked(transaction, current.inquiryId, documentId)
         }
 }

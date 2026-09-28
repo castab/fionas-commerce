@@ -64,6 +64,13 @@ data class RecordedPayment(
  * Fiona's view of commerce-runtime's financial ledger, inside the caller's transaction: a
  * lineage exists for Fiona only when an inquiry owns it, whatever else the ledger holds.
  *
+ * The lineage's `fionas.inquiry_financial_documents` row is the application-level
+ * serialization point for one financial lineage. Mutations lock it before they check and
+ * append ([expectLatest]); multi-query reads lock it too ([current], [history]), so the
+ * snapshot, its pricing source, and its settlement are read from one lineage state under
+ * PostgreSQL READ COMMITTED, where each statement may otherwise see a newer commit. The
+ * reads stay read-only: the lock changes nothing and is released when the transaction ends.
+ *
  * It reads through the ledger's `Transaction` overloads and never opens a transaction.
  */
 internal class FionaFinancialDocuments(
@@ -76,12 +83,6 @@ internal class FionaFinancialDocuments(
         val inquiryId: InquiryId,
         val document: FinancialDocument,
     )
-
-    /** The inquiry that owns [documentId]; [CommerceFailure.NotFound] for a lineage Fiona does not own. */
-    fun inquiryOf(
-        transaction: Transaction,
-        documentId: UUID,
-    ): InquiryId = associations.inquiryOf(transaction, documentId) ?: throw notFound(documentId)
 
     /**
      * The latest snapshot of [documentId], provided it is still [expected], the version the
@@ -97,7 +98,7 @@ internal class FionaFinancialDocuments(
         documentId: UUID,
         expected: Version,
     ): Current {
-        val inquiryId = associations.lockInquiryOf(transaction, documentId) ?: throw notFound(documentId)
+        val inquiryId = lock(transaction, documentId)
         val latest = ledger.latest(transaction, documentId)
         if (latest.version != expected) {
             throw CommerceFailure.Conflict(
@@ -107,22 +108,42 @@ internal class FionaFinancialDocuments(
         return Current(inquiryId, latest)
     }
 
-    /** The lineage's latest snapshot, its pricing source, and its current settlement. */
+    /**
+     * The lineage's latest snapshot, its pricing source, and its current settlement, read
+     * while holding the lineage lock. [CommerceFailure.NotFound] for a lineage no inquiry owns.
+     */
     fun current(
+        transaction: Transaction,
+        documentId: UUID,
+    ): InquiryFinancialDocument = describeLocked(transaction, lock(transaction, documentId), documentId)
+
+    /**
+     * [current] for a caller that already holds the lineage lock ([expectLatest]) or created
+     * the association in this transaction, so the row is not locked a second time.
+     *
+     * The settlement reconciles exactly the snapshot returned, never "whatever is latest" by
+     * a later statement.
+     */
+    fun describeLocked(
         transaction: Transaction,
         inquiryId: InquiryId,
         documentId: UUID,
     ): InquiryFinancialDocument {
         val latest = ledger.latest(transaction, documentId)
-        return InquiryFinancialDocument(inquiryId, priced(transaction, latest), ledger.reconcileLatest(transaction, documentId))
+        val pricing = checkNotNull(pricingSources.find(transaction, latest.reference)) { missingSource(latest) }
+        return InquiryFinancialDocument(inquiryId, PricedSnapshot(latest, pricing), ledger.reconcile(transaction, latest.reference))
     }
 
-    /** Every snapshot of the lineage, oldest first, with its pricing source. */
+    /**
+     * Every snapshot of the lineage, oldest first, with its pricing source, read while
+     * holding the lineage lock, so no version appended meanwhile is seen without its source.
+     * [CommerceFailure.NotFound] for a lineage no inquiry owns.
+     */
     fun history(
         transaction: Transaction,
-        inquiryId: InquiryId,
         documentId: UUID,
     ): InquiryFinancialDocumentHistory {
+        val inquiryId = lock(transaction, documentId)
         val sources = pricingSources.findAll(transaction, documentId)
         val versions =
             ledger.history(transaction, documentId).map { document ->
@@ -131,10 +152,11 @@ internal class FionaFinancialDocuments(
         return InquiryFinancialDocumentHistory(inquiryId, documentId, versions)
     }
 
-    private fun priced(
+    /** Locks the lineage's association row until the transaction ends; the inquiry that owns it. */
+    private fun lock(
         transaction: Transaction,
-        document: FinancialDocument,
-    ) = PricedSnapshot(document, checkNotNull(pricingSources.find(transaction, document.reference)) { missingSource(document) })
+        documentId: UUID,
+    ): InquiryId = associations.lockInquiryOf(transaction, documentId) ?: throw notFound(documentId)
 
     // Every Fiona snapshot is written with its pricing source in one transaction; a missing one is an internal failure.
     private fun missingSource(document: FinancialDocument) = "Financial document ${document.reference} has no pricing source"

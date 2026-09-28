@@ -522,6 +522,9 @@ orders) and `documentVersion` (payments) must be the latest version; otherwise t
 `409 conflict` and nothing is appended, so staff never act on a version they did not see.
 Fiona's mutations of one lineage run one at a time (they lock its association row), and
 commerce-runtime's unique `(document_id, previous_version)` rejects any competing successor.
+Reads of a document and of its history lock the same row, so the version, its pricing
+inputs, and its settlement (or every version and its pricing inputs) come from one lineage
+state under PostgreSQL READ COMMITTED; they change nothing.
 
 **Payments.** `POST /financial-documents/{documentId}/payments` means "we received this
 payment, and all of it is for this document":
@@ -794,6 +797,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; explicit old and new catalog revisions; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
 | `FinancialDocumentAtomicitySpec` | Fiona's first cross-boundary writes roll back together: an estimate, a quote, a change order, and a payment each fail after the ledger wrote, and neither the runtime's snapshot, payment, or allocation nor Fiona's association or pricing source remains |
 | `FinancialDocumentRepositoriesSpec` | The inquiry association and pricing-source repositories on PostgreSQL: several lineages per inquiry, one inquiry per lineage, ordered round trips with an empty category, copies to a successor, and foreign keys to the runtime's exact snapshots |
+| `FinancialDocumentReadConsistencySpec` | A document read and a history read, each paused between their queries, hold the lineage lock: a concurrent change order or quote waits, and the read returns one coherent version and settlement (or a complete history); reads change nothing |
 | `RepricingSpec` | Change-order derivation: remove every current line, add every repriced line in order; identical charges are no financial change |
 | `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
 | `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded (no financial document either), minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |

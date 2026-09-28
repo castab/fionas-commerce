@@ -7,7 +7,7 @@ import java.util.UUID
 
 /**
  * Reads every immutable snapshot of a Fiona lineage, oldest first, each with the pricing
- * inputs that produced it, in one consistent transaction. Historical snapshots are not
+ * inputs that produced it, in one transaction holding the lineage lock. Historical snapshots are not
  * reconciled: an allocation made to a later snapshot cannot be reconciled against an
  * earlier one. A lineage no inquiry owns is [CommerceFailure.NotFound].
  */
@@ -21,6 +21,6 @@ class GetFinancialDocumentHistory(
 
     operator fun invoke(documentId: UUID): InquiryFinancialDocumentHistory =
         transactor.inTransaction { transaction ->
-            documents.history(transaction, documents.inquiryOf(transaction, documentId), documentId)
+            documents.history(transaction, documentId)
         }
 }

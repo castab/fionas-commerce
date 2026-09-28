@@ -8,7 +8,8 @@ import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 
 /**
  * Reads the financial-document lineages an inquiry owns, oldest first, each at its latest
- * snapshot with its pricing source and current settlement, in one consistent transaction.
+ * snapshot with its pricing source and current settlement, each read under its own lineage
+ * lock in one transaction.
  * An unknown inquiry is [CommerceFailure.NotFound]; one without documents has none.
  */
 class ListInquiryFinancialDocuments(
@@ -23,6 +24,7 @@ class ListInquiryFinancialDocuments(
     operator fun invoke(inquiryId: InquiryId): List<InquiryFinancialDocument> =
         transactor.inTransaction { transaction ->
             inquiries.findById(transaction, inquiryId) ?: throw CommerceFailure.NotFound("Inquiry ${inquiryId.value} was not found")
-            associations.documentsOf(transaction, inquiryId).map { documents.current(transaction, inquiryId, it) }
+            // Each lineage is read under its own lock, one at a time.
+            associations.documentsOf(transaction, inquiryId).map { documents.current(transaction, it) }
         }
 }

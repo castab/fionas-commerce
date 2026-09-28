@@ -47,7 +47,7 @@ class CreateInquiryEstimate(
             val estimate = ledger.create(transaction, FinancialDocument.Estimate.create(newDocumentId(), lines))
             associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, now))
             pricingSources.insert(transaction, estimate.reference, inputs)
-            documents.current(transaction, inquiryId, estimate.id)
+            documents.describeLocked(transaction, inquiryId, estimate.id)
         }
     }
 }

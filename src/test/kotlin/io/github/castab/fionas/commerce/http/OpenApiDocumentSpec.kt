@@ -444,6 +444,14 @@ class OpenApiDocumentSpec :
             }
         }
 
+        test("documents both payment conflicts: a stale document version, and an external reference already recorded") {
+            val conflict = operation("/financial-documents/{documentId}/payments", "post").text("responses", "409", "description")
+            conflict shouldStartWith "`conflict`"
+            listOf("`documentVersion` is no longer the document's latest version", "already recorded for another payment").forEach {
+                conflict.contains(it) shouldBe true
+            }
+        }
+
         test("describes every financial-document path identifier as a required UUID path parameter") {
             operations.keys
                 .filter { (path) -> path.startsWith("/financial-documents") || path.startsWith("/inquiries/{inquiryId}/") }

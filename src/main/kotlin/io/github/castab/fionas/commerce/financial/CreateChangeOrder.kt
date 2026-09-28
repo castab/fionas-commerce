@@ -42,7 +42,7 @@ class CreateChangeOrder(
             val revised = pricing.price(transaction, inputs).lineItems
             val next = ledger.changeOrder(transaction, documentId, repricing(current.document.lineItems, revised))
             pricingSources.insert(transaction, next.reference, inputs)
-            documents.current(transaction, current.inquiryId, documentId)
+            documents.describeLocked(transaction, current.inquiryId, documentId)
         }
 }
 
