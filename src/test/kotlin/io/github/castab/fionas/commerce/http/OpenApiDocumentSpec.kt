@@ -54,10 +54,21 @@ class OpenApiDocumentSpec :
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "404", "500"),
                 Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "404", "422", "500"),
+                Triple("/auth/login", "post", "login") to listOf("204", "400", "401", "403", "500"),
+                Triple("/auth/logout", "post", "logout") to listOf("204", "403", "500"),
+                Triple("/auth/me", "get", "getCurrentUser") to listOf("200", "401", "403", "500"),
             )
 
         // Each Fiona operation's tag.
-        val tags = mapOf("createInquiry" to "Inquiries", "getInquiry" to "Inquiries", "previewEstimate" to "Estimates")
+        val tags =
+            mapOf(
+                "createInquiry" to "Inquiries",
+                "getInquiry" to "Inquiries",
+                "previewEstimate" to "Estimates",
+                "login" to "Authentication",
+                "logout" to "Authentication",
+                "getCurrentUser" to "Authentication",
+            )
 
         // commerce-runtime's Offerings operations, where Fiona binds them and as Fiona's prefix names them.
         val offeringOperations =
@@ -84,13 +95,16 @@ class OpenApiDocumentSpec :
                 "EstimatePreviewResponse",
                 "EstimatePreviewLine",
                 "ErrorResponse",
+                "LoginRequest",
+                "CurrentUserResponse",
             )
 
         test("is an OpenAPI 3.1 document of Fiona's Commerce API at the application's version") {
             document.text("openapi") shouldBe "3.1.0"
             document.text("info", "title") shouldBe "Fiona's Commerce API"
             document.text("info", "version") shouldBe fionaVersion()
-            document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder listOf("Inquiries", "Estimates")
+            document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder
+                listOf("Inquiries", "Estimates", "Authentication")
         }
 
         test("names no host, so every deployment serves the same document") {
@@ -286,7 +300,7 @@ class OpenApiDocumentSpec :
                         operation
                             .at("responses")
                             .jsonObject.values
-                            .map { it.at("content", "application/json") }
+                            .mapNotNull { it.jsonObject["content"]?.jsonObject?.get("application/json") }
                 contents.forEach { content ->
                     val required = schema(content.text("schema", "\$ref").substringAfterLast('/')).strings("required")
                     content

@@ -34,7 +34,7 @@ class MigrationLifecycleSpec :
 
         fun compose(
             database: TestDatabase,
-            application: ApplicationContributions = fionaApplication(testClock),
+            application: ApplicationContributions = fionaApplication(testClock, bootstrap = null),
             onStartup: OnStartup = OnStartup.MIGRATE,
         ): CommerceRuntime =
             commerceRuntime(
@@ -78,8 +78,10 @@ class MigrationLifecycleSpec :
                 compose(database).close()
 
                 // Both streams have a version 1; neither numbers its migrations after the other's.
-                database.history("public").map { it.substringBefore(' ') } shouldContainExactly listOf("1")
-                database.history("public").single() shouldContain "V1__customers_and_inquiries.sql"
+                database.history("public").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2")
+                database.history("public").first() shouldContain "V1__customers_and_inquiries.sql"
+                database.history("public").last() shouldContain "V2__staff_identities.sql"
+                database.count("fionas.users") shouldBe 0
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
                 database
                     .strings(

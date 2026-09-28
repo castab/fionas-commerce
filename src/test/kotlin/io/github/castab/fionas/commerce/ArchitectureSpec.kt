@@ -3,7 +3,6 @@ package io.github.castab.fionas.commerce
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
-import io.github.castab.commerce.runtime.offering.OfferingsHttpBinding
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
@@ -11,8 +10,11 @@ import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
-import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_BINDING
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
+import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
+import io.github.castab.fionas.commerce.staff.JdbiStaffRepository
+import io.github.castab.fionas.commerce.staff.StaffRepository
+import io.github.castab.fionas.commerce.testing.metadataAuth
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldBeUnique
@@ -68,7 +70,7 @@ class ArchitectureSpec :
             )
 
         test("every repository operation takes the caller's Transaction first") {
-            listOf(CustomerRepository::class.java, InquiryRepository::class.java).forEach { repository ->
+            listOf(CustomerRepository::class.java, InquiryRepository::class.java, StaffRepository::class.java).forEach { repository ->
                 repository.declaredMethods.forEach { method ->
                     method.parameterTypes.first() shouldBe Transaction::class.java
                 }
@@ -76,7 +78,11 @@ class ArchitectureSpec :
         }
 
         test("repository implementations hold no connection, JDBI, or transaction infrastructure") {
-            listOf(JdbiCustomerRepository::class.java, JdbiInquiryRepository::class.java).forEach { repository ->
+            listOf(
+                JdbiCustomerRepository::class.java,
+                JdbiInquiryRepository::class.java,
+                JdbiStaffRepository::class.java,
+            ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
                 repository.declaredConstructors.single().parameterCount shouldBe 0
             }
@@ -86,7 +92,12 @@ class ArchitectureSpec :
         test("only operations open runtime transactions, and nothing builds its own transaction infrastructure") {
             sources()
                 .containing(listOf("inTransaction"))
-                .shouldContainExactlyInAnyOrder("inquiry/CreateInquiry.kt: inTransaction", "inquiry/GetInquiry.kt: inTransaction")
+                .shouldContainExactlyInAnyOrder(
+                    "inquiry/CreateInquiry.kt: inTransaction",
+                    "inquiry/GetInquiry.kt: inTransaction",
+                    "staff/StaffAuthentication.kt: inTransaction",
+                    "staff/FionaAuthorization.kt: inTransaction",
+                )
             sources().containing(transactionInfrastructure - "inTransaction" - "Handle").shouldBeEmpty()
         }
 
@@ -130,7 +141,10 @@ class ArchitectureSpec :
                         createInquiry = { error("not called") },
                         getInquiry = { error("not called") },
                         previewEstimate = { error("not called") },
+                        login = { _, _ -> error("not called") },
+                        currentUser = { error("not called") },
                     ),
+                    metadataAuth,
                 )
 
             routes.map { it.meta.operationId.shouldNotBeNull() }.shouldBeUnique()
@@ -169,8 +183,11 @@ class ArchitectureSpec :
         test("Fiona's catalog is commerce-runtime's Offerings capability, bound once to Fiona's stable catalog id") {
             // The id is data: every revision of Fiona's catalog is recorded under it. Never change it.
             FIONA_OFFERINGS_CATALOG_ID shouldBe OfferingsCatalogId(UUID.fromString("0cde8e0b-aa9c-4129-9853-8db2cbbb909b"))
-            FIONA_OFFERINGS_BINDING shouldBe
-                OfferingsHttpBinding(FIONA_OFFERINGS_CATALOG_ID, "/offering-catalog", "fionasOfferings", OfferingsHttpAccess.READ_WRITE)
+            val binding = fionaOfferingsBinding(metadataAuth.access)
+            binding.catalogId shouldBe FIONA_OFFERINGS_CATALOG_ID
+            binding.basePath shouldBe "/offering-catalog"
+            binding.operationIdPrefix shouldBe "fionasOfferings"
+            (binding.access is OfferingsHttpAccess.ReadWrite) shouldBe true
             sources().containing(listOf("offeringsHttpCapability(")) shouldContainExactly
                 listOf("FionaApplication.kt: offeringsHttpCapability(")
         }
@@ -272,6 +289,14 @@ class ArchitectureSpec :
         test("Jackson renders only the Offerings schemas; kotlinx.serialization stays the wire format") {
             sources().containing(listOf("org.http4k.format.Jackson", "com.fasterxml")) shouldContainExactlyInAnyOrder
                 listOf("http/OpenApi.kt: org.http4k.format.Jackson", "http/OpenApi.kt: com.fasterxml")
+        }
+
+        test("runtime is the sole session authority and Fiona persists no sessions") {
+            sources { it.name.contains("Session") }.shouldBeEmpty()
+            File("src/main/resources/db/fionas").listFiles().orEmpty().forEach { migration ->
+                Regex("(?i)CREATE\\s+TABLE\\s+[^;]*session").containsMatchIn(migration.readText()) shouldBe false
+            }
+            File(mainSources, "FionaApplication.kt").readText().contains("context.sessions") shouldBe true
         }
 
         test("Fiona ships no runtime migrations and its migrations never touch the commerce schema") {

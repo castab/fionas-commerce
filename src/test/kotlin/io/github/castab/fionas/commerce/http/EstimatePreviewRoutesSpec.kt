@@ -31,7 +31,11 @@ class EstimatePreviewRoutesSpec :
         fun post(
             path: String,
             body: String,
-        ) = application.http(Request(Method.POST, path).header("Content-Type", "application/json").body(body))
+        ) = if (path.startsWith("/offering-catalog")) {
+            application.adminPost(path, body)
+        } else {
+            application.http(Request(Method.POST, path).header("Content-Type", "application/json").body(body))
+        }
 
         fun Response.catalogRevision() = CommerceJson.asA(bodyString(), OfferingResultDto.serializer()).revision
 

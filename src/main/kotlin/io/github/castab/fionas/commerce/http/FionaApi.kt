@@ -1,16 +1,24 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
+import io.github.castab.commerce.runtime.session.IssuedSession
+import io.github.castab.commerce.runtime.session.SessionCookie
+import io.github.castab.commerce.runtime.session.SessionManager
+import io.github.castab.commerce.staff.User
+import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.offering.EstimatePreview
 import io.github.castab.fionas.commerce.offering.PreviewEstimate
+import io.github.castab.fionas.commerce.staff.SecretPassword
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
 import org.http4k.contract.Root
 import org.http4k.contract.contract
 import org.http4k.contract.ui.swagger.swaggerUiWebjar
+import org.http4k.core.Filter
 import org.http4k.core.Method
 import org.http4k.core.Response
 import org.http4k.core.Status
@@ -32,17 +40,32 @@ class FionaOperations(
     val createInquiry: (CreateInquiry.Command) -> InquiryDetails,
     val getInquiry: (InquiryId) -> InquiryDetails,
     val previewEstimate: (PreviewEstimate.Command) -> EstimatePreview,
+    val login: (String, SecretPassword) -> IssuedSession?,
+    val currentUser: (UserId) -> User?,
+)
+
+class FionaAuthRoutes(
+    val sessions: SessionManager,
+    val cookie: SessionCookie,
+    val access: AccessControl,
+    val origin: Filter,
 )
 
 /**
  * Every externally supported Fiona endpoint. Each is a [ContractRoute] carrying its own
  * OpenAPI description, so the running API and its document cannot drift apart.
  */
-fun fionaApiRoutes(operations: FionaOperations): List<ContractRoute> =
+fun fionaApiRoutes(
+    operations: FionaOperations,
+    auth: FionaAuthRoutes,
+): List<ContractRoute> =
     listOf(
         createInquiryRoute(operations.createInquiry),
         getInquiryRoute(operations.getInquiry),
         previewEstimateRoute(operations.previewEstimate),
+        loginRoute(operations.login, auth.cookie, auth.access, auth.origin),
+        logoutRoute(auth.sessions, auth.cookie, auth.access),
+        currentUserRoute(operations.currentUser, auth.access),
     )
 
 /**
@@ -59,8 +82,9 @@ fun fionaApi(
     operations: FionaOperations,
     offerings: OfferingsHttpCapability,
     version: String,
+    auth: FionaAuthRoutes,
 ): RoutingHttpHandler {
-    val apiRoutes = fionaApiRoutes(operations) + offerings.contractRoutes
+    val apiRoutes = fionaApiRoutes(operations, auth) + offerings.contractRoutes
     return routes(
         undeclaredMethods(apiRoutes),
         contract {

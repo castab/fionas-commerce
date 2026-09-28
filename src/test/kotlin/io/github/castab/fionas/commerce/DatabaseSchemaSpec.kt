@@ -38,7 +38,8 @@ class DatabaseSchemaSpec :
             )
 
         test("Fiona's tables live in the fionas schema, which Fiona owns") {
-            application.database.tables("fionas") shouldContainExactlyInAnyOrder listOf("customers", "inquiries")
+            application.database.tables("fionas") shouldContainExactlyInAnyOrder
+                listOf("customers", "inquiries", "users", "user_credentials", "principal_role_assignments", "service_identities")
         }
 
         test("the commerce schema holds exactly what commerce-runtime creates on its own, nothing of Fiona's") {
@@ -81,7 +82,7 @@ class DatabaseSchemaSpec :
                 FROM information_schema.table_constraints tc
                 JOIN information_schema.key_column_usage kcu
                   ON kcu.constraint_schema = tc.constraint_schema AND kcu.constraint_name = tc.constraint_name
-                WHERE tc.table_schema = 'fionas'
+                WHERE tc.table_schema = 'fionas' AND tc.table_name IN ('customers', 'inquiries')
                 ORDER BY 1
                 """.trimIndent(),
             ) shouldContainExactly

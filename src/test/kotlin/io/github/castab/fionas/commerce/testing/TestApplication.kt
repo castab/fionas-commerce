@@ -7,8 +7,15 @@ import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.fionas.commerce.fionaApplication
+import io.github.castab.fionas.commerce.staff.BootstrapAdmin
+import io.github.castab.fionas.commerce.staff.SecretPassword
 import org.http4k.core.HttpHandler
+import org.http4k.core.Method
+import org.http4k.core.Request
+import org.http4k.core.Response
+import org.http4k.core.Status
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -31,9 +38,34 @@ class TestApplication private constructor(
     val database: TestDatabase,
     val runtime: CommerceRuntime,
     val transactor: Transactor,
+    val sessions: SessionManager,
 ) : AutoCloseable {
     /** The complete HTTP handler, including the runtime's error handling, without a server. */
     val http: HttpHandler get() = runtime.http
+
+    val adminCookie: String by lazy {
+        val response =
+            http(
+                Request(Method.POST, "/auth/login")
+                    .header("Origin", TEST_ORIGIN)
+                    .header("Content-Type", "application/json")
+                    .body("""{"username":"admin","password":"test-admin-password"}"""),
+            )
+        check(response.status == Status.NO_CONTENT) { "Test admin login failed: ${response.status} ${response.bodyString()}" }
+        checkNotNull(response.header("Set-Cookie")).substringBefore(';')
+    }
+
+    fun adminPost(
+        path: String,
+        body: String = "",
+    ): Response =
+        http(
+            Request(Method.POST, path)
+                .header("Origin", TEST_ORIGIN)
+                .header("Cookie", adminCookie)
+                .header("Content-Type", "application/json")
+                .body(body),
+        )
 
     override fun close() {
         runtime.close()
@@ -44,7 +76,12 @@ class TestApplication private constructor(
         fun create(clock: Clock = testClock): TestApplication {
             val database = TestDatabase.create()
             try {
-                val fiona = fionaApplication(clock)
+                val fiona =
+                    fionaApplication(
+                        clock,
+                        BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
+                        setOf(TEST_ORIGIN),
+                    )
                 var context: CommerceRuntimeContext? = null
                 val runtime =
                     commerceRuntime(
@@ -63,7 +100,7 @@ class TestApplication private constructor(
                                 },
                             ),
                     )
-                return TestApplication(database, runtime, checkNotNull(context).transactor)
+                return TestApplication(database, runtime, checkNotNull(context).transactor, checkNotNull(context).sessions)
             } catch (e: Exception) {
                 database.close()
                 throw e
@@ -71,3 +108,5 @@ class TestApplication private constructor(
         }
     }
 }
+
+const val TEST_ORIGIN = "https://fionas.test"

@@ -43,7 +43,7 @@ class OfferingsCatalogSpec :
         fun post(
             path: String,
             body: String = "",
-        ) = application.http(Request(Method.POST, path).header("Content-Type", "application/json").body(body))
+        ) = application.adminPost(path, body)
 
         fun <T : Any> Response.body(serializer: KSerializer<T>): T = CommerceJson.asA(bodyString(), serializer)
 

@@ -66,12 +66,16 @@ dependencies {
     // The facade commerce-runtime logs through, for the application's own lifecycle logs.
     implementation(libs.kotlin.logging.jvm)
 
+    // Fiona-owned human credentials. Argon2id hashes are encoded by the maintained JVM binding.
+    implementation(libs.argon2.jvm)
+
     // The application's SLF4J provider, configured by src/main/resources/logback.xml.
     // commerce-runtime deliberately selects none.
     runtimeOnly(libs.logback.classic)
 
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
+    testImplementation(libs.logback.classic)
 }
 
 application {

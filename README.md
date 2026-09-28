@@ -2,15 +2,15 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.8/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.8/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.9/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.9/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
 > submits an inquiry, and it can be read back), serves Fiona's Offerings catalog through
 > commerce-runtime's reusable Offerings capability, and prices selections from it with
 > Fiona's own pricing (`POST /estimate-preview`, which records nothing). There are no stored
-> estimates, quotes, bookings, invoices, payments, or authentication yet.
+> estimates, quotes, bookings, invoices, or payments yet. Staff authentication protects catalog administration.
 
 ## How it fits together
 
@@ -29,8 +29,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.8`, which brings
-`commerce-domain:0.0.8` with it. It contributes its migrations and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.9`, which brings
+`commerce-domain:0.0.9` with it. It contributes its migrations and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -101,6 +101,14 @@ capability (see [Offerings catalog](#offerings-catalog)):
 |---|---|
 | `POST /estimate-preview` | Prices a selection from an exact catalog revision for a guest count and service duration. `200` with the lines and totals; records nothing. |
 
+**Staff authentication API**, implemented by Fiona (see [Staff authentication](#staff-authentication)):
+
+| Endpoint | Behavior |
+|---|---|
+| `POST /auth/login` | Verifies a staff password and sets Fiona's secure session cookie. Requires a trusted browser origin. |
+| `POST /auth/logout` | Revokes the runtime session and clears the cookie, including on repeated logout. |
+| `GET /auth/me` | Returns the active human staff profile and current role keys. |
+
 **Runtime infrastructure**, served by commerce-runtime and not in the OpenAPI document:
 
 | Endpoint | Behavior |
@@ -153,8 +161,8 @@ Offerings catalog. The split is deliberate:
   `FIONA_OFFERINGS_CATALOG_ID`, `0cde8e0b-aa9c-4129-9853-8db2cbbb909b`, a constant in
   [`offering/FionaOfferings.kt`](src/main/kotlin/io/github/castab/fionas/commerce/offering/FionaOfferings.kt).
   It is never generated, configured, or stored in a Fiona table; every environment has its
-  own database, so each uses this same id. `FIONA_OFFERINGS_BINDING` mounts the catalog at
-  `/offering-catalog` with the operationId prefix `fionasOfferings` and `READ_WRITE` access.
+  own database, so each uses this same id. `fionaOfferingsBinding(accessControl)` mounts the catalog at
+  `/offering-catalog` with the operationId prefix `fionasOfferings` and `ReadWrite(accessControl)` access.
 - **commerce-runtime implements the catalog machinery**: the operations, the contract routes
   and their DTOs and schemas, validation, and the append-only snapshot tables in its
   `commerce` schema. Fiona has no Offerings tables, repositories, DTOs, or SQL of its own.
@@ -222,9 +230,54 @@ offering by name.
 Production catalog contents are administrative data, entered through the API (for example
 from Swagger UI at `/docs`) after deployment. Neither startup nor a migration seeds them.
 
-> **The catalog's write routes are not protected.** `READ_WRITE` only decides that the three
-> `POST` routes exist; the API has no authentication or authorization yet. Expose
-> `/offering-catalog` writes only inside the deployment's trusted boundary until it does.
+The three catalog `POST` routes require an active staff session with
+`commerce.offerings.manage`. The runtime enforces this through Fiona's `AccessControl`;
+catalog reads remain public.
+
+## Staff authentication
+
+Fiona authenticates staff credentials. `commerce-runtime` owns the authenticated session,
+its opaque token, digest, expiry, and revocation. `commerce-domain` evaluates roles and
+permissions; Fiona supplies the current principal and role definitions. A session holds
+only identity, so removing a role or disabling a user changes authorization on the next
+request.
+
+```text
+POST /auth/login → PasswordAuthenticator → UserId → context.sessions.create(...)
+                 → __Host-fionas_session cookie
+next request     → sessionAuthentication(...) → authenticatedPrincipal
+                 → AccessControl → PermissionResolver → handler
+```
+
+`POST /auth/login` accepts `{"username":"...","password":"..."}` and answers `204`
+with a `Secure`, `HttpOnly`, host-only, `Path=/`, `SameSite=Lax` cookie. Invalid credentials
+or a disabled user receive the same `401` response. `GET /auth/me` returns the active
+human staff profile and role keys without secrets. `POST /auth/logout` revokes the runtime
+session and clears the cookie; repeating it is safe. No raw session token is sent in JSON.
+
+Usernames are trimmed and lowercased with `Locale.ROOT`; the database enforces unique
+normalized names. `fionas.users` holds the profile, `fionas.user_credentials` holds only
+the encoded Argon2id password hash and change time, and
+`fionas.principal_role_assignments` holds role keys for `PrincipalId` kind and id. Fiona's
+administrator role explicitly grants `CommercePermissions.OfferingsManage`; it does not
+automatically grant future permissions.
+
+To provision the first administrator, set `FIONAS_BOOTSTRAP_ADMIN_USERNAME`,
+`FIONAS_BOOTSTRAP_ADMIN_PASSWORD`, and `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` for one startup.
+The app creates the first active administrator in a shared transaction only when no staff
+user exists. Remove the bootstrap password from the environment after provisioning. Later
+startups need no bootstrap variables and never overwrite a staff user.
+
+Set `FIONAS_TRUSTED_ORIGINS` to the exact frontend origin (or a comma-separated list),
+for example `https://shop.example.com`. Login and every unsafe request carrying Fiona's
+session cookie require a matching `Origin`; a missing or different origin receives `403`.
+When no origin is configured, browser login fails closed. Public inquiry and estimate
+preview requests remain public. `/health`, `/ready`, and Offerings reads remain public;
+Offerings writes require `commerce.offerings.manage`.
+
+Future service credentials will be authenticated by a separate Fiona-specific mechanism
+to a `ServiceId`, then use this same `AccessControl` and `PermissionResolver` path. This
+change does not add service credentials or service login endpoints.
 
 ## Estimate preview
 
@@ -354,8 +407,9 @@ so changing an endpoint changes its documentation in the same place.
 The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
 `-Pversion=<version>`). It declares no server host, so it is the same in every
-environment. The stable `operationId`s are `createInquiry`, `getInquiry`, and
-`previewEstimate`, and for the catalog `fionasOfferingsGetCatalog`, `fionasOfferingsCreateCatalog`,
+environment. The stable `operationId`s are `createInquiry`, `getInquiry`,
+`previewEstimate`, `login`, `logout`, and `getCurrentUser`, and for the catalog
+`fionasOfferingsGetCatalog`, `fionasOfferingsCreateCatalog`,
 `fionasOfferingsGetCatalogRevision`, `fionasOfferingsListCategories`,
 `fionasOfferingsAddCategory`, `fionasOfferingsGetCategory`,
 `fionasOfferingsListCategoryOfferings`, `fionasOfferingsListOfferings`,
@@ -373,7 +427,7 @@ Fiona's own schemas are derived from the kotlinx.serialization descriptors of th
 DTOs, the wire format itself, so `required` matches what the server reads and writes: strings,
 `int32` integers, booleans, arrays, and nested objects, each its own component. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers; and, as commerce-runtime 0.0.8 renders
+contract metadata cannot declare response headers; and, as commerce-runtime 0.0.9 renders
 them, the catalog's operations carry no tag (Swagger UI lists them under an unnamed group)
 and their schemas contain `"format": null`. Every Fiona endpoint must be part of the
 contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
@@ -413,7 +467,7 @@ repository read access.
 
 The application's configuration is [`src/main/resources/application.conf`](src/main/resources/application.conf),
 loaded by commerce-runtime's `CommerceRuntimeConfiguration.load()` and overridden by the
-environment. Credentials come only from the environment.
+environment. Bootstrap staff credentials are supplied only through environment variables.
 
 | Environment variable | Meaning | Default |
 |---|---|---|
@@ -426,6 +480,12 @@ environment. Credentials come only from the environment.
 | `DATABASE_CONNECTION_TIMEOUT_MS` | Connection timeout | `500` |
 | `DATABASE_VALIDATION_TIMEOUT_MS` | Validation timeout | `1000` |
 | `MIGRATIONS_ON_STARTUP` | `migrate`: apply pending migrations, then serve. `validate`: only check that they are applied | `migrate` (Fiona's `application.conf`) |
+| `SESSIONS_LIFETIME_MINUTES` | Fixed runtime session lifetime | `720` |
+| `FIONAS_TRUSTED_ORIGINS` | Comma-separated exact browser origins for login and cookie-authenticated mutations | none; browser login is denied until configured |
+| `FIONAS_BOOTSTRAP_ADMIN_USERNAME` | First administrator's username | none |
+| `FIONAS_BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password; remove after provisioning | none |
+| `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` | First administrator's display name | none |
+| `FIONAS_BOOTSTRAP_ADMIN_FIRST_NAME`, `FIONAS_BOOTSTRAP_ADMIN_LAST_NAME` | Optional profile fields | none |
 | `LOG_LEVEL` | Level of the application's and runtime's own logs | `INFO` |
 
 Logging is Logback ([`logback.xml`](src/main/resources/logback.xml)): `key=value` lines
@@ -445,7 +505,8 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
   `commerce-runtime` jar; Fiona never lists or copies them.
 - The two streams have independent version spaces: Fiona's migrations are `V1`, `V2`, …
   regardless of the runtime's numbering.
-- Fiona's tables are in the `fionas` schema: `customers` and `inquiries`
+- Fiona's tables are in the `fionas` schema: `customers`, `inquiries`, `users`,
+  `user_credentials`, `principal_role_assignments`, and `service_identities`
   (`inquiries.customer_id → customers.id`, `customers.email` unique). Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog. The catalog needs no Fiona
@@ -458,6 +519,10 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
 - If any migration fails, or validation finds the database behind, the process logs
   `event=startup_failed` and exits without serving.
 
+> **Upgrading from commerce 0.0.8.** commerce-runtime 0.0.9 adds its principal session table;
+> Fiona's `V2` adds staff identity, credential, and role assignment tables. Both migration
+> streams run on startup before routes are composed.
+>
 > **Upgrading from commerce 0.0.6.** commerce-runtime 0.0.8 only adds a runtime migration
 > (the Offerings tables), so a database created with 0.0.6 migrates forward on startup.
 >
