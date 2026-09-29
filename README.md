@@ -817,6 +817,23 @@ On Windows use `.\gradlew.bat` and set the variables with `$env:NAME = "value"`.
 The process runs until it receives SIGTERM or SIGINT; its shutdown hook stops the server
 and closes the connection pool.
 
+### Seed a fresh local catalog and preview an estimate
+
+With Fiona running against a fresh, disposable local database, bootstrap the `admin` user
+and set `FIONAS_TRUSTED_ORIGINS=http://localhost:8080` for the application. Use Node.js 20
+or newer to enter the acceptance catalog through Fiona's API and preview its canonical
+`$681.25` estimate:
+
+```bash
+FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/setup-local-commerce.mjs
+```
+
+The script also accepts `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
+`FIONAS_ADMIN_USERNAME`; each defaults to the local port 8080 setup and username `admin`.
+It does not load `.env` files or install npm packages. The catalog is append-only, so the
+script stops if one already exists. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
+for the exact catalog entries and preview request.
+
 ### Packaging
 
 `./gradlew shadowJar` produces `build/libs/fionas-commerce-all.jar`: one executable jar

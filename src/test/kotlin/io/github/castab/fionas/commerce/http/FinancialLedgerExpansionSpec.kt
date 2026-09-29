@@ -3,11 +3,21 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.fionas.commerce.financial.AllocatePayment
+import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.testClock
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
@@ -18,7 +28,10 @@ import java.math.BigDecimal
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Fiona's first-snapshot creation, unapplied payments, and partial allocations through the complete handler. */
 class FinancialLedgerExpansionSpec :
@@ -212,28 +225,100 @@ class FinancialLedgerExpansionSpec :
             rows("commerce.payment_allocations", "payment_id", euroPayment.paymentId) shouldBe 0
         }
 
-        test("competing allocations of one payment cannot together exceed its amount") {
+        test("competing allocations wait on the runtime payment lock and cannot exceed the receipt") {
             val firstDocument = create("QUOTE").document()
             val secondDocument = create("QUOTE").document()
             val payment = record().payment()
-            val ready = CountDownLatch(2)
-            val go = CountDownLatch(1)
-
-            fun race(documentId: String) =
-                CompletableFuture.supplyAsync {
-                    ready.countDown()
-                    check(go.await(30, TimeUnit.SECONDS))
-                    allocate(payment.paymentId, documentId, 1, "300.00")
+            val associations = JdbiInquiryFinancialDocumentRepository()
+            val sources = JdbiFinancialDocumentPricingRepository()
+            val firstBackendPid = AtomicInteger()
+            val secondBackendPid = AtomicInteger()
+            val firstInserted = CountDownLatch(1)
+            val releaseFirst = CountDownLatch(1)
+            val secondLineageLocked = CountDownLatch(1)
+            val firstSources =
+                object : FinancialDocumentPricingRepository by sources {
+                    override fun find(
+                        transaction: Transaction,
+                        snapshot: FinancialDocumentReference,
+                    ): FionasPricingInputs? {
+                        // describeLocked runs after ledger.allocatePayment inserted the allocation,
+                        // while this transaction still holds the payment row lock.
+                        firstBackendPid.set(backendPid(transaction))
+                        firstInserted.countDown()
+                        check(releaseFirst.await(30, TimeUnit.SECONDS))
+                        return sources.find(transaction, snapshot)
+                    }
                 }
-            val first = race(firstDocument.id)
-            val second = race(secondDocument.id)
+            val secondAssociations =
+                object : InquiryFinancialDocumentRepository by associations {
+                    override fun lockInquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? {
+                        val inquiryId = associations.lockInquiryOf(transaction, documentId)
+                        secondBackendPid.set(backendPid(transaction))
+                        secondLineageLocked.countDown()
+                        return inquiryId
+                    }
+                }
+            val firstAllocation =
+                AllocatePayment(application.transactor, application.context.financialLedger, associations, firstSources, testClock)
+            val secondAllocation =
+                AllocatePayment(application.transactor, application.context.financialLedger, secondAssociations, sources, testClock)
+            val executor = Executors.newFixedThreadPool(2)
+            val first =
+                CompletableFuture.supplyAsync(
+                    {
+                        firstAllocation(
+                            AllocatePayment.Command(
+                                UUID.fromString(payment.paymentId),
+                                UUID.fromString(firstDocument.id),
+                                Version.INITIAL,
+                                BigDecimal("300.00"),
+                            ),
+                        )
+                    },
+                    executor,
+                )
             try {
-                ready.await(30, TimeUnit.SECONDS) shouldBe true
+                firstInserted.await(30, TimeUnit.SECONDS) shouldBe true
+                // The other document has a different association row, so its Fiona lock succeeds.
+                val second =
+                    CompletableFuture.supplyAsync(
+                        {
+                            secondAllocation(
+                                AllocatePayment.Command(
+                                    UUID.fromString(payment.paymentId),
+                                    UUID.fromString(secondDocument.id),
+                                    Version.INITIAL,
+                                    BigDecimal("300.00"),
+                                ),
+                            )
+                        },
+                        executor,
+                    )
+                secondLineageLocked.await(30, TimeUnit.SECONDS) shouldBe true
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+                var blockedByFirst = false
+                while (System.nanoTime() < deadline && !blockedByFirst) {
+                    blockedByFirst =
+                        firstBackendPid.get().toString() in
+                        application.database.strings("SELECT unnest(pg_blocking_pids(${secondBackendPid.get()}))::text")
+                    if (!blockedByFirst) Thread.sleep(10) // Poll only PostgreSQL's observed lock state.
+                }
+                blockedByFirst shouldBe true
+                second.isDone shouldBe false
+                releaseFirst.countDown()
+                first
+                    .get(30, TimeUnit.SECONDS)
+                    .allocation.amount.amount shouldBe BigDecimal("300.00")
+                val failure = shouldThrow<ExecutionException> { second.get(30, TimeUnit.SECONDS) }
+                (failure.cause is CommerceFailure.InvariantViolated) shouldBe true
             } finally {
-                go.countDown()
+                releaseFirst.countDown()
+                executor.shutdownNow()
             }
-            setOf(first.get(30, TimeUnit.SECONDS).status, second.get(30, TimeUnit.SECONDS).status) shouldBe
-                setOf(Status.CREATED, Status.UNPROCESSABLE_ENTITY)
             rows("commerce.payment_allocations", "payment_id", payment.paymentId) shouldBe 1
             application.database
                 .strings(
@@ -242,3 +327,9 @@ class FinancialLedgerExpansionSpec :
                 .toBigDecimal() shouldBe BigDecimal("300.00")
         }
     })
+
+private fun backendPid(transaction: Transaction): Int =
+    transaction.handle
+        .createQuery("SELECT pg_backend_pid()")
+        .mapTo(Int::class.javaObjectType)
+        .one()
