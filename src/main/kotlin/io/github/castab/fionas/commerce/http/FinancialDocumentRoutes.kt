@@ -455,6 +455,7 @@ private val recordedPaymentResponse = jsonBody(RecordedPaymentResponse.serialize
 private val paymentRecordResponse = jsonBody(PaymentRecordResponse.serializer())
 private val paymentAllocationResponse = jsonBody(PaymentAllocationResponse.serializer())
 private val recordedRefundResponse = jsonBody(RecordedRefundResponse.serializer())
+private val paymentAllocationIdBodyMeta = recordRefundRequest.metas.single().copy(name = "paymentAllocationId")
 
 // Plain strings for the contract: a contract treats a path value its lens rejects as an
 // unmatched route (404), while an id that is not a UUID is a malformed request (400).
@@ -464,8 +465,6 @@ private val inquiryIdPath =
     Path.of("inquiryId", "The inquiry's id.", mapOf("schema" to mapOf("format" to "uuid")))
 private val paymentIdPath =
     Path.of("paymentId", "The received payment's id.", mapOf("schema" to mapOf("format" to "uuid")))
-private val paymentAllocationIdValue =
-    Path.of("paymentAllocationId", "The payment allocation's id.", mapOf("schema" to mapOf("format" to "uuid")))
 
 private val financialDocuments =
     Tag(
@@ -1182,7 +1181,7 @@ fun recordRefundRoute(
                         allocations =
                             body.allocations.map {
                                 RecordRefund.AllocationCommand(
-                                    uuidIn(it.paymentAllocationId, paymentAllocationIdValue),
+                                    refundAllocationId(it.paymentAllocationId),
                                     refundAmount(it.amount),
                                 )
                             },
@@ -1239,6 +1238,14 @@ private fun uuidIn(
         UUID.fromString(segment)
     } catch (e: IllegalArgumentException) {
         throw LensFailure(Invalid(path.meta), cause = e)
+    }
+
+/** The allocation id is a field of the refund body, so its lens failure carries body metadata. */
+private fun refundAllocationId(value: String): UUID =
+    try {
+        UUID.fromString(value)
+    } catch (e: IllegalArgumentException) {
+        throw LensFailure(Invalid(paymentAllocationIdBodyMeta), cause = e)
     }
 
 private fun InquiryFinancialDocument.toResponse() = latest.toResponse(inquiryId, reconciliation)

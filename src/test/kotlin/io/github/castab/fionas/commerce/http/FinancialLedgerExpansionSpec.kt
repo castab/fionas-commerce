@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.CommercePermissions
@@ -319,9 +320,20 @@ class FinancialLedgerExpansionSpec :
             val other = record("100.00").payment()
             val otherAllocation = allocate(other.paymentId, invoice.id, 1, "100.00").allocation()
             refund(UUID.randomUUID().toString(), "10.00").status shouldBe Status.NOT_FOUND
-            refund("not-a-uuid", "10.00").status shouldBe Status.BAD_REQUEST
-            refund(payment.paymentId, "10.00", """[{"paymentAllocationId":"not-a-uuid","amount":"10.00"}]""")
-                .status shouldBe Status.BAD_REQUEST
+            refund("not-a-uuid", "10.00").let {
+                it.status shouldBe Status.BAD_REQUEST
+                CommerceJson.asA(it.bodyString(), ErrorResponse.serializer()).let { error ->
+                    error.code shouldBe "malformed_request"
+                    error.message shouldBe "Malformed request: path 'paymentId'"
+                }
+            }
+            refund(payment.paymentId, "10.00", """[{"paymentAllocationId":"not-a-uuid","amount":"10.00"}]""").let {
+                it.status shouldBe Status.BAD_REQUEST
+                CommerceJson.asA(it.bodyString(), ErrorResponse.serializer()).let { error ->
+                    error.code shouldBe "malformed_request"
+                    error.message shouldBe "Malformed request: body 'paymentAllocationId'"
+                }
+            }
             application.adminPost("/payments/${payment.paymentId}/refunds", """{"amount":10.00}""").status shouldBe Status.BAD_REQUEST
             refund(payment.paymentId, "10.00", """[{"paymentAllocationId":"${UUID.randomUUID()}","amount":"10.00"}]""")
                 .status shouldBe Status.NOT_FOUND

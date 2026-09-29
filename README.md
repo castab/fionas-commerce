@@ -295,8 +295,11 @@ FinancialDocumentCreate, PaymentRecord, RefundRecord, PrincipalRead, PrincipalMa
 RoleAssign, and CredentialsManage. Future permissions are not granted automatically, and
 the grants are fixed when bootstrap creates the role: startup never changes an existing
 Administrator role. An installation upgrading from an earlier release retains its existing
-grants. Its Administrator role must explicitly receive `commerce.refund.record` through
-`PUT /admin/access/roles/commerce.administrator/permissions` before calling the refund endpoint.
+grants. To enable refunds for that role, first `GET /admin/access/roles/commerce.administrator`
+and inspect its current permissions. Add `commerce.refund.record` to that set, then
+`PUT /admin/access/roles/commerce.administrator/permissions` with the **complete desired
+permission list**. This endpoint replaces the role's full set of grants; sending only the
+new permission would remove every existing grant, including installation-specific ones.
 
 To provision the first administrator, set `FIONAS_BOOTSTRAP_ADMIN_USERNAME`,
 `FIONAS_BOOTSTRAP_ADMIN_PASSWORD`, and `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` for one startup.
@@ -800,7 +803,8 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
 
 > **Upgrading to commerce 0.0.14.** The runtime applies `V6__refunds` to create its two
 > refund tables. Fiona adds no migration. Existing Administrator grants are retained;
-> grant `commerce.refund.record` explicitly before using the new endpoint.
+> use the read-modify-replace permission flow in [Staff authentication](#staff-authentication)
+> to add `commerce.refund.record` before using the new endpoint.
 >
 > **Development reset for the commerce 0.0.11 integration.** Fiona's unreleased `V2`
 > contains only password credentials. Disposable databases from before the authorization
@@ -868,7 +872,8 @@ for the exact catalog entries and preview request.
 With Fiona running locally and its Offerings catalog already initialized by
 `setup-local-commerce.mjs`, use Node.js 20 or newer to exercise the separate payment
 recording, allocation, and refund routes. The local Administrator needs
-`commerce.refund.record` (fresh bootstrap grants it; older roles need an explicit grant):
+`commerce.refund.record` (fresh bootstrap grants it; update older roles using the
+[replacement flow above](#staff-authentication)):
 
 ```bash
 FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/spoof-payment.mjs

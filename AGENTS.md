@@ -630,8 +630,12 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    `ledger.recordRefund(transaction, ...)`, then `reconcilePayment(transaction, ...)` in one
    runtime transaction. Runtime validates the complete history. Refunded money is never
    reusable. No Fiona migration or refund table exists. Fresh Administrators receive the
-   permission; existing roles retain their grants and need an explicit administration API
-   grant. Allocation reversals remain unsupported by runtime persistence.
+   permission; existing roles retain their grants. To enable an existing Administrator,
+   read its current permissions with `GET /admin/access/roles/commerce.administrator`, add
+   `commerce.refund.record`, then submit the complete desired set with
+   `PUT /admin/access/roles/commerce.administrator/permissions`. That endpoint replaces all
+   grants; it does not add one permission. Allocation reversals remain unsupported by runtime
+   persistence.
 10. **Settlement is derived.** Only the latest view carries reconciliation (`grossAllocated`,
    `netApplied`, `balance`); history shows historical facts and pricing sources, never a
    reconciliation of an older snapshot. Unapplied amount is net received minus net

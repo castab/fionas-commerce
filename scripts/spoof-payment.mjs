@@ -224,34 +224,40 @@ async function main() {
   const afterSecond = await currentInvoice(35000n, 35000n);
   console.log(`Invoice balance: ${money(afterSecond.reconciliation.balance, documentCurrency)}`);
 
+  const appliedRefundAmount = "50.00";
+  const appliedRefundCents = cents(appliedRefundAmount, "applied refund amount");
   const refund = (await request("POST", `/payments/${second.payment.paymentId}/refunds`, {
     authenticated: true,
     body: {
-      amount: "50.00", currency: documentCurrency, method: "OTHER",
-      allocations: [{ paymentAllocationId: second.allocation.allocationId, amount: "50.00" }],
+      amount: appliedRefundAmount, currency: documentCurrency, method: "OTHER",
+      allocations: [{ paymentAllocationId: second.allocation.allocationId, amount: appliedRefundAmount }],
     },
     expectedStatus: 201,
   })).data;
   checkId(refund?.refundId, "refund id");
   check(refund.paymentId === second.payment.paymentId && refund.method === "OTHER" &&
     refund.currency === documentCurrency, "refund payment, method, and currency");
-  checkAmount(refund.amount, "50.00", "refund amount");
+  checkAmount(refund.amount, appliedRefundAmount, "refund amount");
   check(typeof refund.refundedAt === "string" && refund.refundedAt.length > 0, "refund time");
   check(refund.allocations?.length === 1, "refund must unwind exactly one allocation");
   checkId(refund.allocations[0].refundAllocationId, "refund allocation id");
   check(refund.allocations[0].paymentAllocationId === second.allocation.allocationId,
     "refund must unwind the second payment's allocation");
-  checkAmount(refund.allocations[0].amount, "50.00", "refund allocation amount");
+  checkAmount(refund.allocations[0].amount, appliedRefundAmount, "refund allocation amount");
+  check(refund.allocations[0].currency === documentCurrency, "refund allocation currency");
+  check(typeof refund.allocations[0].allocatedAt === "string" && refund.allocations[0].allocatedAt.length > 0,
+    "refund allocation time");
   const expectedPayment = {
-    paymentAmount: "150.00", totalRefunded: "50.00", netReceived: "100.00",
-    grossAllocated: "150.00", refundAllocations: "50.00", netAllocated: "100.00", unallocated: "0.00",
+    paymentAmount: "150.00", totalRefunded: appliedRefundAmount, netReceived: "100.00",
+    grossAllocated: "150.00", allocationReversals: "0.00", refundAllocations: appliedRefundAmount,
+    netAllocated: "100.00", unallocated: "0.00",
   };
   check(refund.reconciliation?.currency === documentCurrency, "refund reconciliation currency");
   for (const [field, amount] of Object.entries(expectedPayment)) {
     checkAmount(refund.reconciliation[field], amount, `refund reconciliation ${field}`);
   }
   console.log("\nRefund");
-  console.log(`Refunded ${money("50.00", documentCurrency)} from payment ${second.payment.paymentId}`);
+  console.log(`Refunded ${money(appliedRefundAmount, documentCurrency)} from payment ${second.payment.paymentId}`);
   console.log(`Unwound allocation ${second.allocation.allocationId}`);
 
   const reopened = await currentInvoice(35000n, 30000n);
@@ -261,14 +267,14 @@ async function main() {
   check(cents(finalAmount, "reopened balance") > 0n, "reopened balance must be positive");
   console.log("\nFinal payment");
   await payAndAllocate(finalAmount);
-  const final = await currentInvoice(totalCents + 5000n, totalCents);
+  const final = await currentInvoice(totalCents + appliedRefundCents, totalCents);
   checkAmount(final.reconciliation.balance, "0.00", "final balance");
 
   console.log("\nFinal reconciliation");
   console.log("--------------------------------");
   console.log(`Invoice total       ${money(documentTotal, documentCurrency)}`);
   console.log(`Gross allocated     ${money(final.reconciliation.grossAllocated, documentCurrency)}`);
-  console.log(`Refunded/unwound    ${money("50.00", documentCurrency)}`);
+  console.log(`Refunded/unwound    ${money(appliedRefundAmount, documentCurrency)}`);
   console.log(`Net applied         ${money(final.reconciliation.netApplied, documentCurrency)}`);
   console.log(`Balance             ${money(final.reconciliation.balance, documentCurrency)}`);
   console.log("--------------------------------");

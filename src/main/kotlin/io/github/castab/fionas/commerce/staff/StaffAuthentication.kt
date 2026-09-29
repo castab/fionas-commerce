@@ -186,7 +186,7 @@ class BootstrapFirstAdmin(
                         RoleDefinition(
                             CommerceRoles.Administrator,
                             "Administrator",
-                            "May administer Fiona's staff access, offerings catalog, financial documents, and payments",
+                            "May administer Fiona's staff access, offerings catalog, financial documents, payments, and refunds",
                             setOf(
                                 CommercePermissions.OfferingsManage,
                                 CommercePermissions.FinancialDocumentRead,
