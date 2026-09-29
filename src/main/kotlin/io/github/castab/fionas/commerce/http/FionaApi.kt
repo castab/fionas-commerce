@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.authorization.AuthorizationAdministrationHttpCapability
+import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
@@ -67,6 +68,7 @@ class FionaOperations(
     val issueInvoice: (UUID, Version) -> InquiryFinancialDocument,
     val createChangeOrder: (UUID, Version, FionasPricingInputs) -> InquiryFinancialDocument,
     val recordPayment: (RecordDocumentPayment.Command) -> RecordedPayment,
+    val listFinancialDocumentPayments: (UUID) -> List<PaymentHistory>,
     val recordStandalonePayment: (RecordPayment.Command) -> PaymentRecord,
     val allocatePayment: (AllocatePayment.Command) -> AllocatedPayment,
     val recordRefund: (RecordRefund.Command) -> ReconciledRefund,
@@ -104,6 +106,7 @@ fun fionaApiRoutes(
         issueInvoiceRoute(operations.issueInvoice, auth.access),
         createChangeOrderRoute(operations.createChangeOrder, auth.access),
         recordPaymentRoute(operations.recordPayment, auth.access),
+        listFinancialDocumentPaymentsRoute(operations.listFinancialDocumentPayments, auth.access),
         recordStandalonePaymentRoute(operations.recordStandalonePayment, auth.access),
         allocatePaymentRoute(operations.allocatePayment, auth.access),
         recordRefundRoute(operations.recordRefund, auth.access),

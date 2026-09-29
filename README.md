@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.15/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.15/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.16/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.16/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -38,8 +38,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.15`, which brings
-`commerce-domain:0.0.15` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.16`, which brings
+`commerce-domain:0.0.16` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -126,8 +126,10 @@ Every route needs a staff session:
 | `POST /financial-documents/{documentId}/invoice` | `commerce.financial-document.create` | Issues the latest quote as an invoice, unchanged. |
 | `POST /financial-documents/{documentId}/change-orders` | `commerce.financial-document.create` | Reprices the latest version from revised inputs, in its current stage. |
 | `POST /financial-documents/{documentId}/payments` | `commerce.payment.record` | Records a payment and applies all of it to the latest version, a quote or an invoice. `201`. |
+| `GET /financial-documents/{documentId}/payments` | `commerce.financial-document.read` | Every payment ever allocated to any version of the document, each with its complete history: allocations (to any document), refunds, refund allocations, and derived reconciliation. `[]` when it has none. |
 | `POST /payments` | `commerce.payment.record` | Records money received without assigning it to a document. `201` with the payment fact. |
 | `POST /payments/{paymentId}/allocations` | `commerce.payment.record` | Allocates some or all of an existing payment to an exact, currently latest Quote or Invoice version. `201` with the allocation and reconciliation. |
+| `POST /payments/{paymentId}/refunds` | `commerce.refund.record` | Refunds part or all of a payment, unwinding the allocations the request names. `201` with the refund, its unwinds, and the payment's reconciliation. |
 
 **Staff authentication API**, implemented by Fiona (see [Staff authentication](#staff-authentication)):
 
@@ -632,13 +634,55 @@ response includes the recorded refund, each refund allocation, and the payment's
 currency. It does not pick one document reconciliation: a payment may span documents.
 Refunded money cannot be allocated again. No Fiona table stores a refund or balance.
 
-**Known gap: payments cannot be read back yet.** Payment, allocation, and refund ids appear
-only in the responses of the requests that record them; no Fiona endpoint lists a
-document's payments or a payment's allocations and refunds. commerce-runtime 0.0.15's public
-`FinancialLedger` offers no such reads (only reconciliation totals), and Fiona deliberately
-does not reach into the runtime's `PaymentRepository` or tables, nor cache mutation
-responses. The read endpoints follow once commerce-runtime publishes those reads (see
-[AGENTS.md](AGENTS.md#known-upstream-gaps-last-audited-at-commerce-0014)).
+`GET /financial-documents/{documentId}/payments` reads back everything those requests
+recorded, so a staff screen can prepare a refund after a reload, from the document alone. It
+requires `commerce.financial-document.read`: it is a child read of the document, and the
+payment and refund write permissions carry no read meaning. It lists every payment ever
+allocated to any version of the lineage, by `receivedAt`, then `paymentId`:
+
+```json
+{"documentId":"D",
+ "payments":[{
+   "payment":{"paymentId":"P","method":"CARD","amount":"500.00","currency":"USD",
+              "receivedAt":"2026-09-28T20:00:00Z"},
+   "allocations":[
+     {"allocationId":"A1","paymentId":"P","documentId":"D","documentVersion":3,
+      "amount":"200.00","currency":"USD","allocatedAt":"2026-09-28T20:01:00Z"},
+     {"allocationId":"A2","paymentId":"P","documentId":"E","documentVersion":1,
+      "amount":"150.00","currency":"USD","allocatedAt":"2026-09-28T20:01:30Z"}],
+   "refunds":[{"refundId":"R","paymentId":"P","amount":"50.00","currency":"USD",
+               "method":"OTHER","refundedAt":"2026-09-28T20:02:00Z"}],
+   "refundAllocations":[{"refundAllocationId":"RA","refundId":"R","paymentAllocationId":"A1",
+                         "amount":"50.00","currency":"USD","allocatedAt":"2026-09-28T20:02:00Z"}],
+   "reconciliation":{"paymentAmount":"500.00","totalRefunded":"50.00","netReceived":"450.00",
+                     "grossAllocated":"350.00","allocationReversals":"0.00",
+                     "refundAllocations":"50.00","netAllocated":"300.00",
+                     "unallocated":"150.00","currency":"USD"}}]}
+```
+
+- **Each payment is its whole history**, never only its part in the document it was found
+  through. A split payment carries its allocations to other documents (`A2` above), because
+  its reconciliation depends on them; a UI showing one document selects the allocations
+  whose `documentId` is that document's.
+- **Discovery is historical.** A payment stays listed after refunds unwind its allocations
+  here completely.
+- **Facts link by id**: a refund allocation names its refund (`refundId`) and the allocation it
+  unwound (`paymentAllocationId`), which names its exact document version.
+- Allocations are ordered by `allocatedAt`, refunds by `refundedAt`, refund allocations by
+  `allocatedAt`, each then by id: commerce-runtime's order, which Fiona keeps. An id breaks
+  only timestamp ties.
+- Reconciliation is commerce-runtime's, derived from exactly these facts; Fiona recomputes,
+  filters, and stores nothing, and there is no payment status.
+- A document no inquiry owns is `404`, even when the ledger holds it; one without payments
+  answers `"payments": []`. Fiona proves ownership and reads the histories through
+  `FinancialLedger.paymentHistoriesForLineage` in one `REPEATABLE READ` transaction.
+
+**Unapplied payments cannot be discovered yet, deliberately.** A payment recorded with
+`POST /payments` and never allocated appears only in its recording response: it belongs to no
+document, so no document lists it. There is no `GET /payments`, payment search, unapplied
+payment inbox, or `GET /payments/{paymentId}`; commerce-runtime 0.0.16 offers
+`paymentHistory(paymentId)`, but a global payment resource needs a payment-read permission
+decision of its own, and waits for a screen that needs it.
 
 The existing `POST /financial-documents/{documentId}/payments` means "we received this
 payment, and all of it is for this document":
@@ -674,7 +718,8 @@ it to every ledger call (`context.financialLedger.create(transaction, …)`,
 `issueQuote(transaction, …)`, `changeOrder(transaction, …)`,
 `recordPayment(transaction, …)`, `allocatePayment(transaction, …)`,
 `recordPaymentAgainstDocument(transaction, …)`, `recordRefund(transaction, …)`,
-`reconcilePayment(transaction, …)`, `reconcile(transaction, exactReference)`) and to
+`reconcilePayment(transaction, …)`, `reconcile(transaction, exactReference)`,
+`paymentHistoriesForLineage(transaction, …)`) and to
 Fiona's repositories, and prices from the exact catalog revision read in that same
 transaction. If any step fails, the commerce snapshot, payment, or allocation rolls back
 with Fiona's association and pricing source.
@@ -946,7 +991,10 @@ The script accepts the same `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
 `FIONAS_ADMIN_USERNAME` defaults as the catalog setup script; `FIONAS_ADMIN_PASSWORD` is
 required. It creates a real local inquiry and direct Invoice v1, records and allocates
 `$200.00` and `$150.00`, refunds `$50.00` from the second payment's allocation, then pays
-the server-returned reopened balance. Exact cent arithmetic verifies gross and net
+the server-returned reopened balance. It proves payment facts survive a reload: it keeps
+no id from a payment, allocation, or refund response. The refund's payment and allocation
+ids are rediscovered from `GET /financial-documents/{documentId}/payments`, and the refund
+and its unwind are verified by reading that again. Exact cent arithmetic verifies gross and net
 allocation and a final zero balance. It writes ordinary development data to the configured
 database, so use it in local/disposable environments. It has no npm dependencies and is
 not a payment-provider or webhook simulator.
@@ -983,6 +1031,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; explicit old and new catalog revisions; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
+| `FinancialDocumentPaymentsSpec` | `GET /financial-documents/{documentId}/payments` through the complete handler: `[]` without payments; `404` for a lineage only the runtime ledger holds; `401`/`403` unless `commerce.financial-document.read` (payment and refund writes do not grant it); a payment, its allocation, a refund, and its unwind rediscovered after their responses are gone and reused for a second refund; a fully unwound allocation still listed; a split payment whole from either document with whole-payment reconciliation; unapplied payments not listed; commerce-runtime's ordering kept, ids breaking only timestamp ties |
 | `FinancialDocumentAtomicitySpec` | Fiona's cross-boundary writes roll back together: first-snapshot Estimate, Quote, and Invoice creation, change orders, combined payments, and standalone allocations do not leave partial ledger or Fiona facts on failure |
 | `FinancialLedgerExpansionSpec` | Direct first-snapshot stages and transitions; standalone receipt validation and persistence; partial, repeated, and split allocations; runtime limits and Fiona stage/version policy; concurrent allocations against one payment |
 | `FinancialDocumentRepositoriesSpec` | The inquiry association and pricing-source repositories on PostgreSQL: several lineages per inquiry, one inquiry per lineage, ordered round trips with an empty category, copies to a successor, and foreign keys to the runtime's exact snapshots |
@@ -991,7 +1040,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
 | `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded (no financial document either), minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |
 | `OfferingsCatalogSpec` | Fiona's Offerings catalog through the complete handler: absent until initialized; revisions 1–4 from initialization, a category, and two offerings; ordered reads; exact historical revisions; every price form round-trips; no update or delete route |
-| `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (the inquiry receipt, list, and pricing inputs, financial documents, standalone receipts, and allocations included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
+| `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (the inquiry receipt, list, and pricing inputs, financial documents, standalone receipts, allocations, and document payment histories with their linked fact schemas included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |

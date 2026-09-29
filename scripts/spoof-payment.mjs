@@ -1,5 +1,10 @@
 // Local HTTP smoke test: Invoice, two partial payments, partial refund, final settlement.
 // Requires a running Fiona application and an already seeded Offerings catalog.
+//
+// It also proves that payment facts survive a reload: every mutation response below is
+// validated and then dropped. The refund is prepared only from
+// GET /financial-documents/{documentId}/payments, and its own facts are verified by reading
+// that again, knowing nothing but the document id the operator is looking at.
 
 const baseUrl = process.env.FIONAS_BASE_URL ?? "http://localhost:8080";
 const origin = process.env.FIONAS_ORIGIN ?? "http://localhost:8080";
@@ -212,7 +217,39 @@ async function main() {
     check(allocation.currency === documentCurrency, "allocation currency");
     check(typeof allocation.allocatedAt === "string" && allocation.allocatedAt.length > 0, "allocation time");
     console.log(`Received ${money(amount, documentCurrency)} as payment ${payment.paymentId}; allocated ${allocation.allocationId}`);
-    return { payment, allocation };
+    // The responses are deliberately not returned: later steps rediscover these facts.
+  }
+
+  // The staff payment panel's read. Checks every history is complete and self-consistent:
+  // each refund allocation names a refund and an allocation the same history carries.
+  async function documentPayments() {
+    const read = (await request("GET", `/financial-documents/${documentId}/payments`, {
+      authenticated: true, expectedStatus: 200,
+    })).data;
+    check(read?.documentId === documentId && Array.isArray(read.payments), "payment histories must name the document");
+    for (const history of read.payments) {
+      const { payment, allocations, refunds, refundAllocations, reconciliation } = history;
+      checkId(payment?.paymentId, "rediscovered payment id");
+      check(payment.currency === documentCurrency, "rediscovered payment currency");
+      check([allocations, refunds, refundAllocations].every(Array.isArray), "history lists must be present");
+      check(allocations.some((it) => it.documentId === documentId), "a listed payment must have been allocated here");
+      for (const it of allocations) {
+        checkId(it.allocationId, "rediscovered allocation id");
+        check(it.paymentId === payment.paymentId, "allocation must belong to its payment");
+      }
+      for (const it of refunds) {
+        checkId(it.refundId, "rediscovered refund id");
+        check(it.paymentId === payment.paymentId, "refund must belong to its payment");
+      }
+      for (const it of refundAllocations) {
+        checkId(it.refundAllocationId, "rediscovered refund allocation id");
+        check(refunds.some((refund) => refund.refundId === it.refundId), "refund allocation must name a listed refund");
+        check(allocations.some((allocation) => allocation.allocationId === it.paymentAllocationId),
+          "refund allocation must name a listed allocation");
+      }
+      check(reconciliation?.currency === documentCurrency, "payment reconciliation currency");
+    }
+    return read.payments;
   }
 
   console.log("\nPayment 1");
@@ -220,29 +257,46 @@ async function main() {
   const afterFirst = await currentInvoice(20000n, 20000n);
   console.log(`Invoice balance: ${money(afterFirst.reconciliation.balance, documentCurrency)}`);
   console.log("\nPayment 2");
-  const second = await payAndAllocate("150.00");
+  await payAndAllocate("150.00");
   const afterSecond = await currentInvoice(35000n, 35000n);
   console.log(`Invoice balance: ${money(afterSecond.reconciliation.balance, documentCurrency)}`);
 
+  // Reload: the payment responses are gone. Rediscover what a refund needs from the document alone.
+  console.log("\nReload: GET /financial-documents/{documentId}/payments");
+  const beforeRefund = await documentPayments();
+  check(beforeRefund.length === 2, `the Invoice must list its 2 payments; listed ${beforeRefund.length}`);
+  for (const history of beforeRefund) {
+    check(history.refunds.length === 0 && history.refundAllocations.length === 0, "no refund exists yet");
+    checkAmount(history.reconciliation.unallocated, "0", "a fully allocated payment's unallocated amount");
+  }
+  const refundable = beforeRefund.find((history) => decimal(history.payment.amount, "payment amount") === "150");
+  check(refundable, "the 150.00 payment must be rediscovered");
+  const paymentId = refundable.payment.paymentId;
+  const allocationToRefund = refundable.allocations.find((it) => it.documentId === documentId);
+  check(allocationToRefund?.documentVersion === documentVersion, "the allocation must name the exact Invoice version");
+  checkAmount(allocationToRefund.amount, "150.00", "rediscovered allocation amount");
+  const paymentAllocationId = allocationToRefund.allocationId;
+  console.log(`Rediscovered payment ${paymentId} and its allocation ${paymentAllocationId}`);
+
   const appliedRefundAmount = "50.00";
   const appliedRefundCents = cents(appliedRefundAmount, "applied refund amount");
-  const refund = (await request("POST", `/payments/${second.payment.paymentId}/refunds`, {
+  const refund = (await request("POST", `/payments/${paymentId}/refunds`, {
     authenticated: true,
     body: {
       amount: appliedRefundAmount, currency: documentCurrency, method: "OTHER",
-      allocations: [{ paymentAllocationId: second.allocation.allocationId, amount: appliedRefundAmount }],
+      allocations: [{ paymentAllocationId, amount: appliedRefundAmount }],
     },
     expectedStatus: 201,
   })).data;
   checkId(refund?.refundId, "refund id");
-  check(refund.paymentId === second.payment.paymentId && refund.method === "OTHER" &&
+  check(refund.paymentId === paymentId && refund.method === "OTHER" &&
     refund.currency === documentCurrency, "refund payment, method, and currency");
   checkAmount(refund.amount, appliedRefundAmount, "refund amount");
   check(typeof refund.refundedAt === "string" && refund.refundedAt.length > 0, "refund time");
   check(refund.allocations?.length === 1, "refund must unwind exactly one allocation");
   checkId(refund.allocations[0].refundAllocationId, "refund allocation id");
-  check(refund.allocations[0].paymentAllocationId === second.allocation.allocationId,
-    "refund must unwind the second payment's allocation");
+  check(refund.allocations[0].paymentAllocationId === paymentAllocationId,
+    "refund must unwind the rediscovered allocation");
   checkAmount(refund.allocations[0].amount, appliedRefundAmount, "refund allocation amount");
   check(refund.allocations[0].currency === documentCurrency, "refund allocation currency");
   check(typeof refund.allocations[0].allocatedAt === "string" && refund.allocations[0].allocatedAt.length > 0,
@@ -257,8 +311,32 @@ async function main() {
     checkAmount(refund.reconciliation[field], amount, `refund reconciliation ${field}`);
   }
   console.log("\nRefund");
-  console.log(`Refunded ${money(appliedRefundAmount, documentCurrency)} from payment ${second.payment.paymentId}`);
-  console.log(`Unwound allocation ${second.allocation.allocationId}`);
+  console.log(`Refunded ${money(appliedRefundAmount, documentCurrency)} from payment ${paymentId}`);
+  console.log(`Unwound allocation ${paymentAllocationId}`);
+
+  // Reload again: the refund response is gone too. Its facts come back from the document's payments.
+  console.log("\nReload: GET /financial-documents/{documentId}/payments");
+  const afterRefund = await documentPayments();
+  check(afterRefund.length === 2, "a refund must not add or remove the Invoice's payments");
+  const refunded = afterRefund.find((history) => history.payment.paymentId === paymentId);
+  check(refunded, "the refunded payment must still be listed");
+  check(refunded.refunds.length === 1, "the refunded payment must list its one refund");
+  const [rediscoveredRefund] = refunded.refunds;
+  checkAmount(rediscoveredRefund.amount, appliedRefundAmount, "rediscovered refund amount");
+  check(rediscoveredRefund.method === "OTHER" && rediscoveredRefund.currency === documentCurrency,
+    "rediscovered refund method and currency");
+  check(refunded.refundAllocations.length === 1, "the refund must list its one unwind");
+  const [rediscoveredUnwind] = refunded.refundAllocations;
+  check(rediscoveredUnwind.refundId === rediscoveredRefund.refundId, "the unwind must name the rediscovered refund");
+  check(rediscoveredUnwind.paymentAllocationId === paymentAllocationId, "the unwind must name the rediscovered allocation");
+  checkAmount(rediscoveredUnwind.amount, appliedRefundAmount, "rediscovered unwind amount");
+  for (const [field, amount] of Object.entries(expectedPayment)) {
+    checkAmount(refunded.reconciliation[field], amount, `rediscovered reconciliation ${field}`);
+  }
+  const untouched = afterRefund.find((history) => history.payment.paymentId !== paymentId);
+  check(untouched.refunds.length === 0, "the other payment must have no refund");
+  console.log(`Rediscovered refund ${rediscoveredRefund.refundId} and its unwind ${rediscoveredUnwind.refundAllocationId}`);
+  console.log(`Payment ${paymentId} net received: ${money(refunded.reconciliation.netReceived, documentCurrency)}`);
 
   const reopened = await currentInvoice(35000n, 30000n);
   console.log(`Net applied: ${money(reopened.reconciliation.netApplied, documentCurrency)}`);
@@ -269,6 +347,7 @@ async function main() {
   await payAndAllocate(finalAmount);
   const final = await currentInvoice(totalCents + appliedRefundCents, totalCents);
   checkAmount(final.reconciliation.balance, "0.00", "final balance");
+  check((await documentPayments()).length === 3, "the Invoice must list all 3 payments");
 
   console.log("\nFinal reconciliation");
   console.log("--------------------------------");

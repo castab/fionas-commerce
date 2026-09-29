@@ -61,6 +61,7 @@ private val notInvoked =
         issueInvoice = { _, _ -> error("Rendering the OpenAPI document never issues an invoice") },
         createChangeOrder = { _, _, _ -> error("Rendering the OpenAPI document never applies a change order") },
         recordPayment = { error("Rendering the OpenAPI document never records a payment") },
+        listFinancialDocumentPayments = { error("Rendering the OpenAPI document never reads payments") },
         recordStandalonePayment = { error("Rendering the OpenAPI document never records a standalone payment") },
         allocatePayment = { error("Rendering the OpenAPI document never allocates a payment") },
         recordRefund = { error("Rendering the OpenAPI document never records a refund") },

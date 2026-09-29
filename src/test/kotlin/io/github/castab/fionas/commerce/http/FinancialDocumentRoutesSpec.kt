@@ -459,6 +459,7 @@ class FinancialDocumentRoutesSpec :
                 listOf(
                     get("/financial-documents/$id"),
                     get("/financial-documents/$id/history"),
+                    get("/financial-documents/$id/payments"),
                     quote(id, 1),
                     invoice(id, 1),
                     changeOrder(id, pricingBody(revision, guests = 80, expectedVersion = 1)),
@@ -486,6 +487,7 @@ class FinancialDocumentRoutesSpec :
                 get("/inquiries/not-a-uuid/financial-documents"),
                 get("/financial-documents/not-a-uuid"),
                 get("/financial-documents/not-a-uuid/history"),
+                get("/financial-documents/not-a-uuid/payments"),
                 quote("not-a-uuid", 1),
                 pay("not-a-uuid", 1, "1.00"),
             ).forEach {
@@ -514,6 +516,7 @@ class FinancialDocumentRoutesSpec :
                     Method.POST to "/financial-documents/$id/invoice",
                     Method.POST to "/financial-documents/$id/change-orders",
                     Method.POST to "/financial-documents/$id/payments",
+                    Method.GET to "/financial-documents/$id/payments",
                     Method.POST to "/payments",
                     Method.POST to "/payments/${UUID.randomUUID()}/allocations",
                 )

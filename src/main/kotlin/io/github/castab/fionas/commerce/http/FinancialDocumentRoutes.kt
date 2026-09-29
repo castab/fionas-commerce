@@ -9,6 +9,7 @@ import io.github.castab.commerce.payment.FinancialDocumentReconciliation
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.payment.PaymentReconciliation
 import io.github.castab.commerce.payment.PaymentRecord
+import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
@@ -440,6 +441,103 @@ data class RecordedRefundResponse(
     val reconciliation: PaymentReconciliationResponse,
 )
 
+/** The payments that have touched one Fiona financial-document lineage, each with its complete history. */
+@Serializable
+data class FinancialDocumentPaymentsResponse(
+    @ApiProperty(description = "The document lineage's id, as requested.", format = "uuid")
+    val documentId: String,
+    @ApiProperty(
+        description =
+            "Every payment ever allocated to any version of the lineage, by `receivedAt`, then `paymentId`. Empty " +
+                "when the document has never received a payment.",
+    )
+    val payments: List<PaymentHistoryResponse>,
+)
+
+/**
+ * The complete, immutable history of one payment and the reconciliation derived from exactly
+ * those facts. It is the whole payment, never only its part in the document it was found through.
+ */
+@Serializable
+data class PaymentHistoryResponse(
+    @ApiProperty(description = "The payment fact.")
+    val payment: PaymentRecordResponse,
+    @ApiProperty(
+        description =
+            "Every allocation of the payment, to this or any other lineage, by `allocatedAt`, then `allocationId`, " +
+                "including allocations later unwound by refunds. Select `documentId` to show one document's.",
+    )
+    val allocations: List<PaymentAllocationRecordResponse>,
+    @ApiProperty(description = "Every refund of the payment, by `refundedAt`, then `refundId`.")
+    val refunds: List<RefundRecordResponse>,
+    @ApiProperty(
+        description =
+            "Which allocation each refund unwound, by `allocatedAt`, then `refundAllocationId`. Empty when every " +
+                "refund came from unapplied value.",
+    )
+    val refundAllocations: List<RefundAllocationRecordResponse>,
+    @ApiProperty(description = "The payment's settlement, derived from exactly these facts; never stored.")
+    val reconciliation: PaymentReconciliationResponse,
+)
+
+/** An immutable allocation fact: some of a payment applied to an exact document snapshot. */
+@Serializable
+data class PaymentAllocationRecordResponse(
+    @ApiProperty(description = "The allocation's id; a refund names it as `paymentAllocationId` to unwind it.", format = "uuid")
+    val allocationId: String,
+    @ApiProperty(description = "The payment's id.", format = "uuid")
+    val paymentId: String,
+    @ApiProperty(
+        description = "The financial-document lineage the money was applied to, which need not be the one requested.",
+        format = "uuid",
+    )
+    val documentId: String,
+    @ApiProperty(description = "The exact document version the allocation stays attached to.")
+    val documentVersion: Int,
+    @ApiProperty(description = "The amount applied, an exact decimal string.")
+    val amount: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code.")
+    val currency: String,
+    @ApiProperty(description = "When the allocation was recorded, an RFC 3339 timestamp in UTC.", format = "date-time")
+    val allocatedAt: String,
+)
+
+/** An immutable refund fact: money of a payment returned to the payer. */
+@Serializable
+data class RefundRecordResponse(
+    @ApiProperty(description = "The refund's id.", format = "uuid")
+    val refundId: String,
+    @ApiProperty(description = "The refunded payment's id.", format = "uuid")
+    val paymentId: String,
+    @ApiProperty(description = "The amount returned, an exact decimal string.")
+    val amount: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code.")
+    val currency: String,
+    @ApiProperty(description = "How the money left the business, which may differ from how it arrived.")
+    val method: String,
+    @ApiProperty(description = "When the money was returned, an RFC 3339 timestamp in UTC.", format = "date-time")
+    val refundedAt: String,
+    @ApiProperty(description = "The refund's identity in an external system; absent when it has none.")
+    val externalReference: RefundExternalReference? = null,
+)
+
+/** An immutable refund-allocation fact: part of a refund unwinding value an allocation applied. */
+@Serializable
+data class RefundAllocationRecordResponse(
+    @ApiProperty(description = "The refund allocation's id.", format = "uuid")
+    val refundAllocationId: String,
+    @ApiProperty(description = "The refund, in `refunds`, whose money this portion is.", format = "uuid")
+    val refundId: String,
+    @ApiProperty(description = "The allocation, in `allocations`, whose applied value is unwound.", format = "uuid")
+    val paymentAllocationId: String,
+    @ApiProperty(description = "The amount unwound, an exact decimal string.")
+    val amount: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code.")
+    val currency: String,
+    @ApiProperty(description = "When the unwind was recorded, an RFC 3339 timestamp in UTC.", format = "date-time")
+    val allocatedAt: String,
+)
+
 private val createEstimateRequest = jsonBody(CreateInquiryEstimateRequest.serializer())
 private val createFinancialDocumentRequest = jsonBody(CreateInquiryFinancialDocumentRequest.serializer())
 private val changeOrderRequest = jsonBody(ChangeOrderRequest.serializer())
@@ -455,6 +553,7 @@ private val recordedPaymentResponse = jsonBody(RecordedPaymentResponse.serialize
 private val paymentRecordResponse = jsonBody(PaymentRecordResponse.serializer())
 private val paymentAllocationResponse = jsonBody(PaymentAllocationResponse.serializer())
 private val recordedRefundResponse = jsonBody(RecordedRefundResponse.serializer())
+private val documentPaymentsResponse = jsonBody(FinancialDocumentPaymentsResponse.serializer())
 private val paymentAllocationIdBodyMeta = recordRefundRequest.metas.single().copy(name = "paymentAllocationId")
 
 // Plain strings for the contract: a contract treats a path value its lens rejects as an
@@ -639,6 +738,64 @@ private val exampleRefundResponse =
                 ),
             ),
         reconciliation = PaymentReconciliationResponse("150.00", "50.00", "100.00", "150.00", "0.00", "50.00", "100.00", "0.00", "USD"),
+    )
+
+// A $500 payment split between the example document and another lineage, then partly refunded
+// out of the example document's allocation, with $150 still unapplied.
+private val exampleDocumentPayments =
+    FinancialDocumentPaymentsResponse(
+        documentId = EXAMPLE_DOCUMENT,
+        payments =
+            listOf(
+                PaymentHistoryResponse(
+                    payment = PaymentRecordResponse(examplePaymentRecord.paymentId, "CARD", "500.00", "USD", "2026-09-28T20:00:00Z"),
+                    allocations =
+                        listOf(
+                            PaymentAllocationRecordResponse(
+                                examplePaymentAllocation.allocationId,
+                                examplePaymentRecord.paymentId,
+                                EXAMPLE_DOCUMENT,
+                                3,
+                                "200.00",
+                                "USD",
+                                "2026-09-28T20:01:00Z",
+                            ),
+                            PaymentAllocationRecordResponse(
+                                "ae1f2a3b-4c5d-4e6f-9a7b-8c9d0e1f2a3b",
+                                examplePaymentRecord.paymentId,
+                                "b0c1d2e3-f4a5-4b6c-8d7e-9f0a1b2c3d4e",
+                                1,
+                                "150.00",
+                                "USD",
+                                "2026-09-28T20:01:30Z",
+                            ),
+                        ),
+                    refunds =
+                        listOf(
+                            RefundRecordResponse(
+                                exampleRefundResponse.refundId,
+                                examplePaymentRecord.paymentId,
+                                "50.00",
+                                "USD",
+                                "OTHER",
+                                "2026-09-28T20:02:00Z",
+                            ),
+                        ),
+                    refundAllocations =
+                        listOf(
+                            RefundAllocationRecordResponse(
+                                exampleRefundResponse.allocations.single().refundAllocationId,
+                                exampleRefundResponse.refundId,
+                                examplePaymentAllocation.allocationId,
+                                "50.00",
+                                "USD",
+                                "2026-09-28T20:02:00Z",
+                            ),
+                        ),
+                    reconciliation =
+                        PaymentReconciliationResponse("500.00", "50.00", "450.00", "350.00", "0.00", "50.00", "300.00", "150.00", "USD"),
+                ),
+            ),
     )
 
 /** The errors every staff-protected financial route answers, in addition to its own. */
@@ -1029,6 +1186,42 @@ fun recordPaymentRoute(
         }
     }
 
+/**
+ * `GET /financial-documents/{documentId}/payments`: the complete history of every payment ever
+ * allocated to the lineage, so its payment, allocation, refund, and refund-allocation ids
+ * survive the responses that recorded them.
+ */
+fun listFinancialDocumentPaymentsRoute(
+    listPayments: (UUID) -> List<PaymentHistory>,
+    access: AccessControl,
+): ContractRoute =
+    "/financial-documents" / documentIdPath / "payments" meta {
+        operationId = "listFinancialDocumentPayments"
+        summary = "List a financial document's payments"
+        description =
+            "Every payment that has ever been allocated to any version of the lineage, by `receivedAt`, then " +
+            "`paymentId`, each with its complete history: the payment, its allocations, its refunds, which allocation " +
+            "each refund unwound, and the payment's reconciliation derived from exactly those facts. Discovery is " +
+            "historical: a payment stays listed after refunds unwind its allocations here completely. Each payment " +
+            "is the whole payment, never only its part in this document: its allocations to other lineages are " +
+            "included, because its reconciliation depends on them, so an allocation's `documentId` need not be this " +
+            "document's; select `documentId` to show this document's own. A payment never allocated to this lineage " +
+            "(for example one recorded with `POST /payments` and still unapplied) is not listed. An empty list means " +
+            "the document exists and has no payments. Only documents an inquiry owns exist here. Requires " +
+            "`commerce.financial-document.read`."
+        tags += payments
+        returning(Status.OK, documentPaymentsResponse to exampleDocumentPayments, "The document's payment histories.")
+        returningError(ErrorCategory.MALFORMED_REQUEST, "`documentId` is not a UUID.", "Malformed request: path 'documentId'")
+        returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
+        staffErrors()
+    } bindContract Method.GET to { id: String, _: String ->
+        access.requirePermission(CommercePermissions.FinancialDocumentRead).then { _: Request ->
+            val documentId = uuidIn(id, documentIdPath)
+            val payments = listPayments(documentId).map { it.toResponse() }
+            Response(Status.OK).with(documentPaymentsResponse of FinancialDocumentPaymentsResponse(documentId.toString(), payments))
+        }
+    }
+
 /** `POST /payments`: records received money without requiring an allocation. */
 fun recordStandalonePaymentRoute(
     recordPayment: (RecordPayment.Command) -> PaymentRecord,
@@ -1360,6 +1553,51 @@ private fun ReconciledRefund.toResponse() =
                     it.amount.decimal(),
                     it.currency.currencyCode,
                     it.allocatedAt.toString(),
+                )
+            },
+        reconciliation = reconciliation.toResponse(),
+    )
+
+// Every fact of the history, in commerce-runtime's order; nothing is filtered, re-sorted, or recomputed.
+private fun PaymentHistory.toResponse() =
+    PaymentHistoryResponse(
+        payment = payment.toResponse(),
+        allocations =
+            allocations.map {
+                PaymentAllocationRecordResponse(
+                    allocationId = it.id.toString(),
+                    paymentId = it.paymentReference.toString(),
+                    documentId = it.financialDocumentReference.id.toString(),
+                    documentVersion = it.financialDocumentReference.version.number,
+                    amount = it.amount.decimal(),
+                    currency = it.currency.currencyCode,
+                    allocatedAt = it.allocatedAt.toString(),
+                )
+            },
+        refunds =
+            refunds.map {
+                RefundRecordResponse(
+                    refundId = it.id.toString(),
+                    paymentId = it.paymentReference.toString(),
+                    amount = it.amount.decimal(),
+                    currency = it.currency.currencyCode,
+                    method = it.method.name,
+                    refundedAt = it.refundedAt.toString(),
+                    externalReference =
+                        it.externalReference?.let { reference ->
+                            RefundExternalReference(reference.provider, reference.reference)
+                        },
+                )
+            },
+        refundAllocations =
+            refundAllocations.map {
+                RefundAllocationRecordResponse(
+                    refundAllocationId = it.id.toString(),
+                    refundId = it.refundReference.toString(),
+                    paymentAllocationId = it.paymentAllocationReference.toString(),
+                    amount = it.amount.decimal(),
+                    currency = it.currency.currencyCode,
+                    allocatedAt = it.allocatedAt.toString(),
                 )
             },
         reconciliation = reconciliation.toResponse(),

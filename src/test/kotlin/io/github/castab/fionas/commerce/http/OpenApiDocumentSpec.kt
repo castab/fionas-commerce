@@ -73,6 +73,8 @@ class OpenApiDocumentSpec :
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/financial-documents/{documentId}/payments", "post", "recordPayment") to
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/financial-documents/{documentId}/payments", "get", "listFinancialDocumentPayments") to
+                    listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/payments", "post", "recordStandalonePayment") to listOf("201", "400", "401", "403", "409", "422", "500"),
                 Triple("/payments/{paymentId}/allocations", "post", "allocatePayment") to
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
@@ -101,6 +103,7 @@ class OpenApiDocumentSpec :
                 "issueInvoice" to "Financial documents",
                 "createChangeOrder" to "Financial documents",
                 "recordPayment" to "Payments",
+                "listFinancialDocumentPayments" to "Payments",
                 "recordStandalonePayment" to "Payments",
                 "allocatePayment" to "Payments",
                 "recordRefund" to "Payments",
@@ -190,6 +193,11 @@ class OpenApiDocumentSpec :
                 "RecordedRefundResponse",
                 "RefundAllocationResponse",
                 "PaymentReconciliationResponse",
+                "FinancialDocumentPaymentsResponse",
+                "PaymentHistoryResponse",
+                "PaymentAllocationRecordResponse",
+                "RefundRecordResponse",
+                "RefundAllocationRecordResponse",
                 "ErrorResponse",
                 "LoginRequest",
                 "CurrentUserResponse",
@@ -601,6 +609,71 @@ class OpenApiDocumentSpec :
                     "currency",
                 )
             route.text("responses", "422", "description").contains("`invariant_violated`") shouldBe true
+        }
+
+        test("documents a document's payment histories as complete ledger facts, linked by id, with derived reconciliation") {
+            val route = operation("/financial-documents/{documentId}/payments", "get")
+            route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/FinancialDocumentPaymentsResponse"
+            listOf(
+                "`commerce.financial-document.read`",
+                "ever been allocated to any version of the lineage",
+                "Discovery is historical",
+                "its allocations to other lineages are included",
+                "An empty list means the document exists and has no payments",
+            ).forEach { route.text("description").contains(it) shouldBe true }
+            schema("FinancialDocumentPaymentsResponse").let {
+                it.strings("required") shouldContainExactly listOf("documentId", "payments")
+                it.text("properties", "documentId", "format") shouldBe "uuid"
+                it.text("properties", "payments", "items", "\$ref") shouldBe "#/components/schemas/PaymentHistoryResponse"
+            }
+            schema("PaymentHistoryResponse").let {
+                it.strings("required") shouldContainExactly
+                    listOf("payment", "allocations", "refunds", "refundAllocations", "reconciliation")
+                it.text("properties", "payment", "\$ref") shouldBe "#/components/schemas/PaymentRecordResponse"
+                it.text("properties", "allocations", "items", "\$ref") shouldBe "#/components/schemas/PaymentAllocationRecordResponse"
+                it.text("properties", "refunds", "items", "\$ref") shouldBe "#/components/schemas/RefundRecordResponse"
+                it.text("properties", "refundAllocations", "items", "\$ref") shouldBe
+                    "#/components/schemas/RefundAllocationRecordResponse"
+                it.text("properties", "reconciliation", "\$ref") shouldBe "#/components/schemas/PaymentReconciliationResponse"
+            }
+            // Facts, not mutation receipts: an allocation carries no historical document settlement.
+            schema("PaymentAllocationRecordResponse").let {
+                it.strings("required") shouldContainExactly
+                    listOf("allocationId", "paymentId", "documentId", "documentVersion", "amount", "currency", "allocatedAt")
+                it.at("properties").jsonObject.keys shouldBe it.strings("required").toSet()
+                listOf("allocationId", "paymentId", "documentId").forEach { id -> it.text("properties", id, "format") shouldBe "uuid" }
+                it.text("properties", "allocatedAt", "format") shouldBe "date-time"
+            }
+            schema("RefundRecordResponse").let {
+                it.strings("required") shouldContainExactly listOf("refundId", "paymentId", "amount", "currency", "method", "refundedAt")
+                it.at("properties").jsonObject.keys shouldBe it.strings("required").toSet() + "externalReference"
+                it.text("properties", "externalReference", "\$ref") shouldBe "#/components/schemas/RefundExternalReference"
+                it.text("properties", "refundedAt", "format") shouldBe "date-time"
+            }
+            schema("RefundAllocationRecordResponse").let {
+                it.strings("required") shouldContainExactly
+                    listOf("refundAllocationId", "refundId", "paymentAllocationId", "amount", "currency", "allocatedAt")
+                it.at("properties").jsonObject.keys shouldBe it.strings("required").toSet()
+                listOf("refundAllocationId", "refundId", "paymentAllocationId").forEach { id ->
+                    it.text("properties", id, "format") shouldBe "uuid"
+                }
+            }
+            // The example links every refund allocation to a refund and an allocation it carries.
+            val example =
+                route
+                    .at("responses", "200", "content", "application/json", "example")
+                    .at("payments")
+                    .jsonArray
+                    .single()
+            val allocationIds = example.at("allocations").jsonArray.map { it.text("allocationId") }
+            val refundIds = example.at("refunds").jsonArray.map { it.text("refundId") }
+            allocationIds.size shouldBe 2
+            example.at("refundAllocations").jsonArray.single().let {
+                refundIds.contains(it.text("refundId")) shouldBe true
+                allocationIds.contains(it.text("paymentAllocationId")) shouldBe true
+            }
+            example.text("reconciliation", "grossAllocated") shouldBe "350.00"
         }
 
         test("describes a financial document as immutable ledger facts, pricing source, and derived settlement") {

@@ -149,6 +149,7 @@ class ArchitectureSpec :
                     "financial/GetFinancialDocument.kt: inTransaction",
                     "financial/GetFinancialDocumentHistory.kt: inTransaction",
                     "financial/ListInquiryFinancialDocuments.kt: inTransaction",
+                    "financial/ListFinancialDocumentPaymentHistories.kt: inTransaction",
                 )
             sources().containing(transactionInfrastructure - "inTransaction" - "Handle").shouldBeEmpty()
         }
@@ -207,6 +208,7 @@ class ArchitectureSpec :
                         issueInvoice = { _, _ -> error("not called") },
                         createChangeOrder = { _, _, _ -> error("not called") },
                         recordPayment = { error("not called") },
+                        listFinancialDocumentPayments = { error("not called") },
                         recordStandalonePayment = { error("not called") },
                         allocatePayment = { error("not called") },
                         recordRefund = { error("not called") },

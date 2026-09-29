@@ -526,7 +526,9 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   `PUT /admin/users/{userId}/credentials/password`. The credential endpoint verifies the
   runtime user, stores a new hash, returns no secret material, and does not revoke existing
   sessions. Every financial-document, payment, and refund route requires its commerce permission
-  through the same control, and listing and reading inquiries require
+  through the same control. A document's payment histories are a child read of the document
+  and require `FinancialDocumentRead`; `PaymentRecord` and `RefundRecord` authorize writes
+  only and never gain read meaning, and there is no Fiona payment-read permission. Listing and reading inquiries require
   `fionas.inquiries.read`. Inquiry submission, estimate previews, Offerings reads, health,
   and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
@@ -686,8 +688,22 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    reconciliation of an older snapshot. Unapplied amount is net received minus net
    allocated value after refunds and refund unwinds, never mutable state. Payment status is presentation, derived by
    clients. Allocation responses reconcile the exact reference they changed.
-11. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
-12. **No `Booking` yet.** Inquiry → financial-document lineage → payments is the model until
+11. **Payment facts are read back from the ledger, document-first.**
+    `GET /financial-documents/{documentId}/payments` (`ListFinancialDocumentPaymentHistories`)
+    proves Fiona owns the lineage (`inquiryOf`) and calls
+    `ledger.paymentHistoriesForLineage(transaction, documentId)` in one REPEATABLE READ
+    transaction; a lineage only the ledger holds is `404`, never the runtime's `[]`. Each
+    `PaymentHistory` is returned whole, in the runtime's order: allocations to other lineages
+    stay, because its reconciliation depends on them, and discovery stays historical after
+    refunds unwind every allocation here. Never filter a history to the requested document,
+    re-sort it, recompute its reconciliation, or cache a mutation response in its place. The
+    history DTOs are facts (an allocation carries no document settlement; a refund allocation
+    names its `refundId` and `paymentAllocationId`), distinct from the mutation receipts. No
+    global payment listing, search, unapplied-payment inbox, or `GET /payments/{paymentId}`
+    exists: an unallocated standalone payment is not discoverable until a screen needs it and
+    its read permission is decided.
+12. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
+13. **No `Booking` yet.** Inquiry → financial-document lineage → payments is the model until
     a slice decides when an inquiry becomes a booking.
 
 ## Kotlin conventions
@@ -721,7 +737,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the requested pricing inputs' `InquiryPricingRepository` and `JdbiInquiryPricingRepository`, the `CreateInquiry`, `GetInquiry`, and `ListInquiries` operations |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
-| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, and `ListInquiryFinancialDocuments` operations |
+| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
@@ -772,30 +788,12 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 ### Known upstream gaps (last audited at commerce 0.0.14)
 
 The application history schema gap is closed by commerce 0.0.15 (applications declare their
-own migration schema). The payment read gap below was audited against 0.0.15; the rest have
-not been re-audited.
-
-- **The ledger publishes no payment, allocation, or refund reads** (audited at 0.0.15).
-  `FinancialLedger` records payments, allocations, and refunds and reconciles them
-  (`reconcilePayment`, `reconcile`, `reconcileLatest`: totals only), but offers no read of
-  the facts themselves. The queries exist only on the runtime's `PaymentRepository`, which
-  Fiona must not call. So payment, allocation, and refund ids appear only in the response
-  that recorded them, and a refund (which names allocation ids) cannot be prepared from a
-  later read. Fiona use case: staff open a document or payment and see what was received,
-  where it was applied, and what was refunded, then refund without the original response.
-  Minimal upstream API, on `FinancialLedger`, each with a `Transaction` overload and
-  returning commerce-domain types:
-  `payment(paymentId): PaymentRecord?`;
-  `paymentAllocations(paymentId): List<PaymentAllocation>`;
-  `paymentRefunds(paymentId): List<RefundRecord>` and
-  `refundAllocations(paymentId): List<RefundAllocation>`;
-  `lineageAllocations(documentId): List<PaymentAllocation>` (every allocation to any
-  version, from which the lineage's payments follow); and, preferably, one
-  `paymentHistory(paymentId)` value bundling the record, allocations, refunds, refund
-  allocations, and its `PaymentReconciliation`, read consistently. Unallocated standalone
-  payments (`unappliedPayments(currency?)`) are optional. Implementing these in Fiona would
-  mean SQL on `commerce.payment_*`/`commerce.refund_*` or a copy of payment facts, both
-  forbidden by [Financial documents and payments](#financial-documents-and-payments).
+own migration schema). The payment read gap is closed by commerce 0.0.16:
+`FinancialLedger.paymentHistory` and `paymentHistoriesForLineage` (each with a
+`Transaction` overload) return whole `PaymentHistory` values, which Fiona serves per document
+(see [Financial documents and payments](#financial-documents-and-payments), rule 11). The
+runtime still offers no discovery of payments never allocated (`unappliedPayments`), which
+Fiona has not needed yet. The rest have not been re-audited.
 
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
@@ -884,7 +882,10 @@ not been re-audited.
   `FinancialDocumentRoutesSpec` (the
   whole inquiry → estimate → quote → deposit → invoice → change order → payment workflow
   through the complete handler, with its conflicts, transitions, payment policy, and
-  permissions), `InquiryRoutesSpec` (the public receipt never reveals a stored customer;
+  permissions), `FinancialDocumentPaymentsSpec` (payment, allocation, refund, and
+  refund-allocation ids rediscovered after their responses are gone; Fiona ownership over the
+  runtime's lineage; whole split-payment histories; historical discovery; runtime ordering;
+  `FinancialDocumentRead` only), `InquiryRoutesSpec` (the public receipt never reveals a stored customer;
   inquiry list and detail require `fionas.inquiries.read`; keyset pages with timestamp ties;
   requested pricing inputs pinned, rejected as a preview rejects them, and handed to an
   estimate unchanged), HTTP tests through the complete handler, schema tests,

@@ -18,6 +18,7 @@ import io.github.castab.fionas.commerce.financial.IssueInvoice
 import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
@@ -156,6 +157,8 @@ fun fionaApplication(
                     issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     createChangeOrder = CreateChangeOrder(context.transactor, ledger, documentOwners, pricingSources, pricing)::invoke,
                     recordPayment = RecordDocumentPayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
+                    listFinancialDocumentPayments =
+                        ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)::invoke,
                     recordStandalonePayment = RecordPayment(context.transactor, ledger, clock)::invoke,
                     allocatePayment = AllocatePayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
                     recordRefund = RecordRefund(context.transactor, ledger, clock)::invoke,
