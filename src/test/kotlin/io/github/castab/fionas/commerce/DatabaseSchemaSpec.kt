@@ -8,6 +8,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.TestDatabase
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.shouldBe
@@ -39,9 +40,10 @@ class DatabaseSchemaSpec :
                 """.trimIndent(),
             )
 
-        test("Fiona's tables live in the fionas schema, which Fiona owns") {
-            application.database.tables("fionas") shouldContainExactlyInAnyOrder
+        test("Fiona's tables live in the fionas schema, which Fiona owns, beside its own migration history") {
+            application.database.tables(FIONA_MIGRATION_SCHEMA) shouldContainExactlyInAnyOrder
                 listOf(
+                    "flyway_schema_history",
                     "customers",
                     "inquiries",
                     "user_credentials",
@@ -166,8 +168,14 @@ class DatabaseSchemaSpec :
             application.database.objects("commerce") shouldContainExactly runtimeOnly
         }
 
-        test("no Fiona table is left in public, which holds only the history commerce-runtime keeps for Fiona's stream") {
-            application.database.tables("public") shouldContainExactly listOf("flyway_schema_history")
+        test("each migration stream keeps its history in its own schema") {
+            application.database.tables("commerce") shouldContain "flyway_schema_history"
+            application.database.tables(FIONA_MIGRATION_SCHEMA) shouldContain "flyway_schema_history"
+        }
+
+        test("public holds no Fiona-owned objects or migration metadata") {
+            application.database.objects("public").shouldBeEmpty()
+            application.database.tables("public").shouldBeEmpty()
         }
 
         test("Fiona creates no Offerings persistence: the catalog lives only in commerce-runtime's tables") {

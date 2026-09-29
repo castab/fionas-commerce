@@ -111,7 +111,7 @@ class TestApplication private constructor(
                             ),
                         application =
                             ApplicationContributions(
-                                migrationLocations = fiona.migrationLocations,
+                                migrations = fiona.migrations,
                                 permissionDefinitions = fiona.permissionDefinitions,
                                 routes = { runtimeContext ->
                                     context = runtimeContext

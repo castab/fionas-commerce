@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.14/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.14/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.15/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.15/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -37,8 +37,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.14`, which brings
-`commerce-domain:0.0.14` with it. It contributes its migrations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.15`, which brings
+`commerce-domain:0.0.15` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -765,16 +765,21 @@ on stdout, with library logging at `WARN`/`INFO`. The database password is never
 
 ## Database and migrations
 
-commerce-runtime owns migration orchestration; Fiona owns only its own migrations.
+commerce-runtime owns migration orchestration; Fiona owns only its own migrations and the schema they live in.
 
 ```text
 commerce-runtime migrations    commerce schema    commerce.flyway_schema_history   first
-Fiona migrations               fionas schema      public.flyway_schema_history     second
+Fiona migrations               fionas schema      fionas.flyway_schema_history      second
 ```
 
 - Fiona's migrations live in [`src/main/resources/db/fionas`](src/main/resources/db/fionas)
-  and are contributed as `classpath:db/fionas`. The runtime's migrations come inside the
-  `commerce-runtime` jar; Fiona never lists or copies them.
+  and are contributed, with their schema, as
+  `ApplicationMigrations(schema = "fionas", locations = listOf("classpath:db/fionas"))`.
+  The runtime's Flyway creates the `fionas` schema when missing, makes it the default schema
+  of Fiona's stream, and keeps Fiona's `flyway_schema_history` in it, so Fiona's `V1` does
+  not create the schema (its SQL still qualifies every object, `fionas.customers`). Nothing
+  of Fiona's migrations, tables, or history is in `public`. The runtime's migrations come
+  inside the `commerce-runtime` jar; Fiona never lists or copies them.
 - The two streams have independent version spaces: Fiona's migrations are `V1`, `V2`, …
   regardless of the runtime's numbering.
 - Fiona's tables are in the `fionas` schema: `customers`, `inquiries`, and
@@ -801,6 +806,16 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
 > forward on startup, runtime first. The existing Administrator role keeps its grants (see
 > [Staff authentication](#staff-authentication)).
 
+> **Upgrading to commerce 0.0.15.** The runtime now keeps an application's migration
+> history in the application's own declared schema, so Fiona's moves from
+> `public.flyway_schema_history` to `fionas.flyway_schema_history`. Fiona adds no migration
+> and 0.0.15 deliberately does not reinterpret the old history: it does not move,
+> baseline, or copy it. A development database created by an earlier version has that
+> history in `public` and must be recreated (for our disposable development environment,
+> drop the database or its volume, for example `docker compose down -v`). After recreation,
+> `commerce.flyway_schema_history` and `fionas.flyway_schema_history` exist and `public`
+> holds nothing of Fiona's.
+>
 > **Upgrading to commerce 0.0.14.** The runtime applies `V6__refunds` to create its two
 > refund tables. Fiona adds no migration. Existing Administrator grants are retained;
 > use the read-modify-replace permission flow in [Staff authentication](#staff-authentication)
@@ -912,8 +927,8 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | Spec | Proves |
 |---|---|
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
-| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates on its own (its Offerings and ledger tables included); nothing Fiona-owned in `commerce` or `public`; the association and pricing-source keys reference the runtime's exact snapshots; no Fiona table or column restates a ledger fact |
-| `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: runtime migrations first (the runtime's financial ledger before Fiona's `V3`; an application migration depending on them succeeds), independent version spaces, repeat startup applies nothing, failures prevent composition |
+| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates on its own (its Offerings and ledger tables included); nothing Fiona-owned in `commerce`, and `public` holds no Fiona objects or migration metadata; each stream's `flyway_schema_history` is in its own schema; the association and pricing-source keys reference the runtime's exact snapshots; no Fiona table or column restates a ledger fact |
+| `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: runtime migrations first (the runtime's financial ledger before Fiona's `V3`; an application migration depending on them succeeds), independent version spaces, each history in its own schema (none in `public`), repeat startup applies nothing, failures prevent composition |
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email lookup, unique email conflict, foreign key |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, atomic failure, not found |

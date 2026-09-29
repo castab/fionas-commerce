@@ -1,8 +1,9 @@
 -- Fiona-owned objects for the inquiry slice. They live in the fionas schema, which this
--- application owns; the commerce schema belongs to commerce-runtime and is never touched
--- here. This is Fiona's own migration stream, versioned independently of the runtime's and
--- applied by commerce-runtime after the runtime's migrations.
-CREATE SCHEMA fionas;
+-- application owns and which commerce-runtime's Flyway creates before this migration runs
+-- (Fiona declares it in ApplicationMigrations); the commerce schema belongs to
+-- commerce-runtime and is never touched here. This is Fiona's own migration stream,
+-- versioned independently of the runtime's and applied by commerce-runtime after the
+-- runtime's migrations.
 
 -- The person who makes an inquiry. Emails are stored normalized (trimmed, lowercase) and
 -- are unique, because CreateInquiry reuses the customer who owns a submitted email. The

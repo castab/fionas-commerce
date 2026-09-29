@@ -169,7 +169,7 @@ only to *observe* the database from outside the runtime (see `TestDatabase`).
 ## Composition
 
 `FionaApplication.kt` is the composition root. `fionaApplication()` returns the
-`ApplicationContributions` (Fiona's migration location and route factory); the route
+`ApplicationContributions` (Fiona's migration schema and location, and route factory); the route
 factory builds repositories and operations from the `CommerceRuntimeContext` with
 ordinary Kotlin, hands the operations to the API as `FionaOperations`, binds the runtime's
 Offerings capability to Fiona's catalog (`offeringsHttpCapability(context,
@@ -340,19 +340,27 @@ application migration version numbers with runtime migration versions. Applicati
 migrations live in Fiona's migration location and schema, and are executed by the runtime
 after runtime-owned migrations.
 
-- **The runtime orchestrates; Fiona owns only the contents.** Fiona contributes one
-  location, `classpath:db/fionas` (`FIONA_MIGRATION_LOCATION`), through
-  `ApplicationContributions.migrationLocations`. The runtime discovers its own migrations
-  inside its jar; Fiona never lists, copies, or depends on their files or versions.
+- **The runtime orchestrates; Fiona owns only the contents and the schema.** Fiona
+  contributes `ApplicationMigrations(schema = FIONA_MIGRATION_SCHEMA, locations =
+  listOf(FIONA_MIGRATION_LOCATION))` (`fionas` and `classpath:db/fionas`) through
+  `ApplicationContributions.migrations`. The declared schema is created by the runtime's
+  Flyway when missing, is the default schema of Fiona's stream, is the only schema that
+  stream manages, and holds Fiona's `flyway_schema_history`. The runtime discovers its own
+  migrations inside its jar; Fiona never lists, copies, or depends on their files or versions.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
 - **Independent version space.** Fiona's migrations are `V1__…`, `V2__…`, the next integer
   in Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging.
-- **Fiona's objects live in the `fionas` schema**, created by Fiona's `V1`. SQL names it
-  explicitly (`fionas.customers`); never rely on `search_path`. `public` holds only the
-  history table the runtime keeps for Fiona's stream.
+- **Fiona's objects live in the `fionas` schema**, created by the runtime's Flyway before
+  `V1` runs, so no Fiona migration says `CREATE SCHEMA fionas` (it would collide). SQL still
+  names the schema explicitly (`fionas.customers`); never rely on `search_path` or on the
+  default schema. `public` holds nothing of Fiona's, neither objects nor migration history:
+  `commerce.flyway_schema_history` and `fionas.flyway_schema_history` are the two histories.
+  Development databases created before commerce 0.0.15 keep Fiona's history in
+  `public.flyway_schema_history`; the runtime does not reinterpret it, and Fiona adds no
+  move, baseline, copy, `baselineOnMigrate`, or startup SQL for it. Recreate such databases.
 - **Never create, alter, or drop anything in `commerce`**, and never add files under
   `db/commerce`. If Fiona needs a runtime-owned structure to change, stop and raise it as
   a runtime requirement (see [Commerce-runtime gap rule](#commerce-runtime-gap-rule)).
@@ -723,11 +731,11 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (as of commerce 0.0.14)
+### Known upstream gaps (last audited at commerce 0.0.14)
 
-- **Application history schema is fixed.** Fiona's tables live in `fionas`, but the
-  runtime keeps every application's migration history in `public.flyway_schema_history`
-  (`ApplicationMigrations.SCHEMA`), with no way to choose another schema.
+The application history schema gap is closed by commerce 0.0.15 (applications declare their
+own migration schema). The rest have not been re-audited against 0.0.15.
+
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
 - **Hoplite prints a deprecation notice to stdout** on every

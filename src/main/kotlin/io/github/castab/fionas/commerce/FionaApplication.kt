@@ -5,6 +5,7 @@ import io.github.castab.commerce.runtime.authorization.authorizationAdministrati
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
+import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
@@ -48,14 +49,20 @@ import java.time.Clock
 import java.util.Properties
 
 /**
+ * The schema Fiona owns: commerce-runtime's migration phase creates it when missing, makes it the
+ * default schema of Fiona's migration stream, and keeps `flyway_schema_history` in it.
+ */
+const val FIONA_MIGRATION_SCHEMA = "fionas"
+
+/**
  * Where Fiona's own migrations live: Fiona's migration stream, applied by commerce-runtime
  * after its own. Never `db/commerce`; the runtime discovers and applies its migrations itself.
  */
 const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
 
 /**
- * Everything Fiona's contributes to commerce-runtime: the location of its own migrations
- * (never the runtime's) and its routes: the Fiona API contract and its Swagger UI.
+ * Everything Fiona's contributes to commerce-runtime: the schema and location of its own
+ * migrations (never the runtime's) and its routes: the Fiona API contract and its Swagger UI.
  *
  * This is the application's composition root. Repositories and operations are built here
  * with ordinary Kotlin from the runtime's `CommerceRuntimeContext`, so every Fiona write
@@ -81,7 +88,11 @@ fun fionaApplication(
             ?: emptySet(),
 ): ApplicationContributions =
     ApplicationContributions(
-        migrationLocations = listOf(FIONA_MIGRATION_LOCATION),
+        migrations =
+            ApplicationMigrations(
+                schema = FIONA_MIGRATION_SCHEMA,
+                locations = listOf(FIONA_MIGRATION_LOCATION),
+            ),
         permissionDefinitions = FionaPermissions.definitions,
         routes = { context ->
             val customers = JdbiCustomerRepository()
