@@ -834,6 +834,24 @@ It does not load `.env` files or install npm packages. The catalog is append-onl
 script stops if one already exists. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
 for the exact catalog entries and preview request.
 
+### Smoke test a direct Invoice payment locally
+
+With Fiona running locally and its Offerings catalog already initialized by
+`setup-local-commerce.mjs`, use Node.js 20 or newer to exercise the separate payment
+recording and allocation routes:
+
+```bash
+FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/spoof-payment.mjs
+```
+
+The script accepts the same `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
+`FIONAS_ADMIN_USERNAME` defaults as the catalog setup script; `FIONAS_ADMIN_PASSWORD` is
+required. It creates a real local inquiry, a direct Invoice v1, a standalone payment for
+the server-calculated total, and an allocation through Fiona's HTTP API, then verifies
+the derived balance is zero. It writes ordinary development data to the configured
+database, so use it in local/disposable environments. It has no npm dependencies and is
+not a payment-provider or webhook simulator.
+
 ### Packaging
 
 `./gradlew shadowJar` produces `build/libs/fionas-commerce-all.jar`: one executable jar
