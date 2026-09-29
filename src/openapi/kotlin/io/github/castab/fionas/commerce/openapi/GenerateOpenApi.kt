@@ -49,6 +49,7 @@ import java.nio.file.Path
 private val notInvoked =
     FionaOperations(
         createInquiry = { error("Rendering the OpenAPI document never creates an inquiry") },
+        listInquiries = { error("Rendering the OpenAPI document never lists inquiries") },
         getInquiry = { error("Rendering the OpenAPI document never reads an inquiry") },
         previewEstimate = { error("Rendering the OpenAPI document never prices an estimate") },
         createInquiryEstimate = { _, _ -> error("Rendering the OpenAPI document never persists an estimate") },

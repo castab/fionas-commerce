@@ -52,7 +52,9 @@ before relying on an upstream API. Never copy, fork, or vendor their code.
 Fiona owns, and persists in its own tables:
 
 - customers;
-- inquiries;
+- inquiries, the Fiona pricing inputs a customer configured with one (see
+  [Inquiries and the staff inbox](#inquiries-and-the-staff-inbox)), and the staff inquiry
+  list;
 - password credentials, verification, login, browser Origin policy, and first-admin
   bootstrap policy; commerce-runtime owns staff users and authorization;
 - the identity of Fiona's primary Offerings catalog and where it is served (its contents
@@ -99,12 +101,42 @@ own table, purgeable independently of the customer.
 - `fionas.customers.email` is unique, because this policy needs "the customer with this
   email" to be unambiguous. A concurrent request that loses the race for a new email
   gets `409 conflict` and may retry.
+- **The public response never discloses a stored customer.** `POST /inquiries` answers a
+  receipt of the new inquiry (`id`, `createdAt`, and `Location`), never the customer's
+  id, stored name, or email, so submitting an address reveals nothing about whoever owns
+  it. `CreateInquiry` returns the `Inquiry` alone, so no route can leak what it never
+  receives. Customers are read only by staff holding `fionas.inquiries.read`.
 
 The customer's identity is `CustomerId`, not the email. The email is a lookup key. There
 is no customer update, merge, or deduplication. **Unresolved:** whether a returning
 customer's new name should be recorded or confirmed, whether two customers may ever share
 an email (for example a household), and whether email matching is acceptable without
 verifying ownership of the address. Decide these explicitly before changing the policy.
+
+### Inquiries and the staff inbox
+
+- **Submission is public; reading is staff-only.** `POST /inquiries` is public.
+  `GET /inquiries` and `GET /inquiries/{inquiryId}` require Fiona's
+  `fionas.inquiries.read`. There is no public confirmation lookup: a confirmation renders
+  what the customer just submitted.
+- **The inbox is a primitive, not a query API.** `ListInquiries` returns the newest
+  inquiries first, ordered by `created_at DESC, id DESC`, `limit` 1–100 (default 25) per
+  page, continuing strictly after the previous page's last `(created_at, id)` (keyset, never
+  offsets). The HTTP cursor is that position, base64url-encoded, and is opaque to clients.
+  The `inquiries_created_at_id_idx` index serves every page. Never add search,
+  filters, inquiry status, offsets, or a generic pagination framework here without a
+  dedicated slice.
+- **Requested pricing inputs are the customer's request, never amounts.** An inquiry may
+  carry the `FionasPricingInputs` the customer configured (catalog revision, selections,
+  guest count, duration), in `fionas.inquiry_pricing` and its ordered categories and
+  selections. `CreateInquiry` checks them with `FionasPricing` from exactly the revision they
+  name, inside its one transaction, and discards the lines: rejections are the preview's
+  own `404`/`422`, the revision is pinned as submitted, and no `FinancialDocument` is
+  created. Staff read them back unchanged and may submit them to
+  `POST /inquiries/{inquiryId}/estimates`. They are never rewritten later.
+- **Event facts are not modeled.** Date, location, and occasion stay in the free-form
+  `message` until a slice introduces event details; never encode structured facts in
+  `message` or bolt them onto the pricing inputs.
 
 ## Generic commerce concepts
 
@@ -373,7 +405,9 @@ after runtime-owned migrations.
   runtime's Offerings operations and snapshot read. Fiona's `V2` references the published
   `commerce.users(principal_id)` for the credential foreign key, and `V3` references the
   published `commerce.financial_document_snapshots(document_id, version)`: the association
-  names each lineage's first snapshot, and each pricing source its exact snapshot.
+  names each lineage's first snapshot, and each pricing source its exact snapshot. `V4`
+  (the inquiry list index and an inquiry's requested pricing inputs) references only
+  Fiona's own tables.
   `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
@@ -474,13 +508,15 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   later startup never overwrites an existing credential.
 - The Administrator role grants exactly OfferingsManage, FinancialDocumentRead,
   FinancialDocumentCreate, PaymentRecord, RefundRecord, PrincipalRead, PrincipalManage, RoleRead,
-  RoleManage, RoleAssign, and Fiona's `fionas.credentials.manage`. It has no wildcard or
+  RoleManage, RoleAssign, and Fiona's `fionas.credentials.manage` and `fionas.inquiries.read`. It has no wildcard or
   automatic future grants. Grants are fixed when bootstrap creates the role; startup never
-  mutates an existing Administrator role, whose grants are managed through `/admin/access`.
+  mutates an existing Administrator role, whose grants are managed through `/admin/access`:
+  an Administrator created by an earlier release gains `fionas.inquiries.read` (or
+  `commerce.refund.record`) only through the documented read-modify-replace grant.
 - Generic commerce actions use commerce-domain's `CommercePermissions`
   (`FinancialDocumentRead`, `FinancialDocumentCreate`, `PaymentRecord`, `RefundRecord`); never define a Fiona
   duplicate. Only Fiona-specific actions get a Fiona permission.
-- Fiona contributes `fionas.credentials.manage` through
+- Fiona contributes `fionas.credentials.manage` and `fionas.inquiries.read` through
   `ApplicationContributions.permissionDefinitions`. The runtime permission catalog and
   live resolver remain the only authorization source.
 - Fiona composes one `AccessControl` from cookie `sessionAuthentication(context.sessions,
@@ -490,8 +526,9 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   `PUT /admin/users/{userId}/credentials/password`. The credential endpoint verifies the
   runtime user, stores a new hash, returns no secret material, and does not revoke existing
   sessions. Every financial-document, payment, and refund route requires its commerce permission
-  through the same control. Public
-  inquiries, estimate previews, Offerings reads, health, and readiness remain public.
+  through the same control, and listing and reading inquiries require
+  `fionas.inquiries.read`. Inquiry submission, estimate previews, Offerings reads, health,
+  and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
   cookie-authenticated methods require a matching `Origin` and fail closed if none is
   configured. Fiona's CSRF policy is separate from the reusable runtime session filter.
@@ -557,7 +594,7 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
    the one transaction that writes it.
 9. **One input model, one pricing path.** `FionasPricingInputs` (catalog revision,
    `OfferingSelections`, `FionasOfferingsContext`) is what previews, persisted estimates,
-   change orders, and pricing-source history share; `FionasPricing` turns it into lines and
+   change orders, pricing-source history, and an inquiry's requested inputs share; `FionasPricing` turns it into lines and
    reports rejections identically everywhere. It is strongly typed Fiona data: never a
    metadata map or an opaque context.
 10. **A preview is not an estimate document.** `POST /estimate-preview` stays public and
@@ -682,7 +719,7 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
-| `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
+| `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the requested pricing inputs' `InquiryPricingRepository` and `JdbiInquiryPricingRepository`, the `CreateInquiry`, `GetInquiry`, and `ListInquiries` operations |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
 | `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, and `ListInquiryFinancialDocuments` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
@@ -706,7 +743,8 @@ webhooks, service credentials, OAuth/OIDC, self-service password resets, event p
 outbox, NATS, projections, CQRS, bookings and booking conversion, booking lifecycle
 transitions, a generic line-source identity, stored balances or payment statuses, tax,
 travel fees, minimum orders, inventory, availability, catalog seeding or import, deposit
-requirements or schedules, and customer merge or deduplication. Do not add placeholders for
+requirements or schedules, customer merge or deduplication, inquiry search, filters, or
+status, and event details (date, location, occasion). Do not add placeholders for
 them.
 
 Also never introduce Spring or Spring Boot, Hibernate/JPA, a DI framework, event
@@ -734,7 +772,30 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 ### Known upstream gaps (last audited at commerce 0.0.14)
 
 The application history schema gap is closed by commerce 0.0.15 (applications declare their
-own migration schema). The rest have not been re-audited against 0.0.15.
+own migration schema). The payment read gap below was audited against 0.0.15; the rest have
+not been re-audited.
+
+- **The ledger publishes no payment, allocation, or refund reads** (audited at 0.0.15).
+  `FinancialLedger` records payments, allocations, and refunds and reconciles them
+  (`reconcilePayment`, `reconcile`, `reconcileLatest`: totals only), but offers no read of
+  the facts themselves. The queries exist only on the runtime's `PaymentRepository`, which
+  Fiona must not call. So payment, allocation, and refund ids appear only in the response
+  that recorded them, and a refund (which names allocation ids) cannot be prepared from a
+  later read. Fiona use case: staff open a document or payment and see what was received,
+  where it was applied, and what was refunded, then refund without the original response.
+  Minimal upstream API, on `FinancialLedger`, each with a `Transaction` overload and
+  returning commerce-domain types:
+  `payment(paymentId): PaymentRecord?`;
+  `paymentAllocations(paymentId): List<PaymentAllocation>`;
+  `paymentRefunds(paymentId): List<RefundRecord>` and
+  `refundAllocations(paymentId): List<RefundAllocation>`;
+  `lineageAllocations(documentId): List<PaymentAllocation>` (every allocation to any
+  version, from which the lineage's payments follow); and, preferably, one
+  `paymentHistory(paymentId)` value bundling the record, allocations, refunds, refund
+  allocations, and its `PaymentReconciliation`, read consistently. Unallocated standalone
+  payments (`unappliedPayments(currency?)`) are optional. Implementing these in Fiona would
+  mean SQL on `commerce.payment_*`/`commerce.refund_*` or a copy of payment facts, both
+  forbidden by [Financial documents and payments](#financial-documents-and-payments).
 
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
@@ -823,7 +884,10 @@ own migration schema). The rest have not been re-audited against 0.0.15.
   `FinancialDocumentRoutesSpec` (the
   whole inquiry → estimate → quote → deposit → invoice → change order → payment workflow
   through the complete handler, with its conflicts, transitions, payment policy, and
-  permissions), HTTP tests through the complete handler, schema tests,
+  permissions), `InquiryRoutesSpec` (the public receipt never reveals a stored customer;
+  inquiry list and detail require `fionas.inquiries.read`; keyset pages with timestamp ties;
+  requested pricing inputs pinned, rejected as a preview rejects them, and handed to an
+  estimate unchanged), HTTP tests through the complete handler, schema tests,
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
   the lifecycle internals), `OfferingsCatalogSpec` (Fiona's catalog through the complete
   handler: initialization, revisions, historical reads, price forms; integration only, the

@@ -21,8 +21,11 @@ import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
+import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.InquiryPage
+import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.offering.EstimatePreview
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.SecretPassword
@@ -51,7 +54,8 @@ const val API_DOCS_PATH = "/docs"
  * supplies the real operations; rendering the contract never calls any of them.
  */
 class FionaOperations(
-    val createInquiry: (CreateInquiry.Command) -> InquiryDetails,
+    val createInquiry: (CreateInquiry.Command) -> Inquiry,
+    val listInquiries: (ListInquiries.Command) -> InquiryPage,
     val getInquiry: (InquiryId) -> InquiryDetails,
     val previewEstimate: (FionasPricingInputs) -> EstimatePreview,
     val createInquiryEstimate: (InquiryId, FionasPricingInputs) -> InquiryFinancialDocument,
@@ -88,7 +92,8 @@ fun fionaApiRoutes(
 ): List<ContractRoute> =
     listOf(
         createInquiryRoute(operations.createInquiry),
-        getInquiryRoute(operations.getInquiry),
+        listInquiriesRoute(operations.listInquiries, auth.access),
+        getInquiryRoute(operations.getInquiry, auth.access),
         previewEstimateRoute(operations.previewEstimate),
         createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
         createInquiryFinancialDocumentRoute(operations.createInquiryFinancialDocument, auth.access),

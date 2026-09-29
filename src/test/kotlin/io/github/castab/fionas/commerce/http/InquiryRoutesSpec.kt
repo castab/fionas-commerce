@@ -2,37 +2,105 @@ package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.commerce.staff.PermissionKey
+import io.github.castab.commerce.staff.RoleDefinition
+import io.github.castab.commerce.staff.RoleKey
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
+import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.pricingBody
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.collections.shouldBeUnique
+import io.kotest.matchers.collections.shouldContainExactly
+import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.nulls.shouldBeNull
+import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.shouldNotBe
+import io.kotest.matchers.string.shouldNotContain
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.util.Base64
 import java.util.UUID
 
 /** The inquiry API through the complete fionas-commerce HTTP handler, runtime error handling included. */
 class InquiryRoutesSpec :
     FunSpec({
         lateinit var application: TestApplication
+        var revision = 0
 
-        beforeSpec { application = TestApplication.create() }
+        beforeSpec {
+            application = TestApplication.create()
+            revision = application.createAcceptanceCatalog()
+        }
         afterSpec { application.close() }
 
-        fun post(body: String) = application.http(Request(Method.POST, "/inquiries").header("Content-Type", "application/json").body(body))
+        fun TestApplication.post(body: String) =
+            http(Request(Method.POST, "/inquiries").header("Content-Type", "application/json").body(body))
 
-        fun get(path: String) = application.http(Request(Method.GET, path))
+        fun post(body: String) = application.post(body)
+
+        fun anonymousGet(path: String) = application.http(Request(Method.GET, path))
+
+        fun Response.receipt() = CommerceJson.asA(bodyString(), InquiryReceiptResponse.serializer())
 
         fun Response.inquiry() = CommerceJson.asA(bodyString(), InquiryResponse.serializer())
 
+        fun Response.list() = CommerceJson.asA(bodyString(), InquiryListResponse.serializer())
+
         fun Response.error() = CommerceJson.asA(bodyString(), ErrorResponse.serializer())
 
-        fun rows() = application.database.count("fionas.customers") to application.database.count("fionas.inquiries")
+        fun Response.keys() = Json.parseToJsonElement(bodyString()).jsonObject.keys
 
-        test("POST /inquiries records the inquiry and returns it, with its location") {
+        fun rows() =
+            listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_pricing", "fionas.inquiry_pricing_selections")
+                .map(application.database::count)
+
+        /** Runs [block] while the bootstrap administrator holds only [permissions], then restores the Administrator role. */
+        fun <T> TestApplication.asStaffWith(
+            permissions: Set<PermissionKey>,
+            block: () -> T,
+        ): T {
+            val admin = checkNotNull(authorization.findUserByUsername("admin"))
+            val role = RoleKey("fionas.test.restricted-${UUID.randomUUID()}")
+            authorization.createRole(RoleDefinition(role, "Restricted staff", null, permissions))
+            authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+            authorization.assignRole(admin.id, role)
+            try {
+                return block()
+            } finally {
+                authorization.unassignRole(admin.id, role)
+                authorization.assignRole(admin.id, CommerceRoles.Administrator)
+            }
+        }
+
+        fun inquiryBody(
+            email: String,
+            name: String = "Jane Doe",
+            extra: String = "",
+        ) = """{"name":"$name","email":"$email"$extra}"""
+
+        // POST /inquiries: public, and a receipt of the new inquiry only.
+
+        test("POST /inquiries records the inquiry and answers a receipt of it, with its location") {
             val email = "jane-${UUID.randomUUID()}@example.com"
 
             val response =
@@ -41,35 +109,38 @@ class InquiryRoutesSpec :
                 )
 
             response.status shouldBe Status.CREATED
-            val created = response.inquiry()
-            created.name shouldBe "Jane Doe"
-            created.email shouldBe email
-            created.message shouldBe "I'm interested in ice cream service for a birthday."
-            created.createdAt shouldBe STORED_INSTANT.toString()
-            UUID.fromString(created.id) shouldNotBe UUID.fromString(created.customerId)
-            response.header("Location") shouldBe "/inquiries/${created.id}"
+            response.keys() shouldBe setOf("id", "createdAt")
+            val receipt = response.receipt()
+            receipt.createdAt shouldBe STORED_INSTANT.toString()
+            response.header("Location") shouldBe "/inquiries/${receipt.id}"
+            application.adminGet("/inquiries/${receipt.id}").inquiry().let {
+                it.id shouldBe receipt.id
+                it.name shouldBe "Jane Doe"
+                it.email shouldBe email
+                it.message shouldBe "I'm interested in ice cream service for a birthday."
+                it.createdAt shouldBe receipt.createdAt
+            }
         }
 
-        test("GET /inquiries/{id} returns the persisted inquiry") {
-            val created = post("""{"name":"Ada","email":"ada-${UUID.randomUUID()}@example.com"}""").inquiry()
+        test("a public submission with an existing customer's email never reveals that customer's stored record") {
+            val email = "known-${UUID.randomUUID()}@example.com"
+            val stored = "Alice Stored-Name"
+            val first = post(inquiryBody(email, name = stored)).receipt()
+            val storedCustomerId = application.adminGet("/inquiries/${first.id}").inquiry().customerId
 
-            val response = get("/inquiries/${created.id}")
+            val probe = post(inquiryBody(" ${email.uppercase()} ", name = "Bob Probe"))
 
-            response.status shouldBe Status.OK
-            response.inquiry() shouldBe created
-            created.message.shouldBeNull()
-            response.bodyString().contains("\"message\"") shouldBe false
-        }
-
-        test("a second inquiry with the same email belongs to the same customer") {
-            val email = "twice-${UUID.randomUUID()}@example.com"
-            val first = post("""{"name":"Jane Doe","email":"$email"}""").inquiry()
-
-            val second = post("""{"name":"Janet","email":"$email","message":"Also a wedding"}""").inquiry()
-
-            second.customerId shouldBe first.customerId
-            second.name shouldBe "Jane Doe"
-            second.id shouldNotBe first.id
+            probe.status shouldBe Status.CREATED
+            probe.keys() shouldBe setOf("id", "createdAt")
+            probe.bodyString() shouldNotContain stored
+            probe.bodyString() shouldNotContain storedCustomerId
+            probe.bodyString() shouldNotContain email
+            probe.header("Location") shouldBe "/inquiries/${probe.receipt().id}"
+            // The customer-matching policy is unchanged: the inquiry is the stored customer's, whose name is kept.
+            application.adminGet("/inquiries/${probe.receipt().id}").inquiry().let {
+                it.customerId shouldBe storedCustomerId
+                it.name shouldBe stored
+            }
         }
 
         test("invalid values are a validation failure, and nothing is recorded") {
@@ -97,43 +168,427 @@ class InquiryRoutesSpec :
                 it.error().code shouldBe "malformed_request"
             }
             post("""{not json""").error().code shouldBe "malformed_request"
+            post(inquiryBody("jane@example.com", extra = ""","pricingInputs":{"catalogRevision":$revision}""")).let {
+                it.status shouldBe Status.BAD_REQUEST
+                it.error().code shouldBe "malformed_request"
+            }
 
             rows() shouldBe before
         }
 
-        test("an inquiry id that is not a UUID is a malformed request") {
-            get("/inquiries/not-a-uuid").let {
-                it.status shouldBe Status.BAD_REQUEST
-                it.error().code shouldBe "malformed_request"
+        // GET /inquiries/{inquiryId}: staff only.
+
+        test("reading an inquiry requires a staff session holding fionas.inquiries.read") {
+            val id = post(inquiryBody("guarded-${UUID.randomUUID()}@example.com")).receipt().id
+            val path = "/inquiries/$id"
+
+            anonymousGet(path).let {
+                it.status shouldBe Status.UNAUTHORIZED
+                it.error().code shouldBe "unauthenticated"
+                it.bodyString() shouldNotContain "Jane"
+            }
+            // An anonymous caller learns nothing, not even whether the id is well formed or known.
+            anonymousGet("/inquiries/not-a-uuid").status shouldBe Status.UNAUTHORIZED
+            anonymousGet("/inquiries/${UUID.randomUUID()}").status shouldBe Status.UNAUTHORIZED
+            application.asStaffWith(setOf(CommercePermissions.FinancialDocumentRead, CommercePermissions.FinancialDocumentCreate)) {
+                application.adminGet(path).let {
+                    it.status shouldBe Status.FORBIDDEN
+                    it.error().code shouldBe "forbidden"
+                }
+            }
+            application.asStaffWith(setOf(FionaPermissions.InquiriesRead)) {
+                application.adminGet(path).status shouldBe Status.OK
+            }
+            application.adminGet(path).let {
+                it.status shouldBe Status.OK
+                it.inquiry().id shouldBe id
             }
         }
 
-        test("an unknown inquiry is not found") {
+        test("GET /inquiries/{id} returns the persisted inquiry, without absent properties") {
+            val id = post(inquiryBody("ada-${UUID.randomUUID()}@example.com", name = "Ada")).receipt().id
+
+            val response = application.adminGet("/inquiries/$id")
+
+            response.status shouldBe Status.OK
+            response.inquiry().let {
+                it.id shouldBe id
+                it.name shouldBe "Ada"
+                it.message.shouldBeNull()
+                it.pricingInputs.shouldBeNull()
+            }
+            response.keys() shouldBe setOf("id", "customerId", "name", "email", "createdAt")
+        }
+
+        test("an authorized read of an unknown inquiry is not found, and a malformed id a malformed request") {
             val missing = UUID.randomUUID()
 
-            get("/inquiries/$missing").let {
+            application.adminGet("/inquiries/$missing").let {
                 it.status shouldBe Status.NOT_FOUND
                 it.error() shouldBe ErrorResponse("not_found", "Inquiry $missing was not found")
             }
+            application.adminGet("/inquiries/not-a-uuid").let {
+                it.status shouldBe Status.BAD_REQUEST
+                it.error() shouldBe ErrorResponse("malformed_request", "Malformed request: path 'inquiryId'")
+            }
         }
 
-        // The routes are http4k contract routes, which would otherwise validate inputs and
-        // render failures themselves; commerce-runtime still owns every error response.
+        // The configured request survives the handoff to staff.
+
+        test("a plain contact inquiry without pricing inputs is still recorded") {
+            val before = application.database.count("fionas.inquiry_pricing")
+
+            val response = post(inquiryBody("plain-${UUID.randomUUID()}@example.com", extra = ""","message":"Just a question.""""))
+
+            response.status shouldBe Status.CREATED
+            application
+                .adminGet("/inquiries/${response.receipt().id}")
+                .inquiry()
+                .pricingInputs
+                .shouldBeNull()
+            application.database.count("fionas.inquiry_pricing") shouldBe before
+        }
+
+        test("the configured pricing inputs survive persistence and are returned to staff exactly as submitted") {
+            val inputs =
+                pricingBody(revision, guests = 120, minutes = 180, toppings = TOPPINGS.reversed())
+                    .replace("\"guestCount\":120", "\"guestCount\":120,\"guestCountIsMinimum\":true")
+
+            val response = post(inquiryBody("configured-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":$inputs"""))
+
+            response.status shouldBe Status.CREATED
+            response.keys() shouldBe setOf("id", "createdAt")
+            application.adminGet("/inquiries/${response.receipt().id}").inquiry().pricingInputs shouldBe
+                InquiryRequestedPricing(
+                    catalogRevision = revision,
+                    guestCount = 120,
+                    guestCountIsMinimum = true,
+                    durationMinutes = 180,
+                    selections =
+                        listOf(
+                            PricingSelection("soft-serve-flavor", listOf("vanilla", "horchata")),
+                            PricingSelection("topping", TOPPINGS.reversed()),
+                            PricingSelection("cone-option", listOf("waffle-cone")),
+                        ),
+                )
+        }
+
+        test("the requested catalog revision is pinned: a later catalog revision never replaces it") {
+            val response =
+                post(inquiryBody("pinned-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":${pricingBody(revision)}"""))
+
+            val later = application.addOffering("pistachio", "soft-serve-flavor", "Pistachio")
+
+            later shouldBe revision + 1
+            application
+                .adminGet("/inquiries/${response.receipt().id}")
+                .inquiry()
+                .pricingInputs
+                ?.catalogRevision shouldBe revision
+            revision = later
+        }
+
+        test("pricing inputs the pricing rejects fail exactly as an estimate preview fails, and nothing is recorded") {
+            val before = rows()
+            listOf(
+                pricingBody(revision, guests = 0),
+                pricingBody(revision, minutes = 45),
+                pricingBody(revision, toppings = TOPPINGS + "sprinkles"),
+                pricingBody(revision, cones = listOf("no-such-cone")),
+                pricingBody(999),
+            ).forEach { inputs ->
+                val preview =
+                    application.http(Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(inputs))
+                val submitted = post(inquiryBody("rejected-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":$inputs"""))
+
+                preview.status.successful shouldBe false
+                submitted.status shouldBe preview.status
+                submitted.error() shouldBe preview.error()
+            }
+            post(inquiryBody("rejected@example.com", extra = ""","pricingInputs":${pricingBody(999)}""")).error().code shouldBe "not_found"
+
+            rows() shouldBe before
+        }
+
+        test("client-calculated amounts are never accepted: they are ignored, and only the inputs are recorded") {
+            val forged = ""","lines":[{"description":"Everything","unitPrice":"1.00"}],"subtotal":"1.00","total":"1.00""""
+            val inputs = pricingBody(revision, extra = forged)
+
+            val response =
+                post(inquiryBody("forged-${UUID.randomUUID()}@example.com", extra = ""","total":"1.00","pricingInputs":$inputs"""))
+
+            response.status shouldBe Status.CREATED
+            val read = application.adminGet("/inquiries/${response.receipt().id}")
+            Json
+                .parseToJsonElement(read.bodyString())
+                .jsonObject
+                .getValue("pricingInputs")
+                .jsonObject.keys shouldBe
+                setOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
+            read.bodyString() shouldNotContain "1.00"
+        }
+
+        test("a returning customer's new request keeps its own inputs, and the earlier one is unchanged") {
+            val email = "repeat-${UUID.randomUUID()}@example.com"
+            val first = post(inquiryBody(email, extra = ""","pricingInputs":${pricingBody(revision, guests = 50)}""")).receipt()
+            val firstInputs = application.adminGet("/inquiries/${first.id}").inquiry().pricingInputs
+
+            val second =
+                post(
+                    inquiryBody(
+                        email,
+                        name = "Someone Else",
+                        extra = ""","pricingInputs":${pricingBody(revision, guests = 200, minutes = 90)}""",
+                    ),
+                ).receipt()
+
+            val secondRead = application.adminGet("/inquiries/${second.id}").inquiry()
+            val firstRead = application.adminGet("/inquiries/${first.id}").inquiry()
+            secondRead.customerId shouldBe firstRead.customerId
+            firstRead.pricingInputs shouldBe firstInputs
+            firstRead.pricingInputs?.guestCount shouldBe 50
+            secondRead.pricingInputs?.guestCount shouldBe 200
+            secondRead.pricingInputs?.durationMinutes shouldBe 90
+        }
+
+        test("preview → public inquiry with the same inputs → staff read → an estimate priced as the preview, with nothing re-entered") {
+            val inputs = pricingBody(revision)
+            val preview =
+                application.http(Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(inputs))
+            preview.status shouldBe Status.OK
+            val previewTotal = CommerceJson.asA(preview.bodyString(), EstimatePreviewResponse.serializer()).total
+            val documents = application.database.count("commerce.financial_document_snapshots")
+
+            val receipt =
+                post(inquiryBody("handoff-${UUID.randomUUID()}@example.com", extra = ""","message":"A birthday","pricingInputs":$inputs"""))
+                    .receipt()
+
+            // Recording an inquiry creates no financial document.
+            application.database.count("commerce.financial_document_snapshots") shouldBe documents
+            // Staff start the estimate from the recorded inputs exactly as read, without reconstructing them.
+            val requested =
+                Json
+                    .parseToJsonElement(application.adminGet("/inquiries/${receipt.id}").bodyString())
+                    .jsonObject
+                    .getValue("pricingInputs")
+                    .toString()
+            val estimate = application.adminPost("/inquiries/${receipt.id}/estimates", requested)
+            estimate.status shouldBe Status.CREATED
+            val document = CommerceJson.asA(estimate.bodyString(), FinancialDocumentResponse.serializer())
+            document.total shouldBe previewTotal
+            document.pricing.catalogRevision shouldBe revision
+            CommerceJson.asA(requested, InquiryRequestedPricing.serializer()).let {
+                document.pricing shouldBe
+                    DocumentPricing(it.catalogRevision, it.guestCount, it.guestCountIsMinimum, it.durationMinutes, it.selections)
+            }
+        }
+
+        // GET /inquiries: the staff inbox.
+
+        test("listing inquiries requires a staff session holding fionas.inquiries.read") {
+            listOf("/inquiries", "/inquiries?limit=5", "/inquiries?limit=abc", "/inquiries?cursor=garbage").forEach { path ->
+                anonymousGet(path).let {
+                    it.status shouldBe Status.UNAUTHORIZED
+                    it.error().code shouldBe "unauthenticated"
+                }
+            }
+            application.asStaffWith(setOf(CommercePermissions.FinancialDocumentRead, CommercePermissions.PaymentRecord)) {
+                application.adminGet("/inquiries").let {
+                    it.status shouldBe Status.FORBIDDEN
+                    it.error().code shouldBe "forbidden"
+                }
+            }
+            application.asStaffWith(setOf(FionaPermissions.InquiriesRead)) {
+                application.adminGet("/inquiries").status shouldBe Status.OK
+            }
+            application.adminGet("/inquiries").status shouldBe Status.OK
+        }
+
+        test("an Administrator role from an earlier release gains inquiry reads through the complete-set grant") {
+            TestApplication.create().use { app ->
+                val upgraded = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, upgraded - FionaPermissions.InquiriesRead)
+                app.adminGet("/inquiries").status shouldBe Status.FORBIDDEN
+
+                // The documented upgrade: read the current grants, add fionas.inquiries.read, submit the complete set.
+                val current =
+                    Json
+                        .parseToJsonElement(app.adminGet("/admin/access/roles/commerce.administrator").bodyString())
+                        .jsonObject
+                        .getValue("permissions")
+                        .jsonArray
+                        .map { it.jsonPrimitive.content }
+                val desired = JsonArray((current + FionaPermissions.InquiriesRead.value).map(::JsonPrimitive))
+                app
+                    .adminRequest(Method.PUT, "/admin/access/roles/commerce.administrator/permissions", """{"permissions":$desired}""")
+                    .status.successful shouldBe true
+
+                app.adminGet("/inquiries").status shouldBe Status.OK
+                app.authorization.getRole(CommerceRoles.Administrator)?.permissions shouldBe upgraded
+            }
+        }
+
+        test("with no inquiries the list is empty and has no next page") {
+            TestApplication.create().use { app ->
+                val response = app.adminGet("/inquiries")
+
+                response.status shouldBe Status.OK
+                response.list().inquiries.shouldBeEmpty()
+                response.list().nextCursor.shouldBeNull()
+                response.keys() shouldBe setOf("inquiries")
+            }
+        }
+
+        test("inquiries are listed newest first, a bounded page at a time, with the default and maximum page sizes") {
+            val clock = SteppingClock(Instant.parse("2026-10-01T12:00:00Z"))
+            TestApplication.create(clock = clock).use { app ->
+                val ids =
+                    List(105) { index ->
+                        clock.now = Instant.parse("2026-10-01T12:00:00Z").plus(Duration.ofMinutes(index.toLong()))
+                        app.post(inquiryBody("inbox-$index@example.com", name = "Customer $index")).receipt().id
+                    }
+                val newestFirst = ids.reversed()
+
+                val first = app.adminGet("/inquiries")
+                first.status shouldBe Status.OK
+                first.list().inquiries.map { it.id } shouldContainExactly newestFirst.take(25)
+                first.list().nextCursor.shouldNotBeNull()
+                first.list().inquiries.first().let {
+                    it.name shouldBe "Customer 104"
+                    it.email shouldBe "inbox-104@example.com"
+                    it.createdAt shouldBe "2026-10-01T13:44:00Z"
+                }
+
+                app.adminGet("/inquiries?limit=100").list().let {
+                    it.inquiries.map { item -> item.id } shouldContainExactly newestFirst.take(100)
+                    it.nextCursor.shouldNotBeNull()
+                }
+                app
+                    .adminGet("/inquiries?limit=1")
+                    .list()
+                    .inquiries
+                    .map { it.id } shouldContainExactly newestFirst.take(1)
+
+                // Walking every page visits every inquiry once, newest first.
+                val walked = mutableListOf<String>()
+                var cursor: String? = null
+                var pages = 0
+                do {
+                    val page = app.adminGet("/inquiries?limit=7" + (cursor?.let { "&cursor=$it" } ?: "")).list()
+                    page.inquiries shouldHaveSize 7
+                    walked += page.inquiries.map { it.id }
+                    cursor = page.nextCursor
+                    pages++
+                } while (cursor != null)
+                pages shouldBe 15
+                walked shouldContainExactly newestFirst
+
+                // A page exactly at the end has no next page.
+                app.adminGet("/inquiries?limit=100&cursor=${app.adminGet("/inquiries?limit=5").list().nextCursor}").list().let {
+                    it.inquiries.map { item -> item.id } shouldContainExactly newestFirst.subList(5, 105)
+                    it.nextCursor.shouldBeNull()
+                }
+            }
+        }
+
+        test("inquiries recorded at the same instant are neither repeated nor skipped across pages") {
+            val clock = SteppingClock(Instant.parse("2026-10-02T09:00:00Z"))
+            TestApplication.create(clock = clock).use { app ->
+                val older = app.post(inquiryBody("older@example.com")).receipt().id
+                clock.now = Instant.parse("2026-10-02T09:30:00.123456Z")
+                val tied = List(9) { app.post(inquiryBody("tied-$it@example.com")).receipt().id }
+                clock.now = Instant.parse("2026-10-02T10:00:00Z")
+                val newer = app.post(inquiryBody("newer@example.com")).receipt().id
+
+                val walked = mutableListOf<String>()
+                var cursor: String? = null
+                do {
+                    val page = app.adminGet("/inquiries?limit=2" + (cursor?.let { "&cursor=$it" } ?: "")).list()
+                    walked += page.inquiries.map { it.id }
+                    cursor = page.nextCursor
+                } while (cursor != null)
+
+                walked.shouldBeUnique()
+                walked shouldHaveSize 11
+                walked.first() shouldBe newer
+                walked.last() shouldBe older
+                // Ties follow PostgreSQL's uuid order, descending: the canonical text, descending.
+                walked.subList(1, 10) shouldContainExactly tied.sortedDescending()
+            }
+        }
+
+        test("an inquiry recorded while staff page through the list never shifts a later page") {
+            val clock = SteppingClock(Instant.parse("2026-10-03T09:00:00Z"))
+            TestApplication.create(clock = clock).use { app ->
+                val ids =
+                    List(6) { index ->
+                        clock.now = Instant.parse("2026-10-03T09:00:00Z").plusSeconds(index.toLong())
+                        app.post(inquiryBody("stable-$index@example.com")).receipt().id
+                    }.reversed()
+                val first = app.adminGet("/inquiries?limit=3").list()
+
+                clock.now = Instant.parse("2026-10-03T10:00:00Z")
+                app.post(inquiryBody("arrived-later@example.com"))
+
+                app
+                    .adminGet("/inquiries?limit=3&cursor=${first.nextCursor}")
+                    .list()
+                    .inquiries
+                    .map { it.id } shouldContainExactly
+                    ids.subList(3, 6)
+            }
+        }
+
+        test("a limit outside 1 to 100 is a validation failure, and one that is not an integer a malformed request") {
+            listOf("0", "-1", "101").forEach { limit ->
+                application.adminGet("/inquiries?limit=$limit").let {
+                    it.status shouldBe Status.UNPROCESSABLE_ENTITY
+                    it.error() shouldBe ErrorResponse("validation_failed", "limit must be between 1 and 100")
+                }
+            }
+            listOf("abc", "2.5").forEach { limit ->
+                application.adminGet("/inquiries?limit=$limit").let {
+                    it.status shouldBe Status.BAD_REQUEST
+                    it.error() shouldBe ErrorResponse("malformed_request", "Malformed request: query 'limit'")
+                }
+            }
+        }
+
+        test("a cursor the API did not issue is a malformed request") {
+            fun encoded(text: String) = Base64.getUrlEncoder().withoutPadding().encodeToString(text.toByteArray())
+            listOf(
+                "garbage!",
+                encoded("not a position"),
+                encoded("2026-10-01T12:00:00Z|not-a-uuid"),
+                encoded("yesterday|${UUID.randomUUID()}"),
+                encoded("2026-10-01T12:00:00Z|${UUID.randomUUID()}|extra"),
+            ).forEach { cursor ->
+                application.adminGet("/inquiries?cursor=$cursor").let {
+                    it.status shouldBe Status.BAD_REQUEST
+                    it.error() shouldBe ErrorResponse("malformed_request", "Malformed request: query 'cursor'")
+                }
+            }
+        }
+
+        // The contract leaves every error body to commerce-runtime.
+
         test("inputs the contract cannot read keep commerce-runtime's error body") {
             listOf(post(""), post("""{not json"""), post("""{"name":1,"email":"jane@example.com"}""")).forEach {
                 it.status shouldBe Status.BAD_REQUEST
                 it.header("Content-Type") shouldBe "application/json; charset=utf-8"
                 it.error() shouldBe ErrorResponse("malformed_request", "Malformed request: body 'body'")
             }
-            get("/inquiries/not-a-uuid").error() shouldBe ErrorResponse("malformed_request", "Malformed request: path 'inquiryId'")
-            get("/inquiries/${UUID.randomUUID()}/more").error().code shouldBe "not_found"
+            application.adminGet("/inquiries/not-a-uuid").error() shouldBe
+                ErrorResponse("malformed_request", "Malformed request: path 'inquiryId'")
+            application.adminGet("/inquiries/${UUID.randomUUID()}/more").error().code shouldBe "not_found"
         }
 
-        test("a method an inquiry path does not declare is not allowed, OPTIONS included") {
+        test("GET /inquiries is now the staff list, and every other undeclared method is still not allowed") {
+            application.adminGet("/inquiries").status shouldBe Status.OK
             val id = UUID.randomUUID()
             listOf(
-                Request(Method.GET, "/inquiries"),
                 Request(Method.PUT, "/inquiries"),
+                Request(Method.DELETE, "/inquiries"),
                 Request(Method.OPTIONS, "/inquiries"),
                 Request(Method.POST, "/inquiries/$id"),
                 Request(Method.DELETE, "/inquiries/$id"),
@@ -146,3 +601,14 @@ class InquiryRoutesSpec :
             }
         }
     })
+
+/** A clock whose time a spec sets, so inquiries can be recorded at chosen instants. */
+private class SteppingClock(
+    @Volatile var now: Instant,
+) : Clock() {
+    override fun getZone(): ZoneId = ZoneOffset.UTC
+
+    override fun withZone(zone: ZoneId): Clock = this
+
+    override fun instant(): Instant = now
+}

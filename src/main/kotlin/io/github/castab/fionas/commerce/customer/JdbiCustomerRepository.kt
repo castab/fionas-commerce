@@ -44,6 +44,19 @@ class JdbiCustomerRepository : CustomerRepository {
             .findOne()
             .orElse(null)
 
+    override fun findByIds(
+        transaction: Transaction,
+        ids: Set<CustomerId>,
+    ): Map<CustomerId, Customer> {
+        if (ids.isEmpty()) return emptyMap()
+        return transaction.handle
+            .createQuery("SELECT id, name, email, created_at FROM fionas.customers WHERE id = ANY(:ids)")
+            .bindArray("ids", UUID::class.java, ids.map { it.value })
+            .map(customerRow)
+            .list()
+            .associateBy { it.id }
+    }
+
     override fun findByEmail(
         transaction: Transaction,
         email: Email,

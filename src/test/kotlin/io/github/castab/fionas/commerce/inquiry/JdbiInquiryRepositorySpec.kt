@@ -1,14 +1,27 @@
 package io.github.castab.fionas.commerce.inquiry
 
+import io.github.castab.commerce.offering.OfferingCategoryKey
+import io.github.castab.commerce.offering.OfferingCategorySelection
+import io.github.castab.commerce.offering.OfferingKey
+import io.github.castab.commerce.offering.OfferingSelections
+import io.github.castab.commerce.offering.OfferingsRevision
+import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.inquiry
 import io.github.castab.fionas.commerce.testing.sqlState
 import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
+import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 
 class JdbiInquiryRepositorySpec :
@@ -16,6 +29,7 @@ class JdbiInquiryRepositorySpec :
         lateinit var application: TestApplication
         val customers = JdbiCustomerRepository()
         val inquiries = JdbiInquiryRepository()
+        val requested = JdbiInquiryPricingRepository()
 
         beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
@@ -61,5 +75,112 @@ class JdbiInquiryRepositorySpec :
 
             failure.sqlState() shouldBe "23503"
             application.database.count("fionas.inquiries") shouldBe before
+        }
+
+        test("inquiries are listed newest first, ties broken by id, continuing strictly after a position") {
+            // Later than every other inquiry of this spec, so these lead the list.
+            val customer = customer()
+            val newest = inquiry(customer, createdAt = Instant.parse("2200-01-01T00:00:02Z"))
+            val tied = List(4) { inquiry(customer, createdAt = Instant.parse("2200-01-01T00:00:01Z")) }
+            val oldest = inquiry(customer, createdAt = Instant.parse("2200-01-01T00:00:00Z"))
+            application.transactor.inTransaction { transaction ->
+                customers.insert(transaction, customer)
+                (tied + oldest + newest).forEach { inquiries.insert(transaction, it) }
+            }
+            // PostgreSQL orders uuids as their canonical lowercase text.
+            val expected = listOf(newest) + tied.sortedByDescending { it.id.value.toString() } + oldest
+
+            fun list(
+                after: Inquiry?,
+                limit: Int,
+            ) = application.transactor.inTransaction { transaction ->
+                inquiries.listNewestFirst(transaction, after?.let { InquiryListPosition(it.createdAt, it.id) }, limit)
+            }
+
+            list(null, 6) shouldContainExactly expected
+            list(expected[1], 2) shouldContainExactly expected.subList(2, 4)
+            list(expected[3], 2) shouldContainExactly expected.subList(4, 6)
+            // Pages of one never repeat or skip an inquiry sharing a timestamp.
+            generateSequence(list(null, 1).single()) { previous -> list(previous, 1).single() }
+                .take(6)
+                .toList() shouldContainExactly expected
+        }
+
+        test("the list reads the inquiries index backwards, without sorting, for the first and every later page") {
+            listOf(
+                "SELECT id, customer_id, message, created_at FROM fionas.inquiries ORDER BY created_at DESC, id DESC LIMIT 26",
+                "SELECT id, customer_id, message, created_at FROM fionas.inquiries WHERE (created_at, id) < (now(), gen_random_uuid()) " +
+                    "ORDER BY created_at DESC, id DESC LIMIT 26",
+            ).forEach { query ->
+                val plan =
+                    application.database.connect { connection ->
+                        connection.createStatement().use { statement ->
+                            // A handful of test rows would otherwise make any plan cheapest.
+                            statement.execute("SET enable_seqscan = off")
+                            statement.executeQuery("EXPLAIN $query").use { rows ->
+                                buildList { while (rows.next()) add(rows.getString(1)) }.joinToString(" / ")
+                            }
+                        }
+                    }
+                plan shouldContain "Index Scan Backward using inquiries_created_at_id_idx"
+                plan shouldNotContain "Sort"
+            }
+        }
+
+        test("an inquiry's requested pricing inputs are read back exactly, in order, empty blocks included") {
+            val customer = customer()
+            val inquiry = inquiry(customer)
+            val inputs =
+                FionasPricingInputs(
+                    catalogRevision = OfferingsRevision.of(7),
+                    selections =
+                        OfferingSelections(
+                            listOf(
+                                OfferingCategorySelection(OfferingCategoryKey("topping"), listOf("oreos", "sprinkles").map(::OfferingKey)),
+                                OfferingCategorySelection(OfferingCategoryKey("cone-option"), emptyList()),
+                                OfferingCategorySelection(OfferingCategoryKey("soft-serve-flavor"), listOf(OfferingKey("vanilla"))),
+                            ),
+                        ),
+                    context = FionasOfferingsContext(guestCount = 100, guestCountIsMinimum = true, duration = Duration.ofMinutes(150)),
+                )
+
+            application.transactor.inTransaction { transaction ->
+                customers.insert(transaction, customer)
+                inquiries.insert(transaction, inquiry)
+                requested.insert(transaction, inquiry.id, inputs)
+            }
+
+            application.transactor.inTransaction { requested.find(it, inquiry.id) } shouldBe inputs
+            application.transactor.inTransaction { requested.find(it, InquiryId(UUID.randomUUID())) }.shouldBeNull()
+        }
+
+        test("requested pricing inputs cannot exist without their inquiry") {
+            val failure =
+                shouldThrowAny {
+                    application.transactor.inTransaction {
+                        requested.insert(
+                            it,
+                            InquiryId(UUID.randomUUID()),
+                            FionasPricingInputs(
+                                OfferingsRevision.of(1),
+                                OfferingSelections(emptyList()),
+                                FionasOfferingsContext(1, false, Duration.ofMinutes(90)),
+                            ),
+                        )
+                    }
+                }
+
+            failure.sqlState() shouldBe "23503"
+        }
+
+        test("customers are found by id in one read, and unknown ids are absent") {
+            val first = customer()
+            val second = customer()
+            application.transactor.inTransaction { transaction -> listOf(first, second).forEach { customers.insert(transaction, it) } }
+
+            application.transactor.inTransaction {
+                customers.findByIds(it, setOf(first.id, second.id, CustomerId(UUID.randomUUID())))
+            } shouldBe mapOf(first.id to first, second.id to second)
+            application.transactor.inTransaction { customers.findByIds(it, emptySet()) } shouldBe emptyMap()
         }
     })

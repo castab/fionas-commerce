@@ -86,6 +86,7 @@ class AuthRoutesSpec :
                         CommercePermissions.RoleManage,
                         CommercePermissions.RoleAssign,
                         FionaPermissions.CredentialsManage,
+                        FionaPermissions.InquiriesRead,
                     )
                 val hash = app.database.strings("SELECT password_hash FROM fionas.user_credentials").single()
                 hash.startsWith("\$argon2id\$") shouldBe true
@@ -101,10 +102,10 @@ class AuthRoutesSpec :
             }
         }
 
-        test("later bootstrap does not add the refund permission to an existing Administrator role") {
+        test("later bootstrap does not add the refund or inquiry-read permission to an existing Administrator role") {
             TestApplication.create().use { app ->
                 val role = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator))
-                val previous = role.permissions - CommercePermissions.RefundRecord
+                val previous = role.permissions - CommercePermissions.RefundRecord - FionaPermissions.InquiriesRead
                 app.authorization.replaceRolePermissions(CommerceRoles.Administrator, previous)
                 BootstrapFirstAdmin(app.transactor, app.authorization, JdbiCredentialRepository(), PasswordHasher(), testClock).invoke(
                     BootstrapAdmin("other", "Other", null, null, SecretPassword.of("another-test-password")),
@@ -210,7 +211,10 @@ class AuthRoutesSpec :
                 app.authorization.assignRole(admin.id, CommerceRoles.Administrator)
                 request(app, Method.GET, "/admin/access/users").status shouldBe Status.OK
                 request(app, Method.GET, "/admin/access/roles").status shouldBe Status.OK
-                request(app, Method.GET, "/admin/access/permissions").bodyString() shouldContain FionaPermissions.CredentialsManage.value
+                request(app, Method.GET, "/admin/access/permissions").bodyString().let { catalog ->
+                    catalog shouldContain FionaPermissions.CredentialsManage.value
+                    catalog shouldContain FionaPermissions.InquiriesRead.value
+                }
                 val created =
                     request(app, Method.POST, "/admin/access/users", body = """{"username":"new-staff","displayName":"New Staff"}""")
                 created.status shouldBe Status.CREATED

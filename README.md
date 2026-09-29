@@ -7,7 +7,8 @@ application built on the reusable
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
-> submits an inquiry, and it can be read back), serves Fiona's Offerings catalog through
+> submits an inquiry, optionally with the configuration they chose, and staff list and read
+> them), serves Fiona's Offerings catalog through
 > commerce-runtime's reusable Offerings capability, and prices selections from it with
 > Fiona's own pricing (`POST /estimate-preview`, which records nothing). Staff turn an
 > inquiry into persisted financial documents (an estimate, change orders, a quote, an
@@ -82,10 +83,11 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 
 **Inquiry API**, implemented by Fiona:
 
-| Endpoint | Behavior |
-|---|---|
-| `POST /inquiries` | Records an inquiry, establishing its customer. `201` with the inquiry and a `Location` header. |
-| `GET /inquiries/{inquiryId}` | The persisted inquiry. `404` when unknown, `400` when the id is not a UUID. |
+| Endpoint | Permission | Behavior |
+|---|---|---|
+| `POST /inquiries` | public | Records an inquiry, establishing its customer, with the pricing inputs the customer configured when present. `201` with a receipt (`id`, `createdAt`) and a `Location` header; never the stored customer. |
+| `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
+| `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
 
 **Offerings Catalog API**, exposed by Fiona and implemented by commerce-runtime's Offerings
 capability (see [Offerings catalog](#offerings-catalog)):
@@ -159,25 +161,48 @@ catalog route replaces or deletes anything.
 
 ```bash
 curl -i -X POST localhost:8080/inquiries -H 'Content-Type: application/json' \
-  -d '{"name":"Jane Doe","email":"jane@example.com","message":"Ice cream for a birthday."}'
+  -d '{"name":"Jane Doe","email":"jane@example.com","message":"Ice cream for a birthday.",
+       "pricingInputs":{"catalogRevision":12,"guestCount":75,"durationMinutes":120,
+         "selections":[{"category":"soft-serve-flavor","offerings":["vanilla","horchata"]},
+                       {"category":"topping","offerings":["sprinkles","oreos","strawberries","brownies"]},
+                       {"category":"cone-option","offerings":["waffle-cone"]}]}}'
 ```
 
 ```json
 {
   "id": "c755f7cd-1e28-4c75-a85f-d066ede7387d",
-  "customerId": "602df298-8d54-45b6-a40c-bbf80949a3b8",
-  "name": "Jane Doe",
-  "email": "jane@example.com",
-  "message": "Ice cream for a birthday.",
   "createdAt": "2026-09-26T21:19:39.321012Z"
 }
 ```
 
 `name` (at most 200 characters) and `email` are required; `message` is optional (at most
-4000 characters). Values are trimmed, and the email is lowercased. If a customer already
-has that email, the inquiry is attached to that customer and the response shows the
-customer's stored name, which a later inquiry does not change (see
-[Customer matching](AGENTS.md#customer-matching-current-deliberately-simple-policy)).
+4000 characters) and stays free-form text. Values are trimmed, and the email is lowercased.
+If a customer already has that email, the inquiry is attached to that customer, whose
+stored name a later inquiry does not change (see
+[Customer matching](AGENTS.md#customer-matching-current-deliberately-simple-policy)). The
+public response is a receipt of the new inquiry only: it never contains the stored
+customer's id, name, or email, so submitting someone else's address reveals nothing. A
+confirmation page renders what the customer just submitted.
+
+`pricingInputs` is optional and has exactly the shape `POST /estimate-preview` and
+`POST /inquiries/{inquiryId}/estimates` take (`catalogRevision`, `guestCount`,
+`guestCountIsMinimum`, `durationMinutes`, `selections`). It is checked with the same Fiona
+pricing, from exactly the catalog revision it names, in the transaction that records the
+inquiry; inputs the pricing rejects fail with the preview's own `404` or `422`, and nothing
+is recorded. Only the inputs are stored (`fionas.inquiry_pricing` and its ordered
+categories and selections), pinned to the submitted revision; amounts are never accepted,
+and no financial document is created. Staff read them back as `pricingInputs` on
+`GET /inquiries/{inquiryId}` and can submit that object unchanged to
+`POST /inquiries/{inquiryId}/estimates`. Event date, location, and occasion are not modeled
+yet; the customer describes them in `message`.
+
+Staff discover inquiries with `GET /inquiries`, newest first by creation time, ties broken
+by id. `limit` bounds a page (1–100, default 25; outside that range is `422`, not an
+integer `400`). When more inquiries follow, the page carries `nextCursor`; pass it back
+unchanged as `cursor`. A cursor is opaque (a cursor the API did not issue is `400`), and a
+page continues strictly after the previous page's last inquiry, so inquiries recorded at the
+same instant are neither repeated nor skipped and new inquiries never shift later pages.
+There is no search, filtering, or offset pagination.
 
 Errors use commerce-runtime's contract, `{"code": "...", "message": "..."}`:
 `malformed_request` (400), `unauthenticated` (401), `forbidden` (403), `not_found` (404),
@@ -289,17 +314,20 @@ session and clears the cookie; repeating it is safe. No raw session token is sen
 The runtime directory normalizes usernames and stores the profile and status in
 `commerce.users`. Fiona's `fionas.user_credentials` holds only the Argon2id hash and
 change time, with a foreign key to that runtime user. Fiona contributes
-`fionas.credentials.manage` to the runtime permission catalog. The bootstrap
+`fionas.credentials.manage` and `fionas.inquiries.read` to the runtime permission catalog. The bootstrap
 Administrator role explicitly grants OfferingsManage, FinancialDocumentRead,
 FinancialDocumentCreate, PaymentRecord, RefundRecord, PrincipalRead, PrincipalManage, RoleRead, RoleManage,
-RoleAssign, and CredentialsManage. Future permissions are not granted automatically, and
+RoleAssign, CredentialsManage, and InquiriesRead. Future permissions are not granted automatically, and
 the grants are fixed when bootstrap creates the role: startup never changes an existing
 Administrator role. An installation upgrading from an earlier release retains its existing
-grants. To enable refunds for that role, first `GET /admin/access/roles/commerce.administrator`
-and inspect its current permissions. Add `commerce.refund.record` to that set, then
+grants. To enable refunds or inquiry reads for that role, first `GET /admin/access/roles/commerce.administrator`
+and inspect its current permissions. Add `commerce.refund.record` and `fionas.inquiries.read`
+(whichever it lacks) to that set, then
 `PUT /admin/access/roles/commerce.administrator/permissions` with the **complete desired
 permission list**. This endpoint replaces the role's full set of grants; sending only the
 new permission would remove every existing grant, including installation-specific ones.
+Until an upgraded Administrator has `fionas.inquiries.read`, `GET /inquiries` and
+`GET /inquiries/{inquiryId}` answer it `403`.
 
 To provision the first administrator, set `FIONAS_BOOTSTRAP_ADMIN_USERNAME`,
 `FIONAS_BOOTSTRAP_ADMIN_PASSWORD`, and `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` for one startup.
@@ -321,8 +349,9 @@ revoke existing sessions; there is no self-service password change in this API.
 Set `FIONAS_TRUSTED_ORIGINS` to the exact frontend origin (or a comma-separated list),
 for example `https://shop.example.com`. Login and every unsafe request carrying Fiona's
 session cookie require a matching `Origin`; a missing or different origin receives `403`.
-When no origin is configured, browser login fails closed. Public inquiry and estimate
-preview requests remain public. `/health`, `/ready`, and Offerings reads remain public;
+When no origin is configured, browser login fails closed. Inquiry submission
+(`POST /inquiries`) and estimate previews remain public; listing and reading inquiries
+require `fionas.inquiries.read`. `/health`, `/ready`, and Offerings reads remain public;
 Offerings writes require `commerce.offerings.manage`. Every financial-document and payment
 route is staff-only.
 
@@ -603,6 +632,14 @@ response includes the recorded refund, each refund allocation, and the payment's
 currency. It does not pick one document reconciliation: a payment may span documents.
 Refunded money cannot be allocated again. No Fiona table stores a refund or balance.
 
+**Known gap: payments cannot be read back yet.** Payment, allocation, and refund ids appear
+only in the responses of the requests that record them; no Fiona endpoint lists a
+document's payments or a payment's allocations and refunds. commerce-runtime 0.0.15's public
+`FinancialLedger` offers no such reads (only reconciliation totals), and Fiona deliberately
+does not reach into the runtime's `PaymentRepository` or tables, nor cache mutation
+responses. The read endpoints follow once commerce-runtime publishes those reads (see
+[AGENTS.md](AGENTS.md#known-upstream-gaps-last-audited-at-commerce-0014)).
+
 The existing `POST /financial-documents/{documentId}/payments` means "we received this
 payment, and all of it is for this document":
 
@@ -674,7 +711,7 @@ so changing an endpoint changes its documentation in the same place.
 The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
 `-Pversion=<version>`). It declares no server host, so it is the same in every
-environment. The stable `operationId`s are `createInquiry`, `getInquiry`,
+environment. The stable `operationId`s are `createInquiry`, `listInquiries`, `getInquiry`,
 `previewEstimate`, `createInquiryEstimate`, `createInquiryFinancialDocument`, `listInquiryFinancialDocuments`,
 `getFinancialDocument`, `getFinancialDocumentHistory`, `issueQuote`, `issueInvoice`,
 `createChangeOrder`, `recordPayment`, `recordStandalonePayment`, `allocatePayment`, `login`, `logout`, `getCurrentUser`, and
@@ -789,7 +826,10 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   `(document_id, initial_version = 1) → commerce.financial_document_snapshots`, indexed by
   inquiry) and `financial_document_pricing` with its ordered `…_categories` and
   `…_selections` (keyed by `(document_id, document_version)`, referencing the association
-  and the exact `commerce.financial_document_snapshots` version). Fiona never creates or
+  and the exact `commerce.financial_document_snapshots` version), and, from `V4`, the
+  `inquiries_created_at_id_idx` index `(created_at, id)` behind the newest-first inquiry
+  list and `inquiry_pricing` with its ordered `…_categories` and `…_selections` (keyed by
+  `inquiry_id`, referencing only `fionas.inquiries`). Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog and the financial ledger's snapshots,
   lines, payments, allocations, refunds, and refund allocations. None needs a Fiona copy.
@@ -815,6 +855,14 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
 > drop the database or its volume, for example `docker compose down -v`). After recreation,
 > `commerce.flyway_schema_history` and `fionas.flyway_schema_history` exist and `public`
 > holds nothing of Fiona's.
+>
+> **Inquiry discovery and requested pricing (Fiona `V4`).** Fiona's `V4` adds the
+> `inquiries_created_at_id_idx` index and the `inquiry_pricing` tables; the runtime applies it
+> on startup like any Fiona migration. `GET /inquiries/{inquiryId}` is no longer public, and
+> `POST /inquiries` now answers a receipt (`id`, `createdAt`) instead of the inquiry and its
+> customer. A fresh bootstrap grants `fionas.inquiries.read`; an existing Administrator role
+> keeps its grants, so use the read-modify-replace permission flow in
+> [Staff authentication](#staff-authentication) to add `fionas.inquiries.read`.
 >
 > **Upgrading to commerce 0.0.14.** The runtime applies `V6__refunds` to create its two
 > refund tables. Fiona adds no migration. Existing Administrator grants are retained;
@@ -929,10 +977,10 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
 | `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates on its own (its Offerings and ledger tables included); nothing Fiona-owned in `commerce`, and `public` holds no Fiona objects or migration metadata; each stream's `flyway_schema_history` is in its own schema; the association and pricing-source keys reference the runtime's exact snapshots; no Fiona table or column restates a ledger fact |
 | `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: runtime migrations first (the runtime's financial ledger before Fiona's `V3`; an application migration depending on them succeeds), independent version spaces, each history in its own schema (none in `public`), repeat startup applies nothing, failures prevent composition |
-| `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email lookup, unique email conflict, foreign key |
+| `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
-| `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, atomic failure, not found |
-| `InquiryRoutesSpec` | The HTTP API through the complete runtime handler, including errors: the contract leaves every error body to commerce-runtime, and undeclared methods stay `405` |
+| `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
+| `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; explicit old and new catalog revisions; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
 | `FinancialDocumentAtomicitySpec` | Fiona's cross-boundary writes roll back together: first-snapshot Estimate, Quote, and Invoice creation, change orders, combined payments, and standalone allocations do not leave partial ledger or Fiona facts on failure |
@@ -943,7 +991,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
 | `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded (no financial document either), minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |
 | `OfferingsCatalogSpec` | Fiona's Offerings catalog through the complete handler: absent until initialized; revisions 1–4 from initialization, a category, and two offerings; ordered reads; exact historical revisions; every price form round-trips; no update or delete route |
-| `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (financial documents, standalone receipts, and allocations included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
+| `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (the inquiry receipt, list, and pricing inputs, financial documents, standalone receipts, and allocations included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |

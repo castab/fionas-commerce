@@ -1,42 +1,101 @@
 package io.github.castab.fionas.commerce.inquiry
 
+import io.github.castab.commerce.offering.OfferingCategoryKey
+import io.github.castab.commerce.offering.OfferingCategorySelection
+import io.github.castab.commerce.offering.OfferingKey
+import io.github.castab.commerce.offering.OfferingSelections
+import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
+import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
+import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
+import io.github.castab.fionas.commerce.offering.FionasPricing
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
+import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import java.time.Duration
 import java.util.UUID
 
 class InquiryOperationsSpec :
     FunSpec({
         lateinit var application: TestApplication
+        var revision = 0
         val customers = JdbiCustomerRepository()
         val inquiries = JdbiInquiryRepository()
+        val requested = JdbiInquiryPricingRepository()
 
-        beforeSpec { application = TestApplication.create() }
+        beforeSpec {
+            application = TestApplication.create()
+            revision = application.createAcceptanceCatalog()
+        }
         afterSpec { application.close() }
+
+        fun pricing() =
+            FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), application.context.offeringsSnapshotRepository::retrieveVersion)
 
         fun createInquiry(
             customerId: CustomerId = CustomerId(UUID.randomUUID()),
             inquiryId: InquiryId = InquiryId(UUID.randomUUID()),
             inquiryRepository: InquiryRepository = inquiries,
-        ) = CreateInquiry(application.transactor, customers, inquiryRepository, testClock, { customerId }, { inquiryId })
+            pricingRepository: InquiryPricingRepository = requested,
+        ) = CreateInquiry(
+            application.transactor,
+            customers,
+            inquiryRepository,
+            pricingRepository,
+            pricing(),
+            testClock,
+            { customerId },
+            { inquiryId },
+        )
 
-        fun getInquiry() = GetInquiry(application.transactor, customers, inquiries)
+        fun getInquiry() = GetInquiry(application.transactor, customers, inquiries, requested)
+
+        fun inputs(
+            catalogRevision: Int = revision,
+            guests: Int = 75,
+            minutes: Long = 120,
+            toppings: List<String> = TOPPINGS,
+        ) = FionasPricingInputs(
+            catalogRevision = OfferingsRevision.of(catalogRevision),
+            selections =
+                OfferingSelections(
+                    listOf(
+                        OfferingCategorySelection(
+                            OfferingCategoryKey("soft-serve-flavor"),
+                            listOf("vanilla", "horchata").map(::OfferingKey),
+                        ),
+                        OfferingCategorySelection(OfferingCategoryKey("topping"), toppings.map(::OfferingKey)),
+                        OfferingCategorySelection(OfferingCategoryKey("cone-option"), listOf(OfferingKey("waffle-cone"))),
+                    ),
+                ),
+            context = FionasOfferingsContext(guestCount = guests, guestCountIsMinimum = true, duration = Duration.ofMinutes(minutes)),
+        )
 
         fun command(
             email: String,
             name: String = "Jane Doe",
             message: String? = "Ice cream for a birthday party",
-        ) = CreateInquiry.Command(CustomerName.of(name), Email.of(email), InquiryMessage.ofOptional(message))
+            pricingInputs: FionasPricingInputs? = null,
+        ) = CreateInquiry.Command(CustomerName.of(name), Email.of(email), InquiryMessage.ofOptional(message), pricingInputs)
+
+        fun rows() =
+            listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_pricing", "fionas.inquiry_pricing_selections")
+                .map(application.database::count)
 
         test("a new email creates the customer and the inquiry together") {
             val customerId = CustomerId(UUID.randomUUID())
@@ -45,12 +104,14 @@ class InquiryOperationsSpec :
 
             val created = createInquiry(customerId, inquiryId)(command(email))
 
-            created.customer.id shouldBe customerId
-            created.customer.name shouldBe CustomerName("Jane Doe")
-            created.customer.email shouldBe Email(email)
-            created.customer.createdAt shouldBe STORED_INSTANT
-            created.inquiry shouldBe Inquiry(inquiryId, customerId, InquiryMessage("Ice cream for a birthday party"), STORED_INSTANT)
-            getInquiry()(inquiryId) shouldBe created
+            created shouldBe Inquiry(inquiryId, customerId, InquiryMessage("Ice cream for a birthday party"), STORED_INSTANT)
+            val read = getInquiry()(inquiryId)
+            read.inquiry shouldBe created
+            read.customer.id shouldBe customerId
+            read.customer.name shouldBe CustomerName("Jane Doe")
+            read.customer.email shouldBe Email(email)
+            read.customer.createdAt shouldBe STORED_INSTANT
+            read.pricingInputs.shouldBeNull()
         }
 
         test("an inquiry with a known email reuses that customer and does not overwrite its name") {
@@ -60,12 +121,57 @@ class InquiryOperationsSpec :
 
             val second = createInquiry()(command(email.uppercase(), name = "J. Doe", message = null))
 
-            second.customer shouldBe first.customer
-            second.customer.name shouldBe CustomerName("Jane Doe")
-            second.inquiry.customerId shouldBe first.customer.id
-            second.inquiry.message.shouldBeNull()
-            getInquiry()(second.inquiry.id) shouldBe second
+            second.customerId shouldBe first.customerId
+            second.message.shouldBeNull()
+            getInquiry()(second.id).customer.name shouldBe CustomerName("Jane Doe")
             application.database.count("fionas.customers") shouldBe customersAfterFirst
+        }
+
+        test("the configured pricing inputs are recorded with the inquiry exactly as submitted") {
+            val submitted = inputs(guests = 120, minutes = 180)
+
+            val created = createInquiry()(command("configured-${UUID.randomUUID()}@example.com", pricingInputs = submitted))
+
+            getInquiry()(created.id).pricingInputs shouldBe submitted
+        }
+
+        test("the requested catalog revision is pinned, even after the catalog moves on") {
+            val pinned = inputs()
+            val created = createInquiry()(command("pinned-${UUID.randomUUID()}@example.com", pricingInputs = pinned))
+
+            val later = application.addOffering("mint", "soft-serve-flavor", "Mint")
+
+            later shouldBe revision + 1
+            getInquiry()(created.id).pricingInputs?.catalogRevision shouldBe OfferingsRevision.of(revision)
+            // An older revision stays requestable, and stays as requested.
+            val older = createInquiry()(command("older-${UUID.randomUUID()}@example.com", pricingInputs = inputs(revision)))
+            getInquiry()(older.id).pricingInputs?.catalogRevision shouldBe OfferingsRevision.of(revision)
+        }
+
+        test("a returning customer's new request records its own inputs and leaves earlier ones unchanged") {
+            val email = "repeat-${UUID.randomUUID()}@example.com"
+            val first = createInquiry()(command(email, pricingInputs = inputs(guests = 50)))
+            val second = createInquiry()(command(email, name = "Someone Else", pricingInputs = inputs(guests = 200, minutes = 90)))
+
+            second.customerId shouldBe first.customerId
+            getInquiry()(first.id).pricingInputs shouldBe inputs(guests = 50)
+            getInquiry()(second.id).pricingInputs shouldBe inputs(guests = 200, minutes = 90)
+        }
+
+        test("inputs the pricing rejects are a validation failure, and nothing is recorded") {
+            val before = rows()
+
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                createInquiry()(command("rejected-${UUID.randomUUID()}@example.com", pricingInputs = inputs(guests = 0)))
+            }.message shouldContain "INVALID_GUEST_COUNT"
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                createInquiry()(command("rejected-${UUID.randomUUID()}@example.com", pricingInputs = inputs(toppings = TOPPINGS.take(2))))
+            }.message shouldContain "TOO_FEW_SELECTIONS"
+            shouldThrow<CommerceFailure.NotFound> {
+                createInquiry()(command("rejected-${UUID.randomUUID()}@example.com", pricingInputs = inputs(catalogRevision = 999)))
+            }.message shouldBe "Offerings catalog revision r999 was not found"
+
+            rows() shouldBe before
         }
 
         test("when the inquiry cannot be recorded, the new customer is not recorded either") {
@@ -83,6 +189,30 @@ class InquiryOperationsSpec :
             }
 
             application.transactor.inTransaction { customers.findById(it, customerId) }.shouldBeNull()
+        }
+
+        test("when the requested pricing inputs cannot be recorded, neither the inquiry nor the new customer is") {
+            val customerId = CustomerId(UUID.randomUUID())
+            val inquiryId = InquiryId(UUID.randomUUID())
+            val failingPricing =
+                object : InquiryPricingRepository by requested {
+                    override fun insert(
+                        transaction: Transaction,
+                        inquiryId: InquiryId,
+                        inputs: FionasPricingInputs,
+                    ): Unit = error("pricing insert failed")
+                }
+
+            shouldThrow<IllegalStateException> {
+                createInquiry(customerId, inquiryId, pricingRepository = failingPricing)(
+                    command("atomic-pricing-${UUID.randomUUID()}@example.com", pricingInputs = inputs()),
+                )
+            }
+
+            application.transactor.inTransaction { transaction ->
+                customers.findById(transaction, customerId).shouldBeNull()
+                inquiries.findById(transaction, inquiryId).shouldBeNull()
+            }
         }
 
         test("reading a missing inquiry is a not-found failure") {

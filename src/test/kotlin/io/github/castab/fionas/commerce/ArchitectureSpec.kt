@@ -12,7 +12,9 @@ import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRe
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
+import io.github.castab.fionas.commerce.inquiry.InquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
@@ -30,6 +32,7 @@ import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import io.kotest.matchers.string.shouldStartWith
 import java.io.File
 import java.util.UUID
 import java.util.jar.JarFile
@@ -101,6 +104,7 @@ class ArchitectureSpec :
             listOf(
                 CustomerRepository::class.java,
                 InquiryRepository::class.java,
+                InquiryPricingRepository::class.java,
                 CredentialRepository::class.java,
                 InquiryFinancialDocumentRepository::class.java,
                 FinancialDocumentPricingRepository::class.java,
@@ -115,6 +119,7 @@ class ArchitectureSpec :
             listOf(
                 JdbiCustomerRepository::class.java,
                 JdbiInquiryRepository::class.java,
+                JdbiInquiryPricingRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
                 JdbiFinancialDocumentPricingRepository::class.java,
@@ -131,6 +136,7 @@ class ArchitectureSpec :
                 .shouldContainExactlyInAnyOrder(
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
+                    "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
                     "financial/CreateInquiryFinancialDocument.kt: inTransaction",
                     "financial/CreateChangeOrder.kt: inTransaction",
@@ -189,6 +195,7 @@ class ArchitectureSpec :
                 fionaApiRoutes(
                     FionaOperations(
                         createInquiry = { error("not called") },
+                        listInquiries = { error("not called") },
                         getInquiry = { error("not called") },
                         previewEstimate = { error("not called") },
                         createInquiryEstimate = { _, _ -> error("not called") },
@@ -438,7 +445,11 @@ class ArchitectureSpec :
                 "CommercePermissions.PaymentRecord",
                 "CommercePermissions.RefundRecord",
             ).filterNot { it in bootstrap }.shouldBeEmpty()
-            // Fiona defines no duplicates of generic commerce permissions.
-            FionaPermissions.definitions.map { it.key } shouldContainExactly listOf(FionaPermissions.CredentialsManage)
+            // Fiona defines no duplicates of generic commerce permissions: only Fiona-specific actions.
+            FionaPermissions.definitions.map { it.key } shouldContainExactly
+                listOf(FionaPermissions.CredentialsManage, FionaPermissions.InquiriesRead)
+            FionaPermissions.definitions.forEach { it.key.value shouldStartWith "fionas." }
+            // Fresh Administrators can discover inquiries; existing roles are never changed at startup.
+            bootstrap.contains("FionaPermissions.InquiriesRead") shouldBe true
         }
     })

@@ -30,7 +30,9 @@ import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
 import io.github.castab.fionas.commerce.offering.FionasPricing
@@ -74,6 +76,8 @@ const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
  * `FinancialLedger`, called with the caller's transaction; Fiona's own repositories store
  * only which inquiry owns each lineage and the pricing inputs of each snapshot, and the
  * operations that write them price from the runtime's snapshot read in that same transaction.
+ * An inquiry's requested pricing inputs are checked with the same pricing, in the transaction
+ * that records the inquiry.
  */
 fun fionaApplication(
     clock: Clock = Clock.systemUTC(),
@@ -97,6 +101,7 @@ fun fionaApplication(
         routes = { context ->
             val customers = JdbiCustomerRepository()
             val inquiries = JdbiInquiryRepository()
+            val inquiryPricing = JdbiInquiryPricingRepository()
             val credentials = JdbiCredentialRepository()
             val hasher = PasswordHasher()
             BootstrapFirstAdmin(context.transactor, context.authorization, credentials, hasher, clock).invoke(bootstrap)
@@ -127,8 +132,9 @@ fun fionaApplication(
                 )
             val operations =
                 FionaOperations(
-                    createInquiry = CreateInquiry(context.transactor, customers, inquiries, clock)::invoke,
-                    getInquiry = GetInquiry(context.transactor, customers, inquiries)::invoke,
+                    createInquiry = CreateInquiry(context.transactor, customers, inquiries, inquiryPricing, pricing, clock)::invoke,
+                    listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
+                    getInquiry = GetInquiry(context.transactor, customers, inquiries, inquiryPricing)::invoke,
                     previewEstimate =
                         PreviewEstimate(
                             getRevision = GetOfferingsCatalogRevision(context.transactor, context.offeringsSnapshotRepository)::invoke,

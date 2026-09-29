@@ -35,6 +35,41 @@ class JdbiInquiryRepository : InquiryRepository {
             .map(inquiryRow)
             .findOne()
             .orElse(null)
+
+    // Two statements rather than one with an optional predicate, so each is a plain range scan
+    // of inquiries_created_at_id_idx; the row comparison continues strictly after the cursor.
+    override fun listNewestFirst(
+        transaction: Transaction,
+        after: InquiryListPosition?,
+        limit: Int,
+    ): List<Inquiry> {
+        require(limit >= 1) { "A page holds at least one inquiry" }
+        val query =
+            if (after == null) {
+                transaction.handle.createQuery(
+                    """
+                    SELECT id, customer_id, message, created_at FROM fionas.inquiries
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT :limit
+                    """.trimIndent(),
+                )
+            } else {
+                transaction.handle
+                    .createQuery(
+                        """
+                        SELECT id, customer_id, message, created_at FROM fionas.inquiries
+                        WHERE (created_at, id) < (:afterCreatedAt, :afterId)
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT :limit
+                        """.trimIndent(),
+                    ).bind("afterCreatedAt", after.createdAt)
+                    .bind("afterId", after.id.value)
+            }
+        return query
+            .bind("limit", limit)
+            .map(inquiryRow)
+            .list()
+    }
 }
 
 private val inquiryRow =

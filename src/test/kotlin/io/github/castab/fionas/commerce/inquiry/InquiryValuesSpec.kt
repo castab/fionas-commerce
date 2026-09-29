@@ -33,9 +33,23 @@ class InquiryValuesSpec :
             val customer = Customer(CustomerId(UUID.randomUUID()), CustomerName("Jane Doe"), Email("jane@example.com"), TEST_INSTANT)
             val inquiry = Inquiry(InquiryId(UUID.randomUUID()), customer.id, null, TEST_INSTANT)
 
-            InquiryDetails(inquiry, customer).customer shouldBe customer
+            InquiryDetails(inquiry, customer, null).customer shouldBe customer
+            InquirySummary(inquiry, customer).customer shouldBe customer
             shouldThrow<IllegalArgumentException> {
-                InquiryDetails(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer)
+                InquiryDetails(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer, null)
+            }
+            shouldThrow<IllegalArgumentException> {
+                InquirySummary(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer)
+            }
+        }
+
+        test("a list page holds 1 to 100 inquiries, 25 unless asked otherwise") {
+            ListInquiries.Command(after = null).limit shouldBe 25
+            ListInquiries.Command(after = null, limit = 1).limit shouldBe 1
+            ListInquiries.Command(after = null, limit = 100).limit shouldBe 100
+            listOf(0, -1, 101).forEach { limit ->
+                shouldThrow<IllegalArgumentException> { ListInquiries.Command(after = null, limit = limit) }.message shouldBe
+                    "limit must be between 1 and 100"
             }
         }
     })

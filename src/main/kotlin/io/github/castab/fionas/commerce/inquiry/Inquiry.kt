@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.time.Instant
 import java.util.UUID
 
@@ -48,8 +49,26 @@ data class Inquiry(
     val createdAt: Instant,
 )
 
-/** An [inquiry] together with the [customer] who made it, as the inquiry operations return it. */
+/**
+ * An [inquiry] together with the [customer] who made it and the [pricingInputs] the customer
+ * configured with it, if any, as staff read an inquiry.
+ *
+ * [pricingInputs] are the inputs the customer submitted, pinned to the catalog revision they
+ * named; never lines, amounts, or totals. Staff price them into a financial document
+ * separately.
+ */
 data class InquiryDetails(
+    val inquiry: Inquiry,
+    val customer: Customer,
+    val pricingInputs: FionasPricingInputs?,
+) {
+    init {
+        require(inquiry.customerId == customer.id) { "Inquiry ${inquiry.id.value} belongs to another customer" }
+    }
+}
+
+/** An [inquiry] and the [customer] who made it, as the staff inquiry list shows it. */
+data class InquirySummary(
     val inquiry: Inquiry,
     val customer: Customer,
 ) {
@@ -57,3 +76,21 @@ data class InquiryDetails(
         require(inquiry.customerId == customer.id) { "Inquiry ${inquiry.id.value} belongs to another customer" }
     }
 }
+
+/**
+ * Where an inquiry stands in the newest-first inquiry list: its creation time, then its id,
+ * which breaks ties between inquiries recorded at the same instant.
+ */
+data class InquiryListPosition(
+    val createdAt: Instant,
+    val id: InquiryId,
+)
+
+/**
+ * One page of the newest-first inquiry list. [next] is the position of the page's last
+ * inquiry when more inquiries follow it, and `null` on the last page.
+ */
+data class InquiryPage(
+    val inquiries: List<InquirySummary>,
+    val next: InquiryListPosition?,
+)

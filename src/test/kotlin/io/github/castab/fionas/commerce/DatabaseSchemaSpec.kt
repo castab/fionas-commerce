@@ -46,6 +46,9 @@ class DatabaseSchemaSpec :
                     "flyway_schema_history",
                     "customers",
                     "inquiries",
+                    "inquiry_pricing",
+                    "inquiry_pricing_categories",
+                    "inquiry_pricing_selections",
                     "user_credentials",
                     "inquiry_financial_documents",
                     "financial_document_pricing",
@@ -93,6 +96,31 @@ class DatabaseSchemaSpec :
                 listOf(
                     "CREATE INDEX inquiry_financial_documents_inquiry_id_idx ON fionas.inquiry_financial_documents " +
                         "USING btree (inquiry_id, created_at)",
+                )
+        }
+
+        test("an inquiry's requested pricing inputs belong to it alone, in submitted order, and reference no runtime table") {
+            application.database.foreignKeys("inquiry_pricing") shouldContainExactly listOf("inquiry_id → fionas.inquiries(id)")
+            application.database.foreignKeys("inquiry_pricing_categories") shouldContainExactly
+                listOf("inquiry_id → fionas.inquiry_pricing(inquiry_id)")
+            application.database.foreignKeys("inquiry_pricing_selections") shouldContainExactly
+                listOf("inquiry_id, category_position → fionas.inquiry_pricing_categories(inquiry_id, position)")
+            application.database.strings(
+                """
+                SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                WHERE conrelid = 'fionas.inquiry_pricing'::regclass AND contype IN ('p', 'u')
+                """.trimIndent(),
+            ) shouldContainExactly listOf("PRIMARY KEY (inquiry_id)")
+        }
+
+        test("the newest-first inquiry list has an index on its exact ordering") {
+            application.database.strings(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas' AND tablename = 'inquiries' " +
+                    "AND indexname <> 'inquiries_pkey' ORDER BY indexname",
+            ) shouldContainExactly
+                listOf(
+                    "CREATE INDEX inquiries_created_at_id_idx ON fionas.inquiries USING btree (created_at, id)",
+                    "CREATE INDEX inquiries_customer_id_idx ON fionas.inquiries USING btree (customer_id)",
                 )
         }
 

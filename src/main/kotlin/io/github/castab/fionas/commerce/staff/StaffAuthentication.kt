@@ -49,14 +49,21 @@ class PasswordHasher {
         }
 }
 
+/** Fiona's own permissions, for Fiona-specific actions only; generic commerce actions use `CommercePermissions`. */
 object FionaPermissions {
     val CredentialsManage = PermissionKey("fionas.credentials.manage")
+    val InquiriesRead = PermissionKey("fionas.inquiries.read")
     val definitions =
         listOf(
             PermissionDefinition(
                 CredentialsManage,
                 "Manage staff credentials",
                 "Set or reset password credentials for Fiona's staff users",
+            ),
+            PermissionDefinition(
+                InquiriesRead,
+                "Read inquiries",
+                "List Fiona's inquiries and read each one with its customer's contact details and requested configuration",
             ),
         )
 }
@@ -186,7 +193,7 @@ class BootstrapFirstAdmin(
                         RoleDefinition(
                             CommerceRoles.Administrator,
                             "Administrator",
-                            "May administer Fiona's staff access, offerings catalog, financial documents, payments, and refunds",
+                            "May administer Fiona's staff access, inquiries, offerings catalog, financial documents, payments, and refunds",
                             setOf(
                                 CommercePermissions.OfferingsManage,
                                 CommercePermissions.FinancialDocumentRead,
@@ -199,6 +206,7 @@ class BootstrapFirstAdmin(
                                 CommercePermissions.RoleManage,
                                 CommercePermissions.RoleAssign,
                                 FionaPermissions.CredentialsManage,
+                                FionaPermissions.InquiriesRead,
                             ),
                         ),
                     )

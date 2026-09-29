@@ -51,8 +51,9 @@ class OpenApiDocumentSpec :
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
-                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "409", "422", "500"),
-                Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "404", "500"),
+                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "404", "409", "422", "500"),
+                Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
+                Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/estimates", "post", "createInquiryEstimate") to
                     listOf("201", "400", "401", "403", "404", "422", "500"),
@@ -88,6 +89,7 @@ class OpenApiDocumentSpec :
         val tags =
             mapOf(
                 "createInquiry" to "Inquiries",
+                "listInquiries" to "Inquiries",
                 "getInquiry" to "Inquiries",
                 "previewEstimate" to "Estimates",
                 "createInquiryEstimate" to "Financial documents",
@@ -154,7 +156,12 @@ class OpenApiDocumentSpec :
         val fionaSchemas =
             listOf(
                 "CreateInquiryRequest",
+                "InquiryPricingInputs",
+                "InquiryReceiptResponse",
                 "InquiryResponse",
+                "InquiryRequestedPricing",
+                "InquiryListResponse",
+                "InquiryListItem",
                 "EstimatePreviewRequest",
                 "EstimatePreviewSelection",
                 "EstimatePreviewResponse",
@@ -312,7 +319,7 @@ class OpenApiDocumentSpec :
             }
         }
 
-        test("describes the create request: required name and email, an optional message, and their limits") {
+        test("describes the create request: required name and email, optional message and pricing inputs, and their limits") {
             val body = operation("/inquiries", "post").at("requestBody")
             body.at("required") shouldBe JsonPrimitive(true)
             body.text("content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/CreateInquiryRequest"
@@ -321,9 +328,11 @@ class OpenApiDocumentSpec :
             request.text("type") shouldBe "object"
             request.strings("required") shouldContainExactly listOf("name", "email")
             val properties = request.at("properties").jsonObject
-            properties.keys.toList() shouldContainExactly listOf("name", "email", "message")
-            properties.values.forEach { it.text("type") shouldBe "string" }
-            properties.mapValues { (_, property) -> property.at("maxLength").jsonPrimitive.int } shouldBe
+            properties.keys.toList() shouldContainExactly listOf("name", "email", "message", "pricingInputs")
+            properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryPricingInputs"
+            val text = properties - "pricingInputs"
+            text.values.forEach { it.text("type") shouldBe "string" }
+            text.mapValues { (_, property) -> property.at("maxLength").jsonPrimitive.int } shouldBe
                 mapOf(
                     "name" to CustomerName.MAX_LENGTH,
                     "email" to Email.MAX_LENGTH,
@@ -336,19 +345,91 @@ class OpenApiDocumentSpec :
                 .contains("format") shouldBe false
         }
 
-        test("describes the inquiry response with its identifiers and timestamp formats") {
-            listOf(
-                operation("/inquiries", "post").at("responses", "201"),
-                operation("/inquiries/{inquiryId}", "get").at("responses", "200"),
-            ).forEach { it.text("content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/InquiryResponse" }
+        test("describes the public create response as a receipt of the new inquiry, naming no customer") {
+            operation("/inquiries", "post").text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/InquiryReceiptResponse"
+
+            val receipt = schema("InquiryReceiptResponse")
+            receipt.strings("required") shouldContainExactly listOf("id", "createdAt")
+            receipt
+                .at("properties")
+                .jsonObject.keys
+                .toList() shouldContainExactly listOf("id", "createdAt")
+            receipt.text("properties", "id", "format") shouldBe "uuid"
+            receipt.text("properties", "createdAt", "format") shouldBe "date-time"
+        }
+
+        test("describes the staff inquiry response with its identifiers, timestamp formats, and requested pricing inputs") {
+            operation("/inquiries/{inquiryId}", "get").text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/InquiryResponse"
 
             val response = schema("InquiryResponse")
             response.strings("required") shouldContainExactly listOf("id", "customerId", "name", "email", "createdAt")
             val properties = response.at("properties").jsonObject
-            properties.keys.toList() shouldContainExactly listOf("id", "customerId", "name", "email", "message", "createdAt")
-            properties.values.forEach { it.text("type") shouldBe "string" }
+            properties.keys.toList() shouldContainExactly
+                listOf("id", "customerId", "name", "email", "message", "createdAt", "pricingInputs")
+            properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryRequestedPricing"
+            (properties - "pricingInputs").values.forEach { it.text("type") shouldBe "string" }
             properties.filterValues { "format" in it.jsonObject }.mapValues { (_, property) -> property.text("format") } shouldBe
                 mapOf("id" to "uuid", "customerId" to "uuid", "createdAt" to "date-time")
+        }
+
+        test("describes an inquiry's pricing inputs as the estimate's commercial inputs: never amounts, and pinned to a revision") {
+            val commercialInputs = listOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
+            listOf("InquiryPricingInputs", "InquiryRequestedPricing").forEach { name ->
+                val inputs = schema(name)
+                inputs
+                    .at("properties")
+                    .jsonObject.keys
+                    .toList() shouldContainExactly commercialInputs
+                inputs.text("properties", "selections", "items", "\$ref") shouldBe "#/components/schemas/PricingSelection"
+                listOf("catalogRevision", "guestCount", "durationMinutes").forEach {
+                    inputs.text("properties", it, "type") shouldBe "integer"
+                }
+                inputs.text("properties", "guestCountIsMinimum", "type") shouldBe "boolean"
+            }
+            // Submitted as an estimate request takes them; read back as staff submit them to an estimate.
+            schema("InquiryPricingInputs").strings("required") shouldContainExactly
+                schema("CreateInquiryEstimateRequest").strings("required")
+            schema("InquiryPricingInputs").at("properties").jsonObject.keys shouldBe
+                schema("CreateInquiryEstimateRequest").at("properties").jsonObject.keys
+            schema("InquiryRequestedPricing").strings("required") shouldContainExactly commercialInputs
+        }
+
+        test("describes the staff inquiry list: an optional bounded limit, an opaque cursor, and the next page's cursor") {
+            val list = operation("/inquiries", "get")
+            list.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/InquiryListResponse"
+            list.at("parameters").jsonArray.associateBy { it.text("name") }.let { parameters ->
+                parameters.keys shouldBe setOf("limit", "cursor")
+                parameters.values.forEach {
+                    it.text("in") shouldBe "query"
+                    it.at("required") shouldBe JsonPrimitive(false)
+                }
+                parameters.getValue("limit").at("schema").jsonObject shouldBe
+                    Json.parseToJsonElement("""{"type":"integer","minimum":1,"maximum":100,"default":25}""")
+                parameters.getValue("cursor").text("schema", "type") shouldBe "string"
+            }
+            list.text("responses", "400", "description").contains("`cursor`") shouldBe true
+            list.text("responses", "422", "description").contains("`limit`") shouldBe true
+
+            schema("InquiryListResponse").let {
+                it.strings("required") shouldContainExactly listOf("inquiries")
+                it
+                    .at("properties")
+                    .jsonObject.keys
+                    .toList() shouldContainExactly listOf("inquiries", "nextCursor")
+                it.text("properties", "inquiries", "items", "\$ref") shouldBe "#/components/schemas/InquiryListItem"
+                it.text("properties", "nextCursor", "type") shouldBe "string"
+            }
+            schema("InquiryListItem").let {
+                it.strings("required") shouldContainExactly listOf("id", "customerId", "name", "email", "createdAt")
+                it
+                    .at("properties")
+                    .jsonObject.keys
+                    .toList() shouldContainExactly
+                    listOf("id", "customerId", "name", "email", "message", "createdAt")
+            }
         }
 
         test("describes the inquiry id as a required UUID path parameter") {

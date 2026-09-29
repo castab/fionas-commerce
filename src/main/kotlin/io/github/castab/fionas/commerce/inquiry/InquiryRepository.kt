@@ -17,4 +17,14 @@ interface InquiryRepository {
         transaction: Transaction,
         id: InquiryId,
     ): Inquiry?
+
+    /**
+     * At most [limit] inquiries, newest first (by creation time, then by id, descending),
+     * starting strictly after [after], or from the newest when it is `null`.
+     */
+    fun listNewestFirst(
+        transaction: Transaction,
+        after: InquiryListPosition?,
+        limit: Int,
+    ): List<Inquiry>
 }

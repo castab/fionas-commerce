@@ -18,6 +18,12 @@ interface CustomerRepository {
         id: CustomerId,
     ): Customer?
 
+    /** The customers among [ids] that exist, by id. */
+    fun findByIds(
+        transaction: Transaction,
+        ids: Set<CustomerId>,
+    ): Map<CustomerId, Customer>
+
     fun findByEmail(
         transaction: Transaction,
         email: Email,
