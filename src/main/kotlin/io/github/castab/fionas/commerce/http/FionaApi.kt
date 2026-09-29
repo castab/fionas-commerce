@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.financial.Version
+import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.authorization.AuthorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
@@ -9,9 +10,13 @@ import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.financial.AllocatePayment
+import io.github.castab.fionas.commerce.financial.AllocatedPayment
+import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
+import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
@@ -48,6 +53,7 @@ class FionaOperations(
     val getInquiry: (InquiryId) -> InquiryDetails,
     val previewEstimate: (FionasPricingInputs) -> EstimatePreview,
     val createInquiryEstimate: (InquiryId, FionasPricingInputs) -> InquiryFinancialDocument,
+    val createInquiryFinancialDocument: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
     val listInquiryFinancialDocuments: (InquiryId) -> List<InquiryFinancialDocument>,
     val getFinancialDocument: (UUID) -> InquiryFinancialDocument,
     val getFinancialDocumentHistory: (UUID) -> InquiryFinancialDocumentHistory,
@@ -55,6 +61,8 @@ class FionaOperations(
     val issueInvoice: (UUID, Version) -> InquiryFinancialDocument,
     val createChangeOrder: (UUID, Version, FionasPricingInputs) -> InquiryFinancialDocument,
     val recordPayment: (RecordDocumentPayment.Command) -> RecordedPayment,
+    val recordStandalonePayment: (RecordPayment.Command) -> PaymentRecord,
+    val allocatePayment: (AllocatePayment.Command) -> AllocatedPayment,
     val login: (String, SecretPassword) -> IssuedSession?,
     val currentUser: (UserId) -> User?,
     val setStaffPassword: (UserId, SecretPassword) -> Unit,
@@ -80,6 +88,7 @@ fun fionaApiRoutes(
         getInquiryRoute(operations.getInquiry),
         previewEstimateRoute(operations.previewEstimate),
         createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
+        createInquiryFinancialDocumentRoute(operations.createInquiryFinancialDocument, auth.access),
         listInquiryFinancialDocumentsRoute(operations.listInquiryFinancialDocuments, auth.access),
         getFinancialDocumentRoute(operations.getFinancialDocument, auth.access),
         getFinancialDocumentHistoryRoute(operations.getFinancialDocumentHistory, auth.access),
@@ -87,6 +96,8 @@ fun fionaApiRoutes(
         issueInvoiceRoute(operations.issueInvoice, auth.access),
         createChangeOrderRoute(operations.createChangeOrder, auth.access),
         recordPaymentRoute(operations.recordPayment, auth.access),
+        recordStandalonePaymentRoute(operations.recordStandalonePayment, auth.access),
+        allocatePaymentRoute(operations.allocatePayment, auth.access),
         loginRoute(operations.login, auth.cookie, auth.access, auth.origin),
         logoutRoute(auth.sessions, auth.cookie, auth.access),
         currentUserRoute(operations.currentUser, auth.access),

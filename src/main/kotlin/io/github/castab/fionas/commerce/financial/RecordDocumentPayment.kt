@@ -1,13 +1,10 @@
 package io.github.castab.fionas.commerce.financial
 
-import io.github.castab.commerce.financial.FinancialDocument
-import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.ExternalPaymentReference
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.financial.FinancialLedger
-import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.math.BigDecimal
@@ -64,18 +61,8 @@ class RecordDocumentPayment(
         return transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, command.documentId, command.documentVersion)
             val document = current.document
-            if (document is FinancialDocument.Estimate) {
-                throw CommerceFailure.InvariantViolated(
-                    "Financial document ${document.id} is an estimate; payments are accepted against a quote or an invoice",
-                )
-            }
-            val currency = document.currency
-            if (command.amount.stripTrailingZeros().scale() > currency.defaultFractionDigits) {
-                throw CommerceFailure.ValidationFailed(
-                    "A ${currency.currencyCode} payment amount has at most ${currency.defaultFractionDigits} decimal places",
-                )
-            }
-            val amount = Money(command.amount, currency)
+            document.requirePaymentDestination()
+            val amount = paymentMoney(command.amount, document.currency)
             val payment =
                 validating { PaymentRecord(newPaymentId(), amount, command.method, command.receivedAt ?: now, command.externalReference) }
             val allocation =

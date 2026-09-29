@@ -116,6 +116,7 @@ Every route needs a staff session:
 | Endpoint | Permission | Behavior |
 |---|---|---|
 | `POST /inquiries/{inquiryId}/estimates` | `commerce.financial-document.create` | Prices commercial inputs on the server and persists them as version 1 of a new estimate the inquiry owns. `201` with the document and `Location: /financial-documents/{documentId}`. |
+| `POST /inquiries/{inquiryId}/financial-documents` | `commerce.financial-document.create` | Prices commercial inputs and creates a new inquiry-owned Estimate, Quote, or Invoice at version 1, with no predecessor. `201` and `Location: /financial-documents/{documentId}`. |
 | `GET /inquiries/{inquiryId}/financial-documents` | `commerce.financial-document.read` | The inquiry's documents, each at its latest version with its current settlement. |
 | `GET /financial-documents/{documentId}` | `commerce.financial-document.read` | The latest version, its pricing inputs, and its current settlement. |
 | `GET /financial-documents/{documentId}/history` | `commerce.financial-document.read` | Every version, oldest first, each with its pricing inputs. |
@@ -123,6 +124,8 @@ Every route needs a staff session:
 | `POST /financial-documents/{documentId}/invoice` | `commerce.financial-document.create` | Issues the latest quote as an invoice, unchanged. |
 | `POST /financial-documents/{documentId}/change-orders` | `commerce.financial-document.create` | Reprices the latest version from revised inputs, in its current stage. |
 | `POST /financial-documents/{documentId}/payments` | `commerce.payment.record` | Records a payment and applies all of it to the latest version, a quote or an invoice. `201`. |
+| `POST /payments` | `commerce.payment.record` | Records money received without assigning it to a document. `201` with the payment fact. |
+| `POST /payments/{paymentId}/allocations` | `commerce.payment.record` | Allocates some or all of an existing payment to an exact, currently latest Quote or Invoice version. `201` with the allocation and reconciliation. |
 
 **Staff authentication API**, implemented by Fiona (see [Staff authentication](#staff-authentication)):
 
@@ -440,6 +443,12 @@ Inquiry I
 GET /financial-documents/{D}   latest Invoice D/v5, settlement across the whole lineage
 ```
 
+An inquiry can also begin a new lineage directly at `D/v1 Quote` or `D/v1 Invoice`
+through `POST /inquiries/{inquiryId}/financial-documents`. These are legitimate first
+snapshots with `previousVersion: null`; no Estimate or Quote is synthesized before them.
+The existing `/estimates` endpoint creates `D/v1 Estimate` through the same pricing and
+persistence operation.
+
 The responsibilities are split three ways:
 
 ```text
@@ -449,8 +458,8 @@ commerce-runtime     financial snapshot persistence and lifecycle orchestration,
                      allocation persistence, reconciliation, transaction-aware ledger
                      operations (context.financialLedger)
 fionas-commerce      inquiry → document ownership, Fiona pricing inputs of every version,
-                     server-authoritative estimates, change-order intent, payment
-                     acceptance policy, HTTP, authentication and authorization
+                     server-authoritative starting stage and pricing, change-order intent,
+                     payment acceptance and allocation policy, HTTP and auth
 ```
 
 **The ledger is commerce-runtime's.** Every version of a document is an immutable
@@ -477,13 +486,19 @@ D/v4 Invoice   $825.00   the exact inputs of D/v3
 D/v5 Invoice   $850.00   catalog r20, 100 guests, 150 minutes, selections X
 ```
 
-**The server prices, the browser never does.** A persisted estimate and a change order take
+**The server prices, the browser never does.** A first-snapshot document and a change order take
 the same commercial inputs as `POST /estimate-preview` (`catalogRevision`, `guestCount`,
 `guestCountIsMinimum`, `durationMinutes`, `selections`) and price them with the same
 `FionasOfferingsEngine`. Lines, amounts, and totals are never accepted; any such property
 in a request is ignored. The catalog revision is the one the request names, never silently
 the latest: staff may deliberately keep an old price book or adopt a newer one, and the
 pricing source records which.
+
+The new creation route adds only a `stage` (`ESTIMATE`, `QUOTE`, or `INVOICE`) to those
+commercial inputs. It cannot accept client-authored lines, totals, currency, document
+version, or predecessor. Fiona creates version 1, associates it with the inquiry, and
+stores its exact pricing source in one transaction. A direct Quote can later become an
+Invoice; a direct Invoice has no further quote or invoice transition.
 
 ```bash
 curl -s -X POST localhost:8080/inquiries/$INQUIRY/estimates -b "$COOKIE" -H "Origin: $ORIGIN" \
@@ -517,8 +532,8 @@ produce exactly the current charges (descriptions, quantities, prices, tax, curr
 order, ignoring line ids) are no financial change: `422` "The revised pricing produces no
 financial change".
 
-**Every mutation names the version it acts on.** `expectedVersion` (transitions and change
-orders) and `documentVersion` (payments) must be the latest version; otherwise the request is
+**Every document-lineage mutation names the version it acts on.** `expectedVersion` (transitions and change
+orders) and `documentVersion` (allocations and combined payments) must be the latest version; otherwise the request is
 `409 conflict` and nothing is appended, so staff never act on a version they did not see.
 Fiona's mutations of one lineage run one at a time (they lock its association row), and
 commerce-runtime's unique `(document_id, previous_version)` rejects any competing successor.
@@ -528,7 +543,40 @@ the association row, so a mutation can commit while a reader is open. Mutations 
 association-row `SELECT ... FOR UPDATE` and expected-version check to serialize writes.
 The current view reconciles the exact document snapshot it returns.
 
-**Payments.** `POST /financial-documents/{documentId}/payments` means "we received this
+**Payments are two immutable facts.** Recording means money was received. Allocation
+assigns some of that money to an exact document snapshot. Reconciliation is a derived
+view over the document and its allocations. A payment can therefore be unapplied,
+partially applied, or split across eligible documents. The unapplied amount is its
+received amount minus persisted allocations; Fiona stores no payment status or balance.
+
+`POST /payments` records a payment without knowing its destination:
+
+```json
+{"amount":"500.00","currency":"USD","method":"CARD",
+ "receivedAt":"2026-09-28T20:00:00Z",
+ "externalReference":{"provider":"stripe","reference":"pi_example"}}
+```
+
+The currency is required because no document supplies one. The response contains the
+persisted payment id, amount, currency, method, receipt time, and optional external
+reference, with no allocation or settlement fields. Receipt time and external reference
+are optional. The runtime rejects duplicate provider/reference pairs.
+
+`POST /payments/{paymentId}/allocations` assigns an existing payment to an exact snapshot:
+
+```json
+{"documentId":"...","documentVersion":3,"amount":"150.00"}
+```
+
+Fiona requires that version to remain latest and be a Quote or Invoice, locks its lineage,
+and derives currency from that snapshot. The runtime locks the payment and enforces its
+allocation history, including currency agreement and the maximum allocatable amount.
+The response contains the allocation fact and reconciliation for the exact document
+reference. Two allocations of a received `$500` may assign `$300` to one document and
+`$200` to another; allocating `$150` leaves `$350` unapplied without storing that
+remainder. Refunds and allocation reversals are not implemented.
+
+The existing `POST /financial-documents/{documentId}/payments` means "we received this
 payment, and all of it is for this document":
 
 ```json
@@ -552,12 +600,16 @@ that exact version. The allocation stays attached to it as the document advances
 on quote `D/v3` still counts when invoice `D/v5` is reconciled, whose balance is `D/v5`'s
 total minus the net applied. Over-application is allowed; the balance is then negative. The
 response names the payment, the allocation, the exact version, and the settlement after it.
-commerce-runtime supports unapplied and split payments; Fiona's API does not offer them yet.
+The two facts are committed atomically. All payment amounts remain exact decimal strings,
+never JSON floating-point numbers. Provider SDKs, webhooks, stored payment status,
+stored document balance, booking conversion, events/outbox/CQRS, refunds, and allocation
+reversals remain outside this workflow.
 
 **One transaction per operation.** Each operation opens one runtime transaction and passes
 it to every ledger call (`context.financialLedger.create(transaction, …)`,
 `issueQuote(transaction, …)`, `changeOrder(transaction, …)`,
-`recordPaymentAgainstDocument(transaction, …)`, `reconcileLatest(transaction, …)`) and to
+`recordPayment(transaction, …)`, `allocatePayment(transaction, …)`,
+`recordPaymentAgainstDocument(transaction, …)`, `reconcile(transaction, exactReference)`) and to
 Fiona's repositories, and prices from the exact catalog revision read in that same
 transaction. If any step fails, the commerce snapshot, payment, or allocation rolls back
 with Fiona's association and pricing source.
@@ -595,9 +647,9 @@ The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
 `-Pversion=<version>`). It declares no server host, so it is the same in every
 environment. The stable `operationId`s are `createInquiry`, `getInquiry`,
-`previewEstimate`, `createInquiryEstimate`, `listInquiryFinancialDocuments`,
+`previewEstimate`, `createInquiryEstimate`, `createInquiryFinancialDocument`, `listInquiryFinancialDocuments`,
 `getFinancialDocument`, `getFinancialDocumentHistory`, `issueQuote`, `issueInvoice`,
-`createChangeOrder`, `recordPayment`, `login`, `logout`, `getCurrentUser`, and
+`createChangeOrder`, `recordPayment`, `recordStandalonePayment`, `allocatePayment`, `login`, `logout`, `getCurrentUser`, and
 `setStaffPassword`, and for the catalog
 `fionasOfferingsGetCatalog`, `fionasOfferingsCreateCatalog`,
 `fionasOfferingsGetCatalogRevision`, `fionasOfferingsListCategories`,
@@ -797,14 +849,15 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler, including errors: the contract leaves every error body to commerce-runtime, and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; explicit old and new catalog revisions; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
-| `FinancialDocumentAtomicitySpec` | Fiona's first cross-boundary writes roll back together: an estimate, a quote, a change order, and a payment each fail after the ledger wrote, and neither the runtime's snapshot, payment, or allocation nor Fiona's association or pricing source remains |
+| `FinancialDocumentAtomicitySpec` | Fiona's cross-boundary writes roll back together: first-snapshot Estimate, Quote, and Invoice creation, change orders, combined payments, and standalone allocations do not leave partial ledger or Fiona facts on failure |
+| `FinancialLedgerExpansionSpec` | Direct first-snapshot stages and transitions; standalone receipt validation and persistence; partial, repeated, and split allocations; runtime limits and Fiona stage/version policy; concurrent allocations against one payment |
 | `FinancialDocumentRepositoriesSpec` | The inquiry association and pricing-source repositories on PostgreSQL: several lineages per inquiry, one inquiry per lineage, ordered round trips with an empty category, copies to a successor, and foreign keys to the runtime's exact snapshots |
-| `FinancialDocumentReadConsistencySpec` | Current-document, history, and inquiry-list reads pause between queries; a payment or quote commits while each reader is open, each reader retains its old snapshot, and a later read sees the committed state; reads change nothing |
+| `FinancialDocumentReadConsistencySpec` | Current-document, history, and inquiry-list reads pause between queries; a payment or quote commits while each reader is open, each reader retains its old snapshot, and a later read sees the committed state; ownership lookups fail immediately if they take the mutation-only lock |
 | `RepricingSpec` | Change-order derivation: remove every current line, add every repriced line in order; identical charges are no financial change |
 | `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
 | `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded (no financial document either), minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |
 | `OfferingsCatalogSpec` | Fiona's Offerings catalog through the complete handler: absent until initialized; revisions 1–4 from initialization, a category, and two offerings; ordered reads; exact historical revisions; every price form round-trips; no update or delete route |
-| `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (financial documents and payments included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; requests carry commercial inputs, never amounts; the runtime's strict `OfferingPrice` `oneOf` |
+| `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (financial documents, standalone receipts, and allocations included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |

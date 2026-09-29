@@ -58,12 +58,14 @@ class DatabaseSchemaSpec :
                 SELECT (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
                         FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord)
                         JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum)
-                    || ' → ' || con.confrelid::regclass::text || '('
+                    || ' → ' || referenced_namespace.nspname || '.' || referenced_table.relname || '('
                     || (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
                         FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord)
                         JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum)
                     || ')'
                 FROM pg_constraint con
+                JOIN pg_class referenced_table ON referenced_table.oid = con.confrelid
+                JOIN pg_namespace referenced_namespace ON referenced_namespace.oid = referenced_table.relnamespace
                 WHERE con.contype = 'f' AND con.conrelid = 'fionas.$table'::regclass
                 """.trimIndent(),
             )

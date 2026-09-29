@@ -195,9 +195,10 @@ no service locator. Keep wiring visible.
 
 The shared runtime transaction is the seam that lets one Fiona operation atomically write
 Fiona-owned rows and runtime-owned commerce facts. Fiona's financial operations do: a
-persisted estimate writes the runtime's snapshot, Fiona's inquiry association, and Fiona's
-pricing source in one transaction; a transition or change order writes the runtime's
-successor and its pricing source; a payment writes the runtime's payment and allocation.
+first-snapshot document writes the runtime's snapshot, Fiona's inquiry association, and
+Fiona's pricing source in one transaction; a transition or change order writes the runtime's
+successor and its pricing source; standalone receipt and allocation are separate ledger
+facts, while the combined payment operation writes both in one transaction.
 
 - **Ledger calls take the operation's `Transaction`.** Inside `inTransaction`, call only the
   `FinancialLedger` overloads that take a `Transaction`
@@ -557,9 +558,10 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
 ## Financial documents and payments
 
 Financial documents (`Estimate`, `Quote`, `Invoice`) and payments are commerce-runtime's
-financial ledger. Fiona builds its first commercial workflow on it:
-inquiry → persisted estimate → change orders → quote → deposit → invoice → change orders →
-further payments. The split:
+financial ledger. A Fiona inquiry may begin a lineage at Estimate v1, Quote v1, or Invoice
+v1. Starting at Quote or Invoice is a legitimate new lineage with no predecessor, not a
+skipped-history transition. An Estimate may then follow the usual change-order, quote,
+deposit, invoice, and final-payment workflow. The split:
 
 ```text
 commerce-domain     FinancialDocument / ChangeOrder / LineItem / PaymentRecord /
@@ -568,8 +570,8 @@ commerce-runtime    financial snapshot persistence, lifecycle orchestration, pay
                     allocation persistence, reconciliation, transaction-aware
                     FinancialLedger operations
 fionas-commerce     inquiry → document relationship, Fiona pricing inputs and history,
-                    server-authoritative estimate creation, change-order intent, payment
-                    acceptance policy, HTTP, authentication and authorization
+                    server-authoritative starting-stage choice and pricing, change-order
+                    intent, payment acceptance and allocation policy, HTTP and auth
 ```
 
 1. **Never persist a ledger fact in Fiona.** No Fiona table holds a document, a line, an
@@ -585,9 +587,11 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    its ordered categories and selections) stores the `FionasPricingInputs` of each exact
    `(document_id, version)`, written in the same transaction as the snapshot. A change order
    records its revised inputs; a transition copies its source's inputs unchanged.
-4. **The server prices; the browser never supplies financial values.** Persisted estimates
-   and change orders accept commercial inputs only, never lines, prices, tax, or totals, and
-   price them with `FionasPricing` from exactly the catalog revision the request names.
+4. **The server prices; the browser never supplies financial values.** First-snapshot
+   Estimate, Quote, and Invoice documents and change orders accept commercial inputs only,
+   never lines, prices, tax, or totals, and price them with `FionasPricing` from exactly
+   the catalog revision the request names. The existing estimate endpoint delegates to the
+   same creation choreography with starting stage Estimate.
 5. **Transitions never reprice**; they go through `issueQuote` and `issueInvoice`, and the
    runtime reports a transition the stage does not have (`IllegalTransition`). There is no
    estimate-to-invoice shortcut.
@@ -597,8 +601,8 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    (ignoring line ids) are rejected as no financial change. A change to non-financial
    details is not a change order. A generic line-source identity is future work, decided
    from real need.
-7. **Every mutation names the version it acts on** (`expectedVersion`, a payment's
-   `documentVersion`); a lineage that has moved on is `Conflict`. Mutations lock the
+7. **Every document-lineage mutation names the version it acts on** (`expectedVersion`, an
+   allocation's `documentVersion`); a lineage that has moved on is `Conflict`. Mutations lock the
    lineage's association row, and the runtime's `(document_id, previous_version)` uniqueness
    is the final guard.
    `fionas.inquiry_financial_documents` is the serialization point for mutations of one
@@ -607,17 +611,23 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    PostgreSQL REPEATABLE READ and normal ownership lookups, so their document, pricing,
    and settlement queries share one point-in-time snapshot without blocking writers.
    The current view reconciles the exact snapshot it returns.
-8. **Payment policy for this slice:** a payment is recorded against the latest version, a
-   quote or an invoice (never an estimate: `InvariantViolated`); the whole payment is
-   allocated to that exact snapshot through `recordPaymentAgainstDocument`; its currency is
-   the document's; the amount is an exact decimal with at most the currency's minor digits;
-   over-application is allowed. Allocations stay attached to their snapshot; the latest
-   snapshot's reconciliation counts them all. The runtime's external-reference uniqueness is
-   the only idempotency. Unapplied and split payments exist in the runtime but have no Fiona
-   workflow yet.
+8. **Receipt and allocation are separate immutable facts.** Standalone `RecordPayment`
+   records money received through `ledger.recordPayment` with an explicit currency and no
+   destination; it may remain unapplied. `AllocatePayment` assigns part or all of an
+   existing payment to an exact, currently latest Quote or Invoice snapshot through
+   `ledger.allocatePayment`. Fiona locks the document lineage and checks its version and
+   stage; the runtime locks payment history and enforces existence, currency agreement,
+   and allocation limits. Separate allocations can apply one payment to several eligible
+   documents. The combined `RecordDocumentPayment` operation remains atomic: it records
+   and allocates the entire payment to one latest Quote or Invoice in one transaction.
+   Amounts are exact decimals limited by currency minor units. External-reference
+   uniqueness is the runtime's conflict policy. Allocations stay attached to their exact
+   snapshot, while the latest lineage reconciliation counts them all.
 9. **Settlement is derived.** Only the latest view carries reconciliation (`grossAllocated`,
    `netApplied`, `balance`); history shows historical facts and pricing sources, never a
-   reconciliation of an older snapshot. A payment status is presentation, derived by clients.
+   reconciliation of an older snapshot. Unapplied amount is the received amount minus
+   persisted allocations, never mutable state. Payment status is presentation, derived by
+   clients. Allocation responses reconcile the exact reference they changed.
 10. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
 11. **No `Booking` yet.** Inquiry → financial-document lineage → payments is the model until
     a slice decides when an inquiry becomes a booking.
@@ -653,7 +663,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
-| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordDocumentPayment`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, and `ListInquiryFinancialDocuments` operations |
+| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, and `ListInquiryFinancialDocuments` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
@@ -670,7 +680,7 @@ future requirements. Repositories are narrow and intention-revealing. Extract on
 real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: refunds, allocation reversals,
-unapplied or split-payment workflows, Stripe or any payment provider or SDK, payment
+Stripe or any payment provider or SDK, payment
 webhooks, service credentials, OAuth/OIDC, self-service password resets, event publishing,
 outbox, NATS, projections, CQRS, bookings and booking conversion, booking lifecycle
 transitions, a generic line-source identity, stored balances or payment statuses, tax,

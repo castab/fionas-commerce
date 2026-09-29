@@ -27,6 +27,7 @@ import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import java.math.BigDecimal
 import java.time.Duration
+import java.util.Currency
 import java.util.UUID
 
 /**
@@ -131,6 +132,41 @@ class FinancialDocumentAtomicitySpec :
             stored(id) shouldBe listOf(1, 2, 1, 1)
         }
 
+        test("direct Quote and Invoice creation roll back the first snapshot with Fiona's context") {
+            listOf(CreateInquiryFinancialDocument.Stage.QUOTE, CreateInquiryFinancialDocument.Stage.INVOICE).forEach { stage ->
+                val id = UUID.randomUUID()
+                val failing =
+                    object : FinancialDocumentPricingRepository by sources {
+                        override fun insert(
+                            transaction: Transaction,
+                            snapshot: FinancialDocumentReference,
+                            inputs: FionasPricingInputs,
+                        ) {
+                            application.context.financialLedger
+                                .latest(transaction, snapshot.id)
+                                .version shouldBe Version.INITIAL
+                            associations.inquiryOf(transaction, snapshot.id).shouldNotBeNull()
+                            error("pricing source failure after direct $stage creation")
+                        }
+                    }
+                val create =
+                    CreateInquiryFinancialDocument(
+                        application.transactor,
+                        inquiries,
+                        application.context.financialLedger,
+                        associations,
+                        failing,
+                        pricing(),
+                        testClock,
+                        newDocumentId = { id },
+                    )
+                shouldThrow<IllegalStateException> {
+                    create(CreateInquiryFinancialDocument.Command(InquiryId(UUID.fromString(application.createInquiry())), stage, inputs()))
+                }
+                stored(id) shouldBe listOf(0, 0, 0, 0)
+            }
+        }
+
         test("a quote that fails after the ledger appended it is rolled back with its pricing source") {
             val estimate = createEstimate().latest.document
             val failing =
@@ -218,6 +254,44 @@ class FinancialDocumentAtomicitySpec :
 
             // ...and neither survives the rollback.
             rows("commerce.payment_records", "payment_id", paymentId) shouldBe 0
+            rows("commerce.payment_allocations", "allocation_id", allocationId) shouldBe 0
+            application.context.financialLedger
+                .reconcileLatest(estimate.id)
+                .netApplied.amount
+                .signum() shouldBe 0
+        }
+
+        test("a failed standalone allocation rolls back its ledger fact while the received payment remains") {
+            val estimate = createEstimate().latest.document
+            issueQuote()(estimate.id, Version.INITIAL)
+            val paymentId = UUID.randomUUID()
+            val allocationId = UUID.randomUUID()
+            RecordPayment(application.transactor, application.context.financialLedger, testClock, newPaymentId = { paymentId })(
+                RecordPayment.Command(BigDecimal("300.00"), Currency.getInstance("USD"), PaymentMethod.CARD, null, null),
+            )
+            val failing =
+                object : FinancialDocumentPricingRepository by sources {
+                    override fun find(
+                        transaction: Transaction,
+                        snapshot: FinancialDocumentReference,
+                    ): FionasPricingInputs? {
+                        rowsIn(transaction, "commerce.payment_allocations", "allocation_id", allocationId) shouldBe 1
+                        error("failure after standalone allocation")
+                    }
+                }
+            val allocate =
+                AllocatePayment(
+                    application.transactor,
+                    application.context.financialLedger,
+                    associations,
+                    failing,
+                    testClock,
+                    newAllocationId = { allocationId },
+                )
+            shouldThrow<IllegalStateException> {
+                allocate(AllocatePayment.Command(paymentId, estimate.id, Version.of(2), BigDecimal("150.00")))
+            }
+            rows("commerce.payment_records", "payment_id", paymentId) shouldBe 1
             rows("commerce.payment_allocations", "allocation_id", allocationId) shouldBe 0
             application.context.financialLedger
                 .reconcileLatest(estimate.id)

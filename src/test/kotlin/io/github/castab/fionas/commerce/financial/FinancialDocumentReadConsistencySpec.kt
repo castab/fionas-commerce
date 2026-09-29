@@ -74,7 +74,14 @@ class FinancialDocumentReadConsistencySpec :
                         snapshot: FinancialDocumentReference,
                     ): FionasPricingInputs? = pause.after(sources.find(transaction, snapshot))
                 }
-            val read = GetFinancialDocument(application.transactor, application.context.financialLedger, associations, pausing)
+            val nonLockingAssociations =
+                object : InquiryFinancialDocumentRepository by associations {
+                    override fun lockInquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? = error("A current-document read must not lock a financial lineage")
+                }
+            val read = GetFinancialDocument(application.transactor, application.context.financialLedger, nonLockingAssociations, pausing)
             val reader = CompletableFuture.supplyAsync { read(id) }
             try {
                 pause.paused.await(30, TimeUnit.SECONDS) shouldBe true
@@ -115,7 +122,15 @@ class FinancialDocumentReadConsistencySpec :
                         documentId: UUID,
                     ): Map<Version, FionasPricingInputs> = pause.after(sources.findAll(transaction, documentId))
                 }
-            val read = GetFinancialDocumentHistory(application.transactor, application.context.financialLedger, associations, pausing)
+            val nonLockingAssociations =
+                object : InquiryFinancialDocumentRepository by associations {
+                    override fun lockInquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? = error("A history read must not lock a financial lineage")
+                }
+            val read =
+                GetFinancialDocumentHistory(application.transactor, application.context.financialLedger, nonLockingAssociations, pausing)
             val reader = CompletableFuture.supplyAsync { read(id) }
             try {
                 pause.paused.await(30, TimeUnit.SECONDS) shouldBe true

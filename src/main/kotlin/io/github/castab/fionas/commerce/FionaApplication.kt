@@ -8,8 +8,9 @@ import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.CreateChangeOrder
-import io.github.castab.fionas.commerce.financial.CreateInquiryEstimate
+import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.IssueInvoice
@@ -18,6 +19,7 @@ import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRe
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
+import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
@@ -101,6 +103,16 @@ fun fionaApplication(
             val ledger = context.financialLedger
             val documentOwners = JdbiInquiryFinancialDocumentRepository()
             val pricingSources = JdbiFinancialDocumentPricingRepository()
+            val createDocument =
+                CreateInquiryFinancialDocument(
+                    context.transactor,
+                    inquiries,
+                    ledger,
+                    documentOwners,
+                    pricingSources,
+                    pricing,
+                    clock,
+                )
             val operations =
                 FionaOperations(
                     createInquiry = CreateInquiry(context.transactor, customers, inquiries, clock)::invoke,
@@ -111,15 +123,12 @@ fun fionaApplication(
                             pricing = pricing,
                         )::invoke,
                     createInquiryEstimate =
-                        CreateInquiryEstimate(
-                            context.transactor,
-                            inquiries,
-                            ledger,
-                            documentOwners,
-                            pricingSources,
-                            pricing,
-                            clock,
-                        )::invoke,
+                        { inquiryId, inputs ->
+                            createDocument(
+                                CreateInquiryFinancialDocument.Command(inquiryId, CreateInquiryFinancialDocument.Stage.ESTIMATE, inputs),
+                            )
+                        },
+                    createInquiryFinancialDocument = createDocument::invoke,
                     listInquiryFinancialDocuments =
                         ListInquiryFinancialDocuments(context.transactor, inquiries, ledger, documentOwners, pricingSources)::invoke,
                     getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)::invoke,
@@ -129,6 +138,8 @@ fun fionaApplication(
                     issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     createChangeOrder = CreateChangeOrder(context.transactor, ledger, documentOwners, pricingSources, pricing)::invoke,
                     recordPayment = RecordDocumentPayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
+                    recordStandalonePayment = RecordPayment(context.transactor, ledger, clock)::invoke,
+                    allocatePayment = AllocatePayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
                     login = Login(
                         StaffPasswordAuthenticator(context.authorization, context.transactor, credentials, hasher),
                         context.sessions,

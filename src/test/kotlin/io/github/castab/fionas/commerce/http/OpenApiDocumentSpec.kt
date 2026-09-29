@@ -56,6 +56,8 @@ class OpenApiDocumentSpec :
                 Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/estimates", "post", "createInquiryEstimate") to
                     listOf("201", "400", "401", "403", "404", "422", "500"),
+                Triple("/inquiries/{inquiryId}/financial-documents", "post", "createInquiryFinancialDocument") to
+                    listOf("201", "400", "401", "403", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "get", "listInquiryFinancialDocuments") to
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/financial-documents/{documentId}", "get", "getFinancialDocument") to
@@ -69,6 +71,9 @@ class OpenApiDocumentSpec :
                 Triple("/financial-documents/{documentId}/change-orders", "post", "createChangeOrder") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/financial-documents/{documentId}/payments", "post", "recordPayment") to
+                    listOf("201", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/payments", "post", "recordStandalonePayment") to listOf("201", "400", "401", "403", "409", "422", "500"),
+                Triple("/payments/{paymentId}/allocations", "post", "allocatePayment") to
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/auth/login", "post", "login") to listOf("204", "400", "401", "403", "500"),
                 Triple("/auth/logout", "post", "logout") to listOf("204", "403", "500"),
@@ -84,6 +89,7 @@ class OpenApiDocumentSpec :
                 "getInquiry" to "Inquiries",
                 "previewEstimate" to "Estimates",
                 "createInquiryEstimate" to "Financial documents",
+                "createInquiryFinancialDocument" to "Financial documents",
                 "listInquiryFinancialDocuments" to "Financial documents",
                 "getFinancialDocument" to "Financial documents",
                 "getFinancialDocumentHistory" to "Financial documents",
@@ -91,6 +97,8 @@ class OpenApiDocumentSpec :
                 "issueInvoice" to "Financial documents",
                 "createChangeOrder" to "Financial documents",
                 "recordPayment" to "Payments",
+                "recordStandalonePayment" to "Payments",
+                "allocatePayment" to "Payments",
                 "login" to "Authentication",
                 "logout" to "Authentication",
                 "getCurrentUser" to "Authentication",
@@ -149,10 +157,13 @@ class OpenApiDocumentSpec :
                 "EstimatePreviewResponse",
                 "EstimatePreviewLine",
                 "CreateInquiryEstimateRequest",
+                "CreateInquiryFinancialDocumentRequest",
                 "ChangeOrderRequest",
                 "PricingSelection",
                 "StageTransitionRequest",
                 "RecordPaymentRequest",
+                "RecordStandalonePaymentRequest",
+                "AllocatePaymentRequest",
                 "PaymentExternalReference",
                 "FinancialDocumentResponse",
                 "DocumentPricing",
@@ -161,6 +172,8 @@ class OpenApiDocumentSpec :
                 "FinancialDocumentHistoryResponse",
                 "InquiryFinancialDocumentsResponse",
                 "RecordedPaymentResponse",
+                "PaymentRecordResponse",
+                "PaymentAllocationResponse",
                 "ErrorResponse",
                 "LoginRequest",
                 "CurrentUserResponse",
@@ -389,15 +402,23 @@ class OpenApiDocumentSpec :
         }
 
         test("persisted financial documents take commercial inputs only: no request carries lines, amounts, or totals") {
-            listOf("CreateInquiryEstimateRequest", "ChangeOrderRequest").forEach { name ->
+            listOf("CreateInquiryEstimateRequest", "CreateInquiryFinancialDocumentRequest", "ChangeOrderRequest").forEach { name ->
                 val request = schema(name)
                 request.at("properties").jsonObject.keys shouldBe
-                    (if (name == "ChangeOrderRequest") setOf("expectedVersion") else emptySet()) +
+                    (
+                        when (name) {
+                            "ChangeOrderRequest" -> setOf("expectedVersion")
+                            "CreateInquiryFinancialDocumentRequest" -> setOf("stage")
+                            else -> emptySet()
+                        }
+                    ) +
                     setOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
                 request.text("properties", "selections", "items", "\$ref") shouldBe "#/components/schemas/PricingSelection"
             }
             schema("CreateInquiryEstimateRequest").strings("required") shouldContainExactly
                 listOf("catalogRevision", "guestCount", "durationMinutes", "selections")
+            schema("CreateInquiryFinancialDocumentRequest").strings("required") shouldContainExactly
+                listOf("stage", "catalogRevision", "guestCount", "durationMinutes", "selections")
             schema("ChangeOrderRequest").strings("required") shouldContainExactly
                 listOf("expectedVersion", "catalogRevision", "guestCount", "durationMinutes", "selections")
             schema("StageTransitionRequest").strings("required") shouldContainExactly listOf("expectedVersion")
@@ -408,6 +429,51 @@ class OpenApiDocumentSpec :
                 it.text("properties", "externalReference", "\$ref") shouldBe "#/components/schemas/PaymentExternalReference"
             }
             schema("PaymentExternalReference").strings("required") shouldContainExactly listOf("provider", "reference")
+            schema("RecordStandalonePaymentRequest").let {
+                it.strings("required") shouldContainExactly listOf("amount", "currency", "method")
+                it.text("properties", "amount", "type") shouldBe "string"
+                it.text("properties", "receivedAt", "format") shouldBe "date-time"
+            }
+            schema("AllocatePaymentRequest").let {
+                it.strings("required") shouldContainExactly listOf("documentId", "documentVersion", "amount")
+                it.text("properties", "documentId", "format") shouldBe "uuid"
+                it.text("properties", "amount", "type") shouldBe "string"
+                it.at("properties").jsonObject.containsKey("currency") shouldBe false
+            }
+        }
+
+        test("documents first-snapshot creation and separate payment facts with derived allocation settlement") {
+            operation("/inquiries/{inquiryId}/financial-documents", "post")
+                .text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/FinancialDocumentResponse"
+            operation("/payments", "post").text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/PaymentRecordResponse"
+            operation("/payments/{paymentId}/allocations", "post")
+                .text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/PaymentAllocationResponse"
+            schema("PaymentRecordResponse").let {
+                it.strings("required") shouldContainExactly listOf("paymentId", "method", "amount", "currency", "receivedAt")
+                it
+                    .at("properties")
+                    .jsonObject.keys
+                    .contains("allocationId") shouldBe false
+                it.text("properties", "amount", "type") shouldBe "string"
+            }
+            schema("PaymentAllocationResponse").let {
+                it.strings("required") shouldContainExactly
+                    listOf(
+                        "allocationId",
+                        "paymentId",
+                        "documentId",
+                        "documentVersion",
+                        "amount",
+                        "currency",
+                        "allocatedAt",
+                        "reconciliation",
+                    )
+                it.text("properties", "reconciliation", "\$ref") shouldBe "#/components/schemas/DocumentReconciliation"
+                it.text("properties", "amount", "type") shouldBe "string"
+            }
         }
 
         test("describes a financial document as immutable ledger facts, pricing source, and derived settlement") {
@@ -454,8 +520,11 @@ class OpenApiDocumentSpec :
 
         test("describes every financial-document path identifier as a required UUID path parameter") {
             operations.keys
-                .filter { (path) -> path.startsWith("/financial-documents") || path.startsWith("/inquiries/{inquiryId}/") }
-                .forEach { (path, method) ->
+                .filter { (path) ->
+                    path.startsWith("/financial-documents") ||
+                        path.startsWith("/inquiries/{inquiryId}/") ||
+                        path.startsWith("/payments/{paymentId}/")
+                }.forEach { (path, method) ->
                     val parameter = operation(path, method).at("parameters").jsonArray.single()
                     parameter.text("in") shouldBe "path"
                     parameter.at("required") shouldBe JsonPrimitive(true)

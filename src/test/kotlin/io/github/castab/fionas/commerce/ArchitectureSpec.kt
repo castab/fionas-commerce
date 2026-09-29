@@ -72,6 +72,12 @@ class ArchitectureSpec :
                 tokens.filter { it in text }.map { "${file.relativeTo(mainSources).invariantSeparatorsPath}: $it" }
             }
 
+        /** Keep structural checks about executable source from matching explanatory comments. */
+        fun File.codeWithoutComments() =
+            readText()
+                .replace(Regex("""(?s)/\*.*?\*/"""), "")
+                .replace(Regex("""(?m)//.*$"""), "")
+
         // Ways to obtain a connection, a JDBI root, or a transaction without the runtime's Transactor.
         val transactionInfrastructure =
             listOf(
@@ -126,11 +132,13 @@ class ArchitectureSpec :
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
-                    "financial/CreateInquiryEstimate.kt: inTransaction",
+                    "financial/CreateInquiryFinancialDocument.kt: inTransaction",
                     "financial/CreateChangeOrder.kt: inTransaction",
                     "financial/IssueQuote.kt: inTransaction",
                     "financial/IssueInvoice.kt: inTransaction",
                     "financial/RecordDocumentPayment.kt: inTransaction",
+                    "financial/RecordPayment.kt: inTransaction",
+                    "financial/AllocatePayment.kt: inTransaction",
                     "financial/GetFinancialDocument.kt: inTransaction",
                     "financial/GetFinancialDocumentHistory.kt: inTransaction",
                     "financial/ListInquiryFinancialDocuments.kt: inTransaction",
@@ -183,6 +191,7 @@ class ArchitectureSpec :
                         getInquiry = { error("not called") },
                         previewEstimate = { error("not called") },
                         createInquiryEstimate = { _, _ -> error("not called") },
+                        createInquiryFinancialDocument = { error("not called") },
                         listInquiryFinancialDocuments = { error("not called") },
                         getFinancialDocument = { error("not called") },
                         getFinancialDocumentHistory = { error("not called") },
@@ -190,6 +199,8 @@ class ArchitectureSpec :
                         issueInvoice = { _, _ -> error("not called") },
                         createChangeOrder = { _, _, _ -> error("not called") },
                         recordPayment = { error("not called") },
+                        recordStandalonePayment = { error("not called") },
+                        allocatePayment = { error("not called") },
                         login = { _, _ -> error("not called") },
                         currentUser = { error("not called") },
                         setStaffPassword = { _, _ -> error("not called") },
@@ -272,8 +283,13 @@ class ArchitectureSpec :
             // The runtime's snapshot repository is named only in the composition root, which hands
             // it to the runtime's own read operation (previews) and its transaction-bound read to
             // FionasPricing (persisted documents); Fiona never calls it itself.
-            sources().containing(listOf("OfferingsSnapshotRepository", "offeringsSnapshotRepository")) shouldContainExactly
-                listOf("FionaApplication.kt: offeringsSnapshotRepository")
+            sources()
+                .filter {
+                    Regex(
+                        """\b(?:OfferingsSnapshotRepository|offeringsSnapshotRepository)\b""",
+                    ).containsMatchIn(it.codeWithoutComments())
+                }.map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactly
+                listOf("FionaApplication.kt")
             // SQL naming a runtime Offerings table (`commerce.offerings…`), as opposed to the
             // `io.github.castab.commerce.offering` package.
             val runtimeOfferingsTable = Regex("""(?<![\w.])commerce\.offering""")
@@ -339,9 +355,9 @@ class ArchitectureSpec :
         test("financial documents and payments are commerce-runtime's ledger; Fiona stores only its own context") {
             // Fiona reaches documents and payments only through the runtime's FinancialLedger,
             // never its repositories or tables, and writes no SQL against them.
-            sources()
-                .containing(listOf("financialDocumentRepository", "paymentRepository", "FinancialDocumentRepository", "PaymentRepository"))
-                .shouldBeEmpty()
+            val runtimeRepositoryNames =
+                Regex("""\b(?:financialDocumentRepository|paymentRepository|FinancialDocumentRepository|PaymentRepository)\b""")
+            sources().filter { runtimeRepositoryNames.containsMatchIn(it.codeWithoutComments()) }.shouldBeEmpty()
             sources()
                 // Table names, as opposed to permission keys such as `commerce.payment.record`.
                 .filter { Regex("""(?<![\w.])commerce\.(financial_document|payment_)""").containsMatchIn(it.readText()) }

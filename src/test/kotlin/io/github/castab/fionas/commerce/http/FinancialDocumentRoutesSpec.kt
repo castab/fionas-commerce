@@ -506,6 +506,7 @@ class FinancialDocumentRoutesSpec :
             val routes =
                 listOf(
                     Method.POST to "/inquiries/$inquiryId/estimates",
+                    Method.POST to "/inquiries/$inquiryId/financial-documents",
                     Method.GET to "/inquiries/$inquiryId/financial-documents",
                     Method.GET to "/financial-documents/$id",
                     Method.GET to "/financial-documents/$id/history",
@@ -513,6 +514,8 @@ class FinancialDocumentRoutesSpec :
                     Method.POST to "/financial-documents/$id/invoice",
                     Method.POST to "/financial-documents/$id/change-orders",
                     Method.POST to "/financial-documents/$id/payments",
+                    Method.POST to "/payments",
+                    Method.POST to "/payments/${UUID.randomUUID()}/allocations",
                 )
             routes.forEach { (method, path) ->
                 application

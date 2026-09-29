@@ -6,15 +6,20 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.ExternalPaymentReference
 import io.github.castab.commerce.payment.FinancialDocumentReconciliation
 import io.github.castab.commerce.payment.PaymentMethod
+import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.fionas.commerce.financial.AllocatePayment
+import io.github.castab.fionas.commerce.financial.AllocatedPayment
+import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.PricedSnapshot
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
+import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
@@ -38,6 +43,7 @@ import org.http4k.lens.PathLens
 import java.math.BigDecimal
 import java.time.OffsetDateTime
 import java.time.format.DateTimeParseException
+import java.util.Currency
 import java.util.UUID
 
 /** The body of `POST /inquiries/{inquiryId}/estimates`: commercial inputs only, never amounts or lines. */
@@ -58,6 +64,23 @@ data class CreateInquiryEstimateRequest(
     @ApiProperty(description = "The service duration in minutes: one of 90, 120, 150, or 180.")
     val durationMinutes: Int,
     @ApiProperty(description = "The chosen offerings, one entry per catalog category, in the order they are shown.")
+    val selections: List<PricingSelection>,
+)
+
+/** A new lineage's starting stage and Fiona commercial inputs, never caller-authored financial values. */
+@Serializable
+data class CreateInquiryFinancialDocumentRequest(
+    @ApiProperty(description = "The first snapshot's stage: `ESTIMATE`, `QUOTE`, or `INVOICE`.")
+    val stage: String,
+    @ApiProperty(description = "The exact Offerings catalog revision to price from. At least 1.")
+    val catalogRevision: Int,
+    @ApiProperty(description = "The guests to price the event for. At least 1.")
+    val guestCount: Int,
+    @ApiProperty(description = "Whether `guestCount` is a lower bound. False when absent.")
+    val guestCountIsMinimum: Boolean = false,
+    @ApiProperty(description = "The service duration in minutes: one of 90, 120, 150, or 180.")
+    val durationMinutes: Int,
+    @ApiProperty(description = "The chosen offerings, in catalog category order.")
     val selections: List<PricingSelection>,
 )
 
@@ -134,6 +157,32 @@ data class RecordPaymentRequest(
                 "reference already recorded for another payment is `409 conflict`.",
     )
     val externalReference: PaymentExternalReference? = null,
+)
+
+/** Records money received without assigning it to a document yet. */
+@Serializable
+data class RecordStandalonePaymentRequest(
+    @ApiProperty(description = "The money received, a positive exact decimal string, never a JSON number.")
+    val amount: String,
+    @ApiProperty(description = "An ISO 4217 currency code; the amount may use only its minor-unit digits.")
+    val currency: String,
+    @ApiProperty(description = "How the money was received: `CASH`, `CHECK`, `CARD`, `BANK_TRANSFER`, `DIGITAL_WALLET`, or `OTHER`.")
+    val method: String,
+    @ApiProperty(description = "When the money was received, an RFC 3339 timestamp; recording time when absent.", format = "date-time")
+    val receivedAt: String? = null,
+    @ApiProperty(description = "The payment's unique provider and reference, when it has one.")
+    val externalReference: PaymentExternalReference? = null,
+)
+
+/** Applies some of an existing payment to the document's exact latest Quote or Invoice snapshot. */
+@Serializable
+data class AllocatePaymentRequest(
+    @ApiProperty(description = "The Fiona-owned financial-document lineage's id.", format = "uuid")
+    val documentId: String,
+    @ApiProperty(description = "The exact snapshot to allocate to; it must still be the latest version.")
+    val documentVersion: Int,
+    @ApiProperty(description = "The amount to apply, as a positive exact decimal string; currency comes from the document.")
+    val amount: String,
 )
 
 /** A payment's identity in an external system. */
@@ -282,14 +331,57 @@ data class RecordedPaymentResponse(
     val reconciliation: DocumentReconciliation,
 )
 
+/** An immutable receipt fact, which may have no allocation yet. */
+@Serializable
+data class PaymentRecordResponse(
+    @ApiProperty(description = "The payment's id.", format = "uuid")
+    val paymentId: String,
+    @ApiProperty(description = "How the money was received.")
+    val method: String,
+    @ApiProperty(description = "The received amount, an exact decimal string.")
+    val amount: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code.")
+    val currency: String,
+    @ApiProperty(description = "When the money was received, an RFC 3339 timestamp in UTC.", format = "date-time")
+    val receivedAt: String,
+    @ApiProperty(description = "The payment's identity in an external system, when provided.")
+    val externalReference: PaymentExternalReference? = null,
+)
+
+/** An immutable allocation and the destination lineage's resulting derived settlement. */
+@Serializable
+data class PaymentAllocationResponse(
+    @ApiProperty(description = "The allocation's id.", format = "uuid")
+    val allocationId: String,
+    @ApiProperty(description = "The received payment's id.", format = "uuid")
+    val paymentId: String,
+    @ApiProperty(description = "The financial-document lineage's id.", format = "uuid")
+    val documentId: String,
+    @ApiProperty(description = "The exact document version this allocation stays attached to.")
+    val documentVersion: Int,
+    @ApiProperty(description = "The amount applied, an exact decimal string.")
+    val amount: String,
+    @ApiProperty(description = "The document and payment currency's ISO 4217 code.")
+    val currency: String,
+    @ApiProperty(description = "When the allocation was recorded, an RFC 3339 timestamp in UTC.", format = "date-time")
+    val allocatedAt: String,
+    @ApiProperty(description = "The document lineage's settlement after this allocation.")
+    val reconciliation: DocumentReconciliation,
+)
+
 private val createEstimateRequest = jsonBody(CreateInquiryEstimateRequest.serializer())
+private val createFinancialDocumentRequest = jsonBody(CreateInquiryFinancialDocumentRequest.serializer())
 private val changeOrderRequest = jsonBody(ChangeOrderRequest.serializer())
 private val transitionRequest = jsonBody(StageTransitionRequest.serializer())
 private val recordPaymentRequest = jsonBody(RecordPaymentRequest.serializer())
+private val recordStandalonePaymentRequest = jsonBody(RecordStandalonePaymentRequest.serializer())
+private val allocatePaymentRequest = jsonBody(AllocatePaymentRequest.serializer())
 private val documentResponse = jsonBody(FinancialDocumentResponse.serializer())
 private val historyResponse = jsonBody(FinancialDocumentHistoryResponse.serializer())
 private val inquiryDocumentsResponse = jsonBody(InquiryFinancialDocumentsResponse.serializer())
 private val recordedPaymentResponse = jsonBody(RecordedPaymentResponse.serializer())
+private val paymentRecordResponse = jsonBody(PaymentRecordResponse.serializer())
+private val paymentAllocationResponse = jsonBody(PaymentAllocationResponse.serializer())
 
 // Plain strings for the contract: a contract treats a path value its lens rejects as an
 // unmatched route (404), while an id that is not a UUID is a malformed request (400).
@@ -297,6 +389,8 @@ private val documentIdPath =
     Path.of("documentId", "The financial-document lineage's id.", mapOf("schema" to mapOf("format" to "uuid")))
 private val inquiryIdPath =
     Path.of("inquiryId", "The inquiry's id.", mapOf("schema" to mapOf("format" to "uuid")))
+private val paymentIdPath =
+    Path.of("paymentId", "The received payment's id.", mapOf("schema" to mapOf("format" to "uuid")))
 
 private val financialDocuments =
     Tag(
@@ -305,7 +399,7 @@ private val financialDocuments =
             "server from commercial inputs, each with the pricing inputs it was priced from.",
     )
 
-private val payments = Tag("Payments", "Money received and applied to an inquiry's financial documents.")
+private val payments = Tag("Payments", "Money received, and allocations to exact financial-document snapshots.")
 
 private const val EXAMPLE_DOCUMENT = "5f0c6a7e-8c1d-4f63-9b2a-0d8e7f6a5b4c"
 private const val EXAMPLE_INQUIRY = "c755f7cd-1e28-4c75-a85f-d066ede7387d"
@@ -321,6 +415,9 @@ private val exampleSelections =
 
 private val exampleCreateEstimate =
     CreateInquiryEstimateRequest(catalogRevision = 20, guestCount = 75, durationMinutes = 120, selections = exampleSelections)
+
+private val exampleCreateFinancialDocument =
+    CreateInquiryFinancialDocumentRequest("QUOTE", 20, 75, durationMinutes = 120, selections = exampleSelections)
 
 private val exampleChangeOrder =
     ChangeOrderRequest(expectedVersion = 1, catalogRevision = 20, guestCount = 100, durationMinutes = 120, selections = exampleSelections)
@@ -410,6 +507,38 @@ private val exampleRecordedPayment =
         reconciliation = DocumentReconciliation("300.00", "300.00", "525.00", "USD"),
     )
 
+private val exampleStandalonePayment =
+    RecordStandalonePaymentRequest(
+        amount = "300.00",
+        currency = "USD",
+        method = "CARD",
+        receivedAt = "2026-09-28T20:00:00Z",
+        externalReference = PaymentExternalReference("stripe", "pi_example"),
+    )
+
+private val examplePaymentRecord =
+    PaymentRecordResponse(
+        paymentId = "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d",
+        method = "CARD",
+        amount = "300.00",
+        currency = "USD",
+        receivedAt = "2026-09-28T20:00:00Z",
+        externalReference = PaymentExternalReference("stripe", "pi_example"),
+    )
+
+private val exampleAllocatePayment = AllocatePaymentRequest(EXAMPLE_DOCUMENT, 3, "150.00")
+private val examplePaymentAllocation =
+    PaymentAllocationResponse(
+        allocationId = "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e",
+        paymentId = examplePaymentRecord.paymentId,
+        documentId = EXAMPLE_DOCUMENT,
+        documentVersion = 3,
+        amount = "150.00",
+        currency = "USD",
+        allocatedAt = "2026-09-28T20:01:00Z",
+        reconciliation = DocumentReconciliation("150.00", "150.00", "675.00", "USD"),
+    )
+
 /** The errors every staff-protected financial route answers, in addition to its own. */
 private fun RouteMetaDsl.staffErrors() {
     returningError(ErrorCategory.UNAUTHENTICATED, "there is no active staff session.", "Authentication is required")
@@ -479,6 +608,59 @@ fun createInquiryEstimateRoute(
                         body.selections.map { it.category to it.offerings },
                     ),
                 )
+            Response(Status.CREATED)
+                .header("Location", "/financial-documents/${created.latest.document.id}")
+                .with(documentResponse of created.toResponse())
+        }
+    }
+
+/** `POST /inquiries/{inquiryId}/financial-documents`: prices and creates a chosen first stage. */
+fun createInquiryFinancialDocumentRoute(
+    createDocument: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
+    access: AccessControl,
+): ContractRoute =
+    "/inquiries" / inquiryIdPath / "financial-documents" meta {
+        operationId = "createInquiryFinancialDocument"
+        summary = "Create an inquiry's financial document"
+        description =
+            "Prices commercial inputs from their exact catalog revision and creates version 1 of a new inquiry-owned " +
+            "Estimate, Quote, or Invoice lineage. A direct Quote or Invoice has no predecessor; no intermediate " +
+            "snapshots are invented. The caller cannot supply lines or totals. `Location` contains " +
+            "`/financial-documents/{documentId}`. Requires `commerce.financial-document.create`."
+        tags += financialDocuments
+        receiving(createFinancialDocumentRequest to exampleCreateFinancialDocument)
+        returning(
+            Status.CREATED,
+            documentResponse to exampleDocument(1, "QUOTE", 75, unpaid("681.25")),
+            "The first snapshot and exact-reference reconciliation; `Location` holds its path.",
+        )
+        malformed("`inquiryId`")
+        returningError(ErrorCategory.NOT_FOUND, "the inquiry or catalog revision does not exist.", "Inquiry $EXAMPLE_INQUIRY was not found")
+        returningError(
+            ErrorCategory.VALIDATION_FAILED,
+            "the stage or commercial inputs are invalid. $PRICING_REJECTED",
+            "Invalid starting stage",
+        )
+        staffErrors()
+    } bindContract Method.POST to { id: String, _: String ->
+        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
+            val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
+            val body = createFinancialDocumentRequest(request)
+            val stage =
+                validating {
+                    requireNotNull(CreateInquiryFinancialDocument.Stage.entries.find { it.name == body.stage }) {
+                        "Starting stage must be ESTIMATE, QUOTE, or INVOICE"
+                    }
+                }
+            val inputs =
+                pricingInputs(
+                    body.catalogRevision,
+                    body.guestCount,
+                    body.guestCountIsMinimum,
+                    body.durationMinutes,
+                    body.selections.map { it.category to it.offerings },
+                )
+            val created = createDocument(CreateInquiryFinancialDocument.Command(inquiryId, stage, inputs))
             Response(Status.CREATED)
                 .header("Location", "/financial-documents/${created.latest.document.id}")
                 .with(documentResponse of created.toResponse())
@@ -745,6 +927,104 @@ fun recordPaymentRoute(
         }
     }
 
+/** `POST /payments`: records received money without requiring an allocation. */
+fun recordStandalonePaymentRoute(
+    recordPayment: (RecordPayment.Command) -> PaymentRecord,
+    access: AccessControl,
+): ContractRoute =
+    "/payments" meta {
+        operationId = "recordStandalonePayment"
+        summary = "Record money received"
+        description =
+            "Records an immutable payment fact. It may remain unapplied or be allocated later, in parts, through " +
+            "`POST /payments/{paymentId}/allocations`. Requires `commerce.payment.record`."
+        tags += payments
+        receiving(recordStandalonePaymentRequest to exampleStandalonePayment)
+        returning(Status.CREATED, paymentRecordResponse to examplePaymentRecord, "The received payment, without allocation fields.")
+        returningError(ErrorCategory.MALFORMED_REQUEST, "the body cannot be read.", "Malformed request: body 'body'")
+        returningError(
+            ErrorCategory.CONFLICT,
+            "the external provider and reference pair already exists.",
+            "Payment id or external reference already exists",
+        )
+        returningError(
+            ErrorCategory.VALIDATION_FAILED,
+            "the amount, ISO 4217 currency, method, receivedAt, or external reference is invalid.",
+            "Payment amount must be an exact decimal string, for example 300.00",
+        )
+        staffErrors()
+    } bindContract Method.POST to
+        access.requirePermission(CommercePermissions.PaymentRecord).then { request: Request ->
+            val body = recordStandalonePaymentRequest(request)
+            val command =
+                validating {
+                    RecordPayment.Command(
+                        amount = paymentAmount(body.amount),
+                        currency = paymentCurrency(body.currency),
+                        method = paymentMethod(body.method),
+                        receivedAt = body.receivedAt?.let(::receivedAt),
+                        externalReference =
+                            body.externalReference?.let {
+                                ExternalPaymentReference(
+                                    it.provider.trim(),
+                                    it.reference.trim(),
+                                )
+                            },
+                    )
+                }
+            Response(Status.CREATED).with(paymentRecordResponse of recordPayment(command).toResponse())
+        }
+
+/** `POST /payments/{paymentId}/allocations`: applies part of a payment to an exact snapshot. */
+fun allocatePaymentRoute(
+    allocate: (AllocatePayment.Command) -> AllocatedPayment,
+    access: AccessControl,
+): ContractRoute =
+    "/payments" / paymentIdPath / "allocations" meta {
+        operationId = "allocatePayment"
+        summary = "Allocate a payment to a financial document"
+        description =
+            "Applies part of an existing payment to the specified latest Quote or Invoice snapshot of a Fiona-owned " +
+            "lineage. The allocation remains attached to that version; settlement is derived from allocation " +
+            "history. Requires `commerce.payment.record`."
+        tags += payments
+        receiving(allocatePaymentRequest to exampleAllocatePayment)
+        returning(
+            Status.CREATED,
+            paymentAllocationResponse to examplePaymentAllocation,
+            "The allocation and resulting document settlement.",
+        )
+        malformed("`paymentId`")
+        returningError(
+            ErrorCategory.NOT_FOUND,
+            "the payment or Fiona-owned document does not exist.",
+            "Payment $EXAMPLE_DOCUMENT was not found",
+        )
+        staleVersion("")
+        returningError(
+            ErrorCategory.VALIDATION_FAILED,
+            "the amount or version is invalid, currencies differ, the payment would be over-allocated, or the latest " +
+                "document is an Estimate (code `invariant_violated`).",
+            "Payment amount must be an exact decimal string, for example 300.00",
+        )
+        staffErrors()
+    } bindContract Method.POST to { id: String, _: String ->
+        access.requirePermission(CommercePermissions.PaymentRecord).then { request: Request ->
+            val paymentId = uuidIn(id, paymentIdPath)
+            val body = allocatePaymentRequest(request)
+            val command =
+                validating {
+                    AllocatePayment.Command(
+                        paymentId = paymentId,
+                        documentId = UUID.fromString(body.documentId),
+                        documentVersion = Version.of(body.documentVersion),
+                        amount = paymentAmount(body.amount),
+                    )
+                }
+            Response(Status.CREATED).with(paymentAllocationResponse of allocate(command).toResponse())
+        }
+    }
+
 private val EXACT_DECIMAL = Regex("""\d+(\.\d+)?""")
 
 private fun paymentAmount(text: String): BigDecimal {
@@ -755,6 +1035,13 @@ private fun paymentAmount(text: String): BigDecimal {
 private fun paymentMethod(text: String): PaymentMethod =
     requireNotNull(PaymentMethod.entries.find { it.name == text }) {
         "Payment method must be one of ${PaymentMethod.entries.joinToString()}"
+    }
+
+private fun paymentCurrency(text: String): Currency =
+    try {
+        Currency.getInstance(text)
+    } catch (e: IllegalArgumentException) {
+        throw IllegalArgumentException("Currency must be an ISO 4217 code", e)
     }
 
 private fun receivedAt(text: String) =
@@ -844,6 +1131,28 @@ private fun RecordedPayment.toResponse() =
         currency = payment.currency.currencyCode,
         receivedAt = payment.receivedAt.toString(),
         externalReference = payment.externalReference?.let { PaymentExternalReference(it.provider, it.reference) },
+        allocatedAt = allocation.allocatedAt.toString(),
+        reconciliation = document.reconciliation.toResponse(),
+    )
+
+private fun PaymentRecord.toResponse() =
+    PaymentRecordResponse(
+        paymentId = id.toString(),
+        method = method.name,
+        amount = amount.decimal(),
+        currency = currency.currencyCode,
+        receivedAt = receivedAt.toString(),
+        externalReference = externalReference?.let { PaymentExternalReference(it.provider, it.reference) },
+    )
+
+private fun AllocatedPayment.toResponse() =
+    PaymentAllocationResponse(
+        allocationId = allocation.id.toString(),
+        paymentId = allocation.paymentReference.toString(),
+        documentId = allocation.financialDocumentReference.id.toString(),
+        documentVersion = allocation.financialDocumentReference.version.number,
+        amount = allocation.amount.decimal(),
+        currency = allocation.currency.currencyCode,
         allocatedAt = allocation.allocatedAt.toString(),
         reconciliation = document.reconciliation.toResponse(),
     )
