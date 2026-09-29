@@ -1,10 +1,10 @@
 [versions]
 # The commerce artifacts this application is built on. commerce-runtime exposes the
 # matching commerce-domain version transitively, so the domain is not declared separately.
-commerce = "0.0.12"
+commerce = "0.0.13"
 
 # http4k arrives with commerce-runtime; the contract/OpenAPI modules Fiona adds on top must
-# be exactly the version commerce-runtime 0.0.12 is built against, never a newer one (Gradle
+# be exactly the version commerce-runtime 0.0.13 is built against, never a newer one (Gradle
 # would silently upgrade the runtime's http4k-core to match). Change it only together with
 # the commerce version. ArchitectureSpec fails if two http4k versions meet on the classpath.
 http4k = "6.58.0.0"

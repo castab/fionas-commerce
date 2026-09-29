@@ -5,6 +5,8 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.http.FinancialDocumentResponse
+import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
@@ -18,18 +20,13 @@ import org.http4k.core.Status
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /**
- * Multi-query financial reads under PostgreSQL READ COMMITTED: each statement may see a newer
- * commit, so a read that assembled a snapshot, its pricing source, and its settlement (or a
- * history and its pricing sources) without the lineage lock could mix two lineage states.
- *
- * Each case pauses a reader between its reads, inside its transaction, and starts a writer
- * on the same lineage. The writer must wait on the association row the reader holds, and the
- * reader must return one coherent state. A reader without the lock would let the writer
- * commit during the pause, and these cases would fail.
+ * Each reader pauses after its first database query has established a REPEATABLE READ snapshot.
+ * A writer commits while the reader transaction remains open; the reader finishes with its old
+ * snapshot, and a fresh reader sees the new state. The writer's progress also proves that query
+ * paths do not lock the lineage association row.
  */
 class FinancialDocumentReadConsistencySpec :
     FunSpec({
@@ -38,29 +35,14 @@ class FinancialDocumentReadConsistencySpec :
         val associations = JdbiInquiryFinancialDocumentRepository()
         val sources = JdbiFinancialDocumentPricingRepository()
 
-        fun newEstimate(): UUID {
-            val response = application.adminPost("/inquiries/${application.createInquiry()}/estimates", pricingBody(revision))
+        fun newEstimate(): Pair<InquiryId, UUID> {
+            val inquiryId = InquiryId(UUID.fromString(application.createInquiry()))
+            val response = application.adminPost("/inquiries/${inquiryId.value}/estimates", pricingBody(revision))
             response.status shouldBe Status.CREATED
-            return UUID.fromString(CommerceJson.asA(response.bodyString(), FinancialDocumentResponse.serializer()).id)
+            val documentId = UUID.fromString(CommerceJson.asA(response.bodyString(), FinancialDocumentResponse.serializer()).id)
+            return inquiryId to documentId
         }
 
-        /** Sessions of this spec's database waiting for a lock, seen from outside the runtime. */
-        fun waitingOnLocks() =
-            application.database
-                .strings("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")
-                .single()
-                .toInt()
-
-        /** Waits until [writer] either finished or is waiting on a lock. */
-        fun awaitBlockedOrDone(writer: Future<*>) {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
-            while (!writer.isDone && waitingOnLocks() == 0) {
-                check(System.nanoTime() < deadline) { "The writer neither finished nor waited on a lock" }
-                Thread.sleep(20)
-            }
-        }
-
-        /** Pauses the reader after one of its reads until [resume] opens, having opened [paused]. */
         class Pause {
             val paused = CountDownLatch(1)
             val resume = CountDownLatch(1)
@@ -75,21 +57,16 @@ class FinancialDocumentReadConsistencySpec :
         beforeSpec {
             application = TestApplication.create()
             revision = application.createAcceptanceCatalog()
-            // Log in before any concurrent request needs the session.
             application.adminCookie
         }
         afterSpec { application.close() }
 
-        test("a current-document read cannot return one version with the settlement of another") {
-            val id = newEstimate()
+        test("a current-document read keeps pre-payment settlement while a payment commits") {
+            val (_, id) = newEstimate()
             application.adminPost("/financial-documents/$id/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
-            // A deposit, so the settlement differs between the quote and its repriced successor.
-            application
-                .adminPost("/financial-documents/$id/payments", """{"documentVersion":2,"amount":"300.00","method":"CASH"}""")
-                .status shouldBe Status.CREATED
 
             val pause = Pause()
-            // Paused between the snapshot read and the reconciliation.
+            // The document and pricing have been read; reconciliation has not.
             val pausing =
                 object : FinancialDocumentPricingRepository by sources {
                     override fun find(
@@ -98,38 +75,39 @@ class FinancialDocumentReadConsistencySpec :
                     ): FionasPricingInputs? = pause.after(sources.find(transaction, snapshot))
                 }
             val read = GetFinancialDocument(application.transactor, application.context.financialLedger, associations, pausing)
-
             val reader = CompletableFuture.supplyAsync { read(id) }
-            pause.paused.await(30, TimeUnit.SECONDS) shouldBe true
-            val writer: CompletableFuture<Response> =
-                CompletableFuture.supplyAsync {
-                    val repriced = pricingBody(revision, guests = 100, expectedVersion = 2)
-                    application.adminPost("/financial-documents/$id/change-orders", repriced)
-                }
-            awaitBlockedOrDone(writer)
+            try {
+                pause.paused.await(30, TimeUnit.SECONDS) shouldBe true
+                val writer: CompletableFuture<Response> =
+                    CompletableFuture.supplyAsync {
+                        application.adminPost(
+                            "/financial-documents/$id/payments",
+                            """{"documentVersion":2,"amount":"300.00","method":"CASH"}""",
+                        )
+                    }
+                writer.get(30, TimeUnit.SECONDS).status shouldBe Status.CREATED
+                reader.isDone shouldBe false
+            } finally {
+                pause.resume.countDown()
+            }
 
-            // The change order waits on the lineage lock the reader holds.
-            writer.isDone shouldBe false
-            pause.resume.countDown()
             val view = reader.get(30, TimeUnit.SECONDS)
             view.latest.document.version shouldBe Version.of(2)
             view.reconciliation.documentReference shouldBe view.latest.document.reference
-            view.reconciliation.documentTotal shouldBe view.latest.document.total
             view.reconciliation.balance.amount
-                .compareTo(view.latest.document.total.amount - "300.00".toBigDecimal()) shouldBe 0
+                .compareTo(view.latest.document.total.amount) shouldBe 0
 
-            // The writer proceeds once the reader's transaction ends, and later reads are coherent too.
-            writer.get(30, TimeUnit.SECONDS).status shouldBe Status.OK
             val after = GetFinancialDocument(application.transactor, application.context.financialLedger, associations, sources)(id)
-            after.latest.document.version shouldBe Version.of(3)
+            after.latest.document.version shouldBe Version.of(2)
             after.reconciliation.documentReference shouldBe after.latest.document.reference
+            after.reconciliation.balance.amount
+                .compareTo(after.latest.document.total.amount - "300.00".toBigDecimal()) shouldBe 0
         }
 
-        test("a history read sees every version with its pricing source, never a new version without one") {
-            val id = newEstimate()
-
+        test("a history read keeps pre-quote versions and pricing while a quote commits") {
+            val (_, id) = newEstimate()
             val pause = Pause()
-            // Paused between the pricing-source read and the ledger history read.
+            // Pricing sources establish the snapshot before the ledger history query.
             val pausing =
                 object : FinancialDocumentPricingRepository by sources {
                     override fun findAll(
@@ -138,20 +116,20 @@ class FinancialDocumentReadConsistencySpec :
                     ): Map<Version, FionasPricingInputs> = pause.after(sources.findAll(transaction, documentId))
                 }
             val read = GetFinancialDocumentHistory(application.transactor, application.context.financialLedger, associations, pausing)
-
             val reader = CompletableFuture.supplyAsync { read(id) }
-            pause.paused.await(30, TimeUnit.SECONDS) shouldBe true
-            val writer: CompletableFuture<Response> =
-                CompletableFuture.supplyAsync { application.adminPost("/financial-documents/$id/quote", """{"expectedVersion":1}""") }
-            awaitBlockedOrDone(writer)
+            try {
+                pause.paused.await(30, TimeUnit.SECONDS) shouldBe true
+                val writer =
+                    CompletableFuture.supplyAsync {
+                        application.adminPost("/financial-documents/$id/quote", """{"expectedVersion":1}""")
+                    }
+                writer.get(30, TimeUnit.SECONDS).status shouldBe Status.OK
+                reader.isDone shouldBe false
+            } finally {
+                pause.resume.countDown()
+            }
 
-            // The quote waits on the lineage lock the reader holds.
-            writer.isDone shouldBe false
-            pause.resume.countDown()
-            // The complete pre-write history, without failing on a version it has no source for.
             reader.get(30, TimeUnit.SECONDS).versions.map { it.document.version } shouldContainExactly listOf(Version.INITIAL)
-
-            writer.get(30, TimeUnit.SECONDS).status shouldBe Status.OK
             val after = GetFinancialDocumentHistory(application.transactor, application.context.financialLedger, associations, sources)(id)
             after.versions.map { it.document.version } shouldContainExactly listOf(Version.INITIAL, Version.of(2))
             after.versions
@@ -160,8 +138,67 @@ class FinancialDocumentReadConsistencySpec :
                 .size shouldBe 1
         }
 
-        test("reads take the lock but change nothing") {
-            val id = newEstimate()
+        test("an inquiry list keeps pre-quote documents while a quote commits") {
+            val (inquiryId, id) = newEstimate()
+            val pause = Pause()
+            // The inquiry and its lineage ids have been read; each document is read afterwards.
+            val pausing =
+                object : InquiryFinancialDocumentRepository by associations {
+                    override fun documentsOf(
+                        transaction: Transaction,
+                        inquiryId: InquiryId,
+                    ): List<UUID> = pause.after(associations.documentsOf(transaction, inquiryId))
+
+                    override fun lockInquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? = error("An inquiry list must not lock a financial lineage")
+                }
+            val read =
+                ListInquiryFinancialDocuments(
+                    application.transactor,
+                    JdbiInquiryRepository(),
+                    application.context.financialLedger,
+                    pausing,
+                    sources,
+                )
+            val reader = CompletableFuture.supplyAsync { read(inquiryId) }
+            try {
+                pause.paused.await(30, TimeUnit.SECONDS) shouldBe true
+                val writer =
+                    CompletableFuture.supplyAsync {
+                        application.adminPost("/financial-documents/$id/quote", """{"expectedVersion":1}""")
+                    }
+                writer.get(30, TimeUnit.SECONDS).status shouldBe Status.OK
+                reader.isDone shouldBe false
+            } finally {
+                pause.resume.countDown()
+            }
+
+            val before = reader.get(30, TimeUnit.SECONDS)
+            before.map { it.latest.document.version } shouldContainExactly listOf(Version.INITIAL)
+            before.single().reconciliation.documentReference shouldBe
+                before
+                    .single()
+                    .latest.document.reference
+
+            val after =
+                ListInquiryFinancialDocuments(
+                    application.transactor,
+                    JdbiInquiryRepository(),
+                    application.context.financialLedger,
+                    associations,
+                    sources,
+                )(inquiryId)
+            after.map { it.latest.document.version } shouldContainExactly listOf(Version.of(2))
+            after.single().reconciliation.documentReference shouldBe
+                after
+                    .single()
+                    .latest.document.reference
+        }
+
+        test("reads change no database rows") {
+            val (inquiryId, id) = newEstimate()
 
             fun state() =
                 listOf(
@@ -176,6 +213,13 @@ class FinancialDocumentReadConsistencySpec :
             listOf("/financial-documents/$id", "/financial-documents/$id/history").forEach {
                 application.adminGet(it).status shouldBe Status.OK
             }
+            ListInquiryFinancialDocuments(
+                application.transactor,
+                JdbiInquiryRepository(),
+                application.context.financialLedger,
+                associations,
+                sources,
+            )(inquiryId).size shouldBe 1
             state() shouldBe before
         }
     })

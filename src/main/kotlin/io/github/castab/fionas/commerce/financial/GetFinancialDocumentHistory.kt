@@ -2,12 +2,13 @@ package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
 /**
  * Reads every immutable snapshot of a Fiona lineage, oldest first, each with the pricing
- * inputs that produced it, in one transaction holding the lineage lock. Historical snapshots are not
+ * inputs that produced it, in one REPEATABLE READ transaction. Historical snapshots are not
  * reconciled: an allocation made to a later snapshot cannot be reconciled against an
  * earlier one. A lineage no inquiry owns is [CommerceFailure.NotFound].
  */
@@ -20,7 +21,7 @@ class GetFinancialDocumentHistory(
     private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
 
     operator fun invoke(documentId: UUID): InquiryFinancialDocumentHistory =
-        transactor.inTransaction { transaction ->
+        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
             documents.history(transaction, documentId)
         }
 }

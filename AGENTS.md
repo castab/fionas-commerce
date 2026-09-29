@@ -190,8 +190,8 @@ no service locator. Keep wiring visible.
 - **Repositories never begin, commit, or roll back**, never call `inTransaction`, and hold
   no `Jdbi`, `Handle`, `DataSource`, or `Transactor`.
 - An operation that coordinates several writes does all of them inside one
-  `inTransaction` call. Never nest `inTransaction`; it opens a separate transaction. Pass
-  the `Transaction` down instead.
+  `inTransaction` call. Prefer caller-owned `Transaction` composition over nested
+  `inTransaction` calls; pass the `Transaction` down instead.
 
 The shared runtime transaction is the seam that lets one Fiona operation atomically write
 Fiona-owned rows and runtime-owned commerce facts. Fiona's financial operations do: a
@@ -601,12 +601,12 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    `documentVersion`); a lineage that has moved on is `Conflict`. Mutations lock the
    lineage's association row, and the runtime's `(document_id, previous_version)` uniqueness
    is the final guard.
-   `fionas.inquiry_financial_documents` is the serialization point for one Fiona-owned
-   financial lineage: mutations and multi-query financial reads (`FionaFinancialDocuments`
-   `current` and `history`) lock that row, so document, pricing-source, and
-   reconciliation or history reads stay coherent under PostgreSQL READ COMMITTED. Reads
-   remain read-only, and the current view reconciles the exact snapshot it returns. Never
-   raise the isolation level for this.
+   `fionas.inquiry_financial_documents` is the serialization point for mutations of one
+   Fiona-owned financial lineage: `expectLatest` locks it before reading the latest version
+   and writing. Multi-query financial reads (current, history, inquiry list) use
+   PostgreSQL REPEATABLE READ and normal ownership lookups, so their document, pricing,
+   and settlement queries share one point-in-time snapshot without blocking writers.
+   The current view reconciles the exact snapshot it returns.
 8. **Payment policy for this slice:** a payment is recorded against the latest version, a
    quote or an invoice (never an estimate: `InvariantViolated`); the whole payment is
    allocated to that exact snapshot through `recordPaymentAgainstDocument`; its currency is
@@ -700,7 +700,7 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (as of commerce 0.0.12)
+### Known upstream gaps (as of commerce 0.0.13)
 
 - **Application history schema is fixed.** Fiona's tables live in `fionas`, but the
   runtime keeps every application's migration history in `public.flyway_schema_history`
@@ -788,8 +788,8 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   invisible until commit), `FinancialDocumentAtomicitySpec` (a Fiona failure after a ledger
   write rolls back the runtime's snapshot, payment, and allocation with Fiona's rows),
   `FinancialDocumentRepositoriesSpec`, `RepricingSpec`, `FinancialDocumentReadConsistencySpec`
-  (a paused read holds the lineage lock, a concurrent writer waits, and the read returns one
-  coherent state), `FinancialDocumentRoutesSpec` (the
+  (a paused REPEATABLE READ reader retains its snapshot while a concurrent writer commits),
+  `FinancialDocumentRoutesSpec` (the
   whole inquiry → estimate → quote → deposit → invoice → change order → payment workflow
   through the complete handler, with its conflicts, transitions, payment policy, and
   permissions), HTTP tests through the complete handler, schema tests,
