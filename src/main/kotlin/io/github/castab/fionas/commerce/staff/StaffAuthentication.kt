@@ -192,6 +192,7 @@ class BootstrapFirstAdmin(
                                 CommercePermissions.FinancialDocumentRead,
                                 CommercePermissions.FinancialDocumentCreate,
                                 CommercePermissions.PaymentRecord,
+                                CommercePermissions.RefundRecord,
                                 CommercePermissions.PrincipalRead,
                                 CommercePermissions.PrincipalManage,
                                 CommercePermissions.RoleRead,

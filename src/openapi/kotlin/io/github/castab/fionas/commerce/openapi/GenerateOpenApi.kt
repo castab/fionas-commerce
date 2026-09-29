@@ -62,6 +62,7 @@ private val notInvoked =
         recordPayment = { error("Rendering the OpenAPI document never records a payment") },
         recordStandalonePayment = { error("Rendering the OpenAPI document never records a standalone payment") },
         allocatePayment = { error("Rendering the OpenAPI document never allocates a payment") },
+        recordRefund = { error("Rendering the OpenAPI document never records a refund") },
         login = { _, _ -> error("Rendering the OpenAPI document never logs in") },
         currentUser = { error("Rendering the OpenAPI document never reads a user") },
         setStaffPassword = { _, _ -> error("Rendering the OpenAPI document never sets a password") },

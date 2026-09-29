@@ -10,6 +10,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
+import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldStartWith
 
 /** The database shape fionas-commerce ends up with after commerce-runtime's migration phase. */
@@ -108,22 +109,27 @@ class DatabaseSchemaSpec :
                 )
         }
 
-        test("Fiona duplicates no ledger fact: documents, lines, amounts, payments, and allocations stay in commerce") {
+        test("Fiona duplicates no ledger fact: documents, payments, refunds, and reconciliation stay in commerce") {
             application.database
                 .strings(
                     """
                     SELECT table_name || '.' || column_name FROM information_schema.columns
                     WHERE table_schema = 'fionas'
-                      AND column_name ~ '(line|amount|price|total|tax|balance|stage|status|payment|allocation|currency)'
+                      AND column_name ~ '(line|amount|price|total|tax|balance|stage|status|payment|refund|allocation|reconciliation|currency)'
                     """.trimIndent(),
                 ).shouldBeEmpty()
             application.database
                 .strings(
                     """
                     SELECT table_name FROM information_schema.tables
-                    WHERE table_schema = 'fionas' AND table_name ~ '(line|payment|allocation|reconciliation|snapshot)'
+                    WHERE table_schema = 'fionas' AND table_name ~ '(line|payment|refund|allocation|reconciliation|balance|status|snapshot)'
                     """.trimIndent(),
                 ).shouldBeEmpty()
+        }
+
+        test("commerce-runtime V6 owns both refund tables; Fiona owns neither") {
+            application.database.tables("commerce").containsAll(listOf("refund_records", "refund_allocations")) shouldBe true
+            application.database.tables("fionas").none { "refund" in it } shouldBe true
         }
 
         test("Fiona credentials reference the runtime-owned human user") {

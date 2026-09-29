@@ -1,4 +1,4 @@
-// Local HTTP smoke test: direct Invoice v1, standalone payment, full allocation, zero balance.
+// Local HTTP smoke test: Invoice, two partial payments, partial refund, final settlement.
 // Requires a running Fiona application and an already seeded Offerings catalog.
 
 const baseUrl = process.env.FIONAS_BASE_URL ?? "http://localhost:8080";
@@ -73,6 +73,17 @@ function checkAmount(actual, expected, description) {
     `${description} must equal ${expected}; received ${actual}`);
 }
 
+function cents(value, description) {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value);
+  check(match, `${description} must be a nonnegative exact amount with at most two decimal places`);
+  return BigInt(match[1]) * 100n + BigInt((match[2] ?? "").padEnd(2, "0"));
+}
+
+function fromCents(value) {
+  check(value >= 0n, "computed amount must not be negative");
+  return `${value / 100n}.${(value % 100n).toString().padStart(2, "0")}`;
+}
+
 function checkReconciliation(value, total, currency, paid) {
   check(value && typeof value === "object", "reconciliation must be present");
   check(value.currency === currency, `reconciliation currency must be ${currency}`);
@@ -120,7 +131,7 @@ async function main() {
     body: {
       name: "Local Payment Smoke Test",
       email: "payment-smoke@example.com",
-      message: "Local developer smoke test: direct invoice paid in full.",
+      message: "Local developer smoke test: partial payments, refund, and final settlement.",
     },
     expectedStatus: 201,
   })).data;
@@ -156,53 +167,110 @@ async function main() {
   const { id: documentId, version: documentVersion, total: documentTotal, currency: documentCurrency } = document;
   console.log(`Created Invoice ${documentId} v${documentVersion}: ${money(documentTotal, documentCurrency)}`);
 
-  const payment = (await request("POST", "/payments", {
+  const totalCents = cents(documentTotal, "Invoice total");
+  check(totalCents > 35000n, "Invoice total must exceed 350.00 for this partial-payment walkthrough");
+
+  async function currentInvoice(grossCents, netCents) {
+    const current = (await request("GET", `/financial-documents/${documentId}`, {
+      authenticated: true, expectedStatus: 200,
+    })).data;
+    check(current?.id === documentId && current.inquiryId === inquiryId, "Invoice identity must be unchanged");
+    check(current.stage === "INVOICE" && current.version === documentVersion && current.previousVersion == null,
+      "Invoice must remain the original v1 snapshot");
+    checkAmount(current.total, documentTotal, "Invoice total");
+    check(current.currency === documentCurrency, "Invoice currency must be unchanged");
+    check(JSON.stringify(current.pricing) === JSON.stringify(document.pricing), "pricing inputs must be unchanged");
+    check(JSON.stringify(current.lines) === JSON.stringify(document.lines), "Invoice lines must be unchanged");
+    check(current.subtotal === document.subtotal && current.taxAmount === document.taxAmount,
+      "Invoice subtotal and tax must be unchanged");
+    check(current.reconciliation?.currency === documentCurrency, "reconciliation currency must match");
+    checkAmount(current.reconciliation.grossAllocated, fromCents(grossCents), "grossAllocated");
+    checkAmount(current.reconciliation.netApplied, fromCents(netCents), "netApplied");
+    checkAmount(current.reconciliation.balance, fromCents(totalCents - netCents), "balance");
+    return current;
+  }
+
+  async function payAndAllocate(amount) {
+    const payment = (await request("POST", "/payments", {
+      authenticated: true,
+      body: { amount, currency: documentCurrency, method: "OTHER" },
+      expectedStatus: 201,
+    })).data;
+    checkId(payment?.paymentId, "payment id");
+    checkAmount(payment.amount, amount, "payment amount");
+    check(payment.currency === documentCurrency && payment.method === "OTHER", "payment currency and method");
+    check(typeof payment.receivedAt === "string" && payment.receivedAt.length > 0, "payment receivedAt");
+    const allocation = (await request("POST", `/payments/${payment.paymentId}/allocations`, {
+      authenticated: true,
+      body: { documentId, documentVersion, amount },
+      expectedStatus: 201,
+    })).data;
+    checkId(allocation?.allocationId, "allocation id");
+    check(allocation.paymentId === payment.paymentId && allocation.documentId === documentId &&
+      allocation.documentVersion === documentVersion, "allocation must identify the exact Invoice and payment");
+    checkAmount(allocation.amount, amount, "allocation amount");
+    check(allocation.currency === documentCurrency, "allocation currency");
+    check(typeof allocation.allocatedAt === "string" && allocation.allocatedAt.length > 0, "allocation time");
+    console.log(`Received ${money(amount, documentCurrency)} as payment ${payment.paymentId}; allocated ${allocation.allocationId}`);
+    return { payment, allocation };
+  }
+
+  console.log("\nPayment 1");
+  await payAndAllocate("200.00");
+  const afterFirst = await currentInvoice(20000n, 20000n);
+  console.log(`Invoice balance: ${money(afterFirst.reconciliation.balance, documentCurrency)}`);
+  console.log("\nPayment 2");
+  const second = await payAndAllocate("150.00");
+  const afterSecond = await currentInvoice(35000n, 35000n);
+  console.log(`Invoice balance: ${money(afterSecond.reconciliation.balance, documentCurrency)}`);
+
+  const refund = (await request("POST", `/payments/${second.payment.paymentId}/refunds`, {
     authenticated: true,
-    body: { amount: documentTotal, currency: documentCurrency, method: "OTHER" },
+    body: {
+      amount: "50.00", currency: documentCurrency, method: "OTHER",
+      allocations: [{ paymentAllocationId: second.allocation.allocationId, amount: "50.00" }],
+    },
     expectedStatus: 201,
   })).data;
-  checkId(payment?.paymentId, "payment id");
-  checkAmount(payment.amount, documentTotal, "payment amount");
-  check(payment.currency === documentCurrency, "payment currency must equal document currency");
-  check(payment.method === "OTHER", "payment method must be OTHER");
-  check(typeof payment.receivedAt === "string" && payment.receivedAt.length > 0, "payment receivedAt must be present");
-  const paymentId = payment.paymentId;
-  console.log(`Recorded payment ${paymentId}: ${money(payment.amount, payment.currency)}`);
+  checkId(refund?.refundId, "refund id");
+  check(refund.paymentId === second.payment.paymentId && refund.method === "OTHER" &&
+    refund.currency === documentCurrency, "refund payment, method, and currency");
+  checkAmount(refund.amount, "50.00", "refund amount");
+  check(typeof refund.refundedAt === "string" && refund.refundedAt.length > 0, "refund time");
+  check(refund.allocations?.length === 1, "refund must unwind exactly one allocation");
+  checkId(refund.allocations[0].refundAllocationId, "refund allocation id");
+  check(refund.allocations[0].paymentAllocationId === second.allocation.allocationId,
+    "refund must unwind the second payment's allocation");
+  checkAmount(refund.allocations[0].amount, "50.00", "refund allocation amount");
+  const expectedPayment = {
+    paymentAmount: "150.00", totalRefunded: "50.00", netReceived: "100.00",
+    grossAllocated: "150.00", refundAllocations: "50.00", netAllocated: "100.00", unallocated: "0.00",
+  };
+  check(refund.reconciliation?.currency === documentCurrency, "refund reconciliation currency");
+  for (const [field, amount] of Object.entries(expectedPayment)) {
+    checkAmount(refund.reconciliation[field], amount, `refund reconciliation ${field}`);
+  }
+  console.log("\nRefund");
+  console.log(`Refunded ${money("50.00", documentCurrency)} from payment ${second.payment.paymentId}`);
+  console.log(`Unwound allocation ${second.allocation.allocationId}`);
 
-  const allocation = (await request("POST", `/payments/${paymentId}/allocations`, {
-    authenticated: true,
-    body: { documentId, documentVersion, amount: documentTotal },
-    expectedStatus: 201,
-  })).data;
-  checkId(allocation?.allocationId, "allocation id");
-  check(allocation.paymentId === paymentId, "allocation must reference the recorded payment");
-  check(allocation.documentId === documentId, "allocation must reference the created Invoice");
-  check(allocation.documentVersion === documentVersion, "allocation must reference the exact Invoice version");
-  checkAmount(allocation.amount, documentTotal, "allocation amount");
-  check(allocation.currency === documentCurrency, "allocation currency must equal document currency");
-  check(typeof allocation.allocatedAt === "string" && allocation.allocatedAt.length > 0, "allocation allocatedAt must be present");
-  checkReconciliation(allocation.reconciliation, documentTotal, documentCurrency, true);
-  console.log(`Allocated payment ${allocation.allocationId} to Invoice v${documentVersion}`);
+  const reopened = await currentInvoice(35000n, 30000n);
+  console.log(`Net applied: ${money(reopened.reconciliation.netApplied, documentCurrency)}`);
+  console.log(`Invoice balance: ${money(reopened.reconciliation.balance, documentCurrency)}`);
+  const finalAmount = reopened.reconciliation.balance;
+  check(cents(finalAmount, "reopened balance") > 0n, "reopened balance must be positive");
+  console.log("\nFinal payment");
+  await payAndAllocate(finalAmount);
+  const final = await currentInvoice(totalCents + 5000n, totalCents);
+  checkAmount(final.reconciliation.balance, "0.00", "final balance");
 
-  const current = (await request("GET", `/financial-documents/${documentId}`, {
-    authenticated: true, expectedStatus: 200,
-  })).data;
-  check(current?.id === documentId && current.inquiryId === inquiryId, "current Invoice identity must be unchanged");
-  check(current.stage === "INVOICE" && current.version === documentVersion && current.previousVersion == null,
-    "current Invoice must still be the original v1 snapshot");
-  checkAmount(current.total, documentTotal, "current Invoice total");
-  check(current.currency === documentCurrency, "current Invoice currency must be unchanged");
-  check(JSON.stringify(current.pricing) === JSON.stringify(document.pricing), "Invoice pricing inputs must be unchanged");
-  check(JSON.stringify(current.lines) === JSON.stringify(document.lines), "Invoice lines must be unchanged");
-  check(current.subtotal === document.subtotal && current.taxAmount === document.taxAmount,
-    "Invoice subtotal and tax must be unchanged");
-  checkReconciliation(current.reconciliation, documentTotal, documentCurrency, true);
-
-  console.log("\nReconciliation");
+  console.log("\nFinal reconciliation");
   console.log("--------------------------------");
-  console.log(`Gross allocated  ${money(current.reconciliation.grossAllocated, documentCurrency)}`);
-  console.log(`Net applied      ${money(current.reconciliation.netApplied, documentCurrency)}`);
-  console.log(`Balance          ${money(current.reconciliation.balance, documentCurrency)}`);
+  console.log(`Invoice total       ${money(documentTotal, documentCurrency)}`);
+  console.log(`Gross allocated     ${money(final.reconciliation.grossAllocated, documentCurrency)}`);
+  console.log(`Refunded/unwound    ${money("50.00", documentCurrency)}`);
+  console.log(`Net applied         ${money(final.reconciliation.netApplied, documentCurrency)}`);
+  console.log(`Balance             ${money(final.reconciliation.balance, documentCurrency)}`);
   console.log("--------------------------------");
   console.log("Result: PAID IN FULL");
 }

@@ -20,6 +20,7 @@ import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRe
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
+import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
@@ -140,6 +141,7 @@ fun fionaApplication(
                     recordPayment = RecordDocumentPayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
                     recordStandalonePayment = RecordPayment(context.transactor, ledger, clock)::invoke,
                     allocatePayment = AllocatePayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
+                    recordRefund = RecordRefund(context.transactor, ledger, clock)::invoke,
                     login = Login(
                         StaffPasswordAuthenticator(context.authorization, context.transactor, credentials, hasher),
                         context.sessions,

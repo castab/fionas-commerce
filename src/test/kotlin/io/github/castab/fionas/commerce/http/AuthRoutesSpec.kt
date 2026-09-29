@@ -79,6 +79,7 @@ class AuthRoutesSpec :
                         CommercePermissions.FinancialDocumentRead,
                         CommercePermissions.FinancialDocumentCreate,
                         CommercePermissions.PaymentRecord,
+                        CommercePermissions.RefundRecord,
                         CommercePermissions.PrincipalRead,
                         CommercePermissions.PrincipalManage,
                         CommercePermissions.RoleRead,
@@ -97,6 +98,18 @@ class AuthRoutesSpec :
                 app.database.strings("SELECT permission_key FROM commerce.role_permissions ORDER BY 1") shouldBe grants
                 app.database.count("commerce.users") shouldBe 1
                 app.database.strings("SELECT password_hash FROM fionas.user_credentials").single() shouldBe hash
+            }
+        }
+
+        test("later bootstrap does not add the refund permission to an existing Administrator role") {
+            TestApplication.create().use { app ->
+                val role = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator))
+                val previous = role.permissions - CommercePermissions.RefundRecord
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, previous)
+                BootstrapFirstAdmin(app.transactor, app.authorization, JdbiCredentialRepository(), PasswordHasher(), testClock).invoke(
+                    BootstrapAdmin("other", "Other", null, null, SecretPassword.of("another-test-password")),
+                )
+                app.authorization.getRole(CommerceRoles.Administrator)?.permissions shouldBe previous
             }
         }
 

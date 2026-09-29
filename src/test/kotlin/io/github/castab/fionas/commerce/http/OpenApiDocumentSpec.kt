@@ -75,6 +75,8 @@ class OpenApiDocumentSpec :
                 Triple("/payments", "post", "recordStandalonePayment") to listOf("201", "400", "401", "403", "409", "422", "500"),
                 Triple("/payments/{paymentId}/allocations", "post", "allocatePayment") to
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/payments/{paymentId}/refunds", "post", "recordRefund") to
+                    listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/auth/login", "post", "login") to listOf("204", "400", "401", "403", "500"),
                 Triple("/auth/logout", "post", "logout") to listOf("204", "403", "500"),
                 Triple("/auth/me", "get", "getCurrentUser") to listOf("200", "401", "403", "500"),
@@ -99,6 +101,7 @@ class OpenApiDocumentSpec :
                 "recordPayment" to "Payments",
                 "recordStandalonePayment" to "Payments",
                 "allocatePayment" to "Payments",
+                "recordRefund" to "Payments",
                 "login" to "Authentication",
                 "logout" to "Authentication",
                 "getCurrentUser" to "Authentication",
@@ -174,6 +177,12 @@ class OpenApiDocumentSpec :
                 "RecordedPaymentResponse",
                 "PaymentRecordResponse",
                 "PaymentAllocationResponse",
+                "RecordRefundRequest",
+                "RefundExternalReference",
+                "RefundAllocationRequest",
+                "RecordedRefundResponse",
+                "RefundAllocationResponse",
+                "PaymentReconciliationResponse",
                 "ErrorResponse",
                 "LoginRequest",
                 "CurrentUserResponse",
@@ -474,6 +483,43 @@ class OpenApiDocumentSpec :
                 it.text("properties", "reconciliation", "\$ref") shouldBe "#/components/schemas/DocumentReconciliation"
                 it.text("properties", "amount", "type") shouldBe "string"
             }
+        }
+
+        test("documents the explicit refund request and its complete payment reconciliation") {
+            val route = operation("/payments/{paymentId}/refunds", "post")
+            route.text("requestBody", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/RecordRefundRequest"
+            route.text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/RecordedRefundResponse"
+            schema("RecordRefundRequest").let {
+                it.strings("required") shouldContainExactly listOf("amount", "currency", "method")
+                it.text("properties", "amount", "type") shouldBe "string"
+                it.text("properties", "refundedAt", "format") shouldBe "date-time"
+                it.text("properties", "externalReference", "\$ref") shouldBe "#/components/schemas/RefundExternalReference"
+            }
+            schema("RefundAllocationRequest").let {
+                it.strings("required") shouldContainExactly listOf("paymentAllocationId", "amount")
+                it.text("properties", "paymentAllocationId", "format") shouldBe "uuid"
+                it.text("properties", "amount", "type") shouldBe "string"
+            }
+            schema("RecordedRefundResponse").let {
+                it.strings("required") shouldContainExactly
+                    listOf("refundId", "paymentId", "amount", "currency", "method", "refundedAt", "allocations", "reconciliation")
+                it.text("properties", "reconciliation", "\$ref") shouldBe "#/components/schemas/PaymentReconciliationResponse"
+            }
+            schema("PaymentReconciliationResponse").strings("required") shouldContainExactly
+                listOf(
+                    "paymentAmount",
+                    "totalRefunded",
+                    "netReceived",
+                    "grossAllocated",
+                    "allocationReversals",
+                    "refundAllocations",
+                    "netAllocated",
+                    "unallocated",
+                    "currency",
+                )
+            route.text("responses", "422", "description").contains("`invariant_violated`") shouldBe true
         }
 
         test("describes a financial document as immutable ledger facts, pricing source, and derived settlement") {

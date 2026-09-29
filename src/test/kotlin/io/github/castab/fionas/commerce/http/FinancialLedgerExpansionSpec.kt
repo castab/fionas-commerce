@@ -5,6 +5,10 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.commerce.staff.RoleDefinition
+import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
@@ -12,6 +16,7 @@ import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRe
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
@@ -22,6 +27,8 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import org.http4k.core.Method
+import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
 import java.math.BigDecimal
@@ -45,6 +52,8 @@ class FinancialLedgerExpansionSpec :
 
         fun Response.allocation() = CommerceJson.asA(bodyString(), PaymentAllocationResponse.serializer())
 
+        fun Response.refund() = CommerceJson.asA(bodyString(), RecordedRefundResponse.serializer())
+
         fun create(
             stage: String,
             inquiryId: String = application.createInquiry(),
@@ -66,6 +75,17 @@ class FinancialLedgerExpansionSpec :
             application.adminPost(
                 "/payments/$paymentId/allocations",
                 """{"documentId":"$documentId","documentVersion":$version,"amount":"$amount"}""",
+            )
+
+        fun refund(
+            paymentId: String,
+            amount: String,
+            allocations: String = "[]",
+            extra: String = "",
+        ): Response =
+            application.adminPost(
+                "/payments/$paymentId/refunds",
+                """{"amount":"$amount","currency":"USD","method":"OTHER","allocations":$allocations$extra}""",
             )
 
         fun rows(
@@ -223,6 +243,138 @@ class FinancialLedgerExpansionSpec :
             allocate(euroPayment.paymentId, quote.id, 2, "10.00").status shouldBe Status.UNPROCESSABLE_ENTITY
             rows("commerce.payment_allocations", "payment_id", payment.paymentId) shouldBe 0
             rows("commerce.payment_allocations", "payment_id", euroPayment.paymentId) shouldBe 0
+        }
+
+        test("an applied partial refund reopens the invoice and reconciles its payment") {
+            val invoice = create("INVOICE").document()
+            val payment = record("200.00").payment()
+            val allocation = allocate(payment.paymentId, invoice.id, 1, "200.00").allocation()
+            val response =
+                refund(
+                    payment.paymentId,
+                    "50.00",
+                    """[{"paymentAllocationId":"${allocation.allocationId}","amount":"50.00"}]""",
+                )
+            response.status shouldBe Status.CREATED
+            response.refund().let {
+                it.paymentId shouldBe payment.paymentId
+                it.method shouldBe "OTHER" // The refund method may differ from the card payment.
+                it.amount shouldBe "50.00"
+                it.refundedAt shouldBe "2026-09-26T18:30:00.123456Z"
+                it.allocations.single().paymentAllocationId shouldBe allocation.allocationId
+                it.allocations.single().amount shouldBe "50.00"
+                it.reconciliation.paymentAmount shouldBe "200.00"
+                it.reconciliation.totalRefunded shouldBe "50.00"
+                it.reconciliation.netReceived shouldBe "150.00"
+                it.reconciliation.grossAllocated shouldBe "200.00"
+                it.reconciliation.refundAllocations shouldBe "50.00"
+                it.reconciliation.netAllocated shouldBe "150.00"
+                it.reconciliation.unallocated shouldBe "0.00"
+            }
+            application.adminGet("/financial-documents/${invoice.id}").document().reconciliation?.let {
+                it.grossAllocated shouldBe "200.00"
+                it.netApplied shouldBe "150.00"
+                it.balance.toBigDecimal() shouldBe invoice.total.toBigDecimal() - BigDecimal("150.00")
+            }
+            rows("commerce.refund_records", "payment_id", payment.paymentId) shouldBe 1
+            rows("commerce.refund_allocations", "payment_allocation_id", allocation.allocationId) shouldBe 1
+        }
+
+        test("unapplied refunds leave documents alone; explicit portions can unwind two allocations") {
+            val invoice = create("INVOICE").document()
+            val unapplied = record("100.00").payment()
+            refund(unapplied.paymentId, "25.00").let {
+                it.status shouldBe Status.CREATED
+                it.refund().allocations shouldContainExactly emptyList()
+                it.refund().reconciliation.unallocated shouldBe "75.00"
+            }
+            application
+                .adminGet("/financial-documents/${invoice.id}")
+                .document()
+                .reconciliation
+                ?.grossAllocated shouldBe "0.00"
+
+            val payment = record("200.00").payment()
+            val first = allocate(payment.paymentId, invoice.id, 1, "100.00").allocation()
+            val second = allocate(payment.paymentId, invoice.id, 1, "100.00").allocation()
+            val portions =
+                """[{"paymentAllocationId":"${first.allocationId}","amount":"20.00"},""" +
+                    """{"paymentAllocationId":"${second.allocationId}","amount":"30.00"}]"""
+            refund(payment.paymentId, "50.00", portions).let {
+                it.status shouldBe Status.CREATED
+                it.refund().allocations.size shouldBe 2
+                it.refund().reconciliation.netAllocated shouldBe "150.00"
+            }
+            application
+                .adminGet("/financial-documents/${invoice.id}")
+                .document()
+                .reconciliation
+                ?.netApplied shouldBe "150.00"
+        }
+
+        test("invalid refunds leave the existing payment and invoice history unchanged") {
+            val invoice = create("INVOICE").document()
+            val payment = record("200.00").payment()
+            val allocation = allocate(payment.paymentId, invoice.id, 1, "200.00").allocation()
+            val other = record("100.00").payment()
+            val otherAllocation = allocate(other.paymentId, invoice.id, 1, "100.00").allocation()
+            refund(UUID.randomUUID().toString(), "10.00").status shouldBe Status.NOT_FOUND
+            refund("not-a-uuid", "10.00").status shouldBe Status.BAD_REQUEST
+            refund(payment.paymentId, "10.00", """[{"paymentAllocationId":"not-a-uuid","amount":"10.00"}]""")
+                .status shouldBe Status.BAD_REQUEST
+            application.adminPost("/payments/${payment.paymentId}/refunds", """{"amount":10.00}""").status shouldBe Status.BAD_REQUEST
+            refund(payment.paymentId, "10.00", """[{"paymentAllocationId":"${UUID.randomUUID()}","amount":"10.00"}]""")
+                .status shouldBe Status.NOT_FOUND
+            refund(payment.paymentId, "10.00", """[{"paymentAllocationId":"${otherAllocation.allocationId}","amount":"10.00"}]""")
+                .status shouldBe Status.UNPROCESSABLE_ENTITY
+            refund(payment.paymentId, "50.00").status shouldBe Status.UNPROCESSABLE_ENTITY
+            refund(payment.paymentId, "10.00", """[{"paymentAllocationId":"${allocation.allocationId}","amount":"20.00"}]""")
+                .status shouldBe Status.UNPROCESSABLE_ENTITY
+            refund(
+                payment.paymentId,
+                "10.00",
+                """[{"paymentAllocationId":"${allocation.allocationId}","amount":"10.00"}]""",
+                ",\"externalReference\":{\"provider\":\"test\",\"reference\":\"duplicate\"}",
+            ).status shouldBe Status.CREATED
+            refund(
+                payment.paymentId,
+                "10.00",
+                """[{"paymentAllocationId":"${allocation.allocationId}","amount":"10.00"}]""",
+                ",\"externalReference\":{\"provider\":\"test\",\"reference\":\"duplicate\"}",
+            ).status shouldBe Status.CONFLICT
+            rows("commerce.refund_records", "payment_id", payment.paymentId) shouldBe 1
+            application
+                .adminGet("/financial-documents/${invoice.id}")
+                .document()
+                .reconciliation
+                ?.netApplied shouldBe "290.00"
+        }
+
+        test("refunds require their own permission and a trusted browser Origin") {
+            val payment = record("50.00").payment()
+            val path = "/payments/${payment.paymentId}/refunds"
+            val body = """{"amount":"10.00","currency":"USD","method":"OTHER"}"""
+            application.http(Request(Method.POST, path).header("Origin", TEST_ORIGIN).body(body)).status shouldBe Status.UNAUTHORIZED
+            application.http(Request(Method.POST, path).header("Cookie", application.adminCookie).body(body)).status shouldBe
+                Status.FORBIDDEN
+            val admin = checkNotNull(application.authorization.findUserByUsername("admin"))
+            val paymentOnly = RoleKey("fionas.test.payment-only")
+            val refundOnly = RoleKey("fionas.test.refund-only")
+            application.authorization.createRole(
+                RoleDefinition(paymentOnly, "Payment only", null, setOf(CommercePermissions.PaymentRecord)),
+            )
+            application.authorization.createRole(RoleDefinition(refundOnly, "Refund only", null, setOf(CommercePermissions.RefundRecord)))
+            application.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+            application.authorization.assignRole(admin.id, paymentOnly)
+            try {
+                application.adminPost(path, body).status shouldBe Status.FORBIDDEN
+                application.authorization.assignRole(admin.id, refundOnly)
+                application.adminPost(path, body).status shouldBe Status.CREATED
+            } finally {
+                application.authorization.unassignRole(admin.id, paymentOnly)
+                application.authorization.unassignRole(admin.id, refundOnly)
+                application.authorization.assignRole(admin.id, CommerceRoles.Administrator)
+            }
         }
 
         test("competing allocations wait on the runtime payment lock and cannot exceed the receipt") {

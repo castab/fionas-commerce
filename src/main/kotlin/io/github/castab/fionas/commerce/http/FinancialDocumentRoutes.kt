@@ -4,8 +4,10 @@ import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.ExternalPaymentReference
+import io.github.castab.commerce.payment.ExternalRefundReference
 import io.github.castab.commerce.payment.FinancialDocumentReconciliation
 import io.github.castab.commerce.payment.PaymentMethod
+import io.github.castab.commerce.payment.PaymentReconciliation
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
@@ -18,8 +20,10 @@ import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.PricedSnapshot
+import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
+import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
@@ -192,6 +196,35 @@ data class PaymentExternalReference(
     val provider: String,
     @ApiProperty(description = "The payment's identifier in that system. Must not be blank.")
     val reference: String,
+)
+
+/** The body of a refund of an existing payment, with explicit allocation unwinds. */
+@Serializable
+data class RecordRefundRequest(
+    @ApiProperty(description = "The positive exact decimal amount returned, never a JSON number.")
+    val amount: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code; the ledger validates agreement.")
+    val currency: String,
+    @ApiProperty(description = "How money left: `CASH`, `CHECK`, `CARD`, `BANK_TRANSFER`, `DIGITAL_WALLET`, or `OTHER`.")
+    val method: String,
+    @ApiProperty(description = "When money was returned, RFC 3339; server time when absent.", format = "date-time")
+    val refundedAt: String? = null,
+    @ApiProperty(description = "The refund's external provider and reference, when present.")
+    val externalReference: RefundExternalReference? = null,
+    @ApiProperty(description = "Explicit portions unwinding prior payment allocations; empty for unapplied value.")
+    val allocations: List<RefundAllocationRequest> = emptyList(),
+)
+
+@Serializable
+data class RefundExternalReference(
+    @ApiProperty(description = "The external provider's nonblank name.") val provider: String,
+    @ApiProperty(description = "The refund's nonblank reference at that provider.") val reference: String,
+)
+
+@Serializable
+data class RefundAllocationRequest(
+    @ApiProperty(description = "The payment allocation to unwind.", format = "uuid") val paymentAllocationId: String,
+    @ApiProperty(description = "The positive exact decimal portion unwound.") val amount: String,
 )
 
 /**
@@ -369,6 +402,44 @@ data class PaymentAllocationResponse(
     val reconciliation: DocumentReconciliation,
 )
 
+@Serializable
+data class RefundAllocationResponse(
+    @ApiProperty(description = "The generated refund allocation id.", format = "uuid") val refundAllocationId: String,
+    @ApiProperty(description = "The payment allocation unwound.", format = "uuid") val paymentAllocationId: String,
+    @ApiProperty(description = "The exact amount unwound.") val amount: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code.") val currency: String,
+    @ApiProperty(description = "When the unwind was recorded, RFC 3339 UTC.", format = "date-time") val allocatedAt: String,
+)
+
+@Serializable
+data class PaymentReconciliationResponse(
+    @ApiProperty(description = "The payment's original exact amount.") val paymentAmount: String,
+    @ApiProperty(description = "All returned value.") val totalRefunded: String,
+    @ApiProperty(description = "Original amount less refunds.") val netReceived: String,
+    @ApiProperty(description = "All original allocations.") val grossAllocated: String,
+    @ApiProperty(description = "Allocation reversals; currently zero because runtime does not persist them.") val allocationReversals:
+        String,
+    @ApiProperty(description = "Applied value unwound by refunds.") val refundAllocations: String,
+    @ApiProperty(description = "Currently applied value.") val netAllocated: String,
+    @ApiProperty(description = "Kept money not applied to documents.") val unallocated: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code.") val currency: String,
+)
+
+@Serializable
+data class RecordedRefundResponse(
+    @ApiProperty(description = "The generated refund id.", format = "uuid") val refundId: String,
+    @ApiProperty(description = "The payment being refunded.", format = "uuid") val paymentId: String,
+    @ApiProperty(description = "The exact amount returned.") val amount: String,
+    @ApiProperty(description = "The payment's ISO 4217 currency code.") val currency: String,
+    @ApiProperty(description = "How money left the business.") val method: String,
+    @ApiProperty(description = "When money was returned, RFC 3339 UTC.", format = "date-time") val refundedAt: String,
+    @ApiProperty(description = "The refund's external identity, when present.") val externalReference: RefundExternalReference? = null,
+    @ApiProperty(description = "Explicit portions of prior allocations unwound by the refund.") val allocations:
+        List<RefundAllocationResponse>,
+    @ApiProperty(description = "The payment's derived reconciliation after recording the refund.")
+    val reconciliation: PaymentReconciliationResponse,
+)
+
 private val createEstimateRequest = jsonBody(CreateInquiryEstimateRequest.serializer())
 private val createFinancialDocumentRequest = jsonBody(CreateInquiryFinancialDocumentRequest.serializer())
 private val changeOrderRequest = jsonBody(ChangeOrderRequest.serializer())
@@ -376,12 +447,14 @@ private val transitionRequest = jsonBody(StageTransitionRequest.serializer())
 private val recordPaymentRequest = jsonBody(RecordPaymentRequest.serializer())
 private val recordStandalonePaymentRequest = jsonBody(RecordStandalonePaymentRequest.serializer())
 private val allocatePaymentRequest = jsonBody(AllocatePaymentRequest.serializer())
+private val recordRefundRequest = jsonBody(RecordRefundRequest.serializer())
 private val documentResponse = jsonBody(FinancialDocumentResponse.serializer())
 private val historyResponse = jsonBody(FinancialDocumentHistoryResponse.serializer())
 private val inquiryDocumentsResponse = jsonBody(InquiryFinancialDocumentsResponse.serializer())
 private val recordedPaymentResponse = jsonBody(RecordedPaymentResponse.serializer())
 private val paymentRecordResponse = jsonBody(PaymentRecordResponse.serializer())
 private val paymentAllocationResponse = jsonBody(PaymentAllocationResponse.serializer())
+private val recordedRefundResponse = jsonBody(RecordedRefundResponse.serializer())
 
 // Plain strings for the contract: a contract treats a path value its lens rejects as an
 // unmatched route (404), while an id that is not a UUID is a malformed request (400).
@@ -391,6 +464,8 @@ private val inquiryIdPath =
     Path.of("inquiryId", "The inquiry's id.", mapOf("schema" to mapOf("format" to "uuid")))
 private val paymentIdPath =
     Path.of("paymentId", "The received payment's id.", mapOf("schema" to mapOf("format" to "uuid")))
+private val paymentAllocationIdValue =
+    Path.of("paymentAllocationId", "The payment allocation's id.", mapOf("schema" to mapOf("format" to "uuid")))
 
 private val financialDocuments =
     Tag(
@@ -399,7 +474,7 @@ private val financialDocuments =
             "server from commercial inputs, each with the pricing inputs it was priced from.",
     )
 
-private val payments = Tag("Payments", "Money received, and allocations to exact financial-document snapshots.")
+private val payments = Tag("Payments", "Money received, allocations to exact financial-document snapshots, and refunds.")
 
 private const val EXAMPLE_DOCUMENT = "5f0c6a7e-8c1d-4f63-9b2a-0d8e7f6a5b4c"
 private const val EXAMPLE_INQUIRY = "c755f7cd-1e28-4c75-a85f-d066ede7387d"
@@ -537,6 +612,34 @@ private val examplePaymentAllocation =
         currency = "USD",
         allocatedAt = "2026-09-28T20:01:00Z",
         reconciliation = DocumentReconciliation("150.00", "150.00", "675.00", "USD"),
+    )
+
+private val exampleRefundRequest =
+    RecordRefundRequest(
+        amount = "50.00",
+        currency = "USD",
+        method = "OTHER",
+        allocations = listOf(RefundAllocationRequest(examplePaymentAllocation.allocationId, "50.00")),
+    )
+private val exampleRefundResponse =
+    RecordedRefundResponse(
+        refundId = "8c9d0e1f-2a3b-4c4d-8e5f-6a7b8c9d0e1f",
+        paymentId = examplePaymentRecord.paymentId,
+        amount = "50.00",
+        currency = "USD",
+        method = "OTHER",
+        refundedAt = "2026-09-28T20:02:00Z",
+        allocations =
+            listOf(
+                RefundAllocationResponse(
+                    "9d0e1f2a-3b4c-4d5e-8f6a-7b8c9d0e1f2a",
+                    examplePaymentAllocation.allocationId,
+                    "50.00",
+                    "USD",
+                    "2026-09-28T20:02:00Z",
+                ),
+            ),
+        reconciliation = PaymentReconciliationResponse("150.00", "50.00", "100.00", "150.00", "0.00", "50.00", "100.00", "0.00", "USD"),
     )
 
 /** The errors every staff-protected financial route answers, in addition to its own. */
@@ -1025,10 +1128,79 @@ fun allocatePaymentRoute(
         }
     }
 
+/** `POST /payments/{paymentId}/refunds`: returns money with caller-selected allocation unwinds. */
+fun recordRefundRoute(
+    recordRefund: (RecordRefund.Command) -> ReconciledRefund,
+    access: AccessControl,
+): ContractRoute =
+    "/payments" / paymentIdPath / "refunds" meta {
+        operationId = "recordRefund"
+        summary = "Record a payment refund"
+        description =
+            "Returns part or all of a payment. Each allocation portion explicitly names a previous payment allocation " +
+            "to unwind; an empty list refunds unapplied value. No document snapshot changes. The runtime validates " +
+            "the complete payment history. Requires `commerce.refund.record`."
+        tags += payments
+        receiving(recordRefundRequest to exampleRefundRequest)
+        returning(
+            Status.CREATED,
+            recordedRefundResponse to exampleRefundResponse,
+            "The refund, its unwind portions, and payment reconciliation.",
+        )
+        malformed("`paymentId` or an allocation's `paymentAllocationId`")
+        returningError(
+            ErrorCategory.NOT_FOUND,
+            "the payment or a named payment allocation does not exist.",
+            "Payment $EXAMPLE_DOCUMENT was not found",
+        )
+        returningError(
+            ErrorCategory.CONFLICT,
+            "the external provider and refund reference already exist.",
+            "Refund id or external reference already exists",
+        )
+        returningError(
+            ErrorCategory.VALIDATION_FAILED,
+            "the amount, currency, method, time, reference, or allocation relationship is invalid. A refund that " +
+                "makes the complete payment history impossible answers the same status with code `invariant_violated`.",
+            "Refund amount must be an exact decimal string, for example 50.00",
+        )
+        staffErrors()
+    } bindContract Method.POST to { id: String, _: String ->
+        access.requirePermission(CommercePermissions.RefundRecord).then { request: Request ->
+            val paymentId = uuidIn(id, paymentIdPath)
+            val body = recordRefundRequest(request)
+            val command =
+                validating {
+                    RecordRefund.Command(
+                        paymentId = paymentId,
+                        amount = refundAmount(body.amount),
+                        currency = paymentCurrency(body.currency),
+                        method = paymentMethod(body.method),
+                        refundedAt = body.refundedAt?.let(::refundedAt),
+                        externalReference =
+                            body.externalReference?.let { ExternalRefundReference(it.provider.trim(), it.reference.trim()) },
+                        allocations =
+                            body.allocations.map {
+                                RecordRefund.AllocationCommand(
+                                    uuidIn(it.paymentAllocationId, paymentAllocationIdValue),
+                                    refundAmount(it.amount),
+                                )
+                            },
+                    )
+                }
+            Response(Status.CREATED).with(recordedRefundResponse of recordRefund(command).toResponse())
+        }
+    }
+
 private val EXACT_DECIMAL = Regex("""\d+(\.\d+)?""")
 
 private fun paymentAmount(text: String): BigDecimal {
     require(EXACT_DECIMAL.matches(text)) { "Payment amount must be an exact decimal string, for example 300.00" }
+    return BigDecimal(text)
+}
+
+private fun refundAmount(text: String): BigDecimal {
+    require(EXACT_DECIMAL.matches(text)) { "Refund amount must be an exact decimal string, for example 50.00" }
     return BigDecimal(text)
 }
 
@@ -1049,6 +1221,13 @@ private fun receivedAt(text: String) =
         OffsetDateTime.parse(text).toInstant()
     } catch (e: DateTimeParseException) {
         throw IllegalArgumentException("receivedAt must be an RFC 3339 timestamp, for example 2026-09-27T17:05:00Z", e)
+    }
+
+private fun refundedAt(text: String) =
+    try {
+        OffsetDateTime.parse(text).toInstant()
+    } catch (e: DateTimeParseException) {
+        throw IllegalArgumentException("refundedAt must be an RFC 3339 timestamp, for example 2026-09-28T20:02:00Z", e)
     }
 
 /** The UUID in a path segment; one that is not a UUID is reported as the unreadable path value it is. */
@@ -1155,4 +1334,39 @@ private fun AllocatedPayment.toResponse() =
         currency = allocation.currency.currencyCode,
         allocatedAt = allocation.allocatedAt.toString(),
         reconciliation = document.reconciliation.toResponse(),
+    )
+
+private fun ReconciledRefund.toResponse() =
+    RecordedRefundResponse(
+        refundId = recorded.refund.id.toString(),
+        paymentId = recorded.refund.paymentReference.toString(),
+        amount = recorded.refund.amount.decimal(),
+        currency = recorded.refund.currency.currencyCode,
+        method = recorded.refund.method.name,
+        refundedAt = recorded.refund.refundedAt.toString(),
+        externalReference = recorded.refund.externalReference?.let { RefundExternalReference(it.provider, it.reference) },
+        allocations =
+            recorded.allocations.map {
+                RefundAllocationResponse(
+                    it.id.toString(),
+                    it.paymentAllocationReference.toString(),
+                    it.amount.decimal(),
+                    it.currency.currencyCode,
+                    it.allocatedAt.toString(),
+                )
+            },
+        reconciliation = reconciliation.toResponse(),
+    )
+
+private fun PaymentReconciliation.toResponse() =
+    PaymentReconciliationResponse(
+        paymentAmount.decimal(),
+        totalRefunded.decimal(),
+        netReceived.decimal(),
+        grossAllocated.decimal(),
+        allocationReversals.decimal(),
+        refundAllocations.decimal(),
+        netAllocated.decimal(),
+        unallocated.decimal(),
+        currency.currencyCode,
     )

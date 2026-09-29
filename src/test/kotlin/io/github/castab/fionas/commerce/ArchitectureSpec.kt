@@ -139,6 +139,7 @@ class ArchitectureSpec :
                     "financial/RecordDocumentPayment.kt: inTransaction",
                     "financial/RecordPayment.kt: inTransaction",
                     "financial/AllocatePayment.kt: inTransaction",
+                    "financial/RecordRefund.kt: inTransaction",
                     "financial/GetFinancialDocument.kt: inTransaction",
                     "financial/GetFinancialDocumentHistory.kt: inTransaction",
                     "financial/ListInquiryFinancialDocuments.kt: inTransaction",
@@ -201,6 +202,7 @@ class ArchitectureSpec :
                         recordPayment = { error("not called") },
                         recordStandalonePayment = { error("not called") },
                         allocatePayment = { error("not called") },
+                        recordRefund = { error("not called") },
                         login = { _, _ -> error("not called") },
                         currentUser = { error("not called") },
                         setStaffPassword = { _, _ -> error("not called") },
@@ -352,7 +354,7 @@ class ArchitectureSpec :
                 }.shouldBeEmpty()
         }
 
-        test("financial documents and payments are commerce-runtime's ledger; Fiona stores only its own context") {
+        test("financial documents, payments, and refunds are commerce-runtime's ledger; Fiona stores only its own context") {
             // Fiona reaches documents and payments only through the runtime's FinancialLedger,
             // never its repositories or tables, and writes no SQL against them.
             val runtimeRepositoryNames =
@@ -360,13 +362,15 @@ class ArchitectureSpec :
             sources().filter { runtimeRepositoryNames.containsMatchIn(it.codeWithoutComments()) }.shouldBeEmpty()
             sources()
                 // Table names, as opposed to permission keys such as `commerce.payment.record`.
-                .filter { Regex("""(?<![\w.])commerce\.(financial_document|payment_)""").containsMatchIn(it.readText()) }
+                .filter { Regex("""(?<![\w.])commerce\.(financial_document|payment_|refund_)""").containsMatchIn(it.readText()) }
                 .shouldBeEmpty()
             sources().containing(listOf("financialLedger")) shouldContainExactly listOf("FionaApplication.kt: financialLedger")
             // No Fiona table restates a ledger fact: no lines, amounts, totals, balances, stages,
             // payment status, payments, or allocations of its own.
             val ledgerFacts =
-                Regex("""\b(line_items?|lines|amount|price|subtotal|tax|total|balance|stage|status|payments?|allocations?)\b""")
+                Regex(
+                    """\b(line_items?|lines|amount|price|subtotal|tax|total|balance|stage|status|payments?|refunds?|allocations?)\b""",
+                )
             migrations()
                 .flatMap { migration -> createdTableDefinitions(migration).map { migration.name to it } }
                 .filter { (_, definition) -> ledgerFacts.containsMatchIn(definition) }
@@ -384,6 +388,15 @@ class ArchitectureSpec :
                     }
             calls.shouldNotBeEmpty()
             calls.filterNot { it.endsWith("(transaction") }.shouldBeEmpty()
+        }
+
+        test("recording a refund joins one runtime transaction and reconciles in it") {
+            val source = File(mainSources, "financial/RecordRefund.kt").readText()
+            source.contains("transactor.inTransaction { transaction ->") shouldBe true
+            source.contains("ledger.recordRefund(") shouldBe true
+            source.contains("transaction = transaction") shouldBe true
+            source.contains("ledger.reconcilePayment(transaction, command.paymentId)") shouldBe true
+            listOf("Jdbi", "Handle", "DataSource", "jdbc:").filter { it in source }.shouldBeEmpty()
         }
 
         test("Jackson renders only the Offerings schemas; kotlinx.serialization stays the wire format") {
@@ -423,6 +436,7 @@ class ArchitectureSpec :
                 "CommercePermissions.FinancialDocumentRead",
                 "CommercePermissions.FinancialDocumentCreate",
                 "CommercePermissions.PaymentRecord",
+                "CommercePermissions.RefundRecord",
             ).filterNot { it in bootstrap }.shouldBeEmpty()
             // Fiona defines no duplicates of generic commerce permissions.
             FionaPermissions.definitions.map { it.key } shouldContainExactly listOf(FionaPermissions.CredentialsManage)

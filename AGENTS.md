@@ -156,9 +156,10 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
 - the financial ledger: `FinancialLedger` (`context.financialLedger`), the
   `FinancialDocumentRepository` and `PaymentRepository`, their tables
   (`commerce.financial_document_snapshots`, `commerce.financial_document_lines`,
-  `commerce.payment_records`, `commerce.payment_allocations`), financial-document lifecycle
+  `commerce.payment_records`, `commerce.payment_allocations`, `commerce.refund_records`,
+  `commerce.refund_allocations`), financial-document lifecycle
   orchestration (`create`, `changeOrder`, `issueQuote`, `issueInvoice`), payment recording
-  and allocation, and derived reconciliation.
+  and allocation, refund recording and explicit allocation unwinds, and derived reconciliation.
 
 Never create another connection pool, another `Jdbi` instance, another transaction
 manager, Spring transactions, a nested transaction abstraction, a second configuration
@@ -464,12 +465,12 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   after both migration streams and permission validation. There is no default password;
   later startup never overwrites an existing credential.
 - The Administrator role grants exactly OfferingsManage, FinancialDocumentRead,
-  FinancialDocumentCreate, PaymentRecord, PrincipalRead, PrincipalManage, RoleRead,
+  FinancialDocumentCreate, PaymentRecord, RefundRecord, PrincipalRead, PrincipalManage, RoleRead,
   RoleManage, RoleAssign, and Fiona's `fionas.credentials.manage`. It has no wildcard or
   automatic future grants. Grants are fixed when bootstrap creates the role; startup never
   mutates an existing Administrator role, whose grants are managed through `/admin/access`.
 - Generic commerce actions use commerce-domain's `CommercePermissions`
-  (`FinancialDocumentRead`, `FinancialDocumentCreate`, `PaymentRecord`); never define a Fiona
+  (`FinancialDocumentRead`, `FinancialDocumentCreate`, `PaymentRecord`, `RefundRecord`); never define a Fiona
   duplicate. Only Fiona-specific actions get a Fiona permission.
 - Fiona contributes `fionas.credentials.manage` through
   `ApplicationContributions.permissionDefinitions`. The runtime permission catalog and
@@ -480,7 +481,7 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   control guards runtime administration at `/admin/access` and Fiona's
   `PUT /admin/users/{userId}/credentials/password`. The credential endpoint verifies the
   runtime user, stores a new hash, returns no secret material, and does not revoke existing
-  sessions. Every financial-document and payment route requires its commerce permission
+  sessions. Every financial-document, payment, and refund route requires its commerce permission
   through the same control. Public
   inquiries, estimate previews, Offerings reads, health, and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
@@ -565,9 +566,9 @@ deposit, invoice, and final-payment workflow. The split:
 
 ```text
 commerce-domain     FinancialDocument / ChangeOrder / LineItem / PaymentRecord /
-                    PaymentAllocation models and invariants
-commerce-runtime    financial snapshot persistence, lifecycle orchestration, payment and
-                    allocation persistence, reconciliation, transaction-aware
+                    PaymentAllocation / RefundRecord / RefundAllocation models and invariants
+commerce-runtime    financial snapshot persistence, lifecycle orchestration, payment,
+                    allocation and refund persistence, reconciliation, transaction-aware
                     FinancialLedger operations
 fionas-commerce     inquiry → document relationship, Fiona pricing inputs and history,
                     server-authoritative starting-stage choice and pricing, change-order
@@ -623,13 +624,21 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    Amounts are exact decimals limited by currency minor units. External-reference
    uniqueness is the runtime's conflict policy. Allocations stay attached to their exact
    snapshot, while the latest lineage reconciliation counts them all.
-9. **Settlement is derived.** Only the latest view carries reconciliation (`grossAllocated`,
+9. **Refunds explicitly unwind allocations.** `POST /payments/{paymentId}/refunds` requires
+   `commerce.refund.record`. The caller names each payment allocation and amount to unwind;
+   an empty list refunds unapplied value. Fiona generates refund ids and timestamps and calls
+   `ledger.recordRefund(transaction, ...)`, then `reconcilePayment(transaction, ...)` in one
+   runtime transaction. Runtime validates the complete history. Refunded money is never
+   reusable. No Fiona migration or refund table exists. Fresh Administrators receive the
+   permission; existing roles retain their grants and need an explicit administration API
+   grant. Allocation reversals remain unsupported by runtime persistence.
+10. **Settlement is derived.** Only the latest view carries reconciliation (`grossAllocated`,
    `netApplied`, `balance`); history shows historical facts and pricing sources, never a
-   reconciliation of an older snapshot. Unapplied amount is the received amount minus
-   persisted allocations, never mutable state. Payment status is presentation, derived by
+   reconciliation of an older snapshot. Unapplied amount is net received minus net
+   allocated value after refunds and refund unwinds, never mutable state. Payment status is presentation, derived by
    clients. Allocation responses reconcile the exact reference they changed.
-10. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
-11. **No `Booking` yet.** Inquiry → financial-document lineage → payments is the model until
+11. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
+12. **No `Booking` yet.** Inquiry → financial-document lineage → payments is the model until
     a slice decides when an inquiry becomes a booking.
 
 ## Kotlin conventions
@@ -663,7 +672,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the `CreateInquiry` and `GetInquiry` operations |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
-| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, and `ListInquiryFinancialDocuments` operations |
+| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, and `ListInquiryFinancialDocuments` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
@@ -679,7 +688,7 @@ Do not create generic frameworks, `Repository<T, ID>`, `CrudRepository`,
 future requirements. Repositories are narrow and intention-revealing. Extract only after
 real repetition or a real requirement appears.
 
-Not in scope until a dedicated slice decides otherwise: refunds, allocation reversals,
+Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
 webhooks, service credentials, OAuth/OIDC, self-service password resets, event publishing,
 outbox, NATS, projections, CQRS, bookings and booking conversion, booking lifecycle
@@ -710,7 +719,7 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (as of commerce 0.0.13)
+### Known upstream gaps (as of commerce 0.0.14)
 
 - **Application history schema is fixed.** Fiona's tables live in `fionas`, but the
   runtime keeps every application's migration history in `public.flyway_schema_history`

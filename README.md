@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.13/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.13/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.14/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.14/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -13,7 +13,7 @@ artifacts.
 > inquiry into persisted financial documents (an estimate, change orders, a quote, an
 > invoice) and record payments against them; the documents, payments, and settlement are
 > commerce-runtime's financial ledger, and Fiona records which inquiry owns each document and
-> the pricing inputs of every version. There are no bookings, refunds, or payment-provider
+> the pricing inputs of every version. There are no bookings or payment-provider
 > integrations yet. Staff authentication protects administration and every financial route.
 
 ## How it fits together
@@ -37,8 +37,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.13`, which brings
-`commerce-domain:0.0.13` with it. It contributes its migrations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.14`, which brings
+`commerce-domain:0.0.14` with it. It contributes its migrations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -291,12 +291,12 @@ The runtime directory normalizes usernames and stores the profile and status in
 change time, with a foreign key to that runtime user. Fiona contributes
 `fionas.credentials.manage` to the runtime permission catalog. The bootstrap
 Administrator role explicitly grants OfferingsManage, FinancialDocumentRead,
-FinancialDocumentCreate, PaymentRecord, PrincipalRead, PrincipalManage, RoleRead, RoleManage,
+FinancialDocumentCreate, PaymentRecord, RefundRecord, PrincipalRead, PrincipalManage, RoleRead, RoleManage,
 RoleAssign, and CredentialsManage. Future permissions are not granted automatically, and
 the grants are fixed when bootstrap creates the role: startup never changes an existing
-Administrator role. An installation bootstrapped before this release grants the three
-financial permissions itself, for example by replacing the role's permissions with the full
-list above through `PUT /admin/access/roles/commerce.administrator/permissions`.
+Administrator role. An installation upgrading from an earlier release retains its existing
+grants. Its Administrator role must explicitly receive `commerce.refund.record` through
+`PUT /admin/access/roles/commerce.administrator/permissions` before calling the refund endpoint.
 
 To provision the first administrator, set `FIONAS_BOOTSTRAP_ADMIN_USERNAME`,
 `FIONAS_BOOTSTRAP_ADMIN_PASSWORD`, and `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` for one startup.
@@ -453,9 +453,10 @@ The responsibilities are split three ways:
 
 ```text
 commerce-domain      FinancialDocument (Estimate → Quote → Invoice), ChangeOrder, LineItem,
-                     Money, PaymentRecord, PaymentAllocation, reconciliation invariants
+                     Money, PaymentRecord, PaymentAllocation, RefundRecord, RefundAllocation,
+                     reconciliation invariants
 commerce-runtime     financial snapshot persistence and lifecycle orchestration, payment and
-                     allocation persistence, reconciliation, transaction-aware ledger
+                     allocation and refund persistence, reconciliation, transaction-aware ledger
                      operations (context.financialLedger)
 fionas-commerce      inquiry → document ownership, Fiona pricing inputs of every version,
                      server-authoritative starting stage and pricing, change-order intent,
@@ -465,7 +466,8 @@ fionas-commerce      inquiry → document ownership, Fiona pricing inputs of eve
 **The ledger is commerce-runtime's.** Every version of a document is an immutable
 commerce-runtime snapshot `(documentId, version)` in `commerce.financial_document_snapshots`
 with its lines; totals are derived from the lines. Payments and allocations are
-commerce-runtime's `commerce.payment_records` and `commerce.payment_allocations`. Fiona has
+commerce-runtime's `commerce.payment_records`, `commerce.payment_allocations`,
+`commerce.refund_records`, and `commerce.refund_allocations`. Fiona has
 no copy of any of it, and no stored balance or payment status.
 
 **Fiona owns the context.** `fionas.inquiry_financial_documents` records which inquiry owns
@@ -547,7 +549,8 @@ The current view reconciles the exact document snapshot it returns.
 assigns some of that money to an exact document snapshot. Reconciliation is a derived
 view over the document and its allocations. A payment can therefore be unapplied,
 partially applied, or split across eligible documents. The unapplied amount is its
-received amount minus persisted allocations; Fiona stores no payment status or balance.
+net received amount minus net allocations, including refund unwinds; Fiona stores no
+payment status or balance.
 
 `POST /payments` records a payment without knowing its destination:
 
@@ -574,7 +577,28 @@ allocation history, including currency agreement and the maximum allocatable amo
 The response contains the allocation fact and reconciliation for the exact document
 reference. Two allocations of a received `$500` may assign `$300` to one document and
 `$200` to another; allocating `$150` leaves `$350` unapplied without storing that
-remainder. Refunds and allocation reversals are not implemented.
+remainder. Allocation reversals are not persisted by the runtime.
+
+`POST /payments/{paymentId}/refunds` records a partial or full refund under the separate
+`commerce.refund.record` permission. The request names the payment and explicitly identifies
+each allocation to unwind; Fiona never selects an allocation automatically:
+
+```json
+{"amount":"50.00","currency":"USD","method":"OTHER",
+ "allocations":[{"paymentAllocationId":"...","amount":"50.00"}]}
+```
+
+`amount` and allocation amounts are positive exact decimal strings. `currency` is required
+and must match the payment. `method` may differ from the original payment method.
+`refundedAt` is an optional RFC 3339 timestamp (server time when absent), and
+`externalReference` is an optional refund-specific `{provider, reference}` pair. An empty
+or omitted `allocations` list refunds unapplied value. Fiona generates the refund and refund
+allocation ids and timestamps, then calls the runtime ledger in one transaction. The `201`
+response includes the recorded refund, each refund allocation, and the payment's derived
+`paymentAmount`, `totalRefunded`, `netReceived`, `grossAllocated`,
+`allocationReversals`, `refundAllocations`, `netAllocated`, and `unallocated` amounts, plus
+currency. It does not pick one document reconciliation: a payment may span documents.
+Refunded money cannot be allocated again. No Fiona table stores a refund or balance.
 
 The existing `POST /financial-documents/{documentId}/payments` means "we received this
 payment, and all of it is for this document":
@@ -602,14 +626,15 @@ total minus the net applied. Over-application is allowed; the balance is then ne
 response names the payment, the allocation, the exact version, and the settlement after it.
 The two facts are committed atomically. All payment amounts remain exact decimal strings,
 never JSON floating-point numbers. Provider SDKs, webhooks, stored payment status,
-stored document balance, booking conversion, events/outbox/CQRS, refunds, and allocation
+stored document balance, booking conversion, events/outbox/CQRS, and allocation
 reversals remain outside this workflow.
 
 **One transaction per operation.** Each operation opens one runtime transaction and passes
 it to every ledger call (`context.financialLedger.create(transaction, …)`,
 `issueQuote(transaction, …)`, `changeOrder(transaction, …)`,
 `recordPayment(transaction, …)`, `allocatePayment(transaction, …)`,
-`recordPaymentAgainstDocument(transaction, …)`, `reconcile(transaction, exactReference)`) and to
+`recordPaymentAgainstDocument(transaction, …)`, `recordRefund(transaction, …)`,
+`reconcilePayment(transaction, …)`, `reconcile(transaction, exactReference)`) and to
 Fiona's repositories, and prices from the exact catalog revision read in that same
 transaction. If any step fails, the commerce snapshot, payment, or allocation rolls back
 with Fiona's association and pricing source.
@@ -759,7 +784,7 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
   and the exact `commerce.financial_document_snapshots` version). Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog and the financial ledger's snapshots,
-  lines, payments, and allocations. Neither needs a Fiona copy.
+  lines, payments, allocations, refunds, and refund allocations. None needs a Fiona copy.
 - Composing the runtime runs the migration phase before anything is served. By default
   (`MIGRATIONS_ON_STARTUP=migrate`) it applies the runtime's pending migrations, then
   Fiona's; re-running against a current database applies nothing. A deployment that
@@ -772,6 +797,10 @@ Fiona migrations               fionas schema      public.flyway_schema_history  
 > ledger migration, and Fiona adds `V3`; a database from the previous release migrates
 > forward on startup, runtime first. The existing Administrator role keeps its grants (see
 > [Staff authentication](#staff-authentication)).
+
+> **Upgrading to commerce 0.0.14.** The runtime applies `V6__refunds` to create its two
+> refund tables. Fiona adds no migration. Existing Administrator grants are retained;
+> grant `commerce.refund.record` explicitly before using the new endpoint.
 >
 > **Development reset for the commerce 0.0.11 integration.** Fiona's unreleased `V2`
 > contains only password credentials. Disposable databases from before the authorization
@@ -834,11 +863,12 @@ It does not load `.env` files or install npm packages. The catalog is append-onl
 script stops if one already exists. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
 for the exact catalog entries and preview request.
 
-### Smoke test a direct Invoice payment locally
+### Smoke test Invoice payments and a refund locally
 
 With Fiona running locally and its Offerings catalog already initialized by
 `setup-local-commerce.mjs`, use Node.js 20 or newer to exercise the separate payment
-recording and allocation routes:
+recording, allocation, and refund routes. The local Administrator needs
+`commerce.refund.record` (fresh bootstrap grants it; older roles need an explicit grant):
 
 ```bash
 FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/spoof-payment.mjs
@@ -846,9 +876,10 @@ FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/spoof-payment.mjs
 
 The script accepts the same `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
 `FIONAS_ADMIN_USERNAME` defaults as the catalog setup script; `FIONAS_ADMIN_PASSWORD` is
-required. It creates a real local inquiry, a direct Invoice v1, a standalone payment for
-the server-calculated total, and an allocation through Fiona's HTTP API, then verifies
-the derived balance is zero. It writes ordinary development data to the configured
+required. It creates a real local inquiry and direct Invoice v1, records and allocates
+`$200.00` and `$150.00`, refunds `$50.00` from the second payment's allocation, then pays
+the server-returned reopened balance. Exact cent arithmetic verifies gross and net
+allocation and a final zero balance. It writes ordinary development data to the configured
 database, so use it in local/disposable environments. It has no npm dependencies and is
 not a payment-provider or webhook simulator.
 

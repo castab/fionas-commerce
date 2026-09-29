@@ -15,8 +15,10 @@ import io.github.castab.fionas.commerce.financial.AllocatedPayment
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
+import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
+import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
@@ -63,6 +65,7 @@ class FionaOperations(
     val recordPayment: (RecordDocumentPayment.Command) -> RecordedPayment,
     val recordStandalonePayment: (RecordPayment.Command) -> PaymentRecord,
     val allocatePayment: (AllocatePayment.Command) -> AllocatedPayment,
+    val recordRefund: (RecordRefund.Command) -> ReconciledRefund,
     val login: (String, SecretPassword) -> IssuedSession?,
     val currentUser: (UserId) -> User?,
     val setStaffPassword: (UserId, SecretPassword) -> Unit,
@@ -98,6 +101,7 @@ fun fionaApiRoutes(
         recordPaymentRoute(operations.recordPayment, auth.access),
         recordStandalonePaymentRoute(operations.recordStandalonePayment, auth.access),
         allocatePaymentRoute(operations.allocatePayment, auth.access),
+        recordRefundRoute(operations.recordRefund, auth.access),
         loginRoute(operations.login, auth.cookie, auth.access, auth.origin),
         logoutRoute(auth.sessions, auth.cookie, auth.access),
         currentUserRoute(operations.currentUser, auth.access),
