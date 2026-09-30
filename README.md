@@ -1028,8 +1028,8 @@ The image build runs `shadowJar` only; lint and tests stay in CI.
 
 ### Deploying on Railway
 
-[`railway.toml`](railway.toml) selects the Dockerfile builder and health-checks `/ready`.
-Railway passes service variables to a Dockerfile build only when the Dockerfile declares
+Railway builds the root `Dockerfile` when it detects one. In the service settings, set the
+healthcheck path to `/ready` (`/health` is liveness only). Railway passes service variables to a Dockerfile build only when the Dockerfile declares
 them with `ARG`, which is why `GITHUB_ACTOR` and `GITHUB_TOKEN` are declared there. Set
 these variables on the service (Railway also injects `PORT`):
 
