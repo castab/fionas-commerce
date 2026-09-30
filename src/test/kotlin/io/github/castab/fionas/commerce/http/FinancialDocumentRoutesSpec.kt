@@ -133,7 +133,7 @@ class FinancialDocumentRoutesSpec :
                     ),
                     application.http(
                         Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(
-                            """{"name":"Rejected","email":"rejected@example.com","pricingInputs":$invalidInputs}""",
+                            """{"name":"Rejected","email":"rejected@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$invalidInputs}""",
                         ),
                     ),
                     estimate(inquiryId, invalidInputs),

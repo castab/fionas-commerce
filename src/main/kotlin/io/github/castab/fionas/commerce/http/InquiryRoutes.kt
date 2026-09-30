@@ -7,6 +7,8 @@ import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
+import io.github.castab.fionas.commerce.inquiry.EventDate
+import io.github.castab.fionas.commerce.inquiry.EventType
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -15,6 +17,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.InquirySummary
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
+import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.Serializable
@@ -76,7 +79,34 @@ data class CreateInquiryRequest(
                 "preview, and nothing is recorded. Amounts are never accepted; the inquiry records the inputs only.",
     )
     val pricingInputs: InquiryPricingInputs? = null,
+    @ApiProperty(
+        description =
+            "Required event ZIP code for staff service-area/travel review; not the customer's home address. " +
+                "Trimmed; must contain exactly five ASCII digits, preserving leading zeroes. " +
+                "No automatic service-area decision or surcharge is applied.",
+        minLength = ZipCode.LENGTH,
+        maxLength = ZipCode.LENGTH,
+        pattern = ZipCode.PATTERN,
+    )
+    val zipCode: String,
+    @ApiProperty(description = "Required event calendar date in YYYY-MM-DD, without a time or time zone. Years 0001–9999.", format = "date")
+    val eventDate: String,
+    @ApiProperty(description = "Required event type. Submit one of the form's option values.")
+    val eventType: InquiryEventType,
 )
+
+@Serializable
+enum class InquiryEventType {
+    BIRTHDAY,
+    WEDDING,
+    CORPORATE,
+    SCHOOL_EVENT,
+    NEIGHBORHOOD_EVENT,
+    OTHER,
+    ;
+
+    fun toDomain(): EventType = EventType.valueOf(name)
+}
 
 /** The commercial inputs a customer configured, submitted with an inquiry: never amounts, lines, or totals. */
 @Serializable
@@ -133,6 +163,11 @@ data class InquiryResponse(
                 "Its properties are those `POST /inquiries/{inquiryId}/estimates` takes.",
     )
     val pricingInputs: InquiryRequestedPricing? = null,
+    @ApiProperty(description = "The event's required ZIP code as recorded with this inquiry.", pattern = ZipCode.PATTERN)
+    val zipCode: String,
+    @ApiProperty(description = "The recorded event calendar date, without a time or time zone.", format = "date")
+    val eventDate: String,
+    val eventType: InquiryEventType,
 )
 
 /** The commercial inputs recorded with an inquiry, pinned to the catalog revision the customer chose from. */
@@ -181,6 +216,11 @@ data class InquiryListItem(
         format = "date-time",
     )
     val createdAt: String,
+    @ApiProperty(description = "The inquiry's required event ZIP code for staff travel review.", pattern = ZipCode.PATTERN)
+    val zipCode: String,
+    @ApiProperty(description = "The recorded event calendar date, without a time or time zone.", format = "date")
+    val eventDate: String,
+    val eventType: InquiryEventType,
 )
 
 private val createInquiryRequest = jsonBody(CreateInquiryRequest.serializer())
@@ -226,6 +266,9 @@ private val exampleRequest =
         message = "Ice cream service for a birthday.",
         pricingInputs =
             InquiryPricingInputs(catalogRevision = 12, guestCount = 75, durationMinutes = 120, selections = exampleSelections),
+        zipCode = "92626",
+        eventDate = "2026-12-05",
+        eventType = InquiryEventType.BIRTHDAY,
     )
 private val exampleReceipt =
     InquiryReceiptResponse(id = "c755f7cd-1e28-4c75-a85f-d066ede7387d", createdAt = "2026-09-26T21:19:39.321012Z")
@@ -237,6 +280,9 @@ private val exampleInquiry =
         email = "jane@example.com",
         message = "Ice cream service for a birthday.",
         createdAt = "2026-09-26T21:19:39.321012Z",
+        zipCode = "92626",
+        eventDate = "2026-12-05",
+        eventType = InquiryEventType.BIRTHDAY,
         pricingInputs =
             InquiryRequestedPricing(
                 catalogRevision = 12,
@@ -257,6 +303,9 @@ private val exampleList =
                     email = "jane@example.com",
                     message = "Ice cream service for a birthday.",
                     createdAt = "2026-09-26T21:19:39.321012Z",
+                    zipCode = "92626",
+                    eventDate = "2026-12-05",
+                    eventType = InquiryEventType.BIRTHDAY,
                 ),
             ),
         nextCursor = "MjAyNi0wOS0yNlQyMToxOTozOS4zMjEwMTJafGM3NTVmN2NkLTFlMjgtNGM3NS1hODVmLWQwNjZlZGU3Mzg3ZA",
@@ -303,7 +352,8 @@ fun createInquiryRoute(
         returning(Status.CREATED, inquiryReceiptResponse to exampleReceipt, "The recorded inquiry's receipt. `Location` holds its path.")
         returningError(
             ErrorCategory.MALFORMED_REQUEST,
-            "the body is not JSON, or lacks `name` or `email`, or a field has the wrong type.",
+            "the body is not JSON, lacks a required name, email, ZIP, event date or type, " +
+                "has an unknown event type, or a field has the wrong type.",
             "Malformed request: body 'body'",
         )
         returningError(
@@ -313,7 +363,8 @@ fun createInquiryRoute(
         )
         returningError(
             ErrorCategory.VALIDATION_FAILED,
-            "a value is invalid, for example a blank name or an email address without `@`, or `pricingInputs` cannot " +
+            "a value is invalid: a blank name, an email without `@`, a ZIP code without five digits, an invalid event date, " +
+                "or `pricingInputs` cannot " +
                 "be priced: they do not fit the catalog revision (for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) " +
                 "or Fiona's pricing (for example `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`). Optional `violations` " +
                 "expose stable codes; the message is diagnostic.",
@@ -333,6 +384,9 @@ fun createInquiryRoute(
                     name = CustomerName.of(body.name),
                     email = Email.of(body.email),
                     message = InquiryMessage.ofOptional(body.message),
+                    zipCode = ZipCode.of(body.zipCode),
+                    eventDate = EventDate.of(body.eventDate),
+                    eventType = body.eventType.toDomain(),
                     pricingInputs =
                         body.pricingInputs?.let {
                             pricingInputs(
@@ -452,6 +506,9 @@ private fun InquiryDetails.toResponse() =
         message = inquiry.message?.value,
         createdAt = inquiry.createdAt.toString(),
         pricingInputs = pricingInputs?.toResponse(),
+        zipCode = inquiry.zipCode.value,
+        eventDate = inquiry.eventDate.value.toString(),
+        eventType = InquiryEventType.valueOf(inquiry.eventType.name),
     )
 
 private fun FionasPricingInputs.toResponse() =
@@ -477,4 +534,7 @@ private fun InquirySummary.toResponse() =
         email = customer.email.value,
         message = inquiry.message?.value,
         createdAt = inquiry.createdAt.toString(),
+        zipCode = inquiry.zipCode.value,
+        eventDate = inquiry.eventDate.value.toString(),
+        eventType = InquiryEventType.valueOf(inquiry.eventType.name),
     )

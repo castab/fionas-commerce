@@ -8,6 +8,7 @@ import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.inquiry.InquiryFormControl
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
+import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
@@ -88,21 +89,24 @@ class InquiryFormRoutesSpec :
 
         test("public form returns ordered questions, submission bindings, and separate presentation hints") {
             val form = application.form()
-            form.definitionVersion shouldBe 2
+            form.definitionVersion shouldBe 5
             form.catalogRevision shouldBe revision
             form.sections.map { it.key to it.title } shouldContainExactly
                 listOf(
                     "contact" to "Contact information",
+                    "event" to "Event details",
                     "service" to "Build your ice cream service",
                     "additional" to "Additional information",
                 )
-            form.sections.map { it.optional } shouldContainExactly listOf(false, true, true)
+            form.sections.map { it.optional } shouldContainExactly listOf(false, false, true, true)
             form.fields().map { it.key } shouldContainExactly
                 listOf(
                     "name",
                     "email",
+                    "zipCode",
+                    "eventDate",
+                    "eventType",
                     "guestCount",
-                    "guestCountIsMinimum",
                     "durationMinutes",
                     "offering:soft-serve-flavor",
                     "offering:topping",
@@ -113,8 +117,10 @@ class InquiryFormRoutesSpec :
                 listOf(
                     "/name",
                     "/email",
+                    "/zipCode",
+                    "/eventDate",
+                    "/eventType",
                     "/pricingInputs/guestCount",
-                    "/pricingInputs/guestCountIsMinimum",
                     "/pricingInputs/durationMinutes",
                     "/pricingInputs/selections",
                     "/pricingInputs/selections",
@@ -136,7 +142,7 @@ class InquiryFormRoutesSpec :
                 empty.catalogRevision shouldBe 1
                 empty.choices() shouldBe emptyList()
                 empty.fields().map { it.key } shouldContainExactly
-                    listOf("name", "email", "guestCount", "guestCountIsMinimum", "durationMinutes", "message")
+                    listOf("name", "email", "zipCode", "eventDate", "eventType", "guestCount", "durationMinutes", "message")
                 // Insert in a different order to prove the known questions follow Fiona's definition.
                 var latest = empty.catalogRevision
                 listOf("cone-option", "extras", "soft-serve-flavor").forEach { category ->
@@ -181,7 +187,28 @@ class InquiryFormRoutesSpec :
             fields.getValue("message").required shouldBe false
             fields.getValue("message").presentation.control shouldBe InquiryFormControl.TEXTAREA
             fields.getValue("guestCount").input shouldBe InquiryFormInputResponse.Integer(1)
-            fields.getValue("guestCountIsMinimum").input shouldBe InquiryFormInputResponse.BooleanValue(false)
+            fields.getValue("guestCount").description shouldBe
+                "An estimate is totally okay - we can hash out the finer details during quoting."
+            fields.getValue("zipCode").let {
+                it.input shouldBe InquiryFormInputResponse.Text(ZipCode.LENGTH, ZipCode.LENGTH, ZipCode.PATTERN)
+                it.required shouldBe true
+                it.presentation.control shouldBe InquiryFormControl.TEXT
+            }
+            fields.containsKey("guestCountIsMinimum") shouldBe false
+            fields.getValue("eventDate").let {
+                it.required shouldBe true
+                it.input shouldBe InquiryFormInputResponse.Date("date")
+                it.presentation.control shouldBe InquiryFormControl.DATE
+            }
+            fields.getValue("eventType").let {
+                it.required shouldBe true
+                it.presentation.control shouldBe InquiryFormControl.SELECT
+                val options = (it.input as InquiryFormInputResponse.StringChoice).options
+                options.map { option -> option.label } shouldContainExactly
+                    listOf("Birthday", "Wedding", "Corporate", "School event", "Neighborhood event", "Other")
+                options.map { option -> InquiryEventType.valueOf(option.value).toDomain().name } shouldContainExactly
+                    InquiryEventType.entries.map { type -> type.name }
+            }
             (
                 fields
                     .getValue(
@@ -229,6 +256,12 @@ class InquiryFormRoutesSpec :
                 .price
                 ?.amount shouldBe "0.50"
             flavors.options.first().price shouldBe null
+            form
+                .choices()
+                .single { it.category == "topping" }
+                .options
+                .map { it.key to it.displayName } shouldContainExactly
+                TOPPINGS.zip(listOf("Sprinkles", "Oreos", "Strawberries", "Brownies", "Gummy Bears", "Cookie Dough"))
         }
 
         test("the acceptance estimate is calculated from form facts alone and matches the authoritative preview") {
@@ -422,7 +455,9 @@ class InquiryFormRoutesSpec :
                         Request(Method.POST, "/inquiries")
                             .withUiKey()
                             .header("Content-Type", "application/json")
-                            .body("""{"name":"Jane","email":"jane@example.com","pricingInputs":$inputs}"""),
+                            .body(
+                                """{"name":"Jane","email":"jane@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$inputs}""",
+                            ),
                     ).status shouldBe Status.CREATED
                 fresh
                     .http(
@@ -460,7 +495,14 @@ class InquiryFormRoutesSpec :
                         .body(
                             CommerceJson.json.encodeToString(
                                 CreateInquiryRequest.serializer(),
-                                CreateInquiryRequest("Jane", "form@example.com", pricingInputs = value),
+                                CreateInquiryRequest(
+                                    "Jane",
+                                    "form@example.com",
+                                    pricingInputs = value,
+                                    zipCode = "92626",
+                                    eventDate = "2026-12-05",
+                                    eventType = InquiryEventType.BIRTHDAY,
+                                ),
                             ),
                         ),
                 )
@@ -480,7 +522,9 @@ class InquiryFormRoutesSpec :
                     Request(Method.POST, "/inquiries")
                         .withUiKey()
                         .header("Content-Type", "application/json")
-                        .body("""{"name":"Jane","email":"plain@example.com"}"""),
+                        .body(
+                            """{"name":"Jane","email":"plain@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY"}""",
+                        ),
                 )
             plain.status shouldBe Status.CREATED
         }

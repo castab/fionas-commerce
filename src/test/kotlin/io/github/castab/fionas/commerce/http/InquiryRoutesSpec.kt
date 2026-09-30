@@ -72,8 +72,12 @@ class InquiryRoutesSpec :
         fun Response.keys() = Json.parseToJsonElement(bodyString()).jsonObject.keys
 
         fun rows() =
-            listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_pricing", "fionas.inquiry_pricing_selections")
-                .map(application.database::count)
+            listOf(
+                "fionas.customers",
+                "fionas.inquiries",
+                "fionas.inquiry_pricing",
+                "fionas.inquiry_pricing_selections",
+            ).map(application.database::count)
 
         /** Runs [block] while the bootstrap administrator holds only [permissions], then restores the Administrator role. */
         fun <T> TestApplication.asStaffWith(
@@ -97,16 +101,135 @@ class InquiryRoutesSpec :
             email: String,
             name: String = "Jane Doe",
             extra: String = "",
-        ) = """{"name":"$name","email":"$email"$extra}"""
+            zipCode: String = "92626",
+            eventDate: String = "2026-12-05",
+            eventType: String = "BIRTHDAY",
+        ) = """{"name":"$name","email":"$email","zipCode":"$zipCode","eventDate":"$eventDate","eventType":"$eventType"$extra}"""
 
         // POST /inquiries: public, and a receipt of the new inquiry only.
+
+        test("every event type and a leap-day date survive detail and inbox reads without entering customer data") {
+            val email = "event-${UUID.randomUUID()}@example.com"
+            var customerId: String? = null
+            InquiryEventType.entries.forEach { type ->
+                val response = post(inquiryBody(email, eventDate = "2028-02-29", eventType = type.name))
+                response.status shouldBe Status.CREATED
+                response.keys() shouldBe setOf("id", "createdAt")
+                val read = application.adminGet("/inquiries/${response.receipt().id}").inquiry()
+                read.eventDate shouldBe "2028-02-29"
+                read.eventType shouldBe type
+                customerId?.let { read.customerId shouldBe it }
+                customerId = read.customerId
+                val item =
+                    application
+                        .adminGet("/inquiries")
+                        .list()
+                        .inquiries
+                        .single { it.id == read.id }
+                item.eventDate shouldBe read.eventDate
+                item.eventType shouldBe type
+            }
+        }
+
+        test("invalid calendar dates reject submission without recording customer or inquiry") {
+            listOf(
+                "",
+                "2026-02-29",
+                "2026-04-31",
+                "0000-01-01",
+                "10000-01-01",
+                "2026-1-2",
+                " 2026-12-05 ",
+                "2026-12-05T12:00:00Z",
+                "12/05/2026",
+            ).forEach { date ->
+                val before = rows()
+                val response = post(inquiryBody("invalid-event-${UUID.randomUUID()}@example.com", eventDate = date))
+                response.status shouldBe Status.UNPROCESSABLE_ENTITY
+                response.error().code shouldBe "validation_failed"
+                rows() shouldBe before
+            }
+        }
+
+        test("required event fields reject missing, null, wrong-type and unknown selection values") {
+            val body = inquiryBody("missing-event@example.com")
+            val before = rows()
+            listOf(
+                body.replace(",\"eventDate\":\"2026-12-05\"", ""),
+                body.replace("\"eventDate\":\"2026-12-05\"", "\"eventDate\":null"),
+                body.replace("\"eventDate\":\"2026-12-05\"", "\"eventDate\":20261205"),
+                body.replace(",\"eventType\":\"BIRTHDAY\"", ""),
+                body.replace("\"eventType\":\"BIRTHDAY\"", "\"eventType\":null"),
+                body.replace("\"eventType\":\"BIRTHDAY\"", "\"eventType\":1"),
+                body.replace("BIRTHDAY", "UNKNOWN"),
+                body.replace("BIRTHDAY", "Birthday"),
+            ).forEach { submitted ->
+                post(submitted).let {
+                    it.status shouldBe Status.BAD_REQUEST
+                    it.error().code shouldBe "malformed_request"
+                }
+                rows() shouldBe before
+            }
+        }
+
+        test("event ZIP codes belong to each inquiry, survive staff reads and never expose a customer to public callers") {
+            val email = "zip-${UUID.randomUUID()}@example.com"
+            val first = post(inquiryBody(email, zipCode = " 02108 "))
+            first.status shouldBe Status.CREATED
+            first.keys() shouldBe setOf("id", "createdAt")
+            val second = post(inquiryBody(email, zipCode = "92626"))
+            second.status shouldBe Status.CREATED
+            val firstRead = application.adminGet("/inquiries/${first.receipt().id}").inquiry()
+            val secondRead = application.adminGet("/inquiries/${second.receipt().id}").inquiry()
+            firstRead.zipCode shouldBe "02108"
+            secondRead.zipCode shouldBe "92626"
+            firstRead.customerId shouldBe secondRead.customerId
+            val inbox =
+                application
+                    .adminGet("/inquiries")
+                    .list()
+                    .inquiries
+                    .associateBy { it.id }
+            inbox.getValue(firstRead.id).zipCode shouldBe "02108"
+            inbox.getValue(secondRead.id).zipCode shouldBe "92626"
+            anonymousGet("/inquiries/${firstRead.id}").status shouldBe Status.UNAUTHORIZED
+        }
+
+        test("blank or invalid ZIP rejects submission without writing anything") {
+            listOf("", "   ", "1234", "123456", "12a45", "12345-6789", "１２３４５").forEach { invalid ->
+                val before = rows()
+                val response = post(inquiryBody("bad-zip-${UUID.randomUUID()}@example.com", zipCode = invalid))
+                response.status shouldBe Status.UNPROCESSABLE_ENTITY
+                response.error() shouldBe ErrorResponse("validation_failed", "ZIP code must contain exactly five digits")
+                rows() shouldBe before
+            }
+        }
+
+        test("missing, null or numeric ZIP is a malformed request and writes nothing") {
+            val before = rows()
+            listOf(
+                """{"name":"Jane","email":"missing-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY"}""",
+                """{"name":"Jane","email":"null-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","zipCode":null}""",
+                """{"name":"Jane","email":"numeric-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","zipCode":2108}""",
+            ).forEach { body ->
+                post(body).let {
+                    it.status shouldBe Status.BAD_REQUEST
+                    it.error().code shouldBe "malformed_request"
+                }
+            }
+            rows() shouldBe before
+        }
 
         test("POST /inquiries records the inquiry and answers a receipt of it, with its location") {
             val email = "jane-${UUID.randomUUID()}@example.com"
 
             val response =
                 post(
-                    """{"name":" Jane Doe ","email":"${email.uppercase()}","message":"I'm interested in ice cream service for a birthday."}""",
+                    inquiryBody(
+                        email.uppercase(),
+                        name = " Jane Doe ",
+                        extra = ""","message":"I'm interested in ice cream service for a birthday."""",
+                    ),
                 )
 
             response.status shouldBe Status.CREATED
@@ -147,15 +270,15 @@ class InquiryRoutesSpec :
         test("invalid values are a validation failure, and nothing is recorded") {
             val before = rows()
 
-            post("""{"name":"Jane","email":"not-an-email"}""").let {
+            post(inquiryBody("not-an-email", name = "Jane")).let {
                 it.status shouldBe Status.UNPROCESSABLE_ENTITY
                 it.error() shouldBe ErrorResponse("validation_failed", "Email must contain exactly one @ after a non-empty local part")
             }
-            post("""{"name":"   ","email":"jane@example.com"}""").let {
+            post(inquiryBody("jane@example.com", name = "   ")).let {
                 it.status shouldBe Status.UNPROCESSABLE_ENTITY
                 it.error() shouldBe ErrorResponse("validation_failed", "Name must not be blank")
             }
-            post("""{"name":"Jane","email":"jane@example.com","message":"${"x".repeat(4001)}"}""").error().code shouldBe
+            post(inquiryBody("jane@example.com", extra = ""","message":"${"x".repeat(4001)}"""")).error().code shouldBe
                 "validation_failed"
 
             rows() shouldBe before
@@ -218,7 +341,7 @@ class InquiryRoutesSpec :
                 it.message.shouldBeNull()
                 it.pricingInputs.shouldBeNull()
             }
-            response.keys() shouldBe setOf("id", "customerId", "name", "email", "createdAt")
+            response.keys() shouldBe setOf("id", "customerId", "name", "email", "createdAt", "zipCode", "eventDate", "eventType")
         }
 
         test("an authorized read of an unknown inquiry is not found, and a malformed id a malformed request") {

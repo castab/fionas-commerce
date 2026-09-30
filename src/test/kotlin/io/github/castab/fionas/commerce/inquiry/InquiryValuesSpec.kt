@@ -13,6 +13,22 @@ import java.util.UUID
 
 class InquiryValuesSpec :
     FunSpec({
+        test("event dates are real calendar dates without a time zone and round-trip as ISO text") {
+            EventDate.of("2028-02-29").value.toString() shouldBe "2028-02-29"
+            listOf("2026-02-29", "2026-04-31", "0000-01-01", "10000-01-01", "2026-1-1", "2026-01-01T00:00:00Z").forEach {
+                shouldThrow<IllegalArgumentException> { EventDate.of(it) }
+            }
+        }
+        test("required ZIP codes are trimmed text, preserve leading zeroes and reject blank or malformed values") {
+            ZipCode.of(" 02108 ").value shouldBe "02108"
+            listOf("", " \n ", "1234", "123456", "12a45", "12345-6789", "１２３４５").forEach { invalid ->
+                shouldThrow<IllegalArgumentException> { ZipCode.of(invalid) }.message shouldBe "ZIP code must contain exactly five digits"
+            }
+            listOf("", "1234", "123456", "12a45", "12345-6789", "１２３４５", " 12345 ").forEach { invalid ->
+                shouldThrow<IllegalArgumentException> { ZipCode(invalid) }.message shouldBe "ZIP code must contain exactly five digits"
+            }
+        }
+
         test("a message is trimmed, and a missing or blank one is absent") {
             InquiryMessage.ofOptional("  A birthday party.  ")?.value shouldBe "A birthday party."
             InquiryMessage.ofOptional(null).shouldBeNull()
@@ -31,7 +47,16 @@ class InquiryValuesSpec :
 
         test("inquiry details pair an inquiry only with its own customer") {
             val customer = Customer(CustomerId(UUID.randomUUID()), CustomerName("Jane Doe"), Email("jane@example.com"), TEST_INSTANT)
-            val inquiry = Inquiry(InquiryId(UUID.randomUUID()), customer.id, null, TEST_INSTANT)
+            val inquiry =
+                Inquiry(
+                    InquiryId(UUID.randomUUID()),
+                    customer.id,
+                    null,
+                    TEST_INSTANT,
+                    ZipCode("92626"),
+                    EventDate.of("2026-12-05"),
+                    EventType.BIRTHDAY,
+                )
 
             InquiryDetails(inquiry, customer, null).customer shouldBe customer
             InquirySummary(inquiry, customer).customer shouldBe customer

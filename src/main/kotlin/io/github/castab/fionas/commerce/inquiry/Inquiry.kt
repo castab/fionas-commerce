@@ -47,6 +47,9 @@ data class Inquiry(
     val customerId: CustomerId,
     val message: InquiryMessage?,
     val createdAt: Instant,
+    val zipCode: ZipCode,
+    val eventDate: EventDate,
+    val eventType: EventType,
 )
 
 /**

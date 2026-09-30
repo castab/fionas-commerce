@@ -189,7 +189,9 @@ catalog route replaces or deletes anything.
 
 ```bash
 curl -i -X POST localhost:8080/inquiries -H 'Content-Type: application/json' \
-  -d '{"name":"Jane Doe","email":"jane@example.com","message":"Ice cream for a birthday.",
+  -H 'Authorization: Bearer <ui-key>' \
+  -d '{"name":"Jane Doe","email":"jane@example.com","zipCode":"92626","message":"Ice cream for a birthday.",
+       "eventDate":"2026-12-05","eventType":"BIRTHDAY",
        "pricingInputs":{"catalogRevision":12,"guestCount":75,"durationMinutes":120,
          "selections":[{"category":"soft-serve-flavor","offerings":["vanilla","horchata"]},
                        {"category":"topping","offerings":["sprinkles","oreos","strawberries","brownies"]},
@@ -203,7 +205,8 @@ curl -i -X POST localhost:8080/inquiries -H 'Content-Type: application/json' \
 }
 ```
 
-`name` (at most 200 characters) and `email` are required; `message` is optional (at most
+`name` (at most 200 characters), `email`, `zipCode`, `eventDate`, and `eventType` are required;
+`message` is optional (at most
 4000 characters) and stays free-form text. Values are trimmed, and the email is lowercased.
 If a customer already has that email, the inquiry is attached to that customer, whose
 stored name a later inquiry does not change (see
@@ -221,8 +224,8 @@ is recorded. Only the inputs are stored (`fionas.inquiry_pricing` and its ordere
 categories and selections), pinned to the submitted revision; amounts are never accepted,
 and no financial document is created. Staff read them back as `pricingInputs` on
 `GET /inquiries/{inquiryId}` and can submit that object unchanged to
-`POST /inquiries/{inquiryId}/estimates`. Event date, location, and occasion are not modeled
-yet; the customer describes them in `message`.
+`POST /inquiries/{inquiryId}/estimates`. Street address and further event details remain
+customer-authored `message` text; event date and type are stored separately on the inquiry.
 
 Staff discover inquiries with `GET /inquiries`, newest first by creation time, ties broken
 by id. `limit` bounds a page (1–100, default 25; outside that range is `422`, not an
@@ -244,10 +247,10 @@ failures and present `message` as diagnostic text; they never parse it for codes
 
 `GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
 resolved against one current Offerings snapshot. The response includes `definitionVersion`
-(currently 2), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
+(currently 5), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
 advisory `pricingPreview` facts.
 Definition version identifies the code-owned questions and bindings; catalog edits change
-the catalog revision independently. Sections are **Contact information**, **Build your
+the catalog revision independently. Sections are **Contact information**, **Event details**, **Build your
 ice cream service**, and **Additional information**. Within each section, `fields` are in
 display order. Each field has a stable `key`, `label`, optional `description`,
 `submissionPointer`, `required`, semantic `input`, and a separate `presentation.control`.
@@ -256,17 +259,49 @@ The input is discriminated by `type`:
 
 | Type | Answer and metadata |
 |---|---|
-| `TEXT` | String; `minLength` and `maxLength` after trimming. Name must also be nonblank; blank optional notes count as absent. |
+| `TEXT` | String; `minLength`, `maxLength`, and optional `pattern` after trimming. Name must also be nonblank; blank optional text counts as absent. |
 | `EMAIL` | String; `maxLength` after trimming and lowercasing. Existing shallow email validation still applies. |
 | `INTEGER` | A signed 32-bit integer at least `minimum`; used for guest count. |
-| `BOOLEAN` | Boolean; `defaultValue` is false for the guest-count lower-bound flag. |
+| `BOOLEAN` | Boolean with a `defaultValue`. |
 | `INTEGER_CHOICE` | One integer `value` from the labeled `options`, derived from the pricing policy's allowed durations. |
+| `DATE` | Calendar date string in `YYYY-MM-DD`; `format` is `date`, without a time or time zone. |
+| `STRING_CHOICE` | One string `value` from the labeled `options`; used for event type. |
 | `OFFERING_CHOICE` | Selected offering keys from `options`; category-owned `minSelections` and optional `maxSelections` (absent means unbounded). |
 
-Hints are `TEXT`, `TEXTAREA`, `NUMBER`, `CHECKBOX`, `SELECT`, `CARDS`, and
+Hints are `TEXT`, `TEXTAREA`, `NUMBER`, `CHECKBOX`, `SELECT`, `CARDS`, `DATE`, and
 `CHECKBOXES`. They express preferences; clients retain control of components,
 accessibility, styling, and layout. Multiline notes are a string with a textarea hint.
 No Svelte component names appear in the contract.
+
+Contact information includes a required event **ZIP code**, bound to `/zipCode`.
+It accepts five ASCII digits after trimming and preserves leading zeroes. Missing, null,
+or non-string values receive `400`; blank or invalid strings receive `422`.
+`POST /inquiries` records it in the non-null `fionas.inquiries.zip_code` text column;
+staff detail and inbox reads include it. It is never stored on the customer. The ZIP supports staff review
+of travel needs; operating-area rules and automatic surcharges remain undecided.
+The guest-count question remains because current pricing depends on the count, and
+reassures customers that an approximate count is fine during quoting. The minimum-count
+checkbox is omitted. The existing request's optional `guestCountIsMinimum` still defaults
+to false for clients that omit it.
+
+**Event details** contains required `eventDate` and `eventType`, bound to `/eventDate`
+and `/eventType`. The date uses a DATE control hint for a date picker; submit a real calendar
+date in `YYYY-MM-DD` (years 0001–9999), without a timestamp or time zone. The event-type
+dropdown uses STRING_CHOICE with a SELECT hint, in this order:
+
+| Label | Submitted value |
+|---|---|
+| Birthday | `BIRTHDAY` |
+| Wedding | `WEDDING` |
+| Corporate | `CORPORATE` |
+| School event | `SCHOOL_EVENT` |
+| Neighborhood event | `NEIGHBORHOOD_EVENT` |
+| Other | `OTHER` |
+
+Missing, null, or wrongly typed event fields and unknown event types receive `400`;
+invalid calendar-date strings receive `422`. Both fields are non-null inquiry data,
+returned in staff detail and inbox reads. No availability or future-date restriction is
+applied, and neither field changes pricing.
 
 Public offering questions explicitly reference Fiona's configured category keys: soft
 serve, toppings from the pricing policy, then cones/cups. An absent or retired category
@@ -315,12 +350,11 @@ Copy the response's `catalogRevision` to `pricingInputs.catalogRevision`.
 Preview and submit the same inputs; later catalog edits do not replace this revision.
 Submit answers only, never the definition, presentation hints, or prices.
 
-The form introduces no submission validation path: name, email, and message value
+The form introduces no submission validation path: name, email, ZIP, event date/type, and message value
 objects, commerce-domain's structural selection validation, and Fiona's pricing engine
 remain authoritative. Clients that bypass form metadata still receive the existing
 `400`/`404`/`422` responses. Plain contact inquiries without service inputs still work.
-Structured phone, event date, address, and event contacts are deferred because the
-submission model does not yet store them; event facts remain customer-authored notes.
+Structured phone, street address, and event contacts remain deferred.
 Administration of the definition, historical form-definition reads, a generic form DSL,
 and a shared commerce UI abstraction are deliberately deferred. Duration-dependent option
 availability, conditional pricing, taxes, discounts, travel, promotions, and staff overrides
@@ -1054,7 +1088,11 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   and the exact `commerce.financial_document_snapshots` version), and, from `V4`, the
   `inquiries_created_at_id_idx` index `(created_at, id)` behind the newest-first inquiry
   list and `inquiry_pricing` with its ordered `…_categories` and `…_selections` (keyed by
-  `inquiry_id`, referencing only `fionas.inquiries`). Fiona never creates or
+  `inquiry_id`, referencing only `fionas.inquiries`). `V5` added optional `inquiry_locations`;
+  `V6` replaces it with required `inquiries.zip_code` for empty inquiry data, without a
+  default, backfill, or data transfer. The already-applied `V5` remains immutable. `V7`
+  adds non-null `event_date` (`date`) and `event_type` (checked `text`) without defaults or
+  backfill, assuming empty pre-release inquiry data. Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog and the financial ledger's snapshots,
   lines, payments, allocations, refunds, and refund allocations. None needs a Fiona copy.

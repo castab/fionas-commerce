@@ -33,7 +33,7 @@ import org.http4k.core.with
 
 @Serializable
 data class InquiryFormResponse(
-    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions. Currently 2.")
+    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions. Currently 5.")
     val definitionVersion: Int,
     @ApiProperty(description = "Fiona's stable catalog identity.", format = "uuid")
     val catalogId: String,
@@ -139,12 +139,30 @@ data class InquiryFormPresentation(
 @JsonClassDiscriminator("type")
 sealed interface InquiryFormInputResponse {
     @Serializable
+    @SerialName("DATE")
+    data class Date(
+        @ApiProperty(description = "Calendar date submitted as YYYY-MM-DD, without a time or time zone.")
+        val format: String,
+    ) : InquiryFormInputResponse
+
+    @Serializable
+    @SerialName("STRING_CHOICE")
+    data class StringChoice(
+        @ApiProperty(description = "Choose one string value from these labeled options.")
+        val options: List<InquiryFormStringOption>,
+    ) : InquiryFormInputResponse
+
+    @Serializable
     @SerialName("TEXT")
     data class Text(
-        @ApiProperty(description = "Minimum length after trimming. Required names must not be blank; optional blank notes count as absent.")
+        @ApiProperty(
+            description = "Minimum length of trimmed nonblank text. Required names cannot be blank; optional blank text is absent.",
+        )
         val minLength: Int,
         @ApiProperty(description = "Maximum length after trimming.")
         val maxLength: Int,
+        @ApiProperty(description = "Optional pattern for trimmed nonblank text. ZIP codes are strings, preserving leading zeroes.")
+        val pattern: String? = null,
     ) : InquiryFormInputResponse
 
     @Serializable
@@ -200,6 +218,12 @@ data class InquiryFormIntegerOption(
     val label: String,
 )
 
+@Serializable
+data class InquiryFormStringOption(
+    val value: String,
+    val label: String,
+)
+
 private val inquiryFormBody = jsonBody(InquiryFormResponse.serializer())
 
 // Rendering-only example; it initializes no catalog and creates no production offerings.
@@ -225,7 +249,7 @@ fun getInquiryFormRoute(
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
             "do not reprice those submitted choices. Only configured Fiona categories appear; retired categories and offerings " +
             "are absent. pricingPreview resolves policy/catalog facts for instant advisory browser arithmetic. " +
-            "Name, email, and pricing are validated by the existing submission operation, independently of this metadata. " +
+            "Contact details, event date/type, and pricing are validated on submission, independently of this metadata. " +
             "Requires the trusted server-side UI Bearer key. Successful responses have Cache-Control: " +
             "private, max-age=900, stale-while-revalidate=3600; failures have no-store."
         tags += inquiries
@@ -263,7 +287,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
     // Reuse the runtime's conversion, including every price form, without re-modeling its DTOs.
     val categories = catalog.dto().categories.associateBy { it.key }
     return InquiryFormResponse(
-        definitionVersion = 2,
+        definitionVersion = 5,
         catalogId = catalog.catalogId.value.toString(),
         catalogRevision = catalog.revision.number,
         sections =
@@ -276,7 +300,12 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
                     section.fields.map { field ->
                         val input =
                             when (val value = field.input) {
-                                is InquiryFormInput.Text -> InquiryFormInputResponse.Text(value.minLength, value.maxLength)
+                                InquiryFormInput.Date -> InquiryFormInputResponse.Date("date")
+                                is InquiryFormInput.StringChoice ->
+                                    InquiryFormInputResponse.StringChoice(
+                                        value.options.map { InquiryFormStringOption(it.value, it.label) },
+                                    )
+                                is InquiryFormInput.Text -> InquiryFormInputResponse.Text(value.minLength, value.maxLength, value.pattern)
                                 is InquiryFormInput.Email -> InquiryFormInputResponse.Email(value.maxLength)
                                 is InquiryFormInput.Integer -> InquiryFormInputResponse.Integer(value.minimum)
                                 is InquiryFormInput.BooleanValue -> InquiryFormInputResponse.BooleanValue(value.defaultValue)

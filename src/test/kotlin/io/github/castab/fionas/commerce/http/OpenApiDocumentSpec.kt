@@ -5,6 +5,7 @@ import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
+import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.openapi.fionaOpenApiDocument
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -222,6 +223,7 @@ class OpenApiDocumentSpec :
                 "InquiryFormFieldResponse",
                 "InquiryFormPresentation",
                 "InquiryFormIntegerOption",
+                "InquiryFormStringOption",
                 "InquiryPricingPreviewResponse",
                 "InquiryDurationPricingResponse",
                 "InquiryDurationOfferingContributionResponse",
@@ -232,6 +234,8 @@ class OpenApiDocumentSpec :
                 "InquiryFormInputResponse_INTEGER",
                 "InquiryFormInputResponse_BOOLEAN",
                 "InquiryFormInputResponse_INTEGER_CHOICE",
+                "InquiryFormInputResponse_DATE",
+                "InquiryFormInputResponse_STRING_CHOICE",
                 "InquiryFormInputResponse_OFFERING_CHOICE",
                 "CreateInquiryRequest",
                 "InquiryPricingInputs",
@@ -531,17 +535,19 @@ class OpenApiDocumentSpec :
 
             val request = schema("CreateInquiryRequest")
             request.text("type") shouldBe "object"
-            request.strings("required") shouldContainExactly listOf("name", "email")
+            request.strings("required") shouldContainExactly listOf("name", "email", "zipCode", "eventDate", "eventType")
             val properties = request.at("properties").jsonObject
-            properties.keys.toList() shouldContainExactly listOf("name", "email", "message", "pricingInputs")
+            properties.keys.toList() shouldContainExactly
+                listOf("name", "email", "message", "pricingInputs", "zipCode", "eventDate", "eventType")
             properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryPricingInputs"
-            val text = properties - "pricingInputs"
+            val text = properties - listOf("pricingInputs", "eventDate", "eventType")
             text.values.forEach { it.text("type") shouldBe "string" }
             text.mapValues { (_, property) -> property.at("maxLength").jsonPrimitive.int } shouldBe
                 mapOf(
                     "name" to CustomerName.MAX_LENGTH,
                     "email" to Email.MAX_LENGTH,
                     "message" to InquiryMessage.MAX_LENGTH,
+                    "zipCode" to ZipCode.LENGTH,
                 )
             // The server accepts any text and validates it itself, so no format is claimed for the email.
             properties
@@ -569,14 +575,15 @@ class OpenApiDocumentSpec :
                 "#/components/schemas/InquiryResponse"
 
             val response = schema("InquiryResponse")
-            response.strings("required") shouldContainExactly listOf("id", "customerId", "name", "email", "createdAt")
+            response.strings("required") shouldContainExactly
+                listOf("id", "customerId", "name", "email", "createdAt", "zipCode", "eventDate", "eventType")
             val properties = response.at("properties").jsonObject
             properties.keys.toList() shouldContainExactly
-                listOf("id", "customerId", "name", "email", "message", "createdAt", "pricingInputs")
+                listOf("id", "customerId", "name", "email", "message", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType")
             properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryRequestedPricing"
             (properties - "pricingInputs").values.forEach { it.text("type") shouldBe "string" }
             properties.filterValues { "format" in it.jsonObject }.mapValues { (_, property) -> property.text("format") } shouldBe
-                mapOf("id" to "uuid", "customerId" to "uuid", "createdAt" to "date-time")
+                mapOf("id" to "uuid", "customerId" to "uuid", "createdAt" to "date-time", "eventDate" to "date")
         }
 
         test("describes an inquiry's pricing inputs as the estimate's commercial inputs: never amounts, and pinned to a revision") {
@@ -628,12 +635,13 @@ class OpenApiDocumentSpec :
                 it.text("properties", "nextCursor", "type") shouldBe "string"
             }
             schema("InquiryListItem").let {
-                it.strings("required") shouldContainExactly listOf("id", "customerId", "name", "email", "createdAt")
+                it.strings("required") shouldContainExactly
+                    listOf("id", "customerId", "name", "email", "createdAt", "zipCode", "eventDate", "eventType")
                 it
                     .at("properties")
                     .jsonObject.keys
                     .toList() shouldContainExactly
-                    listOf("id", "customerId", "name", "email", "message", "createdAt")
+                    listOf("id", "customerId", "name", "email", "message", "createdAt", "zipCode", "eventDate", "eventType")
             }
         }
 
@@ -664,7 +672,7 @@ class OpenApiDocumentSpec :
                 "#/components/schemas/InquiryFormInputResponse"
             val union = schema("InquiryFormInputResponse")
             union.text("discriminator", "propertyName") shouldBe "type"
-            val tags = listOf("TEXT", "EMAIL", "INTEGER", "BOOLEAN", "INTEGER_CHOICE", "OFFERING_CHOICE")
+            val tags = listOf("TEXT", "EMAIL", "INTEGER", "BOOLEAN", "INTEGER_CHOICE", "OFFERING_CHOICE", "DATE", "STRING_CHOICE")
             union.at("oneOf").jsonArray.map { it.text("\$ref") } shouldContainExactlyInAnyOrder
                 tags.map { "#/components/schemas/InquiryFormInputResponse_$it" }
             tags.forEach { tag ->
@@ -681,7 +689,35 @@ class OpenApiDocumentSpec :
                 it.text("properties", "options", "items", "\$ref") shouldBe "#/components/schemas/OfferingDto"
             }
             schema("InquiryFormPresentation").strings("properties", "control", "enum") shouldContainExactly
-                listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES")
+                listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES", "DATE")
+        }
+
+        test("required event ZIP is constrained text and form text patterns are explicitly documented") {
+            listOf("CreateInquiryRequest", "InquiryResponse", "InquiryListItem").forEach { name ->
+                val body = schema(name)
+                body.strings("required").contains("zipCode") shouldBe true
+                body.text("properties", "zipCode", "type") shouldBe "string"
+                body.text("properties", "zipCode", "pattern") shouldBe ZipCode.PATTERN
+            }
+            schema("CreateInquiryRequest").at("properties", "zipCode", "minLength").jsonPrimitive.int shouldBe ZipCode.LENGTH
+            val text = schema("InquiryFormInputResponse_TEXT")
+            text.text("properties", "pattern", "type") shouldBe "string"
+            text.strings("required").contains("pattern") shouldBe false
+        }
+
+        test("required event fields expose date format and exact enum values in submission and staff schemas") {
+            val values = listOf("BIRTHDAY", "WEDDING", "CORPORATE", "SCHOOL_EVENT", "NEIGHBORHOOD_EVENT", "OTHER")
+            listOf("CreateInquiryRequest", "InquiryResponse", "InquiryListItem").forEach { name ->
+                val body = schema(name)
+                body.strings("required").containsAll(listOf("eventDate", "eventType")) shouldBe true
+                body.text("properties", "eventDate", "type") shouldBe "string"
+                body.text("properties", "eventDate", "format") shouldBe "date"
+                body.strings("properties", "eventType", "enum") shouldContainExactly values
+            }
+            schema("InquiryFormInputResponse_STRING_CHOICE").text("properties", "options", "items", "\$ref") shouldBe
+                "#/components/schemas/InquiryFormStringOption"
+            schema("InquiryFormStringOption").text("properties", "value", "type") shouldBe "string"
+            schema("InquiryFormInputResponse_DATE").strings("required") shouldContainExactly listOf("format", "type")
         }
 
         test("describes the estimate preview request from its serial descriptors: integers, a boolean, and nested lists") {

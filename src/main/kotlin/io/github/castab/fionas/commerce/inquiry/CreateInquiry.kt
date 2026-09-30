@@ -46,6 +46,9 @@ class CreateInquiry(
         val email: Email,
         val message: InquiryMessage?,
         val pricingInputs: FionasPricingInputs? = null,
+        val zipCode: ZipCode,
+        val eventDate: EventDate,
+        val eventType: EventType,
     )
 
     operator fun invoke(command: Command): Inquiry {
@@ -57,7 +60,7 @@ class CreateInquiry(
                 customers.findByEmail(transaction, command.email)
                     ?: Customer(newCustomerId(), command.name, command.email, now)
                         .also { customers.insert(transaction, it) }
-            val inquiry = Inquiry(newInquiryId(), customer.id, command.message, now)
+            val inquiry = Inquiry(newInquiryId(), customer.id, command.message, now, command.zipCode, command.eventDate, command.eventType)
             inquiries.insert(transaction, inquiry)
             command.pricingInputs?.let { pricingInputs.insert(transaction, inquiry.id, it) }
             inquiry

@@ -91,7 +91,15 @@ class InquiryOperationsSpec :
             name: String = "Jane Doe",
             message: String? = "Ice cream for a birthday party",
             pricingInputs: FionasPricingInputs? = null,
-        ) = CreateInquiry.Command(CustomerName.of(name), Email.of(email), InquiryMessage.ofOptional(message), pricingInputs)
+        ) = CreateInquiry.Command(
+            CustomerName.of(name),
+            Email.of(email),
+            InquiryMessage.ofOptional(message),
+            pricingInputs,
+            ZipCode("92626"),
+            EventDate.of("2026-12-05"),
+            EventType.BIRTHDAY,
+        )
 
         fun rows() =
             listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_pricing", "fionas.inquiry_pricing_selections")
@@ -104,7 +112,16 @@ class InquiryOperationsSpec :
 
             val created = createInquiry(customerId, inquiryId)(command(email))
 
-            created shouldBe Inquiry(inquiryId, customerId, InquiryMessage("Ice cream for a birthday party"), STORED_INSTANT)
+            created shouldBe
+                Inquiry(
+                    inquiryId,
+                    customerId,
+                    InquiryMessage("Ice cream for a birthday party"),
+                    STORED_INSTANT,
+                    ZipCode("92626"),
+                    EventDate.of("2026-12-05"),
+                    EventType.BIRTHDAY,
+                )
             val read = getInquiry()(inquiryId)
             read.inquiry shouldBe created
             read.customer.id shouldBe customerId

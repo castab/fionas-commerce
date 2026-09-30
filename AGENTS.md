@@ -134,9 +134,18 @@ verifying ownership of the address. Decide these explicitly before changing the 
   own `404`/`422`, the revision is pinned as submitted, and no `FinancialDocument` is
   created. Staff read them back unchanged and may submit them to
   `POST /inquiries/{inquiryId}/estimates`. They are never rewritten later.
-- **Event facts are not modeled.** Date, location, and occasion stay in the free-form
-  `message` until a slice introduces event details; never encode structured facts in
-  `message` or bolt them onto the pricing inputs.
+- **The event ZIP code is required inquiry-owned location data.** Non-null `zipCode` is
+  trimmed five-digit US text (leading zeroes preserved), held in the non-null
+  `fionas.inquiries.zip_code` column and read only by staff with the inquiry. Blank is
+  invalid. It is never customer data or part of pricing inputs. It supports staff travel review;
+  no operating-area rule or automatic travel surcharge has been decided.
+- **Event date and type are required inquiry facts.** `eventDate` is an actual calendar date
+  (YYYY-MM-DD, years 0001–9999) with no time or time zone; `eventType` is one of BIRTHDAY,
+  WEDDING, CORPORATE, SCHOOL_EVENT, NEIGHBORHOOD_EVENT, OTHER. Both are non-null Kotlin
+  values and columns on `fionas.inquiries` (`date` and checked `text`), never customer data
+  or pricing inputs. Staff list/detail reads return them unchanged. No availability,
+  future-date restriction, booking, or event-type pricing rule is introduced. Street address
+  and further details remain customer-authored `message` text.
 
 ## Fiona's customer inquiry form
 
@@ -146,7 +155,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
   second catalog, generic form DSL, or shared commerce form concept is introduced.
 - Fiona owns the ordered sections, stable question keys, labels, submission bindings, and
   small rendering hints. Semantic inputs are distinct from hints: TEXT, EMAIL, INTEGER,
-  BOOLEAN, INTEGER_CHOICE, and OFFERING_CHOICE. No frontend component names.
+  BOOLEAN, INTEGER_CHOICE, DATE, STRING_CHOICE, and OFFERING_CHOICE. No frontend component names.
 - Public offering questions explicitly reference stable category keys (soft serve,
   toppings from the pricing policy, cones/cups), ordered by Fiona's question definition.
   Missing/retired categories are omitted; restoration restores the configured question.
@@ -156,10 +165,18 @@ verifying ownership of the address. Decide these explicitly before changing the 
   snapshot. HTTP reuses the runtime's `dto()`, `OfferingDto`, and `OfferingPriceDto`;
   never restate offering identity, price forms, or selection validation. Allowed durations
   come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
-- The response exposes `definitionVersion` (2 for the current code-owned definition) and
+- The response exposes `definitionVersion` (5 for the current code-owned definition) and
   `catalogId`/`catalogRevision`. Clients submit the latter revision as
   `pricingInputs.catalogRevision`; the existing exact-revision pricing remains authoritative.
   Change the definition version deliberately when code-owned questions/bindings change.
+- Contact information includes required event `zipCode`, bound to `/zipCode`, with a TEXT
+  hint and text length/pattern semantics from `ZipCode`. Retain the guest-count question
+  while per-guest pricing applies, with approximate-count help text. The minimum-count
+  checkbox is omitted; the existing request flag remains optional with default false.
+- Required Event details follow Contact information: `eventDate` binds `/eventDate` with
+  DATE semantics and a DATE control hint; `eventType` binds `/eventType` with STRING_CHOICE
+  semantics and a SELECT hint. The six labels are Birthday, Wedding, Corporate, School event,
+  Neighborhood event, Other, in that order. Submit the option value, not the display label.
 - `pricingPreview` is advisory data derived from that same snapshot and
   `FIONAS_PRICING_POLICY`, not a second pricing engine or expression DSL. It projects exact
   decimal amounts: base service and resolved public per-duration offering contributions
@@ -181,7 +198,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
 - Each field's `submissionPointer` is a JSON Pointer into the existing request; offering
   inputs append `{category, offerings}` at `/pricingInputs/selections`.
   The service section remains optional, and field requirements apply when it is used.
-  The form advertises only supported answers. Phone, structured dates/locations, event
+  The form advertises only supported answers. Phone, street addresses, event
   contacts, definition administration/history, and a reusable UI abstraction remain deferred.
 - Wire inputs are sealed serializable DTOs in `http`, with a `type` discriminator.
   `KotlinxSchemas` derives explicit oneOf variants, discriminator mappings, required const
@@ -497,7 +514,11 @@ after runtime-owned migrations.
   published `commerce.financial_document_snapshots(document_id, version)`: the association
   names each lineage's first snapshot, and each pricing source its exact snapshot. `V4`
   (the inquiry list index and an inquiry's requested pricing inputs) references only
-  Fiona's own tables.
+  Fiona's own tables. `V5` added the optional inquiry-owned ZIP code location table;
+  `V6` replaces it with required `inquiries.zip_code` for empty inquiry data, without a
+  default, backfill, or data transfer. The already-applied `V5` remains immutable.
+  `V7` adds required inquiry event date/type with calendar-range and allowed-type checks,
+  without defaults or backfill; it assumes empty pre-release inquiry data.
   `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
@@ -888,7 +909,7 @@ outbox, NATS, projections, CQRS, bookings and booking conversion, booking lifecy
 transitions, a generic line-source identity, stored balances or payment statuses, tax,
 travel fees, minimum orders, inventory, availability, catalog seeding or import, deposit
 requirements or schedules, customer merge or deduplication, inquiry search, filters, or
-status, and event details (date, location, occasion). Do not add placeholders for
+status, and further event details (street address, time, contacts). Do not add placeholders for
 them.
 
 Also never introduce Spring or Spring Boot, Hibernate/JPA, a DI framework, event

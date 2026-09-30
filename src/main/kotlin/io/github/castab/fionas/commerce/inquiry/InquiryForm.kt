@@ -62,9 +62,16 @@ data class InquiryFormField(
 
 /** Answer semantics, independent of any preferred visual control. */
 sealed interface InquiryFormInput {
+    data object Date : InquiryFormInput
+
+    data class StringChoice(
+        val options: List<InquiryStringOption>,
+    ) : InquiryFormInput
+
     data class Text(
         val minLength: Int,
         val maxLength: Int,
+        val pattern: String? = null,
     ) : InquiryFormInput
 
     data class Email(
@@ -94,5 +101,10 @@ data class InquiryIntegerOption(
     val label: String,
 )
 
+data class InquiryStringOption(
+    val value: String,
+    val label: String,
+)
+
 /** Hints only: clients choose their own components, accessibility, layout, and styling. */
-enum class InquiryFormControl { TEXT, TEXTAREA, NUMBER, CHECKBOX, SELECT, CARDS, CHECKBOXES }
+enum class InquiryFormControl { TEXT, TEXTAREA, NUMBER, CHECKBOX, SELECT, CARDS, CHECKBOXES, DATE }

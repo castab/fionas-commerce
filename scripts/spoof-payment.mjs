@@ -144,6 +144,9 @@ async function main() {
     body: {
       name: "Local Payment Smoke Test",
       email: "payment-smoke@example.com",
+      zipCode: "92626",
+      eventDate: "2026-12-05",
+      eventType: "CORPORATE",
       message: "Local developer smoke test: partial payments, refund, and final settlement.",
     },
     expectedStatus: 201,

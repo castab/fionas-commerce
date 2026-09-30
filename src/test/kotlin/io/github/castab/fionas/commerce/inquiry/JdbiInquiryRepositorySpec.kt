@@ -34,6 +34,45 @@ class JdbiInquiryRepositorySpec :
         beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
 
+        test("required event ZIP is persisted with its inquiry and returned in detail and list reads") {
+            val customer = customer()
+            val inquiry = inquiry(customer).copy(zipCode = ZipCode("02108"))
+            application.transactor.inTransaction { transaction ->
+                customers.insert(transaction, customer)
+                inquiries.insert(transaction, inquiry)
+            }
+            application.transactor.inTransaction { inquiries.findById(it, inquiry.id) } shouldBe inquiry
+            application.transactor.inTransaction { inquiries.listNewestFirst(it, null, 100).single { it.id == inquiry.id } } shouldBe
+                inquiry
+            application.transactor.inTransaction { customers.findById(it, customer.id) } shouldBe customer
+        }
+
+        test("null and malformed ZIP columns fail in the database and roll back the caller's complete transaction") {
+            val customer = customer()
+            val inquiry = inquiry(customer)
+            val before = application.database.count("fionas.inquiries")
+            listOf("NULL" to "23502", "'bad'" to "23514").forEach { (value, state) ->
+                shouldThrowAny {
+                    application.transactor.inTransaction { transaction ->
+                        customers.insert(transaction, customer)
+                        inquiries.insert(transaction, inquiry)
+                        transaction.handle
+                            .createUpdate(
+                                "INSERT INTO fionas.inquiries (id, customer_id, created_at, zip_code, event_date, event_type) " +
+                                    "VALUES (:id, :customer, :time, $value, :eventDate, :eventType)",
+                            ).bind("id", UUID.randomUUID())
+                            .bind("customer", customer.id.value)
+                            .bind("time", inquiry.createdAt)
+                            .bind("eventDate", inquiry.eventDate.value)
+                            .bind("eventType", inquiry.eventType.name)
+                            .execute()
+                    }
+                }.sqlState() shouldBe state
+                application.database.count("fionas.inquiries") shouldBe before
+                application.transactor.inTransaction { customers.findById(it, customer.id) }.shouldBeNull()
+            }
+        }
+
         test("an inserted inquiry is read back by id exactly as it was written") {
             val customer = customer()
             val inquiry = inquiry(customer, message = "Ice cream for 80 guests")
@@ -44,6 +83,32 @@ class JdbiInquiryRepositorySpec :
             }
 
             application.transactor.inTransaction { inquiries.findById(it, inquiry.id) } shouldBe inquiry
+        }
+
+        test("database rejects missing event facts, unsupported event types and dates outside the wire year range") {
+            val customer = customer()
+            application.transactor.inTransaction { customers.insert(it, customer) }
+            listOf(
+                "NULL" to "'BIRTHDAY'" to "23502",
+                "DATE '2026-12-05'" to "NULL" to "23502",
+                "DATE '2026-12-05'" to "'UNKNOWN'" to "23514",
+                "DATE '10000-01-01'" to "'BIRTHDAY'" to "23514",
+                "DATE '0001-01-01 BC'" to "'BIRTHDAY'" to "23514",
+            ).forEach { (values, state) ->
+                val (date, type) = values
+                shouldThrowAny {
+                    application.transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate(
+                                "INSERT INTO fionas.inquiries (id, customer_id, created_at, zip_code, event_date, event_type) " +
+                                    "VALUES (:id, :customer, :time, '92626', $date, $type)",
+                            ).bind("id", UUID.randomUUID())
+                            .bind("customer", customer.id.value)
+                            .bind("time", inquiry(customer).createdAt)
+                            .execute()
+                    }
+                }.sqlState() shouldBe state
+            }
         }
 
         test("an inquiry without a message is stored and read back without one") {
@@ -108,8 +173,9 @@ class JdbiInquiryRepositorySpec :
 
         test("the list reads the inquiries index backwards, without sorting, for the first and every later page") {
             listOf(
-                "SELECT id, customer_id, message, created_at FROM fionas.inquiries ORDER BY created_at DESC, id DESC LIMIT 26",
-                "SELECT id, customer_id, message, created_at FROM fionas.inquiries WHERE (created_at, id) < (now(), gen_random_uuid()) " +
+                "SELECT id, customer_id, message, created_at, zip_code FROM fionas.inquiries ORDER BY created_at DESC, id DESC LIMIT 26",
+                "SELECT id, customer_id, message, created_at, zip_code FROM fionas.inquiries " +
+                    "WHERE (created_at, id) < (now(), gen_random_uuid()) " +
                     "ORDER BY created_at DESC, id DESC LIMIT 26",
             ).forEach { query ->
                 val plan =

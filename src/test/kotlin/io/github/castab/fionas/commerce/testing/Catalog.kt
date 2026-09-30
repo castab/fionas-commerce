@@ -55,7 +55,9 @@ fun TestApplication.createAcceptanceCatalog(): Int {
     revision = addOffering(revision, "vanilla", "soft-serve-flavor", "Vanilla")
     revision = addOffering(revision, "chocolate", "soft-serve-flavor", "Chocolate")
     revision = addOffering(revision, "horchata", "soft-serve-flavor", "Horchata", perGuest("0.50"), description = "Premium soft serve")
-    TOPPINGS.forEach { revision = addOffering(revision, it, "topping", it) }
+    TOPPINGS.zip(listOf("Sprinkles", "Oreos", "Strawberries", "Brownies", "Gummy Bears", "Cookie Dough")).forEach { (key, name) ->
+        revision = addOffering(revision, key, "topping", name)
+    }
     revision = addOffering(revision, "cup", "cone-option", "Cups")
     return addOffering(revision, "waffle-cone", "cone-option", "Waffle cones", perGuest("0.75"))
 }
@@ -91,7 +93,9 @@ fun TestApplication.createInquiry(email: String = "jane-${UUID.randomUUID()}@exa
             Request(Method.POST, "/inquiries")
                 .withUiKey()
                 .header("Content-Type", "application/json")
-                .body("""{"name":"Jane Doe","email":"$email","message":"Ice cream for a birthday."}"""),
+                .body(
+                    """{"name":"Jane Doe","email":"$email","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","message":"Ice cream for a birthday."}""",
+                ),
         )
     check(response.status == Status.CREATED) { "Recording an inquiry failed: ${response.status}" }
     return checkNotNull(response.header("Location")).substringAfterLast('/')

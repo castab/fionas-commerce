@@ -1,7 +1,16 @@
 // Fresh local DB → bootstrap Fiona's acceptance catalog → preview the canonical $681.25 estimate.
 // Run with FIONAS_ADMIN_PASSWORD and FIONAS_UI_API_KEY set; this script does not load .env files or seed on application startup.
+// --capitalize-toppings updates labels on an existing local catalog, preserving keys and other properties.
 
 const EXPECTED_TOTAL = "681.25";
+const TOPPING_OPTIONS = [
+  { key: "sprinkles", displayName: "Sprinkles" },
+  { key: "oreos", displayName: "Oreos" },
+  { key: "strawberries", displayName: "Strawberries" },
+  { key: "brownies", displayName: "Brownies" },
+  { key: "gummy-bears", displayName: "Gummy Bears" },
+  { key: "cookie-dough", displayName: "Cookie Dough" },
+];
 
 const baseUrl = process.env.FIONAS_BASE_URL ?? "http://localhost:8080";
 const origin = process.env.FIONAS_ORIGIN ?? "http://localhost:8080";
@@ -61,7 +70,7 @@ async function request(method, path, { body, authenticated = false, expectedStat
 
 function revisionFrom(data, path) {
   if (!Number.isInteger(data?.revision) || data.revision < 1) {
-    throw new Error(`POST ${path} did not return a catalog revision`);
+    throw new Error(`${path} did not return a catalog revision`);
   }
   return data.revision;
 }
@@ -80,6 +89,10 @@ function dollars(value) {
 }
 
 async function main() {
+  const args = process.argv.slice(2);
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--capitalize-toppings")) {
+    throw new Error("Usage: node scripts/setup-local-commerce.mjs [--capitalize-toppings]");
+  }
   if (!uiApiKey) throw new Error("Set FIONAS_UI_API_KEY to the local backend's configured UI key");
   if (!password?.trim()) {
     throw new Error(
@@ -101,6 +114,42 @@ async function main() {
     .find(Boolean);
   if (!sessionCookie) throw new Error("POST /auth/login succeeded but returned no __Host-fionas_session cookie");
   console.log("Logged in as local administrator");
+
+  if (args[0] === "--capitalize-toppings") {
+    const catalog = (await request("GET", "/offering-catalog", { expectedStatus: 200 })).data;
+    const category = catalog.categories.find(({ key }) => key === "topping");
+    const updates = TOPPING_OPTIONS.map(({ key, displayName }) => {
+      const offering = category?.offerings.find((option) => option.key === key);
+      if (!offering) throw new Error(`Active topping ${key} was not found; no labels were changed`);
+      return { offering, displayName };
+    });
+    let revision = catalog.revision;
+    for (const { offering, displayName } of updates) {
+      if (offering.displayName === displayName) continue;
+      const path = `/offering-catalog/offerings/${encodeURIComponent(offering.key)}`;
+      const updated = await request("PUT", path, {
+        body: {
+          expectedRevision: revision, category: category.key, displayName,
+          ...(offering.description == null ? {} : { description: offering.description }),
+          ...(offering.price == null ? {} : { price: offering.price }),
+        },
+        authenticated: true, expectedStatus: 200,
+      });
+      revision = revisionFrom(updated.data, path);
+      console.log(`${offering.key}: ${displayName} (revision ${revision})`);
+    }
+    const latest = (await request("GET", "/offering-catalog", { expectedStatus: 200 })).data;
+    const latestToppings = latest.categories.find(({ key }) => key === "topping").offerings;
+    for (const { offering, displayName } of updates) {
+      const current = latestToppings.find(({ key }) => key === offering.key);
+      if (!current || current.displayName !== displayName || current.description !== offering.description ||
+          JSON.stringify(current.price) !== JSON.stringify(offering.price)) {
+        throw new Error(`Verification failed for topping ${offering.key}; reload the catalog before continuing`);
+      }
+    }
+    console.log(`Topping labels verified at revision ${latest.revision}`);
+    return;
+  }
 
   let catalogRevision;
   try {
@@ -132,7 +181,7 @@ async function main() {
     console.log(`Added category ${category.key}: revision ${catalogRevision}`);
   }
 
-  const toppings = ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"];
+  const toppings = TOPPING_OPTIONS.map(({ key }) => key);
   const offerings = [
     { key: "vanilla", category: "soft-serve-flavor", displayName: "Vanilla" },
     { key: "chocolate", category: "soft-serve-flavor", displayName: "Chocolate" },
@@ -140,7 +189,7 @@ async function main() {
       key: "horchata", category: "soft-serve-flavor", displayName: "Horchata", description: "Premium soft serve",
       price: { kind: "PER_QUANTITY", amount: "0.50", currency: "USD", dimension: "guest" },
     },
-    ...toppings.map((key) => ({ key, category: "topping", displayName: key })),
+    ...TOPPING_OPTIONS.map((topping) => ({ ...topping, category: "topping" })),
     { key: "cup", category: "cone-option", displayName: "Cups" },
     {
       key: "waffle-cone", category: "cone-option", displayName: "Waffle cones",

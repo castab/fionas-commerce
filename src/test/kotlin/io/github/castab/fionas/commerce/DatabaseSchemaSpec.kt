@@ -124,6 +124,26 @@ class DatabaseSchemaSpec :
                 )
         }
 
+        test("every inquiry has a non-null text ZIP code and no optional location row") {
+            application.database.strings(
+                "SELECT is_nullable || ' ' || data_type FROM information_schema.columns " +
+                    "WHERE table_schema = 'fionas' AND table_name = 'inquiries' AND column_name = 'zip_code'",
+            ) shouldContainExactly listOf("NO text")
+            application.database.tables("fionas").contains("inquiry_locations") shouldBe false
+        }
+
+        test("every inquiry has a non-null calendar date and event type, separate from customer identity") {
+            application.database.strings(
+                "SELECT column_name || ' ' || is_nullable || ' ' || data_type FROM information_schema.columns " +
+                    "WHERE table_schema = 'fionas' AND table_name = 'inquiries' " +
+                    "AND column_name IN ('event_date', 'event_type') ORDER BY column_name",
+            ) shouldContainExactly listOf("event_date NO date", "event_type NO text")
+            application.database.strings(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' AND table_name = 'customers' " +
+                    "AND column_name IN ('event_date', 'event_type')",
+            ) shouldContainExactly emptyList()
+        }
+
         test("every pricing source is keyed to commerce-runtime's exact snapshot of a lineage Fiona owns") {
             application.database.foreignKeys("financial_document_pricing") shouldContainExactlyInAnyOrder
                 listOf(

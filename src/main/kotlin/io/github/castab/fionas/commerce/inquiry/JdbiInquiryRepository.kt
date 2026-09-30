@@ -3,10 +3,11 @@ package io.github.castab.fionas.commerce.inquiry
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerId
 import org.jdbi.v3.core.mapper.RowMapper
+import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.util.UUID
 
-/** [InquiryRepository] on `fionas.inquiries`, through the transaction's JDBI handle. */
+/** [InquiryRepository] on `fionas.inquiries`, through the caller's transaction. */
 class JdbiInquiryRepository : InquiryRepository {
     override fun insert(
         transaction: Transaction,
@@ -15,13 +16,16 @@ class JdbiInquiryRepository : InquiryRepository {
         transaction.handle
             .createUpdate(
                 """
-                INSERT INTO fionas.inquiries (id, customer_id, message, created_at)
-                VALUES (:id, :customerId, :message, :createdAt)
+                INSERT INTO fionas.inquiries (id, customer_id, message, created_at, zip_code, event_date, event_type)
+                VALUES (:id, :customerId, :message, :createdAt, :zipCode, :eventDate, :eventType)
                 """.trimIndent(),
             ).bind("id", inquiry.id.value)
             .bind("customerId", inquiry.customerId.value)
             .bind("message", inquiry.message?.value)
             .bind("createdAt", inquiry.createdAt)
+            .bind("zipCode", inquiry.zipCode.value)
+            .bind("eventDate", inquiry.eventDate.value)
+            .bind("eventType", inquiry.eventType.name)
             .execute()
     }
 
@@ -30,8 +34,11 @@ class JdbiInquiryRepository : InquiryRepository {
         id: InquiryId,
     ): Inquiry? =
         transaction.handle
-            .createQuery("SELECT id, customer_id, message, created_at FROM fionas.inquiries WHERE id = :id")
-            .bind("id", id.value)
+            .createQuery(
+                """
+                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type FROM fionas.inquiries WHERE id = :id
+                """.trimIndent(),
+            ).bind("id", id.value)
             .map(inquiryRow)
             .findOne()
             .orElse(null)
@@ -48,7 +55,7 @@ class JdbiInquiryRepository : InquiryRepository {
             if (after == null) {
                 transaction.handle.createQuery(
                     """
-                    SELECT id, customer_id, message, created_at FROM fionas.inquiries
+                    SELECT id, customer_id, message, created_at, zip_code, event_date, event_type FROM fionas.inquiries
                     ORDER BY created_at DESC, id DESC
                     LIMIT :limit
                     """.trimIndent(),
@@ -57,7 +64,7 @@ class JdbiInquiryRepository : InquiryRepository {
                 transaction.handle
                     .createQuery(
                         """
-                        SELECT id, customer_id, message, created_at FROM fionas.inquiries
+                        SELECT id, customer_id, message, created_at, zip_code, event_date, event_type FROM fionas.inquiries
                         WHERE (created_at, id) < (:afterCreatedAt, :afterId)
                         ORDER BY created_at DESC, id DESC
                         LIMIT :limit
@@ -79,5 +86,8 @@ private val inquiryRow =
             customerId = CustomerId(row.getObject("customer_id", UUID::class.java)),
             message = row.getString("message")?.let(::InquiryMessage),
             createdAt = row.getObject("created_at", OffsetDateTime::class.java).toInstant(),
+            zipCode = ZipCode(row.getString("zip_code")),
+            eventDate = EventDate(row.getObject("event_date", LocalDate::class.java)),
+            eventType = EventType.valueOf(row.getString("event_type")),
         )
     }

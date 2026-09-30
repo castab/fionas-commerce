@@ -136,6 +136,7 @@ annotation class ApiProperty(
     val format: String = "",
     val minLength: Int = -1,
     val maxLength: Int = -1,
+    val pattern: String = "",
 )
 
 /**
@@ -301,6 +302,7 @@ private class KotlinxSchemas(
                 "$property states a length, but is not a string"
             }
             check(facts.format.isEmpty() || value.kind == PrimitiveKind.STRING) { "$property states a format, but is not a string" }
+            check(facts.pattern.isEmpty() || value.kind == PrimitiveKind.STRING) { "$property states a pattern, but is not a string" }
         }
         return buildJsonObject {
             valueSchema(value, property, prefix, components).forEach { (key, node) -> put(key, node) }
@@ -308,6 +310,7 @@ private class KotlinxSchemas(
             facts?.format?.takeIf { it.isNotEmpty() }?.let { put("format", it) }
             facts?.minLength?.takeIf { it >= 0 }?.let { put("minLength", it) }
             facts?.maxLength?.takeIf { it >= 0 }?.let { put("maxLength", it) }
+            facts?.pattern?.takeIf { it.isNotEmpty() }?.let { put("pattern", it) }
         }
     }
 
