@@ -10,6 +10,8 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Mig
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.fionas.commerce.fionaApplication
+import io.github.castab.fionas.commerce.http.LoginRateLimit
+import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import org.http4k.core.HttpHandler
@@ -91,6 +93,7 @@ class TestApplication private constructor(
             clock: Clock = testClock,
             bootstrap: BootstrapAdmin? =
                 BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
+            loginRateLimit: LoginRateLimit = LoginRateLimit(),
         ): TestApplication {
             val database = TestDatabase.create()
             try {
@@ -99,6 +102,8 @@ class TestApplication private constructor(
                         clock,
                         bootstrap,
                         setOf(TEST_ORIGIN),
+                        uiApiKey = UiApiKey(TEST_UI_API_KEY),
+                        loginRateLimit = loginRateLimit,
                     )
                 var context: CommerceRuntimeContext? = null
                 val runtime =
@@ -129,3 +134,7 @@ class TestApplication private constructor(
 }
 
 const val TEST_ORIGIN = "https://fionas.test"
+
+const val TEST_UI_API_KEY = "deterministic-test-ui-key"
+
+fun Request.withUiKey(): Request = header("Authorization", "Bearer $TEST_UI_API_KEY")

@@ -7,6 +7,7 @@ import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingsSnapshot
+import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.offering.OfferingDto
@@ -22,10 +23,12 @@ import kotlinx.serialization.json.JsonClassDiscriminator
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.bindContract
 import org.http4k.contract.meta
+import org.http4k.core.Filter
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.core.then
 import org.http4k.core.with
 
 @Serializable
@@ -209,16 +212,22 @@ private val exampleInquiryForm =
         ),
     ).toResponse()
 
-fun getInquiryFormRoute(getInquiryForm: () -> InquiryForm): ContractRoute =
+fun getInquiryFormRoute(
+    getInquiryForm: () -> InquiryForm,
+    uiApiKey: UiApiKey,
+): ContractRoute =
     "/inquiry-form" meta {
         operationId = "getInquiryForm"
+        security = uiApiKeySecurity(uiApiKey)
         summary = "Read the customer inquiry form"
         description = "Public ordered questions for POST /inquiries. Input semantics and presentation hints are separate. " +
             "Service configuration is optional; when used, required fields and category limits apply. Copy catalogRevision " +
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
             "do not reprice those submitted choices. Only configured Fiona categories appear; retired categories and offerings " +
             "are absent. pricingPreview resolves policy/catalog facts for instant advisory browser arithmetic. " +
-            "Name, email, and pricing are validated by the existing submission operation, independently of this metadata."
+            "Name, email, and pricing are validated by the existing submission operation, independently of this metadata. " +
+            "Requires the trusted server-side UI Bearer key. Successful responses have Cache-Control: " +
+            "private, max-age=900, stale-while-revalidate=3600; failures have no-store."
         tags += inquiries
         returning(
             Status.OK,
@@ -226,6 +235,7 @@ fun getInquiryFormRoute(getInquiryForm: () -> InquiryForm): ContractRoute =
             "The question definition with choices from one current catalog revision.",
         )
         returningError(ErrorCategory.NOT_FOUND, "Fiona's catalog has not been initialized.", "Offerings catalog was not found")
+        returningError(ErrorCategory.UNAUTHENTICATED, "the UI credential is missing or invalid.", "Authentication is required")
         returningError(
             ErrorCategory.INTERNAL_FAILURE,
             "the public catalog cannot be represented/priced across every allowed duration " +
@@ -233,8 +243,20 @@ fun getInquiryFormRoute(getInquiryForm: () -> InquiryForm): ContractRoute =
                 "Configuration diagnostics stay in server logs; its cause is never described to customers.",
             INTERNAL_FAILURE,
         )
-    } bindContract Method.GET to { _: Request ->
-        Response(Status.OK).with(inquiryFormBody of getInquiryForm().toResponse())
+    } bindContract Method.GET to
+        inquiryFormCaching.then(CommerceErrorHandling).then { _: Request ->
+            Response(Status.OK).with(inquiryFormBody of getInquiryForm().toResponse())
+        }
+
+private val inquiryFormCaching =
+    Filter { next ->
+        { request ->
+            val response = next(request)
+            response.header(
+                "Cache-Control",
+                if (response.status == Status.OK) "private, max-age=900, stale-while-revalidate=3600" else "no-store",
+            )
+        }
     }
 
 private fun InquiryForm.toResponse(): InquiryFormResponse {

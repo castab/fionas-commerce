@@ -77,14 +77,32 @@ class OpenApiDocumentSpec :
             method: String,
         ) = document.at("paths", path, method).jsonObject
 
+        test("only the three UI routes declare Bearer security and login documents rate limiting") {
+            val scheme = document.at("components", "securitySchemes", "fionasUiApiKey")
+            scheme.text("type") shouldBe "http"
+            scheme.text("scheme") shouldBe "bearer"
+            val protected = setOf("/inquiry-form" to "get", "/estimate-preview" to "post", "/inquiries" to "post")
+            document.at("paths").jsonObject.forEach { (path, methods) ->
+                methods.jsonObject.forEach { (method, endpoint) ->
+                    val security = endpoint.jsonObject["security"] as? JsonArray
+                    val hasUiKey = security?.any { "fionasUiApiKey" in it.jsonObject } == true
+                    hasUiKey shouldBe ((path to method) in protected)
+                }
+            }
+            operation("/auth/login", "post").text("responses", "429", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/ErrorResponse"
+            operation("/auth/login", "post").text("responses", "429", "content", "application/json", "example", "code") shouldBe
+                "rate_limited"
+        }
+
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
-                Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "404", "500"),
-                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "404", "409", "422", "500"),
+                Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "404", "500"),
+                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "404", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "401", "403", "404", "500"),
-                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "404", "422", "500"),
+                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "401", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/estimates", "post", "createInquiryEstimate") to
                     listOf("201", "400", "401", "403", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "post", "createInquiryFinancialDocument") to
@@ -111,7 +129,7 @@ class OpenApiDocumentSpec :
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/payments/{paymentId}/refunds", "post", "recordRefund") to
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
-                Triple("/auth/login", "post", "login") to listOf("204", "400", "401", "403", "500"),
+                Triple("/auth/login", "post", "login") to listOf("204", "400", "401", "403", "429", "500"),
                 Triple("/auth/logout", "post", "logout") to listOf("204", "403", "500"),
                 Triple("/auth/me", "get", "getCurrentUser") to listOf("200", "401", "403", "500"),
                 Triple("/admin/users/{userId}/credentials/password", "put", "setStaffPassword") to
@@ -424,10 +442,15 @@ class OpenApiDocumentSpec :
                     val code = content.text("example", "code")
                     content.text("schema", "\$ref") shouldBe
                         "#/components/schemas/" + if (code == "validation_failed") "ValidationErrorResponse" else "ErrorResponse"
-                    ErrorCategory.entries
-                        .single { it.code == code }
-                        .status.code
-                        .toString() shouldBe status
+                    if (code == "rate_limited") {
+                        (path to method) shouldBe ("/auth/login" to "post")
+                        status shouldBe "429"
+                    } else {
+                        ErrorCategory.entries
+                            .single { it.code == code }
+                            .status.code
+                            .toString() shouldBe status
+                    }
                     response.text("description") shouldStartWith "`$code`"
                 }
             }

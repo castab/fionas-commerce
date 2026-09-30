@@ -70,20 +70,24 @@ fun loginRoute(
     cookie: SessionCookie,
     access: AccessControl,
     origin: Filter,
+    rateLimit: LoginRateLimit,
 ): ContractRoute =
     "/auth/login" meta {
         operationId = "login"
         summary = "Log in as a Fiona staff user"
-        description = "Verifies a staff password and sets a Secure, HttpOnly, host-only session cookie. Requires a trusted Origin."
+        description = "Verifies a staff password and sets a Secure, HttpOnly, host-only session cookie. Requires a trusted Origin. " +
+            "Limited per connection IP to a burst of five attempts, refilling one attempt every five minutes. " +
+            "All attempts count, including successful and malformed requests. 429 includes Retry-After in seconds."
         tags += authTag
         receiving(loginBody to LoginRequest("brayan", "password"))
         returning(Status.NO_CONTENT to "The session cookie is set.")
         returningError(ErrorCategory.MALFORMED_REQUEST, "the credentials body is malformed.", "Malformed request")
         returningError(ErrorCategory.UNAUTHENTICATED, "the credentials are invalid or the user is disabled.", "Invalid credentials")
         returningError(ErrorCategory.FORBIDDEN, "the browser origin is not trusted.", "The browser origin is not trusted")
+        returningLoginRateLimit()
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure.", INTERNAL_FAILURE)
     } bindContract Method.POST to
-        origin.then(access.public()).then { request: Request ->
+        rateLimit.filter.then(origin).then(access.public()).then { request: Request ->
             val body = loginBody(request)
             val issued =
                 login(body.username, SecretPassword.of(body.password))

@@ -279,9 +279,18 @@ private fun RouteMetaDsl.staffErrors() {
  * failures reach callers through commerce-runtime's error handling. The response is a
  * receipt of the new inquiry only: a public caller never reads a stored customer back.
  */
-fun createInquiryRoute(createInquiry: (CreateInquiry.Command) -> Inquiry): ContractRoute =
+fun createInquiryRoute(
+    createInquiry: (CreateInquiry.Command) -> Inquiry,
+    uiApiKey: UiApiKey,
+): ContractRoute =
     "/inquiries" meta {
         operationId = "createInquiry"
+        security = uiApiKeySecurity(uiApiKey)
+        returningError(
+            ErrorCategory.UNAUTHENTICATED,
+            "the trusted server-side UI Bearer credential is missing or invalid.",
+            "Authentication is required",
+        )
         summary = "Record an inquiry"
         description =
             "Records a prospective customer's inquiry, with the configuration they chose when they submit one. The " +

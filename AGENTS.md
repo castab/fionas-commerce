@@ -115,7 +115,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
 
 ### Inquiries and the staff inbox
 
-- **Submission is public; reading is staff-only.** `POST /inquiries` is public.
+- **Submission requires the UI key; reading is staff-only.** `POST /inquiries` requires the trusted server-side UI Bearer key.
   `GET /inquiries` and `GET /inquiries/{inquiryId}` require Fiona's
   `fionas.inquiries.read`. There is no public confirmation lookup: a confirmation renders
   what the customer just submitted.
@@ -140,7 +140,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
 
 ## Fiona's customer inquiry form
 
-- `GET /inquiry-form` is public, a ContractRoute with operationId `getInquiryForm`.
+- `GET /inquiry-form` requires the trusted server-side UI Bearer key, a ContractRoute with operationId `getInquiryForm`.
   `GetInquiryForm` reads one current snapshot through the runtime's `GetOfferingsCatalog`,
   wired in the composition root, and adapts it into `InquiryForm`. No persistence, seeding,
   second catalog, generic form DSL, or shared commerce form concept is introduced.
@@ -419,6 +419,33 @@ Also:
   `libs.versions.toml`), never a newer BOM; `ArchitectureSpec` fails when two http4k
   versions meet on the classpath.
 
+## Trusted UI authentication and login limiting
+
+- `FIONAS_UI_API_KEY` is required when composing Fiona's API. It has no fallback and must
+  match Bearer token syntax. `UiApiKey` retains only a SHA-256 digest, redacts text forms,
+  and compares fixed-length digests with `MessageDigest.isEqual`. No credential logging.
+- Only `GET /inquiry-form`, `POST /estimate-preview`, and `POST /inquiries` attach
+  `uiApiKeyAuthentication` via their contract's Bearer security. The key belongs to the
+  trusted server-side UI, never browser JavaScript. Exactly one key; configuration plus
+  restart/redeploy handles rotation. Accept only a single Authorization header; every
+  invalid/missing credential gets the same runtime `401 unauthenticated` envelope.
+- UI authentication never creates a principal/session or grants staff permissions. Keep
+  it Fiona-local in HTTP; operations and domain/pricing code know nothing of credentials.
+- Authorized successful form responses have `Cache-Control: private, max-age=900,
+  stale-while-revalidate=3600`; failures have `no-store`, including exceptions rendered by
+  the existing runtime error filter. Preserve definitionVersion and catalogRevision.
+- Anonymous `POST /auth/login` uses one synchronized in-memory limiter per process,
+  capacity five, one token per five minutes, keyed by connection source IP. All attempts
+  count before origin/body/password checks, including success; success never resets it.
+  Monotonic time drives refill. Do not trust forwarded headers without an explicit proxy
+  policy; a proxy currently shares its connection-IP bucket. Missing source shares a bucket.
+- Retain at most 10,000 identities; prune fully replenished idle entries and use a depleted
+  shared overflow bucket for new IPs at the bound, never evict depleted identities.
+  Restart resets buckets; replicas do not share them. Exhaustion returns 429, Retry-After
+  seconds rounded up, no-store, and runtime `ErrorResponse("rate_limited", "Too many requests")`.
+  Runtime 0.0.18 has no rate-limit ErrorCategory; reuse its envelope and document the local
+  status/code on the login ContractRoute. No new error framework or upstream subsystem.
+
 ## Application migrations
 
 - **Commerce 0.0.17's V7 deliberately rejects existing financial snapshots.** PostgreSQL
@@ -608,7 +635,7 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   and require `FinancialDocumentRead`. `GET /payments/unapplied` uses `PaymentRecord` for
   its operational queue; `RefundRecord` alone grants neither read. There is no new
   payment-read permission. Listing and reading inquiries require
-  `fionas.inquiries.read`. Inquiry submission, estimate previews, ordinary Offerings reads, health,
+  `fionas.inquiries.read`. Inquiry submission, the inquiry form, and estimate previews require the UI key. Ordinary Offerings reads, health,
   and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
   cookie-authenticated methods require a matching `Origin` and fail closed if none is
@@ -688,8 +715,8 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
    carry optional `violations: [{code: ...}]`; ordinary validation can omit it. Clients
    match codes directly and never parse the diagnostic message. OpenAPI uses runtime
    `ValidationErrorResponse` and `ValidationViolationResponse`, never Fiona copies.
-10. **A preview is not an estimate document.** `POST /estimate-preview` stays public and
-    stateless and creates no `FinancialDocument`; persisted documents are a separate,
+10. **A preview is not an estimate document.** `POST /estimate-preview` requires the trusted server-side UI Bearer key,
+    remains stateless, and creates no `FinancialDocument`; persisted documents are a separate,
     staff-only API.
 
 ## Financial documents and payments

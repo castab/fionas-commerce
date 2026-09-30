@@ -30,6 +30,7 @@ import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.OPENAPI_PATH
+import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
@@ -102,7 +103,14 @@ private val notInvokedSessions =
     }
 
 private val renderingAccess = AccessControl(Filter.NoOp, PermissionResolver { emptySet() })
-private val renderingAuth = FionaAuthRoutes(notInvokedSessions, SessionCookie("__Host-fionas_session"), renderingAccess, Filter.NoOp)
+private val renderingAuth =
+    FionaAuthRoutes(
+        notInvokedSessions,
+        SessionCookie("__Host-fionas_session"),
+        renderingAccess,
+        Filter.NoOp,
+        UiApiKey("rendering-only-not-a-deployment-key"),
+    )
 
 /**
  * A `CommerceRuntimeContext` for rendering only: its transactor opens no connection, its

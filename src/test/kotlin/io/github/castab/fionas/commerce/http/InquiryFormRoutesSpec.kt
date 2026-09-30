@@ -14,6 +14,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
@@ -31,8 +32,9 @@ class InquiryFormRoutesSpec :
         var revision = 0
 
         fun TestApplication.form(): InquiryFormResponse {
-            val response = http(Request(Method.GET, "/inquiry-form"))
+            val response = http(Request(Method.GET, "/inquiry-form").withUiKey())
             response.status shouldBe Status.OK
+            response.header("Cache-Control") shouldBe "private, max-age=900, stale-while-revalidate=3600"
             return CommerceJson.asA(response.bodyString(), InquiryFormResponse.serializer())
         }
 
@@ -76,8 +78,9 @@ class InquiryFormRoutesSpec :
 
         test("a missing catalog returns the runtime not-found envelope; the read initializes nothing") {
             TestApplication.create().use { fresh ->
-                val response = fresh.http(Request(Method.GET, "/inquiry-form"))
+                val response = fresh.http(Request(Method.GET, "/inquiry-form").withUiKey())
                 response.status shouldBe Status.NOT_FOUND
+                response.header("Cache-Control") shouldBe "no-store"
                 CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()).code shouldBe "not_found"
                 fresh.database.count("commerce.offerings_snapshots") shouldBe 0
             }
@@ -186,7 +189,7 @@ class InquiryFormRoutesSpec :
                     ).input as InquiryFormInputResponse.IntegerChoice
             ).options.map { it.value } shouldContainExactly
                 FIONAS_PRICING_POLICY.allowedDurations.sorted().map { Math.toIntExact(it.toMinutes()) }
-            val json = CommerceJson.parse(application.http(Request(Method.GET, "/inquiry-form")).bodyString()).jsonObject
+            val json = CommerceJson.parse(application.http(Request(Method.GET, "/inquiry-form").withUiKey()).bodyString()).jsonObject
             json
                 .getValue("sections")
                 .jsonArray
@@ -247,6 +250,7 @@ class InquiryFormRoutesSpec :
             val response =
                 application.http(
                     Request(Method.POST, "/estimate-preview")
+                        .withUiKey()
                         .header("Content-Type", "application/json")
                         .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), inputs)),
                 )
@@ -298,7 +302,7 @@ class InquiryFormRoutesSpec :
                             ""","total":"0.01","lines":[{"unitPrice":"0.01"}]}"""
                     val response =
                         fresh.http(
-                            Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(forged),
+                            Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(forged),
                         )
                     response.status shouldBe Status.OK
                     BigDecimal(CommerceJson.asA(response.bodyString(), EstimatePreviewResponse.serializer()).total)
@@ -327,6 +331,7 @@ class InquiryFormRoutesSpec :
                 val response =
                     fresh.http(
                         Request(Method.POST, "/estimate-preview")
+                            .withUiKey()
                             .header("Content-Type", "application/json")
                             .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), historical)),
                     )
@@ -346,8 +351,9 @@ class InquiryFormRoutesSpec :
                 TestApplication.create().use { fresh ->
                     val initial = fresh.createAcceptanceCatalog()
                     fresh.addOffering(initial, "invalid-flavor", "soft-serve-flavor", "Invalid flavor", price)
-                    val response = fresh.http(Request(Method.GET, "/inquiry-form"))
+                    val response = fresh.http(Request(Method.GET, "/inquiry-form").withUiKey())
                     response.status shouldBe Status.INTERNAL_SERVER_ERROR
+                    response.header("Cache-Control") shouldBe "no-store"
                     CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()) shouldBe
                         ErrorResponse("internal_failure", INTERNAL_FAILURE)
                     fresh.database.count("fionas.inquiries") shouldBe 0
@@ -409,17 +415,19 @@ class InquiryFormRoutesSpec :
                     .map { it.key } shouldContainExactly listOf("vanilla", "chocolate")
                 val inputs = pricingBody(edited.catalogRevision)
                 fresh
-                    .http(Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(inputs))
+                    .http(Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(inputs))
                     .status shouldBe Status.OK
                 fresh
                     .http(
                         Request(Method.POST, "/inquiries")
+                            .withUiKey()
                             .header("Content-Type", "application/json")
                             .body("""{"name":"Jane","email":"jane@example.com","pricingInputs":$inputs}"""),
                     ).status shouldBe Status.CREATED
                 fresh
                     .http(
                         Request(Method.POST, "/estimate-preview")
+                            .withUiKey()
                             .header("Content-Type", "application/json")
                             .body(pricingBody(current.catalogRevision)),
                     ).status shouldBe Status.UNPROCESSABLE_ENTITY
@@ -447,6 +455,7 @@ class InquiryFormRoutesSpec :
             fun submit(value: InquiryPricingInputs) =
                 application.http(
                     Request(Method.POST, "/inquiries")
+                        .withUiKey()
                         .header("Content-Type", "application/json")
                         .body(
                             CommerceJson.json.encodeToString(
@@ -458,6 +467,7 @@ class InquiryFormRoutesSpec :
             application
                 .http(
                     Request(Method.POST, "/estimate-preview")
+                        .withUiKey()
                         .header("Content-Type", "application/json")
                         .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), inputs)),
                 ).status shouldBe Status.OK
@@ -468,6 +478,7 @@ class InquiryFormRoutesSpec :
             val plain =
                 application.http(
                     Request(Method.POST, "/inquiries")
+                        .withUiKey()
                         .header("Content-Type", "application/json")
                         .body("""{"name":"Jane","email":"plain@example.com"}"""),
                 )

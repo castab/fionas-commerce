@@ -14,6 +14,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldBeUnique
@@ -54,7 +55,7 @@ class InquiryRoutesSpec :
         afterSpec { application.close() }
 
         fun TestApplication.post(body: String) =
-            http(Request(Method.POST, "/inquiries").header("Content-Type", "application/json").body(body))
+            http(Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(body))
 
         fun post(body: String) = application.post(body)
 
@@ -298,7 +299,9 @@ class InquiryRoutesSpec :
                 pricingBody(999),
             ).forEach { inputs ->
                 val preview =
-                    application.http(Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(inputs))
+                    application.http(
+                        Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(inputs),
+                    )
                 val submitted = post(inquiryBody("rejected-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":$inputs"""))
 
                 preview.status.successful shouldBe false
@@ -354,7 +357,9 @@ class InquiryRoutesSpec :
         test("preview → public inquiry with the same inputs → staff read → an estimate priced as the preview, with nothing re-entered") {
             val inputs = pricingBody(revision)
             val preview =
-                application.http(Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(inputs))
+                application.http(
+                    Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(inputs),
+                )
             preview.status shouldBe Status.OK
             val previewTotal = CommerceJson.asA(preview.bodyString(), EstimatePreviewResponse.serializer()).total
             val documents = application.database.count("commerce.financial_document_snapshots")

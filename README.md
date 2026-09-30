@@ -85,10 +85,26 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 
 | Endpoint | Permission | Behavior |
 |---|---|---|
-| `POST /inquiries` | public | Records an inquiry, establishing its customer, with the pricing inputs the customer configured when present. `201` with a receipt (`id`, `createdAt`) and a `Location` header; never the stored customer. |
-| `GET /inquiry-form` | public | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
+| `POST /inquiries` | UI Bearer key | Records an inquiry, establishing its customer, with the pricing inputs the customer configured when present. `201` with a receipt (`id`, `createdAt`) and a `Location` header; never the stored customer. |
+| `GET /inquiry-form` | UI Bearer key | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
+
+The trusted SvelteKit/UI server calls `GET /inquiry-form`, `POST /estimate-preview`, and
+`POST /inquiries` with `Authorization: Bearer <api-key>`. Configure the same high-entropy
+`FIONAS_UI_API_KEY` on the backend and the UI server. Startup fails if it is absent, empty,
+or incompatible with Bearer token syntax. There is one active key; rotate by changing
+configuration and restarting/redeploying both servers. Keep it in server-only configuration,
+never browser JavaScript, logs, examples, URLs, cookies, or request bodies. Missing, malformed,
+duplicate, and incorrect authorization all return `401 unauthenticated` with
+`Authentication is required`. The UI key grants no staff identity or permissions; staff
+sessions still protect inquiry reads, administration, and financial operations.
+
+Authorized `GET /inquiry-form` responses carry
+`Cache-Control: private, max-age=900, stale-while-revalidate=3600` (15 minutes fresh,
+up to one hour stale while revalidating). Failures carry `Cache-Control: no-store`.
+The trusted UI can cache the response privately; form definition and catalog revisions
+retain their existing meaning.
 
 **Offerings Catalog API**, exposed by Fiona and implemented by commerce-runtime's Offerings
 capability (see [Offerings catalog](#offerings-catalog)):
@@ -118,7 +134,7 @@ capability (see [Offerings catalog](#offerings-catalog)):
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /estimate-preview` | Prices a selection from an exact catalog revision for a guest count and service duration. `200` with the lines and totals; records nothing. |
+| `POST /estimate-preview` | Requires the trusted UI Bearer key. Prices a selection from an exact catalog revision for a guest count and service duration. `200` with the lines and totals; records nothing. |
 
 **Financial documents and payments API**, implemented by Fiona on commerce-runtime's
 financial ledger (see [Financial documents and payments](#financial-documents-and-payments)).
@@ -145,7 +161,7 @@ Every route needs a staff session:
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /auth/login` | Verifies a staff password and sets Fiona's secure session cookie. Requires a trusted browser origin. |
+| `POST /auth/login` | Anonymous; verifies a staff password and sets Fiona's secure session cookie. Requires a trusted browser origin. Per-IP burst of five; one attempt refills every five minutes; `429` with `Retry-After` when exhausted. |
 | `POST /auth/logout` | Revokes the runtime session and clears the cookie, including on repeated logout. |
 | `GET /auth/me` | Returns the active human staff profile, current role keys, and sorted effective live `permissions`; requires no role-administration permission. |
 | `PUT /admin/users/{userId}/credentials/password` | Sets a runtime user's Fiona password; requires `fionas.credentials.manage` and trusted Origin. |
@@ -429,6 +445,17 @@ changes appear without a new login. Reading your own permissions requires no
 `commerce.role.read`; that permission governs role administration. `POST /auth/logout` revokes the runtime
 session and clears the cookie; repeating it is safe. No raw session token is sent in JSON.
 
+Login stays anonymous and is limited in memory per connection source IP: a burst of five
+attempts, then one attempt refilled every five minutes, up to five. Successful, malformed,
+and rejected attempts all count. Exhaustion returns `429` with `Retry-After` in whole
+seconds (rounded up), `Cache-Control: no-store`, and
+`{"code":"rate_limited","message":"Too many requests"}`. No progressive lockout is applied.
+Each process has its own buckets and restart clears them. The synchronized map retains
+at most 10,000 IPs, removes idle fully replenished entries, and conservatively shares a
+depleted overflow bucket for new IPs when full. Missing source addresses share one bucket.
+Forwarded, X-Forwarded-For, and X-Real-IP headers are ignored. Behind a proxy, clients share
+the proxy connection's bucket; a trusted-proxy identity policy requires a separate decision.
+
 The runtime directory normalizes usernames and stores the profile and status in
 `commerce.users`. Fiona's `fionas.user_credentials` holds only the Argon2id hash and
 change time, with a foreign key to that runtime user. Fiona contributes
@@ -468,7 +495,7 @@ Set `FIONAS_TRUSTED_ORIGINS` to the exact frontend origin (or a comma-separated 
 for example `https://shop.example.com`. Login and every unsafe request carrying Fiona's
 session cookie require a matching `Origin`; a missing or different origin receives `403`.
 When no origin is configured, browser login fails closed. Inquiry submission
-(`POST /inquiries`) and estimate previews remain public; listing and reading inquiries
+(`POST /inquiries`), `GET /inquiry-form`, and estimate previews require the server-side UI key; listing and reading inquiries
 require `fionas.inquiries.read`. `/health`, `/ready`, and ordinary Offerings reads remain public;
 Offerings mutations and retired discovery require `commerce.offerings.manage`. Every financial-document and payment
 route is staff-only.
@@ -965,7 +992,7 @@ repository read access.
 
 The application's configuration is [`src/main/resources/application.conf`](src/main/resources/application.conf),
 loaded by commerce-runtime's `CommerceRuntimeConfiguration.load()` and overridden by the
-environment. Bootstrap staff credentials are supplied only through environment variables.
+environment. Bootstrap staff credentials and the UI key are supplied through environment variables.
 
 | Environment variable | Meaning | Default |
 |---|---|---|
@@ -979,6 +1006,7 @@ environment. Bootstrap staff credentials are supplied only through environment v
 | `DATABASE_VALIDATION_TIMEOUT_MS` | Validation timeout | `1000` |
 | `MIGRATIONS_ON_STARTUP` | `migrate`: apply pending migrations, then serve. `validate`: only check that they are applied | `migrate` (Fiona's `application.conf`) |
 | `SESSIONS_LIFETIME_MINUTES` | Fixed runtime session lifetime | `720` |
+| `FIONAS_UI_API_KEY` | One pre-shared Bearer-compatible key for the trusted server-side UI; never sent to browser JavaScript | required; no default |
 | `FIONAS_TRUSTED_ORIGINS` | Comma-separated exact browser origins for login and cookie-authenticated mutations | none; browser login is denied until configured |
 | `FIONAS_BOOTSTRAP_ADMIN_USERNAME` | First administrator's username; required with password and display name | none |
 | `FIONAS_BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password, at least 12 characters; remove after provisioning | none |
@@ -1114,7 +1142,8 @@ and closes the connection pool.
 
 With Fiona running against a fresh, disposable local database, bootstrap the `admin` user
 and set `FIONAS_TRUSTED_ORIGINS=http://localhost:8080` for the application. Use Node.js 20
-or newer to enter the acceptance catalog through Fiona's API and preview its canonical
+or newer, with `FIONAS_UI_API_KEY` set to the backend's configured key in the script's
+environment, to enter the acceptance catalog through Fiona's API and preview its canonical
 `$681.25` estimate:
 
 ```bash
@@ -1132,7 +1161,7 @@ for the exact catalog entries and preview request.
 ### Smoke test Invoice payments and a refund locally
 
 With Fiona running locally and its Offerings catalog already initialized by
-`setup-local-commerce.mjs`, use Node.js 20 or newer to exercise the separate payment
+`setup-local-commerce.mjs`, use Node.js 20 or newer with the same `FIONAS_UI_API_KEY` to exercise the separate payment
 recording, allocation, and refund routes. The local Administrator needs
 `commerce.refund.record` (fresh bootstrap grants it; update older roles using the
 [replacement flow above](#staff-authentication)):
@@ -1196,6 +1225,7 @@ these variables on the service (Railway also injects `PORT`):
 | `DATABASE_JDBC_URL` | `jdbc:postgresql://${{Postgres.PGHOST}}:${{Postgres.PGPORT}}/${{Postgres.PGDATABASE}}` |
 | `DATABASE_USERNAME` | `${{Postgres.PGUSER}}` |
 | `DATABASE_PASSWORD` | `${{Postgres.PGPASSWORD}}` |
+| `FIONAS_UI_API_KEY` | A random secret shared only with the trusted UI server |
 | `FIONAS_TRUSTED_ORIGINS` | The service's public origin, for example `https://<domain>` |
 | `FIONAS_BOOTSTRAP_ADMIN_*` | First provisioning only; remove after the admin exists |
 

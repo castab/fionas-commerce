@@ -27,6 +27,8 @@ import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
+import io.github.castab.fionas.commerce.http.LoginRateLimit
+import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.http.apiDocs
 import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
@@ -93,6 +95,8 @@ fun fionaApplication(
             ?.filter(String::isNotBlank)
             ?.toSet()
             ?: emptySet(),
+    uiApiKey: UiApiKey = UiApiKey.fromEnvironment(),
+    loginRateLimit: LoginRateLimit = LoginRateLimit(),
 ): ApplicationContributions =
     ApplicationContributions(
         migrations =
@@ -115,7 +119,7 @@ fun fionaApplication(
                     origin.filter.then(sessionAuthentication(context.sessions, cookie)),
                     context.authorization.permissionResolver,
                 )
-            val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter)
+            val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, uiApiKey, loginRateLimit)
             // Fiona's pricing, over exact catalog revisions read in the caller's transaction.
             val pricing =
                 FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), context.offeringsSnapshotRepository::retrieveVersion)

@@ -1,5 +1,5 @@
 // Fresh local DB → bootstrap Fiona's acceptance catalog → preview the canonical $681.25 estimate.
-// Run with FIONAS_ADMIN_PASSWORD set; this script does not load .env files or seed on application startup.
+// Run with FIONAS_ADMIN_PASSWORD and FIONAS_UI_API_KEY set; this script does not load .env files or seed on application startup.
 
 const EXPECTED_TOTAL = "681.25";
 
@@ -7,6 +7,7 @@ const baseUrl = process.env.FIONAS_BASE_URL ?? "http://localhost:8080";
 const origin = process.env.FIONAS_ORIGIN ?? "http://localhost:8080";
 const username = process.env.FIONAS_ADMIN_USERNAME ?? "admin";
 const password = process.env.FIONAS_ADMIN_PASSWORD;
+const uiApiKey = process.env.FIONAS_UI_API_KEY;
 let sessionCookie;
 
 class HttpFailure extends Error {
@@ -25,6 +26,11 @@ async function request(method, path, { body, authenticated = false, expectedStat
   if (body !== undefined) headers.set("Content-Type", "application/json");
   if (authenticated || path === "/auth/login") headers.set("Origin", origin);
   if (authenticated) headers.set("Cookie", sessionCookie);
+  if ((method === "GET" && path === "/inquiry-form") ||
+      (method === "POST" && ["/estimate-preview", "/inquiries"].includes(path))) {
+    if (!uiApiKey) throw new Error("Set FIONAS_UI_API_KEY to the local backend's configured UI key");
+    headers.set("Authorization", `Bearer ${uiApiKey}`);
+  }
 
   let response;
   try {
@@ -74,6 +80,7 @@ function dollars(value) {
 }
 
 async function main() {
+  if (!uiApiKey) throw new Error("Set FIONAS_UI_API_KEY to the local backend's configured UI key");
   if (!password?.trim()) {
     throw new Error(
       "Set FIONAS_ADMIN_PASSWORD to your local bootstrap admin password, then run: " +

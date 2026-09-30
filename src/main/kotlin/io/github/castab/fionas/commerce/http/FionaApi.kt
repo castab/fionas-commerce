@@ -87,6 +87,8 @@ class FionaAuthRoutes(
     val cookie: SessionCookie,
     val access: AccessControl,
     val origin: Filter,
+    val uiApiKey: UiApiKey,
+    val loginRateLimit: LoginRateLimit = LoginRateLimit(),
 )
 
 /**
@@ -98,11 +100,11 @@ fun fionaApiRoutes(
     auth: FionaAuthRoutes,
 ): List<ContractRoute> =
     listOf(
-        getInquiryFormRoute(operations.getInquiryForm),
-        createInquiryRoute(operations.createInquiry),
+        getInquiryFormRoute(operations.getInquiryForm, auth.uiApiKey),
+        createInquiryRoute(operations.createInquiry, auth.uiApiKey),
         listInquiriesRoute(operations.listInquiries, auth.access),
         getInquiryRoute(operations.getInquiry, auth.access),
-        previewEstimateRoute(operations.previewEstimate),
+        previewEstimateRoute(operations.previewEstimate, auth.uiApiKey),
         createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
         createInquiryFinancialDocumentRoute(operations.createInquiryFinancialDocument, auth.access),
         listInquiryFinancialDocumentsRoute(operations.listInquiryFinancialDocuments, auth.access),
@@ -117,7 +119,7 @@ fun fionaApiRoutes(
         recordStandalonePaymentRoute(operations.recordStandalonePayment, auth.access),
         allocatePaymentRoute(operations.allocatePayment, auth.access),
         recordRefundRoute(operations.recordRefund, auth.access),
-        loginRoute(operations.login, auth.cookie, auth.access, auth.origin),
+        loginRoute(operations.login, auth.cookie, auth.access, auth.origin, auth.loginRateLimit),
         logoutRoute(auth.sessions, auth.cookie, auth.access),
         currentUserRoute(operations.currentUser, operations.currentPermissions, auth.access),
         setStaffPasswordRoute(operations.setStaffPassword, auth.access),

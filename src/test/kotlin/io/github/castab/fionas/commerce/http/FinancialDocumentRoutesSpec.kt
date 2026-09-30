@@ -20,6 +20,7 @@ import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.perGuest
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContain
@@ -125,10 +126,13 @@ class FinancialDocumentRoutesSpec :
             val responses =
                 listOf(
                     application.http(
-                        Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(invalidInputs),
+                        Request(
+                            Method.POST,
+                            "/estimate-preview",
+                        ).withUiKey().header("Content-Type", "application/json").body(invalidInputs),
                     ),
                     application.http(
-                        Request(Method.POST, "/inquiries").header("Content-Type", "application/json").body(
+                        Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(
                             """{"name":"Rejected","email":"rejected@example.com","pricingInputs":$invalidInputs}""",
                         ),
                     ),
@@ -158,7 +162,10 @@ class FinancialDocumentRoutesSpec :
             val snapshotsBefore = application.database.count("commerce.financial_document_snapshots")
             val preview =
                 application.http(
-                    Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(pricingBody(revision)),
+                    Request(
+                        Method.POST,
+                        "/estimate-preview",
+                    ).withUiKey().header("Content-Type", "application/json").body(pricingBody(revision)),
                 )
             preview.status shouldBe Status.OK
             val previewed = CommerceJson.asA(preview.bodyString(), EstimatePreviewResponse.serializer())
@@ -602,8 +609,12 @@ class FinancialDocumentRoutesSpec :
             val documents = application.database.count("commerce.financial_document_snapshots")
             val sources = application.database.count("fionas.financial_document_pricing")
             application
-                .http(Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(pricingBody(revision)))
-                .status shouldBe Status.OK
+                .http(
+                    Request(
+                        Method.POST,
+                        "/estimate-preview",
+                    ).withUiKey().header("Content-Type", "application/json").body(pricingBody(revision)),
+                ).status shouldBe Status.OK
             application.database.count("commerce.financial_document_snapshots") shouldBe documents
             application.database.count("fionas.financial_document_pricing") shouldBe sources
         }

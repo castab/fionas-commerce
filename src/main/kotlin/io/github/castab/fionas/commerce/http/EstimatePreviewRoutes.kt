@@ -165,9 +165,18 @@ private fun exampleLine(
  * nothing. The route only translates between transport and application values;
  * [previewEstimate] loads the revision and evaluates it with Fiona's pricing.
  */
-fun previewEstimateRoute(previewEstimate: (FionasPricingInputs) -> EstimatePreview): ContractRoute =
+fun previewEstimateRoute(
+    previewEstimate: (FionasPricingInputs) -> EstimatePreview,
+    uiApiKey: UiApiKey,
+): ContractRoute =
     "/estimate-preview" meta {
         operationId = "previewEstimate"
+        security = uiApiKeySecurity(uiApiKey)
+        returningError(
+            ErrorCategory.UNAUTHENTICATED,
+            "the trusted server-side UI Bearer credential is missing or invalid.",
+            "Authentication is required",
+        )
         summary = "Preview an estimate"
         description =
             "Prices a selection from one exact revision of Fiona's Offerings catalog for an event's guest count and " +
