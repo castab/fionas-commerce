@@ -874,7 +874,7 @@ The remaining gaps below have not been re-audited.
   the context's `FinancialLedger` (whose constructor is `internal` too) are assembled
   reflectively. This is provisional: commerce-runtime may eventually need a first-class
   contract/OpenAPI composition seam that does not require runtime persistence infrastructure.
-  In 0.0.17 the internal ledger constructor requires concrete PostgreSQL repositories;
+  The runtime's current internal ledger constructor requires concrete PostgreSQL repositories;
   the renderer reflects those constructors, which open no connection, behind its refusing
   transactor. This remains confined to `src/openapi`.
 - **`offeringsOpenApiRenderer` needs Jackson.** It builds schemas through http4k's

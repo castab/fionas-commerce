@@ -167,7 +167,7 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
         }
     val documents = refusing<FinancialDocumentRepository>("Rendering the OpenAPI document never touches a financial document")
     val payments = refusing<PaymentRepository>("Rendering the OpenAPI document never touches a payment")
-    // 0.0.17's internal ledger constructor takes the concrete PostgreSQL repositories.
+    // The runtime's current internal ledger constructor takes the concrete PostgreSQL repositories.
     // Constructing these opens no connection; the refusing transactor guards every ledger call.
     val documentRepositoryType = Class.forName("io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository")
     val paymentRepositoryType = Class.forName("io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository")
