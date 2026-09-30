@@ -1,7 +1,9 @@
 package io.github.castab.fionas.commerce.offering
 
 import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.offering.Offering
 import io.github.castab.commerce.offering.OfferingCategoryKey
+import io.github.castab.commerce.offering.OfferingPrice
 import io.github.castab.commerce.offering.QuantityDimension
 import java.math.BigDecimal
 import java.time.Duration
@@ -47,6 +49,44 @@ data class FionasPricingPolicy(
             require(!it.isNegative && !it.isZero) { "Service duration $it must be positive" }
             // Every offered duration must be charged exactly: hourly pricing never rounds.
             requireNotNull(it.exactMultipleOf(ONE_HOUR)) { "Service duration $it is not an exact number of hours" }
+        }
+    }
+
+    /** One resolved base-service contribution, shared by authoritative pricing and the form preview. */
+    internal fun baseServiceAmount(duration: Duration): Money {
+        val hours = checkNotNull(duration.exactMultipleOf(ONE_HOUR)) { "Allowed durations are whole-minute hour fractions" }
+        return baseEventFee + hourlyRate * hours
+    }
+
+    /** The same compatibility checks for a selected offering and an advertised public offering. */
+    internal fun offeringPriceViolation(
+        offering: Offering,
+        duration: Duration,
+    ): FionasOfferingsViolation? {
+        val price = offering.price ?: return null
+        val amount =
+            when (price) {
+                is OfferingPrice.Fixed -> price.amount
+                is OfferingPrice.PerQuantity -> price.amount
+                is OfferingPrice.PerDuration -> price.amount
+            }
+        if (amount.currency != currency) {
+            return FionasOfferingsViolation.UnsupportedCurrency(offering.key, amount.currency, currency)
+        }
+        return when (price) {
+            is OfferingPrice.Fixed -> null
+            is OfferingPrice.PerQuantity ->
+                if (price.dimension != guestDimension) {
+                    FionasOfferingsViolation.UnsupportedQuantityDimension(offering.key, price.dimension)
+                } else {
+                    null
+                }
+            is OfferingPrice.PerDuration ->
+                if (duration.exactMultipleOf(price.interval) == null) {
+                    FionasOfferingsViolation.IncompatibleDurationPrice(offering.key, price.interval, duration)
+                } else {
+                    null
+                }
         }
     }
 }

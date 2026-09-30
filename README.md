@@ -86,7 +86,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 | Endpoint | Permission | Behavior |
 |---|---|---|
 | `POST /inquiries` | public | Records an inquiry, establishing its customer, with the pricing inputs the customer configured when present. `201` with a receipt (`id`, `createdAt`) and a `Location` header; never the stored customer. |
-| `GET /inquiry-form` | public | Ordered questions, semantic input constraints, presentation hints, and current selectable offerings from one catalog revision. `404` before catalog initialization. |
+| `GET /inquiry-form` | public | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
 
@@ -228,7 +228,8 @@ failures and present `message` as diagnostic text; they never parse it for codes
 
 `GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
 resolved against one current Offerings snapshot. The response includes `definitionVersion`
-(currently 1), Fiona's stable `catalogId`, `catalogRevision`, and ordered `sections`.
+(currently 2), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
+advisory `pricingPreview` facts.
 Definition version identifies the code-owned questions and bindings; catalog edits change
 the catalog revision independently. Sections are **Contact information**, **Build your
 ice cream service**, and **Additional information**. Within each section, `fields` are in
@@ -251,15 +252,42 @@ Hints are `TEXT`, `TEXTAREA`, `NUMBER`, `CHECKBOX`, `SELECT`, `CARDS`, and
 accessibility, styling, and layout. Multiline notes are a string with a textarea hint.
 No Svelte component names appear in the contract.
 
-Known category keys are referenced by Fiona's question configuration: soft serve,
-toppings, then cones/cups. An absent or retired category contributes no field. Additional
-active categories follow in catalog order, using their catalog names and descriptions.
+Public offering questions explicitly reference Fiona's configured category keys: soft
+serve, toppings from the pricing policy, then cones/cups. An absent or retired category
+contributes no field; restoring it restores its configured question and position.
+Other catalog categories do not become public questions. Catalog administration and
+public question configuration are separate concerns.
 All option identity, display names, descriptions, prices, option order, and selection
 limits come from that same immutable snapshot. Options use commerce-runtime's existing
 `OfferingDto` / `OfferingPriceDto` representation, including all three price forms.
 Retired offerings disappear from the current form; no second catalog or form persistence
-is introduced. Catalog prices are descriptive metadata; use `POST /estimate-preview`
-for Fiona's total, including base service, guests, and extra toppings.
+is introduced.
+
+`pricingPreview` is a concrete Fiona projection of the same `FIONAS_PRICING_POLICY` and
+snapshot used to resolve the questions. It supplies the currency, guest quantity
+dimension, per-guest amount, topping category/included count/additional rate, and an
+ordered entry for each allowed duration. Each duration entry includes its base service
+amount and resolved flat contributions for public `PER_DURATION` offerings. Amounts are
+exact decimal strings; there is no client-side duration conversion or rounding rule.
+Local arithmetic adds base service, per-guest amount × guests, selected catalog charges
+(`FIXED` once, `PER_QUANTITY` × guests, `PER_DURATION` from the duration entry; no price
+means zero), and excess topping selections × guests × the additional rate. The topping
+adjustment applies in addition to any selected offering's catalog price.
+
+This local total is advisory. `POST /estimate-preview`, inquiry validation, and persisted
+documents still use `FionasOfferingsEngine` as their authority; the browser submits only
+pricing inputs, never trusted amounts or lines. All preview facts and options belong to
+the response's single catalog revision. Captured facts remain usable for that revision
+after later catalog edits.
+
+Form resolution fails with the runtime's generic `500 internal_failure` if a public
+offering has another currency, a non-guest quantity dimension, or an interval that cannot
+price every advertised duration exactly. Diagnostic detail stays on the server. The
+shared pricing-policy checks preserve the engine's finite decimal multipliers: a one-hour
+price supports 90 minutes at 1.5 units, while a 45-minute interval fails for 120 minutes.
+A required category outside the public definition or insufficient active options for a
+public category's minimum also fails rather than publishing an unusable form. Optional
+hidden catalog offerings are not subjected to public-form compatibility checks.
 
 The service section is optional, matching the existing optional `pricingInputs`.
 Field `required` applies when its section is used. For ordinary answers,
@@ -278,7 +306,9 @@ remain authoritative. Clients that bypass form metadata still receive the existi
 Structured phone, event date, address, and event contacts are deferred because the
 submission model does not yet store them; event facts remain customer-authored notes.
 Administration of the definition, historical form-definition reads, a generic form DSL,
-and a shared commerce UI abstraction are deliberately deferred.
+and a shared commerce UI abstraction are deliberately deferred. Duration-dependent option
+availability, conditional pricing, taxes, discounts, travel, promotions, and staff overrides
+are not added to this projection.
 
 ## Offerings catalog
 
@@ -1193,7 +1223,8 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
-| `InquiryFormRoutesSpec` | Public ordered questions, input constraints and submission bindings, one catalog revision, runtime option text and prices, new and retired identities, catalog-owned selection limits, and form → preview → inquiry with backend validation |
+| `InquiryFormRoutesSpec` | Explicit public questions and lifecycle, input constraints and submission bindings, runtime prices, incompatible configuration failures, and response-only local totals matching authoritative previews across catalog revisions |
+| `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `UnappliedPaymentsSpec` | Standalone receipt discovery with no inquiry, runtime ordering including ties, partial/full allocation, unapplied refunds and unavailable payment exclusion, payment-record authorization, and malformed allocation `documentId` body metadata |

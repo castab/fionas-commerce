@@ -9,6 +9,7 @@ import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.inquiry.InquiryFormControl
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
+import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
@@ -22,6 +23,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
+import java.math.BigDecimal
 
 class InquiryFormRoutesSpec :
     FunSpec({
@@ -37,6 +39,34 @@ class InquiryFormRoutesSpec :
         fun InquiryFormResponse.fields() = sections.flatMap { it.fields }
 
         fun InquiryFormResponse.choices() = fields().mapNotNull { it.input as? InquiryFormInputResponse.OfferingChoice }
+
+        // Browser-like arithmetic using only the wire response and customer answers, never the policy or engine.
+        fun InquiryFormResponse.browserTotal(inputs: InquiryPricingInputs): BigDecimal {
+            val facts = pricingPreview
+            val duration = facts.durationOptions.single { it.durationMinutes == inputs.durationMinutes }
+            val guests = inputs.guestCount.toBigDecimal()
+            val selected = inputs.selections.flatMap { it.offerings }.toSet()
+            var total = BigDecimal(duration.baseServiceAmount) + BigDecimal(facts.perGuestAmount) * guests
+            choices().flatMap { it.options }.filter { it.key in selected }.forEach { offering ->
+                offering.price?.let { price ->
+                    total +=
+                        when (price.kind) {
+                            "FIXED" -> BigDecimal(price.amount)
+                            "PER_QUANTITY" -> BigDecimal(price.amount) * guests
+                            "PER_DURATION" -> BigDecimal(duration.offeringContributions.single { it.offeringKey == offering.key }.amount)
+                            else -> error("Unknown price kind")
+                        }
+                }
+            }
+            val adjustment = facts.toppingAdjustment
+            val toppingCount =
+                inputs.selections
+                    .singleOrNull { it.category == adjustment.category }
+                    ?.offerings
+                    ?.size ?: 0
+            return total + (toppingCount - adjustment.includedSelections).coerceAtLeast(0).toBigDecimal() *
+                guests * BigDecimal(adjustment.additionalSelectionPerGuestAmount)
+        }
 
         beforeSpec {
             application = TestApplication.create()
@@ -55,7 +85,7 @@ class InquiryFormRoutesSpec :
 
         test("public form returns ordered questions, submission bindings, and separate presentation hints") {
             val form = application.form()
-            form.definitionVersion shouldBe 1
+            form.definitionVersion shouldBe 2
             form.catalogRevision shouldBe revision
             form.sections.map { it.key to it.title } shouldContainExactly
                 listOf(
@@ -116,18 +146,25 @@ class InquiryFormRoutesSpec :
                     latest = CommerceJson.asA(response.bodyString(), CategoryDto.serializer()).revision
                 }
                 val active = fresh.form()
-                active.choices().map { it.category } shouldContainExactly listOf("soft-serve-flavor", "cone-option", "extras")
-                active
-                    .fields()
-                    .single { it.key == "offering:extras" }
-                    .presentation.control shouldBe InquiryFormControl.SELECT
+                active.choices().map { it.category } shouldContainExactly listOf("soft-serve-flavor", "cone-option")
                 fresh
                     .adminRequest(Method.DELETE, "/offering-catalog/categories/soft-serve-flavor?expectedRevision=$latest")
                     .status shouldBe Status.OK
                 val retired = fresh.form()
                 retired.catalogRevision shouldBe latest + 1
-                retired.choices().map { it.category } shouldContainExactly listOf("cone-option", "extras")
+                retired.choices().map { it.category } shouldContainExactly listOf("cone-option")
                 retired.choices().flatMap { it.options } shouldBe emptyList()
+                fresh
+                    .adminPost(
+                        "/offering-catalog/categories/soft-serve-flavor/restore",
+                        """{"expectedRevision":${retired.catalogRevision},"displayName":"Restored flavors","maximumSelections":1}""",
+                    ).status shouldBe Status.OK
+                val restored = fresh.form()
+                restored.choices().map { it.category } shouldContainExactly listOf("soft-serve-flavor", "cone-option")
+                restored.fields().single { it.key == "offering:soft-serve-flavor" }.let {
+                    it.label shouldBe "Choose your soft serve flavors"
+                    it.presentation.control shouldBe InquiryFormControl.CARDS
+                }
             }
         }
 
@@ -191,9 +228,137 @@ class InquiryFormRoutesSpec :
             flavors.options.first().price shouldBe null
         }
 
-        test("new categories, all price forms, unbounded selections and catalog descriptions need no frontend category rules") {
+        test("the acceptance estimate is calculated from form facts alone and matches the authoritative preview") {
+            val form = application.form()
+            val inputs =
+                InquiryPricingInputs(
+                    form.catalogRevision,
+                    75,
+                    durationMinutes = 120,
+                    selections =
+                        listOf(
+                            PricingSelection(form.choices()[0].category, listOf("vanilla", "horchata")),
+                            PricingSelection(form.choices()[1].category, TOPPINGS),
+                            PricingSelection(form.choices()[2].category, listOf("waffle-cone")),
+                        ),
+                )
+            val local = form.browserTotal(inputs)
+            local.compareTo(BigDecimal("681.25")) shouldBe 0
+            val response =
+                application.http(
+                    Request(Method.POST, "/estimate-preview")
+                        .header("Content-Type", "application/json")
+                        .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), inputs)),
+                )
+            response.status shouldBe Status.OK
+            val authoritative = CommerceJson.asA(response.bodyString(), EstimatePreviewResponse.serializer())
+            authoritative.catalogRevision shouldBe form.catalogRevision
+            authoritative.currency shouldBe form.pricingPreview.currency
+            BigDecimal(authoritative.total).compareTo(local) shouldBe 0
+            form.pricingPreview.guestQuantityDimension shouldBe "guest"
+            form.browserTotal(inputs.copy(guestCountIsMinimum = true)).compareTo(local) shouldBe 0
+        }
+
+        test("fixed and duration contributions match authoritative pricing for every advertised duration and stay revision-pinned") {
             TestApplication.create().use { fresh ->
                 val initial = fresh.createAcceptanceCatalog()
+                val withFixed =
+                    fresh.addOffering(
+                        initial,
+                        "premium-cup",
+                        "cone-option",
+                        "Premium cup",
+                        """{"kind":"FIXED","amount":"10.00","currency":"USD"}""",
+                    )
+                val withDuration =
+                    fresh.addOffering(
+                        withFixed,
+                        "hourly-flavor",
+                        "soft-serve-flavor",
+                        "Hourly flavor",
+                        """{"kind":"PER_DURATION","amount":"5.00","currency":"USD","interval":"PT1H"}""",
+                    )
+                val form = fresh.form()
+                form.catalogRevision shouldBe withDuration
+                form.pricingPreview.durationOptions.forEach { duration ->
+                    val inputs =
+                        InquiryPricingInputs(
+                            form.catalogRevision,
+                            75,
+                            durationMinutes = duration.durationMinutes,
+                            selections =
+                                listOf(
+                                    PricingSelection(form.choices()[0].category, listOf("horchata", "hourly-flavor")),
+                                    PricingSelection(form.choices()[1].category, TOPPINGS),
+                                    PricingSelection(form.choices()[2].category, listOf("premium-cup")),
+                                ),
+                        )
+                    val forged =
+                        CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), inputs).dropLast(1) +
+                            ""","total":"0.01","lines":[{"unitPrice":"0.01"}]}"""
+                    val response =
+                        fresh.http(
+                            Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(forged),
+                        )
+                    response.status shouldBe Status.OK
+                    BigDecimal(CommerceJson.asA(response.bodyString(), EstimatePreviewResponse.serializer()).total)
+                        .compareTo(form.browserTotal(inputs)) shouldBe 0
+                }
+                fresh
+                    .adminRequest(Method.DELETE, "/offering-catalog/offerings/hourly-flavor?expectedRevision=$withDuration")
+                    .status shouldBe Status.OK
+                val latest = fresh.form()
+                latest.catalogRevision shouldBe withDuration + 1
+                latest.pricingPreview.durationOptions.flatMap { it.offeringContributions } shouldBe emptyList()
+                latest.choices().flatMap { it.options }.any { it.key == "hourly-flavor" } shouldBe false
+                // The browser's captured contribution and the backend's historical pricing both remain valid.
+                val historical =
+                    InquiryPricingInputs(
+                        form.catalogRevision,
+                        75,
+                        durationMinutes = 90,
+                        selections =
+                            listOf(
+                                PricingSelection(form.choices()[0].category, listOf("horchata", "hourly-flavor")),
+                                PricingSelection(form.choices()[1].category, TOPPINGS),
+                                PricingSelection(form.choices()[2].category, listOf("premium-cup")),
+                            ),
+                    )
+                val response =
+                    fresh.http(
+                        Request(Method.POST, "/estimate-preview")
+                            .header("Content-Type", "application/json")
+                            .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), historical)),
+                    )
+                response.status shouldBe Status.OK
+                BigDecimal(CommerceJson.asA(response.bodyString(), EstimatePreviewResponse.serializer()).total)
+                    .compareTo(form.browserTotal(historical)) shouldBe 0
+            }
+        }
+
+        listOf(
+            """{"kind":"FIXED","amount":"1.00","currency":"EUR"}""",
+            """{"kind":"PER_QUANTITY","amount":"1.00","currency":"USD","dimension":"vehicle"}""",
+            """{"kind":"PER_DURATION","amount":"1.00","currency":"USD","interval":"PT7M"}""",
+            """{"kind":"PER_DURATION","amount":"1.00","currency":"USD","interval":"PT45M"}""",
+        ).forEachIndexed { index, price ->
+            test("incompatible public offering $index fails the whole form as a server configuration error") {
+                TestApplication.create().use { fresh ->
+                    val initial = fresh.createAcceptanceCatalog()
+                    fresh.addOffering(initial, "invalid-flavor", "soft-serve-flavor", "Invalid flavor", price)
+                    val response = fresh.http(Request(Method.GET, "/inquiry-form"))
+                    response.status shouldBe Status.INTERNAL_SERVER_ERROR
+                    CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()) shouldBe
+                        ErrorResponse("internal_failure", INTERNAL_FAILURE)
+                    fresh.database.count("fionas.inquiries") shouldBe 0
+                }
+            }
+        }
+
+        test("adding unrelated categories and offerings never adds questions or changes the public pricing facts") {
+            TestApplication.create().use { fresh ->
+                val initial = fresh.createAcceptanceCatalog()
+                val before = fresh.form()
                 val response =
                     fresh.adminPost(
                         "/offering-catalog/categories",
@@ -213,19 +378,8 @@ class InquiryFormRoutesSpec :
                     )
                 val form = fresh.form()
                 form.catalogRevision shouldBe latest
-                val field = form.fields().single { it.key == "offering:extras" }
-                field.description shouldBe "Make it special"
-                field.label shouldBe "Choose Extras"
-                field.required shouldBe false
-                field.presentation.control shouldBe InquiryFormControl.CHECKBOXES
-                val input = field.input as InquiryFormInputResponse.OfferingChoice
-                input.minSelections shouldBe 0
-                input.maxSelections shouldBe null
-                input.options.map { it.price?.kind } shouldContainExactly listOf("FIXED", "PER_DURATION")
-                input.options
-                    .last()
-                    .price
-                    ?.interval shouldBe "PT30M"
+                form.sections shouldBe before.sections
+                form.pricingPreview shouldBe before.pricingPreview
                 fresh.database.count("fionas.inquiries") shouldBe 0
             }
         }

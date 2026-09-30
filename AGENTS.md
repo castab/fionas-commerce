@@ -147,18 +147,37 @@ verifying ownership of the address. Decide these explicitly before changing the 
 - Fiona owns the ordered sections, stable question keys, labels, submission bindings, and
   small rendering hints. Semantic inputs are distinct from hints: TEXT, EMAIL, INTEGER,
   BOOLEAN, INTEGER_CHOICE, and OFFERING_CHOICE. No frontend component names.
-- Known category references are stable keys (soft serve, toppings from the pricing policy,
-  cones/cups), ordered by the question definition. Missing/retired categories are omitted;
-  other active categories follow in catalog order. Every active category is represented so
-  a required category can be answered without frontend business knowledge.
+- Public offering questions explicitly reference stable category keys (soft serve,
+  toppings from the pricing policy, cones/cups), ordered by Fiona's question definition.
+  Missing/retired categories are omitted; restoration restores the configured question.
+  Other active categories never become public questions automatically. Catalog categories
+  and public question exposure are separate concerns.
 - Offering choices project catalog-owned limits and active options from that single
   snapshot. HTTP reuses the runtime's `dto()`, `OfferingDto`, and `OfferingPriceDto`;
   never restate offering identity, price forms, or selection validation. Allowed durations
   come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
-- The response exposes `definitionVersion` (1 for the current code-owned definition) and
+- The response exposes `definitionVersion` (2 for the current code-owned definition) and
   `catalogId`/`catalogRevision`. Clients submit the latter revision as
   `pricingInputs.catalogRevision`; the existing exact-revision pricing remains authoritative.
   Change the definition version deliberately when code-owned questions/bindings change.
+- `pricingPreview` is advisory data derived from that same snapshot and
+  `FIONAS_PRICING_POLICY`, not a second pricing engine or expression DSL. It projects exact
+  decimal amounts: base service and resolved public per-duration offering contributions
+  for each allowed duration, per-guest rate/dimension, and topping included count/rate.
+  Catalog fixed and per-quantity prices retain the runtime's representation. Local totals
+  add base, guest charges, selected offering charges, and excess topping charges; the
+  latter apply in addition to catalog prices. No price contributes zero. The minimum-guest
+  flag labels the estimate and does not change arithmetic.
+- Public-form compatibility checks and authoritative pricing share the policy's currency,
+  guest-dimension, and exact-duration decisions. Preserve finite fractional multipliers
+  (90 minutes at a one-hour price is 1.5 units). A public price incompatible with any
+  advertised duration, insufficient public options for a minimum, or a required hidden
+  category fails with diagnostic server detail and the runtime's generic `500`; never
+  silently filter an invalid public offering. Optional hidden offerings need not satisfy
+  public-form pricing constraints. Conditional availability is a separate slice.
+- Browser amounts are advisory only. Preview, inquiry submission, and persisted documents
+  remain authoritative through `FionasOfferingsEngine`. Request DTOs accept pricing inputs,
+  never trusted totals or line items; the form introduces no alternate validation path.
 - Each field's `submissionPointer` is a JSON Pointer into the existing request; offering
   inputs append `{category, offerings}` at `/pricingInputs/selections`.
   The service section remains optional, and field requirements apply when it is used.
@@ -168,7 +187,9 @@ verifying ownership of the address. Decide these explicitly before changing the 
   `KotlinxSchemas` derives explicit oneOf variants, discriminator mappings, required const
   tags, and string enum values from descriptors. Offering options nested inside Fiona DTOs
   still use `offeringsOpenApiRenderer`. Test the union and its runtime price references in
-  `OpenApiDocumentSpec`, and behavior through the complete handler in `InquiryFormRoutesSpec`.
+  `OpenApiDocumentSpec`, behavior through the complete handler in `InquiryFormRoutesSpec`,
+  and policy/snapshot projection in `GetInquiryFormSpec`. Response-only local estimates
+  must match authoritative previews, including captured historical catalog revisions.
 
 ## Generic commerce concepts
 

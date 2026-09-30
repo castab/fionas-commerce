@@ -29,12 +29,9 @@ internal fun inquiryForm(
             OfferingQuestion(policy.toppingCategory, "Choose your toppings", InquiryFormControl.CHECKBOXES),
             OfferingQuestion(OfferingCategoryKey("cone-option"), "Choose your cones or cups", InquiryFormControl.CARDS),
         )
-    val known = questions.map { it.category }.toSet()
-    val offeringFields =
-        questions.mapNotNull { question -> snapshot.category(question.category)?.let { question.field(it) } } +
-            snapshot.categories.filterNot { it.key in known }.map { category ->
-                OfferingQuestion(category.key, "Choose ${category.displayName}", InquiryFormControl.SELECT).field(category)
-            }
+    val publicCategories = questions.mapNotNull { snapshot.category(it.category) }
+    val offeringFields = questions.mapNotNull { question -> snapshot.category(question.category)?.let { question.field(it) } }
+    val pricingPreview = inquiryPricingPreview(snapshot, publicCategories, policy)
     return InquiryForm(
         snapshot,
         listOf(
@@ -122,6 +119,7 @@ internal fun inquiryForm(
                 ),
             ),
         ),
+        pricingPreview,
     )
 }
 
@@ -138,7 +136,6 @@ private data class OfferingQuestion(
             "/pricingInputs/selections",
             value.minimumSelections > 0,
             InquiryFormInput.OfferingChoice(value),
-            // A select can express one choice; multiple-choice categories need a multiple-choice hint.
-            if (control == InquiryFormControl.SELECT && value.maximumSelections != 1) InquiryFormControl.CHECKBOXES else control,
+            control,
         )
 }

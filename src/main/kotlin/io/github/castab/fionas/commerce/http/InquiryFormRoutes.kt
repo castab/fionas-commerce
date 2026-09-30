@@ -30,7 +30,7 @@ import org.http4k.core.with
 
 @Serializable
 data class InquiryFormResponse(
-    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions. Currently 1.")
+    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions. Currently 2.")
     val definitionVersion: Int,
     @ApiProperty(description = "Fiona's stable catalog identity.", format = "uuid")
     val catalogId: String,
@@ -40,6 +40,60 @@ data class InquiryFormResponse(
     val catalogRevision: Int,
     @ApiProperty(description = "Sections in display order. The service section is optional, as pricingInputs is on POST /inquiries.")
     val sections: List<InquiryFormSectionResponse>,
+    @ApiProperty(
+        description =
+            "Advisory browser estimate facts for this response's catalogRevision. Never submit calculated amounts; " +
+                "estimate-preview and inquiry submission independently price facts/selections with Fiona's authoritative engine.",
+    )
+    val pricingPreview: InquiryPricingPreviewResponse,
+)
+
+@Serializable
+data class InquiryPricingPreviewResponse(
+    @ApiProperty(description = "Currency of all preview amounts and every priced public option.")
+    val currency: String,
+    @ApiProperty(description = "PER_QUANTITY options are guaranteed to use this dimension, whose quantity is guestCount.")
+    val guestQuantityDimension: String,
+    @ApiProperty(description = "Resolved contributions for every allowed service duration, in duration order.")
+    val durationOptions: List<InquiryDurationPricingResponse>,
+    @ApiProperty(description = "Exact decimal ice cream service amount per guest, from Fiona's pricing policy.")
+    val perGuestAmount: String,
+    val toppingAdjustment: InquiryToppingAdjustmentResponse,
+)
+
+@Serializable
+data class InquiryDurationPricingResponse(
+    val durationMinutes: Int,
+    @ApiProperty(description = "Exact decimal base-service contribution at this duration; add once.")
+    val baseServiceAmount: String,
+    @ApiProperty(
+        description =
+            "Resolved flat contributions of all public PER_DURATION options at this duration. " +
+                "Add only those whose offeringKey is selected. FIXED options add price.amount once; " +
+                "PER_QUANTITY adds price.amount * guestCount. Unpriced options add no independent contribution. " +
+                "Fractional intervals are resolved by the server, so clients need not parse intervals.",
+    )
+    val offeringContributions: List<InquiryDurationOfferingContributionResponse>,
+)
+
+@Serializable
+data class InquiryDurationOfferingContributionResponse(
+    @ApiProperty(description = "Key of a PER_DURATION offering in the response's public options.")
+    val offeringKey: String,
+    @ApiProperty(description = "Exact decimal flat contribution for selecting this offering at the enclosing duration; add once.")
+    val amount: String,
+)
+
+@Serializable
+data class InquiryToppingAdjustmentResponse(
+    val category: String,
+    val includedSelections: Int,
+    @ApiProperty(
+        description =
+            "Exact decimal amount per extra topping per guest. Add max(0, selectedCount - includedSelections) * guestCount * " +
+                "this amount, in addition to any catalog price on the selected toppings.",
+    )
+    val additionalSelectionPerGuestAmount: String,
 )
 
 @Serializable
@@ -162,8 +216,9 @@ fun getInquiryFormRoute(getInquiryForm: () -> InquiryForm): ContractRoute =
         description = "Public ordered questions for POST /inquiries. Input semantics and presentation hints are separate. " +
             "Service configuration is optional; when used, required fields and category limits apply. Copy catalogRevision " +
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
-            "do not reprice those submitted choices. All active categories are represented; retired categories and offerings " +
-            "are absent. Name, email, and pricing are validated by the existing submission operation, independently of this metadata."
+            "do not reprice those submitted choices. Only configured Fiona categories appear; retired categories and offerings " +
+            "are absent. pricingPreview resolves policy/catalog facts for instant advisory browser arithmetic. " +
+            "Name, email, and pricing are validated by the existing submission operation, independently of this metadata."
         tags += inquiries
         returning(
             Status.OK,
@@ -171,7 +226,13 @@ fun getInquiryFormRoute(getInquiryForm: () -> InquiryForm): ContractRoute =
             "The question definition with choices from one current catalog revision.",
         )
         returningError(ErrorCategory.NOT_FOUND, "Fiona's catalog has not been initialized.", "Offerings catalog was not found")
-        returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
+        returningError(
+            ErrorCategory.INTERNAL_FAILURE,
+            "the public catalog cannot be represented/priced across every allowed duration " +
+                "(unsupported currency/dimension/interval, insufficient options, or required hidden category), or an unexpected failure. " +
+                "Configuration diagnostics stay in server logs; its cause is never described to customers.",
+            INTERNAL_FAILURE,
+        )
     } bindContract Method.GET to { _: Request ->
         Response(Status.OK).with(inquiryFormBody of getInquiryForm().toResponse())
     }
@@ -180,7 +241,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
     // Reuse the runtime's conversion, including every price form, without re-modeling its DTOs.
     val categories = catalog.dto().categories.associateBy { it.key }
     return InquiryFormResponse(
-        definitionVersion = 1,
+        definitionVersion = 2,
         catalogId = catalog.catalogId.value.toString(),
         catalogRevision = catalog.revision.number,
         sections =
@@ -225,5 +286,31 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
                     },
                 )
             },
+        pricingPreview =
+            InquiryPricingPreviewResponse(
+                currency = pricingPreview.perGuestAmount.currency.currencyCode,
+                guestQuantityDimension = pricingPreview.guestQuantityDimension.value,
+                durationOptions =
+                    pricingPreview.durationOptions.map { duration ->
+                        InquiryDurationPricingResponse(
+                            duration.durationMinutes,
+                            duration.baseServiceAmount.amount.toPlainString(),
+                            duration.offeringContributions.map { contribution ->
+                                InquiryDurationOfferingContributionResponse(
+                                    contribution.offering.value,
+                                    contribution.amount.amount.toPlainString(),
+                                )
+                            },
+                        )
+                    },
+                perGuestAmount = pricingPreview.perGuestAmount.amount.toPlainString(),
+                toppingAdjustment =
+                    InquiryToppingAdjustmentResponse(
+                        pricingPreview.toppingAdjustment.category.value,
+                        pricingPreview.toppingAdjustment.includedSelections,
+                        pricingPreview.toppingAdjustment.additionalSelectionPerGuestAmount.amount
+                            .toPlainString(),
+                    ),
+            ),
     )
 }

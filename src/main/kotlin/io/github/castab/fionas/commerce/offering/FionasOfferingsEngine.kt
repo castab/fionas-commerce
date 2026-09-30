@@ -83,7 +83,7 @@ class FionasOfferingsEngine(
             description = "Base service",
             subDescription = "$hoursText · setup, staff & local travel",
             quantity = null,
-            price = policy.baseEventFee + policy.hourlyRate * hours,
+            price = policy.baseServiceAmount(context.duration),
         )
     }
 
@@ -115,29 +115,19 @@ class FionasOfferingsEngine(
         price: OfferingPrice,
         context: FionasOfferingsContext,
     ): Priced {
+        policy.offeringPriceViolation(offering, context.duration)?.let { return Priced.Refused(it) }
         val amount =
             when (price) {
                 is OfferingPrice.Fixed -> price.amount
                 is OfferingPrice.PerQuantity -> price.amount
                 is OfferingPrice.PerDuration -> price.amount
             }
-        if (amount.currency != policy.currency) {
-            return Priced.Refused(FionasOfferingsViolation.UnsupportedCurrency(offering.key, amount.currency, policy.currency))
-        }
         val quantity =
             when (price) {
                 is OfferingPrice.Fixed -> null
-                is OfferingPrice.PerQuantity ->
-                    if (price.dimension == policy.guestDimension) {
-                        context.guestCount.toBigDecimal()
-                    } else {
-                        return Priced.Refused(FionasOfferingsViolation.UnsupportedQuantityDimension(offering.key, price.dimension))
-                    }
+                is OfferingPrice.PerQuantity -> context.guestCount.toBigDecimal()
                 is OfferingPrice.PerDuration ->
-                    context.duration.exactMultipleOf(price.interval)
-                        ?: return Priced.Refused(
-                            FionasOfferingsViolation.IncompatibleDurationPrice(offering.key, price.interval, context.duration),
-                        )
+                    checkNotNull(context.duration.exactMultipleOf(price.interval)) { "A compatible duration price has an exact multiplier" }
             }
         return Priced.Charged(Charge(offering.displayName, offering.description, quantity, amount))
     }

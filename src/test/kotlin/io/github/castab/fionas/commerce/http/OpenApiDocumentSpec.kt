@@ -204,6 +204,10 @@ class OpenApiDocumentSpec :
                 "InquiryFormFieldResponse",
                 "InquiryFormPresentation",
                 "InquiryFormIntegerOption",
+                "InquiryPricingPreviewResponse",
+                "InquiryDurationPricingResponse",
+                "InquiryDurationOfferingContributionResponse",
+                "InquiryToppingAdjustmentResponse",
                 "InquiryFormInputResponse",
                 "InquiryFormInputResponse_TEXT",
                 "InquiryFormInputResponse_EMAIL",
@@ -632,7 +636,7 @@ class OpenApiDocumentSpec :
             operation("/inquiry-form", "get").text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/InquiryFormResponse"
             schema("InquiryFormResponse").strings("required") shouldContainExactly
-                listOf("definitionVersion", "catalogId", "catalogRevision", "sections")
+                listOf("definitionVersion", "catalogId", "catalogRevision", "sections", "pricingPreview")
             schema("InquiryFormFieldResponse").text("properties", "input", "\$ref") shouldBe
                 "#/components/schemas/InquiryFormInputResponse"
             val union = schema("InquiryFormInputResponse")
@@ -678,6 +682,43 @@ class OpenApiDocumentSpec :
             selection.strings("required") shouldContainExactly listOf("category", "offerings")
             selection.text("properties", "offerings", "type") shouldBe "array"
             selection.text("properties", "offerings", "items", "type") shouldBe "string"
+        }
+
+        test("inquiry pricing preview is concrete arithmetic metadata with decimal strings and no client monetary authority") {
+            schema("InquiryFormResponse").text("properties", "pricingPreview", "\$ref") shouldBe
+                "#/components/schemas/InquiryPricingPreviewResponse"
+            schema("InquiryPricingPreviewResponse").let {
+                it.strings("required") shouldContainExactly
+                    listOf("currency", "guestQuantityDimension", "durationOptions", "perGuestAmount", "toppingAdjustment")
+                it.text("properties", "durationOptions", "items", "\$ref") shouldBe "#/components/schemas/InquiryDurationPricingResponse"
+                it.text("properties", "perGuestAmount", "type") shouldBe "string"
+                it.text("properties", "toppingAdjustment", "\$ref") shouldBe "#/components/schemas/InquiryToppingAdjustmentResponse"
+            }
+            schema("InquiryDurationPricingResponse").let {
+                it.strings("required") shouldContainExactly listOf("durationMinutes", "baseServiceAmount", "offeringContributions")
+                it.text("properties", "durationMinutes", "type") shouldBe "integer"
+                it.text("properties", "baseServiceAmount", "type") shouldBe "string"
+                it.text("properties", "offeringContributions", "items", "\$ref") shouldBe
+                    "#/components/schemas/InquiryDurationOfferingContributionResponse"
+            }
+            schema("InquiryDurationOfferingContributionResponse").let {
+                it.strings("required") shouldContainExactly listOf("offeringKey", "amount")
+                it.text("properties", "amount", "type") shouldBe "string"
+            }
+            schema("InquiryToppingAdjustmentResponse").let {
+                it.strings("required") shouldContainExactly listOf("category", "includedSelections", "additionalSelectionPerGuestAmount")
+                it.text("properties", "includedSelections", "type") shouldBe "integer"
+                it.text("properties", "additionalSelectionPerGuestAmount", "type") shouldBe "string"
+            }
+            listOf(
+                "CreateInquiryRequest",
+                "InquiryPricingInputs",
+                "EstimatePreviewRequest",
+                "CreateInquiryEstimateRequest",
+            ).forEach { name ->
+                val properties = schema(name).at("properties").jsonObject.keys
+                (properties intersect setOf("total", "amount", "lines", "pricingPreview")).isEmpty() shouldBe true
+            }
         }
 
         test("describes the estimate preview response: every amount an exact decimal string, quantity optional") {
