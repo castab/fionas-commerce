@@ -62,11 +62,13 @@ private val notInvoked =
         createChangeOrder = { _, _, _ -> error("Rendering the OpenAPI document never applies a change order") },
         recordPayment = { error("Rendering the OpenAPI document never records a payment") },
         listFinancialDocumentPayments = { error("Rendering the OpenAPI document never reads payments") },
+        listUnappliedPayments = { error("Rendering the OpenAPI document never discovers payments") },
         recordStandalonePayment = { error("Rendering the OpenAPI document never records a standalone payment") },
         allocatePayment = { error("Rendering the OpenAPI document never allocates a payment") },
         recordRefund = { error("Rendering the OpenAPI document never records a refund") },
         login = { _, _ -> error("Rendering the OpenAPI document never logs in") },
         currentUser = { error("Rendering the OpenAPI document never reads a user") },
+        currentPermissions = { error("Rendering the OpenAPI document never resolves permissions") },
         setStaffPassword = { _, _ -> error("Rendering the OpenAPI document never sets a password") },
     )
 
@@ -141,10 +143,20 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
         }
     val documents = refusing<FinancialDocumentRepository>("Rendering the OpenAPI document never touches a financial document")
     val payments = refusing<PaymentRepository>("Rendering the OpenAPI document never touches a payment")
+    // 0.0.17's internal ledger constructor takes the concrete PostgreSQL repositories.
+    // Constructing these opens no connection; the refusing transactor guards every ledger call.
+    val documentRepositoryType = Class.forName("io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository")
+    val paymentRepositoryType = Class.forName("io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository")
+    val ledgerDocuments = documentRepositoryType.getConstructor().newInstance()
+    val ledgerPayments = paymentRepositoryType.getConstructor(FinancialDocumentRepository::class.java).newInstance(ledgerDocuments)
     val ledger =
         FinancialLedger::class.java
-            .getConstructor(Transactor::class.java, FinancialDocumentRepository::class.java, PaymentRepository::class.java)
-            .newInstance(transactor, documents, payments)
+            .getConstructor(Transactor::class.java, documentRepositoryType, paymentRepositoryType)
+            .newInstance(
+                transactor,
+                ledgerDocuments,
+                ledgerPayments,
+            )
     val catalog = PermissionCatalog(commercePermissionDefinitions + FionaPermissions.definitions)
     val repositoryType = Class.forName("io.github.castab.commerce.runtime.persistence.AuthorizationRepository")
     val repository = repositoryType.getConstructor().newInstance()

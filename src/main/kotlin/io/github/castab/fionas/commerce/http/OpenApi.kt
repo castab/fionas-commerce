@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.JsonNode
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.commerce.runtime.offering.offeringsOpenApiRenderer
@@ -62,8 +64,9 @@ fun fionaOpenApi(version: String): ContractRenderer =
                 version = version,
                 description =
                     "The HTTP API of the fionas-commerce application, the commerce backend of Fiona's Ice Cream and its " +
-                        "catering business. Every error is `{\"code\": \"...\", \"message\": \"...\"}`: `code` is stable " +
-                        "and machine-readable, `message` is for people and may change. The Offerings catalog routes " +
+                        "catering business. Errors contain `code` and `message`; validation failures may also contain " +
+                        "an optional `violations` list of objects with stable string `code` values. Codes are machine-readable; " +
+                        "`message` is diagnostic text for people and may change. The Offerings catalog routes " +
                         "are implemented by commerce-runtime's reusable Offerings capability; Fiona chooses the catalog " +
                         "and where it is served. The runtime authorization administration capability is mounted at " +
                         "`/admin/access`. The runtime's `/health` and `/ready` are not part of this API.",
@@ -87,6 +90,7 @@ private object RuntimeErrorHandling : ErrorResponseRenderer {
 }
 
 private val errorBody = jsonBody(ErrorResponse.serializer())
+private val validationErrorBody = jsonBody(ValidationErrorResponse.serializer())
 
 /** The example message of an `internal_failure`, which never describes its cause. */
 internal const val INTERNAL_FAILURE = "The request could not be completed"
@@ -99,11 +103,18 @@ fun RouteMetaDsl.returningError(
     category: ErrorCategory,
     description: String,
     exampleMessage: String,
-) = returning(
-    category.status,
-    errorBody to ErrorResponse(category.code, exampleMessage),
-    "`${category.code}`: $description",
-)
+    violations: List<ValidationViolationResponse>? = null,
+) {
+    if (category == ErrorCategory.VALIDATION_FAILED) {
+        returning(
+            category.status,
+            validationErrorBody to ValidationErrorResponse(category.code, exampleMessage, violations),
+            "`${category.code}`: $description",
+        )
+    } else {
+        returning(category.status, errorBody to ErrorResponse(category.code, exampleMessage), "`${category.code}`: $description")
+    }
+}
 
 /**
  * What a transport DTO property means beyond its Kotlin type, for its OpenAPI schema. It

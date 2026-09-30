@@ -238,6 +238,11 @@ data class FinancialDocumentResponse(
     val id: String,
     @ApiProperty(description = "This snapshot's version within the lineage, from 1.")
     val version: Int,
+    @ApiProperty(
+        description = "When PostgreSQL persisted this exact immutable version, an RFC 3339 timestamp supplied by commerce-runtime.",
+        format = "date-time",
+    )
+    val createdAt: String,
     @ApiProperty(description = "The version this snapshot succeeded; absent for version 1.")
     val previousVersion: Int? = null,
     @ApiProperty(description = "The lifecycle stage of this snapshot: `ESTIMATE`, `QUOTE`, or `INVOICE`.")
@@ -454,6 +459,17 @@ data class FinancialDocumentPaymentsResponse(
     val payments: List<PaymentHistoryResponse>,
 )
 
+/** Complete runtime histories with positive derived unapplied value. */
+@Serializable
+data class UnappliedPaymentsResponse(
+    @ApiProperty(
+        description =
+            "Payments with positive reconciliation.unallocated, ordered by receivedAt then paymentId; " +
+                "no inquiry association is required.",
+    )
+    val payments: List<PaymentHistoryResponse>,
+)
+
 /**
  * The complete, immutable history of one payment and the reconciliation derived from exactly
  * those facts. It is the whole payment, never only its part in the document it was found through.
@@ -555,6 +571,8 @@ private val paymentAllocationResponse = jsonBody(PaymentAllocationResponse.seria
 private val recordedRefundResponse = jsonBody(RecordedRefundResponse.serializer())
 private val documentPaymentsResponse = jsonBody(FinancialDocumentPaymentsResponse.serializer())
 private val paymentAllocationIdBodyMeta = recordRefundRequest.metas.single().copy(name = "paymentAllocationId")
+private val allocationDocumentIdBodyMeta = allocatePaymentRequest.metas.single().copy(name = "documentId")
+private val unappliedPaymentsResponse = jsonBody(UnappliedPaymentsResponse.serializer())
 
 // Plain strings for the contract: a contract treats a path value its lens rejects as an
 // unmatched route (404), while an id that is not a UUID is a malformed request (400).
@@ -634,6 +652,7 @@ private fun exampleDocument(
         )
     val total = lines.map { BigDecimal(it.subtotal) }.reduce(BigDecimal::add).toPlainString()
     return FinancialDocumentResponse(
+        createdAt = "2026-09-28T17:05:00Z",
         id = EXAMPLE_DOCUMENT,
         version = version,
         previousVersion = (version - 1).takeIf { it >= 1 },
@@ -822,7 +841,7 @@ private fun RouteMetaDsl.staleVersion(extra: String) =
 private const val PRICING_REJECTED =
     "a value is invalid, or the inputs cannot be priced: they do not fit the catalog revision (for example " +
         "`TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) or Fiona's pricing (for example `INVALID_GUEST_COUNT`, " +
-        "`UNSUPPORTED_DURATION`). The message names each violation's stable code."
+        "`UNSUPPORTED_DURATION`). Optional `violations` expose stable codes; the message is diagnostic."
 
 /**
  * `POST /inquiries/{inquiryId}/estimates`: persists an estimate for an inquiry, priced by the
@@ -1222,6 +1241,26 @@ fun listFinancialDocumentPaymentsRoute(
         }
     }
 
+/** `GET /payments/unapplied`: the runtime's operational queue, including standalone receipts. */
+fun listUnappliedPaymentsRoute(
+    listPayments: () -> List<PaymentHistory>,
+    access: AccessControl,
+): ContractRoute =
+    "/payments/unapplied" meta {
+        operationId = "listUnappliedPayments"
+        summary = "List payments with unapplied value"
+        description =
+            "Returns complete runtime payment histories whose derived reconciliation.unallocated is positive, " +
+            "ordered by receivedAt then paymentId. Unallocated is net received minus net allocated after refunds " +
+            "and allocation unwinds. No inquiry or document association is required. Requires `commerce.payment.record`."
+        tags += payments
+        returning(Status.OK, unappliedPaymentsResponse to UnappliedPaymentsResponse(emptyList()), "The available payment histories.")
+        staffErrors()
+    } bindContract Method.GET to
+        access.requirePermission(CommercePermissions.PaymentRecord).then { _: Request ->
+            Response(Status.OK).with(unappliedPaymentsResponse of UnappliedPaymentsResponse(listPayments().map { it.toResponse() }))
+        }
+
 /** `POST /payments`: records received money without requiring an allocation. */
 fun recordStandalonePaymentRoute(
     recordPayment: (RecordPayment.Command) -> PaymentRecord,
@@ -1289,7 +1328,7 @@ fun allocatePaymentRoute(
             paymentAllocationResponse to examplePaymentAllocation,
             "The allocation and resulting document settlement.",
         )
-        malformed("`paymentId`")
+        malformed("`paymentId` or body `documentId`")
         returningError(
             ErrorCategory.NOT_FOUND,
             "the payment or Fiona-owned document does not exist.",
@@ -1307,11 +1346,12 @@ fun allocatePaymentRoute(
         access.requirePermission(CommercePermissions.PaymentRecord).then { request: Request ->
             val paymentId = uuidIn(id, paymentIdPath)
             val body = allocatePaymentRequest(request)
+            val documentId = allocationDocumentId(body.documentId)
             val command =
                 validating {
                     AllocatePayment.Command(
                         paymentId = paymentId,
-                        documentId = UUID.fromString(body.documentId),
+                        documentId = documentId,
                         documentVersion = Version.of(body.documentVersion),
                         amount = paymentAmount(body.amount),
                     )
@@ -1441,6 +1481,14 @@ private fun refundAllocationId(value: String): UUID =
         throw LensFailure(Invalid(paymentAllocationIdBodyMeta), cause = e)
     }
 
+/** An unreadable allocation destination is malformed body input, before domain validation. */
+private fun allocationDocumentId(value: String): UUID =
+    try {
+        UUID.fromString(value)
+    } catch (e: IllegalArgumentException) {
+        throw LensFailure(Invalid(allocationDocumentIdBodyMeta), cause = e)
+    }
+
 private fun InquiryFinancialDocument.toResponse() = latest.toResponse(inquiryId, reconciliation)
 
 private fun InquiryFinancialDocumentHistory.toResponse() =
@@ -1452,6 +1500,7 @@ private fun PricedSnapshot.toResponse(
 ) = FinancialDocumentResponse(
     id = document.id.toString(),
     version = document.version.number,
+    createdAt = createdAt.toString(),
     previousVersion = document.previousVersion?.number,
     stage =
         when (document) {

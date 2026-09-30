@@ -76,6 +76,7 @@ class OpenApiDocumentSpec :
                 Triple("/financial-documents/{documentId}/payments", "get", "listFinancialDocumentPayments") to
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/payments", "post", "recordStandalonePayment") to listOf("201", "400", "401", "403", "409", "422", "500"),
+                Triple("/payments/unapplied", "get", "listUnappliedPayments") to listOf("200", "401", "403", "500"),
                 Triple("/payments/{paymentId}/allocations", "post", "allocatePayment") to
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/payments/{paymentId}/refunds", "post", "recordRefund") to
@@ -104,6 +105,7 @@ class OpenApiDocumentSpec :
                 "createChangeOrder" to "Financial documents",
                 "recordPayment" to "Payments",
                 "listFinancialDocumentPayments" to "Payments",
+                "listUnappliedPayments" to "Payments",
                 "recordStandalonePayment" to "Payments",
                 "allocatePayment" to "Payments",
                 "recordRefund" to "Payments",
@@ -199,6 +201,9 @@ class OpenApiDocumentSpec :
                 "RefundRecordResponse",
                 "RefundAllocationRecordResponse",
                 "ErrorResponse",
+                "ValidationErrorResponse",
+                "ValidationViolationResponse",
+                "UnappliedPaymentsResponse",
                 "LoginRequest",
                 "CurrentUserResponse",
                 "SetStaffPasswordRequest",
@@ -311,8 +316,9 @@ class OpenApiDocumentSpec :
             operations.keys.forEach { (path, method) ->
                 operation(path, method).at("responses").jsonObject.filterKeys { it.toInt() >= 400 }.forEach { (status, response) ->
                     val content = response.at("content", "application/json")
-                    content.text("schema", "\$ref") shouldBe "#/components/schemas/ErrorResponse"
                     val code = content.text("example", "code")
+                    content.text("schema", "\$ref") shouldBe
+                        "#/components/schemas/" + if (code == "validation_failed") "ValidationErrorResponse" else "ErrorResponse"
                     ErrorCategory.entries
                         .single { it.code == code }
                         .status.code
@@ -325,6 +331,38 @@ class OpenApiDocumentSpec :
                     mapOf("code" to "string", "message" to "string")
                 it.strings("required") shouldContainExactly listOf("code", "message")
             }
+        }
+
+        test("validation violations are optional runtime codes and no schema has a null format") {
+            val validation = schema("ValidationErrorResponse")
+            validation.strings("required") shouldContainExactly listOf("code", "message")
+            validation.at("properties").jsonObject.keys shouldBe setOf("code", "message", "violations")
+            validation.text("properties", "violations", "items", "\$ref") shouldBe "#/components/schemas/ValidationViolationResponse"
+            schema("ValidationViolationResponse").text("properties", "code", "type") shouldBe "string"
+            schema("ValidationViolationResponse").strings("required") shouldContainExactly listOf("code")
+
+            fun checkFormats(value: JsonElement) {
+                when (value) {
+                    is JsonObject -> {
+                        value["format"]?.let { (it is JsonPrimitive && it.isString) shouldBe true }
+                        value.values.forEach(::checkFormats)
+                    }
+                    is JsonArray -> value.forEach(::checkFormats)
+                    else -> Unit
+                }
+            }
+            checkFormats(document.at("components", "schemas"))
+        }
+
+        test("unapplied discovery reuses whole histories and me documents effective permissions") {
+            val queue = operation("/payments/unapplied", "get")
+            queue.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/UnappliedPaymentsResponse"
+            queue.text("description").contains("commerce.payment.record") shouldBe true
+            schema("UnappliedPaymentsResponse").text("properties", "payments", "items", "\$ref") shouldBe
+                "#/components/schemas/PaymentHistoryResponse"
+            schema("CurrentUserResponse").strings("required").contains("permissions") shouldBe true
+            schema("CurrentUserResponse").text("properties", "permissions", "items", "type") shouldBe "string"
         }
 
         test("describes the create request: required name and email, optional message and pricing inputs, and their limits") {
@@ -679,12 +717,13 @@ class OpenApiDocumentSpec :
         test("describes a financial document as immutable ledger facts, pricing source, and derived settlement") {
             val document = schema("FinancialDocumentResponse")
             document.strings("required") shouldContainExactly
-                listOf("id", "version", "stage", "inquiryId", "pricing", "lines", "subtotal", "taxAmount", "total", "currency")
+                listOf("id", "version", "createdAt", "stage", "inquiryId", "pricing", "lines", "subtotal", "taxAmount", "total", "currency")
             val properties = document.at("properties").jsonObject
             properties.keys shouldBe
                 setOf(
                     "id",
                     "version",
+                    "createdAt",
                     "previousVersion",
                     "stage",
                     "inquiryId",
@@ -697,6 +736,7 @@ class OpenApiDocumentSpec :
                     "reconciliation",
                 )
             listOf("id", "inquiryId").forEach { properties.getValue(it).text("format") shouldBe "uuid" }
+            properties.getValue("createdAt").text("format") shouldBe "date-time"
             listOf("version", "previousVersion").forEach { properties.getValue(it).text("format") shouldBe "int32" }
             listOf("subtotal", "taxAmount", "total").forEach { properties.getValue(it).text("type") shouldBe "string" }
             properties.getValue("reconciliation").text("\$ref") shouldBe "#/components/schemas/DocumentReconciliation"

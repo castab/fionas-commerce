@@ -1,10 +1,13 @@
 package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.financial.FinancialDocument
+import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationErrorResponse
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.RoleDefinition
@@ -114,6 +117,39 @@ class FinancialDocumentRoutesSpec :
             revision = application.createAcceptanceCatalog()
         }
         afterSpec { application.close() }
+
+        test("every pricing workflow exposes the same structured rejection without losing its explanation") {
+            val invalidInputs = pricingBody(revision, minutes = 100)
+            val inquiryId = application.createInquiry()
+            val document = newEstimate()
+            val responses =
+                listOf(
+                    application.http(
+                        Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body(invalidInputs),
+                    ),
+                    application.http(
+                        Request(Method.POST, "/inquiries").header("Content-Type", "application/json").body(
+                            """{"name":"Rejected","email":"rejected@example.com","pricingInputs":$invalidInputs}""",
+                        ),
+                    ),
+                    estimate(inquiryId, invalidInputs),
+                    application.adminPost(
+                        "/inquiries/$inquiryId/financial-documents",
+                        invalidInputs.dropLast(1) + """, "stage":"QUOTE"}""",
+                    ),
+                    changeOrder(document.id, pricingBody(revision, minutes = 100, expectedVersion = 1)),
+                )
+            val errors =
+                responses.map { response ->
+                    response.status shouldBe Status.UNPROCESSABLE_ENTITY
+                    CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()).also {
+                        it.code shouldBe "validation_failed"
+                        it.violations!!.map { violation -> violation.code } shouldBe listOf("UNSUPPORTED_DURATION")
+                        it.message shouldContain "the service duration must be one of 90, 120, 150, 180 minutes, got 100"
+                    }
+                }
+            errors.distinct().size shouldBe 1
+        }
 
         test("an inquiry becomes a persisted estimate, a quote, a deposit, an invoice, change orders, and a final payment") {
             val inquiryId = application.createInquiry()
@@ -249,6 +285,19 @@ class FinancialDocumentRoutesSpec :
             history.versions.map { it.pricing.durationMinutes } shouldContainExactly listOf(120, 120, 120, 120, 150)
             history.versions.map { it.pricing.catalogRevision }.toSet() shouldBe setOf(revision)
             history.versions.forEach { it.reconciliation.shouldBeNull() }
+            // Every mutation response carries the runtime's metadata for that exact persisted version.
+            val written = listOf(v1, v2, v3, v4, v5)
+            written.forEach { response ->
+                val reference = FinancialDocumentReference(UUID.fromString(response.id), Version.of(response.version))
+                val persisted = application.context.financialLedger.version(reference)
+                response.createdAt shouldBe persisted.createdAt.toString()
+                java.time.Instant.parse(response.createdAt) shouldBe persisted.createdAt
+                // The fixed Fiona clock writes the association; it cannot supply runtime metadata.
+                response.createdAt shouldNotBe "2026-09-26T18:30:00.123456Z"
+            }
+            history.versions.map { it.createdAt } shouldBe written.map { it.createdAt }
+            get("/financial-documents/$id/history").history().versions.map { it.createdAt } shouldBe written.map { it.createdAt }
+            get("/financial-documents/$id").document().createdAt shouldBe v5.createdAt
             // D/v1 is exactly as it was created.
             history.versions.first() shouldBe v1.copy(reconciliation = null)
 

@@ -7,6 +7,7 @@ import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.offering.OfferingsViolation
 import io.github.castab.commerce.offering.StructuralOfferingsViolation
+import io.github.castab.commerce.runtime.offering.offeringsValidationFailed
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 
@@ -54,8 +55,10 @@ class FionasPricing(
         return when (val result = engine.evaluate(snapshot, inputs.selections, inputs.context)) {
             is OfferingsEvaluationResult.Accepted -> result.evaluation
             is OfferingsEvaluationResult.Rejected ->
-                throw CommerceFailure.ValidationFailed(
-                    "The selection cannot be estimated: " + result.violations.joinToString("; ") { "${it.code} (${it.explanation()})" },
+                throw offeringsValidationFailed(
+                    message =
+                        "The selection cannot be estimated: " + result.violations.joinToString("; ") { "${it.code} (${it.explanation()})" },
+                    violations = result.violations,
                 )
         }
     }

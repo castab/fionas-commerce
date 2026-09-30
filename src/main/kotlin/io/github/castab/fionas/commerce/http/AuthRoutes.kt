@@ -8,6 +8,7 @@ import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
+import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
@@ -47,6 +48,8 @@ data class CurrentUserResponse(
     val firstName: String? = null,
     val lastName: String? = null,
     val roles: List<String>,
+    @ApiProperty(description = "The staff user's effective live permissions, sorted by key; no role-administration permission is required.")
+    val permissions: List<String>,
 )
 
 @Serializable
@@ -118,17 +121,25 @@ fun logoutRoute(
 
 fun currentUserRoute(
     currentUser: (UserId) -> User?,
+    currentPermissions: (UserId) -> Set<PermissionKey>,
     access: AccessControl,
 ): ContractRoute =
     "/auth/me" meta {
         operationId = "getCurrentUser"
         summary = "Read the authenticated staff identity"
-        description = "Returns the current human staff profile and role keys, without credential or session material."
+        description =
+            "Returns the current human staff profile, role keys, and effective live permissions. Requires only an active staff session."
         tags += authTag
         returning(
             Status.OK,
             currentUserBody to
-                CurrentUserResponse("00000000-0000-0000-0000-000000000001", "brayan", "Brayan", roles = listOf("commerce.administrator")),
+                CurrentUserResponse(
+                    "00000000-0000-0000-0000-000000000001",
+                    "brayan",
+                    "Brayan",
+                    roles = listOf("commerce.administrator"),
+                    permissions = listOf("commerce.payment.record"),
+                ),
         )
         returningError(ErrorCategory.UNAUTHENTICATED, "there is no active session.", "Authentication is required")
         returningError(
@@ -144,11 +155,11 @@ fun currentUserRoute(
             if (user == null || user.status != PrincipalStatus.ACTIVE) {
                 errorResponse(ErrorCategory.FORBIDDEN, "The current principal is not an active staff user")
             } else {
-                Response(Status.OK).with(currentUserBody of user.toResponse())
+                Response(Status.OK).with(currentUserBody of user.toResponse(currentPermissions(user.id)))
             }
         }
 
-private fun User.toResponse() =
+private fun User.toResponse(permissions: Set<PermissionKey>) =
     CurrentUserResponse(
         id.value.toString(),
         username,
@@ -156,6 +167,7 @@ private fun User.toResponse() =
         firstName,
         lastName,
         roles.map { it.role.value }.sorted(),
+        permissions.map { it.value }.sorted(),
     )
 
 fun setStaffPasswordRoute(

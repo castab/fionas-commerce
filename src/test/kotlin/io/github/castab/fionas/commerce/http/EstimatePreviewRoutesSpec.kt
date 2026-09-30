@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationErrorResponse
 import io.github.castab.commerce.runtime.offering.OfferingResultDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.fionas.commerce.testing.TestApplication
@@ -237,6 +238,7 @@ class EstimatePreviewRoutesSpec :
                 request(chosenToppings = toppings.take(3)) to "TOO_FEW_SELECTIONS",
                 request(cones = null) to "TOO_FEW_SELECTIONS",
                 request(softServe = listOf("vanilla", "vanilla")) to "DUPLICATE_OFFERING",
+                request(softServe = listOf("vanilla", "horchata", "chocolate")) to "TOO_MANY_SELECTIONS",
                 request(cones = listOf("sprinkles")) to "OFFERING_IN_WRONG_CATEGORY",
                 request(guests = 0) to "INVALID_GUEST_COUNT",
                 request(minutes = 100) to "UNSUPPORTED_DURATION",
@@ -246,6 +248,9 @@ class EstimatePreviewRoutesSpec :
                     it.error().code shouldBe "validation_failed"
                     it.error().message shouldStartWith "The selection cannot be estimated: "
                     it.error().message shouldContain code
+                    CommerceJson.asA(it.bodyString(), ValidationErrorResponse.serializer()).violations!!.map { violation ->
+                        violation.code
+                    } shouldContainExactly listOf(code)
                 }
             }
             // Values the domain rejects before any evaluation.
@@ -253,8 +258,19 @@ class EstimatePreviewRoutesSpec :
                 preview(it).let { response ->
                     response.status shouldBe Status.UNPROCESSABLE_ENTITY
                     response.error().code shouldBe "validation_failed"
+                    CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()).violations shouldBe null
                 }
             }
+        }
+
+        test("unsupported catalog currency preserves structured policy code and the useful explanation") {
+            val later = addOffering("euro", "soft-serve-flavor", "Euro", """{"kind":"FIXED","amount":"1.00","currency":"EUR"}""")
+            val response = preview(request(revision = later, softServe = listOf("euro")))
+            response.status shouldBe Status.UNPROCESSABLE_ENTITY
+            val error = CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer())
+            error.violations!!.map { it.code } shouldContainExactly listOf("UNSUPPORTED_CURRENCY")
+            error.message shouldContain "EUR"
+            error.message shouldContain "USD"
         }
 
         test("a body it cannot read is a malformed request, with commerce-runtime's error body") {

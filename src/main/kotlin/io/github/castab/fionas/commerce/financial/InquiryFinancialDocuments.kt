@@ -5,6 +5,7 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.FinancialDocumentReconciliation
 import io.github.castab.commerce.payment.PaymentAllocation
 import io.github.castab.commerce.payment.PaymentRecord
+import io.github.castab.commerce.runtime.financial.FinancialDocumentVersion
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
@@ -28,9 +29,12 @@ data class InquiryDocumentAssociation(
 
 /** One immutable financial-document snapshot and the Fiona [pricing] inputs that produced it. */
 data class PricedSnapshot(
-    val document: FinancialDocument,
+    val persisted: FinancialDocumentVersion,
     val pricing: FionasPricingInputs,
-)
+) {
+    val document: FinancialDocument get() = persisted.document
+    val createdAt: Instant get() = persisted.createdAt
+}
 
 /**
  * An inquiry's financial-document lineage at its [latest] snapshot, with the settlement
@@ -134,9 +138,10 @@ internal class FionaFinancialDocuments(
         inquiryId: InquiryId,
         documentId: UUID,
     ): InquiryFinancialDocument {
-        val latest = ledger.latest(transaction, documentId)
-        val pricing = checkNotNull(pricingSources.find(transaction, latest.reference)) { missingSource(latest) }
-        return InquiryFinancialDocument(inquiryId, PricedSnapshot(latest, pricing), ledger.reconcile(transaction, latest.reference))
+        val latest = ledger.latestVersion(transaction, documentId)
+        val document = latest.document
+        val pricing = checkNotNull(pricingSources.find(transaction, document.reference)) { missingSource(document) }
+        return InquiryFinancialDocument(inquiryId, PricedSnapshot(latest, pricing), ledger.reconcile(transaction, document.reference))
     }
 
     /**
@@ -151,8 +156,9 @@ internal class FionaFinancialDocuments(
         val inquiryId = owner(transaction, documentId)
         val sources = pricingSources.findAll(transaction, documentId)
         val versions =
-            ledger.history(transaction, documentId).map { document ->
-                PricedSnapshot(document, checkNotNull(sources[document.version]) { missingSource(document) })
+            ledger.versionHistory(transaction, documentId).map { persisted ->
+                val document = persisted.document
+                PricedSnapshot(persisted, checkNotNull(sources[document.version]) { missingSource(document) })
             }
         return InquiryFinancialDocumentHistory(inquiryId, documentId, versions)
     }

@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.16/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.16/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.17/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.17/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -38,8 +38,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.16`, which brings
-`commerce-domain:0.0.16` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.17`, which brings
+`commerce-domain:0.0.17` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -47,7 +47,7 @@ through `ApplicationContributions`, and every write goes through the runtime's s
 HTTP request
    │
    ▼
-commerce-runtime error handling (one {"code","message"} error contract)
+commerce-runtime error handling ({"code","message"}, optional validation violations)
    │
    ▼
 Fiona contract route http/InquiryRoutes.kt     JSON DTO → application values
@@ -128,6 +128,7 @@ Every route needs a staff session:
 | `POST /financial-documents/{documentId}/payments` | `commerce.payment.record` | Records a payment and applies all of it to the latest version, a quote or an invoice. `201`. |
 | `GET /financial-documents/{documentId}/payments` | `commerce.financial-document.read` | Every payment ever allocated to any version of the document, each with its complete history: allocations (to any document), refunds, refund allocations, and derived reconciliation. `[]` when it has none. |
 | `POST /payments` | `commerce.payment.record` | Records money received without assigning it to a document. `201` with the payment fact. |
+| `GET /payments/unapplied` | `commerce.payment.record` | Complete payment histories with positive derived `reconciliation.unallocated`, including standalone receipts; ordered by `receivedAt`, then `paymentId`. |
 | `POST /payments/{paymentId}/allocations` | `commerce.payment.record` | Allocates some or all of an existing payment to an exact, currently latest Quote or Invoice version. `201` with the allocation and reconciliation. |
 | `POST /payments/{paymentId}/refunds` | `commerce.refund.record` | Refunds part or all of a payment, unwinding the allocations the request names. `201` with the refund, its unwinds, and the payment's reconciliation. |
 
@@ -137,7 +138,7 @@ Every route needs a staff session:
 |---|---|
 | `POST /auth/login` | Verifies a staff password and sets Fiona's secure session cookie. Requires a trusted browser origin. |
 | `POST /auth/logout` | Revokes the runtime session and clears the cookie, including on repeated logout. |
-| `GET /auth/me` | Returns the active human staff profile and current role keys. |
+| `GET /auth/me` | Returns the active human staff profile, current role keys, and sorted effective live `permissions`; requires no role-administration permission. |
 | `PUT /admin/users/{userId}/credentials/password` | Sets a runtime user's Fiona password; requires `fionas.credentials.manage` and trusted Origin. |
 
 The runtime administration capability is mounted at `/admin/access`: it exposes users,
@@ -210,6 +211,9 @@ Errors use commerce-runtime's contract, `{"code": "...", "message": "..."}`:
 `malformed_request` (400), `unauthenticated` (401), `forbidden` (403), `not_found` (404),
 `conflict` (409), `illegal_transition` (409), `validation_failed` (422),
 `invariant_violated` (422), `internal_failure` (500, never describing the cause).
+Validation failures may also carry optional `violations`, each with a stable string `code`.
+Ordinary value-validation failures can omit that list. Clients use codes to identify
+failures and present `message` as diagnostic text; they never parse it for codes.
 
 ## Offerings catalog
 
@@ -310,7 +314,10 @@ next request     → sessionAuthentication(...) → authenticatedPrincipal
 `POST /auth/login` accepts `{"username":"...","password":"..."}` and answers `204`
 with a `Secure`, `HttpOnly`, host-only, `Path=/`, `SameSite=Lax` cookie. Invalid credentials
 or a disabled user receive the same `401` response. `GET /auth/me` returns the active
-human staff profile and role keys without secrets. `POST /auth/logout` revokes the runtime
+human staff profile, role keys, and sorted effective `permissions` without secrets.
+Permissions come directly from the runtime's live resolver, so later grant or assignment
+changes appear without a new login. Reading your own permissions requires no
+`commerce.role.read`; that permission governs role administration. `POST /auth/logout` revokes the runtime
 session and clears the cookie; repeating it is safe. No raw session token is sent in JSON.
 
 The runtime directory normalizes usernames and stores the profile and status in
@@ -456,10 +463,16 @@ stated count, and the response echoes the flag so the page can say "from $X".
 
 Errors use commerce-runtime's contract: `400 malformed_request` for a body that cannot be
 read, `404 not_found` for a catalog revision that does not exist, and `422 validation_failed`
-for a selection that does not fit the revision or Fiona's pricing. The message names each
-violation's stable code, for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`,
+for a selection that does not fit the revision or Fiona's pricing. The optional `violations`
+list exposes stable codes, for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`,
 `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`, `UNSUPPORTED_CURRENCY`,
 `UNSUPPORTED_QUANTITY_DIMENSION`, or `INCOMPATIBLE_DURATION_PRICE`.
+The runtime's `offeringsValidationFailed` preserves both those codes and Fiona's useful
+human explanations, across previews, inquiry submissions, persisted documents, and change orders:
+
+```json
+{"code":"validation_failed","message":"The selection cannot be estimated: TOO_MANY_SELECTIONS (category soft-serve-flavor allows at most 2 selections, got 3)","violations":[{"code":"TOO_MANY_SELECTIONS"}]}
+```
 
 ## Financial documents and payments
 
@@ -547,12 +560,20 @@ curl -s -X POST localhost:8080/inquiries/$INQUIRY/estimates -b "$COOKIE" -H "Ori
   ]}'
 ```
 
-A document response has the ledger's facts (`id`, `version`, `previousVersion`, `stage`
+A document response has the ledger's facts (`id`, `version`, `createdAt`, `previousVersion`, `stage`
 `ESTIMATE`/`QUOTE`/`INVOICE`, `lines` with their durable ids, `subtotal`, `taxAmount`,
 `total`, `currency`), the owning `inquiryId`, the `pricing` inputs of that version, and, on
 the latest version only, `reconciliation`: `grossAllocated`, `netApplied`, and `balance`,
 derived by commerce-runtime across every version of the lineage. Historical versions in
 `/history` carry no reconciliation. Every amount is an exact decimal string.
+
+Every immutable version includes `createdAt`, the RFC 3339 string of the runtime's
+persisted `Instant` (for example `"createdAt":"2026-09-29T18:30:00.123456Z"`). PostgreSQL
+assigns it when that exact snapshot is inserted. Fiona reads `latestVersion` or
+`versionHistory` in its existing `REPEATABLE_READ` transaction and preserves that metadata
+alongside its exact pricing source. Reads, inquiry document lists, histories, and document
+mutation responses all expose it. It stays unchanged on reread and is distinct from
+Fiona's inquiry-association timestamp; Fiona generates no document creation timestamp.
 
 **Transitions never reprice.** `quote` appends a quote with the estimate's lines and copies
 its pricing inputs to the new version; `invoice` does the same from a quote. There is no
@@ -677,12 +698,20 @@ allocated to any version of the lineage, by `receivedAt`, then `paymentId`:
   answers `"payments": []`. Fiona proves ownership and reads the histories through
   `FinancialLedger.paymentHistoriesForLineage` in one `REPEATABLE READ` transaction.
 
-**Unapplied payments cannot be discovered yet, deliberately.** A payment recorded with
-`POST /payments` and never allocated appears only in its recording response: it belongs to no
-document, so no document lists it. There is no `GET /payments`, payment search, unapplied
-payment inbox, or `GET /payments/{paymentId}`; commerce-runtime 0.0.16 offers
-`paymentHistory(paymentId)`, but a global payment resource needs a payment-read permission
-decision of its own, and waits for a screen that needs it.
+**Unapplied payments are discoverable.** `GET /payments/unapplied` returns
+`{"payments":[PaymentHistoryResponse, ...]}`, including receipts with no inquiry or
+document association. It requires `commerce.payment.record`, the permission for this
+operational queue. Fiona delegates directly to `FinancialLedger.unappliedPayments`, whose
+read uses one `REPEATABLE_READ` transaction. Complete histories and runtime ordering
+(`receivedAt`, then `paymentId`) are preserved. The runtime calculates `unallocated` as
+net received minus net allocated after refunds and allocation unwinds; only positive
+values appear. Partial allocation keeps a payment discoverable; full allocation or
+refund consumes its availability. Fiona stores no balance and performs no reconciliation
+math. This endpoint is unpaged; payment search and `GET /payments/{paymentId}` remain deferred.
+
+Allocation requests with unreadable `documentId` text answer `400 malformed_request`
+with body-field metadata. A readable UUID still undergoes the existing domain validation
+and ownership checks (`422` or `404` where appropriate).
 
 The existing `POST /financial-documents/{documentId}/payments` means "we received this
 payment, and all of it is for this document":
@@ -779,8 +808,11 @@ Fiona's own schemas are derived from the kotlinx.serialization descriptors of th
 DTOs, the wire format itself, so `required` matches what the server reads and writes: strings,
 `int32` integers, booleans, arrays, and nested objects, each its own component. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers; and the catalog's schemas contain
-`"format": null`. Commerce-runtime accepts Fiona's OpenAPI tags: Swagger UI groups
+contract metadata cannot declare response headers. Commerce-runtime 0.0.17's Offerings
+renderer omits invalid schema-level `"format": null` and preserves arbitrary example data.
+Fiona uses the runtime's `ValidationErrorResponse` and `ValidationViolationResponse`
+schemas for validation failures, with optional `violations`; ordinary errors retain
+`ErrorResponse`. Commerce-runtime accepts Fiona's OpenAPI tags: Swagger UI groups
 catalog operations under **Offerings catalog** and runtime administration plus Fiona's
 password route under **Staff administration**; Fiona's own routes are grouped under
 **Inquiries**, **Estimates**, **Financial documents**, **Payments**, and **Authentication**. Every Fiona endpoint must be part of the
@@ -846,6 +878,14 @@ Logging is Logback ([`logback.xml`](src/main/resources/logback.xml)): `key=value
 on stdout, with library logging at `WARN`/`INFO`. The database password is never logged.
 
 ## Database and migrations
+
+> **Upgrading to commerce 0.0.17.** Runtime V7 adds the financial snapshot's
+> `created_at timestamptz NOT NULL DEFAULT clock_timestamp()`. It intentionally refuses
+> a pre-V7 database containing financial snapshots, because their creation times are unknown.
+> Existing development/deployment databases have been ephemeral: recreate an affected
+> database or volume. There is no backfill, synthetic timestamp, Fiona compensation
+> migration, or Flyway validation bypass. Empty pre-V7 databases and fresh databases migrate
+> normally. Fiona's own migrations remain exclusively in `fionas`.
 
 commerce-runtime owns migration orchestration; Fiona owns only its own migrations and the schema they live in.
 
@@ -991,8 +1031,11 @@ The script accepts the same `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
 `FIONAS_ADMIN_USERNAME` defaults as the catalog setup script; `FIONAS_ADMIN_PASSWORD` is
 required. It creates a real local inquiry and direct Invoice v1, records and allocates
 `$200.00` and `$150.00`, refunds `$50.00` from the second payment's allocation, then pays
-the server-returned reopened balance. It proves payment facts survive a reload: it keeps
-no id from a payment, allocation, or refund response. The refund's payment and allocation
+the server-returned reopened balance. Each standalone receipt is rediscovered through
+`GET /payments/unapplied`; the first is allocated in two parts, with a read showing its
+remaining available value between them, and disappears from the queue when fully applied.
+It proves payment facts survive a reload: the refund uses no id retained from a payment,
+allocation, or refund response. The refund's payment and allocation
 ids are rediscovered from `GET /financial-documents/{documentId}/payments`, and the refund
 and its unwind are verified by reading that again. Exact cent arithmetic verifies gross and net
 allocation and a final zero balance. It writes ordinary development data to the configured
@@ -1068,6 +1111,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
+| `UnappliedPaymentsSpec` | Standalone receipt discovery with no inquiry, runtime ordering including ties, partial/full allocation, unapplied refunds and unavailable payment exclusion, payment-record authorization, and malformed allocation `documentId` body metadata |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; explicit old and new catalog revisions; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
 | `FinancialDocumentPaymentsSpec` | `GET /financial-documents/{documentId}/payments` through the complete handler: `[]` without payments; `404` for a lineage only the runtime ledger holds; `401`/`403` unless `commerce.financial-document.read` (payment and refund writes do not grant it); a payment, its allocation, a refund, and its unwind rediscovered after their responses are gone and reused for a second refund; a fully unwound allocation still listed; a split payment whole from either document with whole-payment reconciliation; unapplied payments not listed; commerce-runtime's ordering kept, ids breaking only timestamp ties |
 | `FinancialDocumentAtomicitySpec` | Fiona's cross-boundary writes roll back together: first-snapshot Estimate, Quote, and Invoice creation, change orders, combined payments, and standalone allocations do not leave partial ledger or Fiona facts on failure |

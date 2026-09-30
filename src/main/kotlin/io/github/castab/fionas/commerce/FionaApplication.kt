@@ -159,6 +159,7 @@ fun fionaApplication(
                     recordPayment = RecordDocumentPayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
                     listFinancialDocumentPayments =
                         ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)::invoke,
+                    listUnappliedPayments = ledger::unappliedPayments,
                     recordStandalonePayment = RecordPayment(context.transactor, ledger, clock)::invoke,
                     allocatePayment = AllocatePayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
                     recordRefund = RecordRefund(context.transactor, ledger, clock)::invoke,
@@ -167,6 +168,7 @@ fun fionaApplication(
                         context.sessions,
                     )::invoke,
                     currentUser = context.authorization::getUser,
+                    currentPermissions = context.authorization.permissionResolver::permissionsFor,
                     setStaffPassword = SetStaffPassword(context.authorization, context.transactor, credentials, hasher, clock)::invoke,
                 )
             val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(access))

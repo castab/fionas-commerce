@@ -9,6 +9,7 @@ import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
+import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.financial.AllocatePayment
@@ -69,11 +70,13 @@ class FionaOperations(
     val createChangeOrder: (UUID, Version, FionasPricingInputs) -> InquiryFinancialDocument,
     val recordPayment: (RecordDocumentPayment.Command) -> RecordedPayment,
     val listFinancialDocumentPayments: (UUID) -> List<PaymentHistory>,
+    val listUnappliedPayments: () -> List<PaymentHistory>,
     val recordStandalonePayment: (RecordPayment.Command) -> PaymentRecord,
     val allocatePayment: (AllocatePayment.Command) -> AllocatedPayment,
     val recordRefund: (RecordRefund.Command) -> ReconciledRefund,
     val login: (String, SecretPassword) -> IssuedSession?,
     val currentUser: (UserId) -> User?,
+    val currentPermissions: (UserId) -> Set<PermissionKey>,
     val setStaffPassword: (UserId, SecretPassword) -> Unit,
 )
 
@@ -107,12 +110,13 @@ fun fionaApiRoutes(
         createChangeOrderRoute(operations.createChangeOrder, auth.access),
         recordPaymentRoute(operations.recordPayment, auth.access),
         listFinancialDocumentPaymentsRoute(operations.listFinancialDocumentPayments, auth.access),
+        listUnappliedPaymentsRoute(operations.listUnappliedPayments, auth.access),
         recordStandalonePaymentRoute(operations.recordStandalonePayment, auth.access),
         allocatePaymentRoute(operations.allocatePayment, auth.access),
         recordRefundRoute(operations.recordRefund, auth.access),
         loginRoute(operations.login, auth.cookie, auth.access, auth.origin),
         logoutRoute(auth.sessions, auth.cookie, auth.access),
-        currentUserRoute(operations.currentUser, auth.access),
+        currentUserRoute(operations.currentUser, operations.currentPermissions, auth.access),
         setStaffPasswordRoute(operations.setStaffPassword, auth.access),
     )
 

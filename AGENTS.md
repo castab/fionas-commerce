@@ -305,7 +305,8 @@ There is no later step called "update the spec". The rules:
 4. **Metadata changes with the implementation, in the same change**: statuses, request
    and response bodies, examples, and property facts (`@ApiProperty`). A route documents
    every status it can answer; errors use `returningError(ErrorCategory.…)`, which takes
-   status and code from commerce-runtime and the body from its `ErrorResponse`. Never
+   status and code from commerce-runtime and the body from its `ErrorResponse` (or
+   `ValidationErrorResponse` for optional structured validation violations). Never
    define a Fiona error model.
 5. **The served and the generated document are one rendering** of `fionaApi(...)`. The
    generator (`src/openapi`, `generateOpenApi`) calls the contract with `FionaOperations`
@@ -363,6 +364,12 @@ Also:
   versions meet on the classpath.
 
 ## Application migrations
+
+- **Commerce 0.0.17's V7 deliberately rejects existing financial snapshots.** PostgreSQL
+  assigns each new snapshot's `created_at` with `clock_timestamp()`. Pre-V7 snapshots have
+  no authoritative creation time. Existing databases are ephemeral: recreate an affected
+  database/volume. Never backfill, manufacture timestamps, compensate in Fiona migrations,
+  alter runtime migrations, or bypass Flyway validation. Fresh/empty databases migrate normally.
 
 **Database migrations in this repository are application-owned migrations only.**
 `commerce-runtime` owns migration orchestration and its own persistence migrations. Do not
@@ -527,8 +534,9 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   runtime user, stores a new hash, returns no secret material, and does not revoke existing
   sessions. Every financial-document, payment, and refund route requires its commerce permission
   through the same control. A document's payment histories are a child read of the document
-  and require `FinancialDocumentRead`; `PaymentRecord` and `RefundRecord` authorize writes
-  only and never gain read meaning, and there is no Fiona payment-read permission. Listing and reading inquiries require
+  and require `FinancialDocumentRead`. `GET /payments/unapplied` uses `PaymentRecord` for
+  its operational queue; `RefundRecord` alone grants neither read. There is no new
+  payment-read permission. Listing and reading inquiries require
   `fionas.inquiries.read`. Inquiry submission, estimate previews, Offerings reads, health,
   and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
@@ -536,6 +544,11 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   configured. Fiona's CSRF policy is separate from the reusable runtime session filter.
 - Future service credentials map to `ServiceId` and reuse this authorization path;
   service credential authentication is not part of this slice.
+- `GET /auth/me` returns sorted effective `permissions` directly from
+  `context.authorization.permissionResolver.permissionsFor`, alongside profile and roles.
+  It requires only an active human session, never `commerce.role.read`. Grants and role
+  assignments are resolved live; never derive them from role keys, hard-code an
+  Administrator mapping, or store permissions in sessions.
 
 ## Fiona's pricing
 
@@ -599,6 +612,11 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
    change orders, pricing-source history, and an inquiry's requested inputs share; `FionasPricing` turns it into lines and
    reports rejections identically everywhere. It is strongly typed Fiona data: never a
    metadata map or an opaque context.
+   Rejections use runtime `offeringsValidationFailed(message, violations)`, preserving
+   Fiona's explanations and stable structural/policy codes. HTTP `validation_failed` may
+   carry optional `violations: [{code: ...}]`; ordinary validation can omit it. Clients
+   match codes directly and never parse the diagnostic message. OpenAPI uses runtime
+   `ValidationErrorResponse` and `ValidationViolationResponse`, never Fiona copies.
 10. **A preview is not an estimate document.** `POST /estimate-preview` stays public and
     stateless and creates no `FinancialDocument`; persisted documents are a separate,
     staff-only API.
@@ -635,6 +653,12 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    its ordered categories and selections) stores the `FionasPricingInputs` of each exact
    `(document_id, version)`, written in the same transaction as the snapshot. A change order
    records its revised inputs; a transition copies its source's inputs unchanged.
+   `PricedSnapshot` retains runtime `FinancialDocumentVersion`, including its authoritative
+   PostgreSQL-owned `createdAt`. Current reads use `latestVersion(transaction, id)`;
+   history uses `versionHistory(transaction, id)`, within existing REPEATABLE READ boundaries.
+   Document mutation responses read back the persisted version through `describeLocked`.
+   Every `FinancialDocumentResponse` carries its RFC 3339 `createdAt`. Never use Fiona's
+   clock, lineage-association timestamp, or inferred ordering to manufacture this fact.
 4. **The server prices; the browser never supplies financial values.** First-snapshot
    Estimate, Quote, and Invoice documents and change orders accept commercial inputs only,
    never lines, prices, tax, or totals, and price them with `FionasPricing` from exactly
@@ -698,10 +722,16 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
     refunds unwind every allocation here. Never filter a history to the requested document,
     re-sort it, recompute its reconciliation, or cache a mutation response in its place. The
     history DTOs are facts (an allocation carries no document settlement; a refund allocation
-    names its `refundId` and `paymentAllocationId`), distinct from the mutation receipts. No
-    global payment listing, search, unapplied-payment inbox, or `GET /payments/{paymentId}`
-    exists: an unallocated standalone payment is not discoverable until a screen needs it and
-    its read permission is decided.
+    names its `refundId` and `paymentAllocationId`), distinct from the mutation receipts.
+    `GET /payments/unapplied` delegates directly to runtime `unappliedPayments()` through
+    a narrow `FionaOperations` callback. Its runtime-owned REPEATABLE READ boundary returns
+    complete histories with positive derived `unallocated`, ordered by receipt time then
+    payment id, requiring `commerce.payment.record` and no inquiry association. Never
+    filter/re-sort those results, calculate availability, or query commerce payment tables.
+    No pagination, stored balance/status, general payment search, or single-payment resource.
+    Allocation body `documentId` is parsed before domain validation: unreadable UUID text
+    is a body `LensFailure` (`400 malformed_request`), while readable invalid values retain
+    domain errors.
 12. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
 13. **No `Booking` yet.** Inquiry → financial-document lineage → payments is the model until
     a slice decides when an inquiry becomes a booking.
@@ -787,13 +817,15 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 
 ### Known upstream gaps (last audited at commerce 0.0.14)
 
+The application consumes commerce-runtime 0.0.17, with matching commerce-domain transitively.
 The application history schema gap is closed by commerce 0.0.15 (applications declare their
 own migration schema). The payment read gap is closed by commerce 0.0.16:
 `FinancialLedger.paymentHistory` and `paymentHistoriesForLineage` (each with a
 `Transaction` overload) return whole `PaymentHistory` values, which Fiona serves per document
 (see [Financial documents and payments](#financial-documents-and-payments), rule 11). The
-runtime still offers no discovery of payments never allocated (`unappliedPayments`), which
-Fiona has not needed yet. The rest have not been re-audited.
+unapplied discovery gap is closed by 0.0.17 (`unappliedPayments`), as are persisted financial
+version creation timestamps, structured validation errors, and invalid Offerings schema
+formats. The remaining gaps below have not been re-audited.
 
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
@@ -824,6 +856,9 @@ Fiona has not needed yet. The rest have not been re-audited.
   the context's `FinancialLedger` (whose constructor is `internal` too) are assembled
   reflectively. This is provisional: commerce-runtime may eventually need a first-class
   contract/OpenAPI composition seam that does not require runtime persistence infrastructure.
+  In 0.0.17 the internal ledger constructor requires concrete PostgreSQL repositories;
+  the renderer reflects those constructors, which open no connection, behind its refusing
+  transactor. This remains confined to `src/openapi`.
 - **`offeringsOpenApiRenderer` needs Jackson.** It builds schemas through http4k's
   reflective schema generator, which fails on `CommerceJson`
   (`Serializer for class 'JsonLiteral' is not found`), so Fiona renders the Offerings
@@ -833,9 +868,6 @@ Fiona has not needed yet. The rest have not been re-audited.
 - **Offerings route metadata is minimal.** Commerce lets Fiona supply the
   `Offerings catalog` tag through its binding, but routes still have no descriptions;
   their error examples all say `Request failed`, and no route documents `500`.
-- **Offerings schemas contain `"format": null`.** http4k's reflective generator emits it
-  for every property, as commerce-runtime's own sample host renders it too. JSON Schema
-  requires `format` to be a string, so strict validators may reject the document.
 - **The ledger has no expected-version write.** `FinancialLedger.changeOrder`,
   `issueQuote`, `issueInvoice`, and `recordPaymentAgainstDocument` act on whatever is
   latest; only a competing successor is rejected. Fiona checks the caller's version itself
@@ -849,10 +881,6 @@ Fiona has not needed yet. The rest have not been re-audited.
   `FionasPricing` describes commerce-domain's structural violations itself, with a
   fallback for any it does not know. Upstream fix: a caller-safe description on each
   violation.
-- **Rejections cannot be structured over HTTP.** `CommerceFailure.ValidationFailed` and
-  `ErrorResponse` carry only a message, so an estimate rejection names its violation codes
-  in the message rather than as a list. Upstream fix: optional structured details in the
-  error contract.
 - **No line-sum helper for evaluations.** `FinancialDocument` derives its totals, but an
   `OfferingsEvaluation` has none, so a preview's totals are summed in Fiona
   (`EstimatePreview`). A shared helper (or evaluation totals) belongs in commerce-domain.

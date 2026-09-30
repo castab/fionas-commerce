@@ -189,6 +189,33 @@ class AuthRoutesSpec :
             }
         }
 
+        test("me resolves sorted live effective permissions without role-read permission or a new login") {
+            TestApplication.create().use { app ->
+                val cookie = app.adminCookie
+
+                fun me() =
+                    CommerceJson.asA(
+                        request(app, Method.GET, "/auth/me", cookie)
+                            .also {
+                                it.status shouldBe Status.OK
+                            }.bodyString(),
+                        CurrentUserResponse.serializer(),
+                    )
+                val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
+                me().permissions shouldBe grants.map { it.value }.sorted()
+                val limited = setOf(CommercePermissions.PaymentRecord, FionaPermissions.InquiriesRead)
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, limited)
+                request(app, Method.GET, "/admin/access/roles", cookie).status shouldBe Status.FORBIDDEN
+                me().permissions shouldBe limited.map { it.value }.sorted()
+                val admin = checkNotNull(app.authorization.findUserByUsername("admin"))
+                app.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+                me().permissions shouldBe emptyList()
+                me().roles shouldBe emptyList()
+                app.authorization.assignRole(admin.id, CommerceRoles.Administrator)
+                me().permissions shouldBe limited.map { it.value }.sorted()
+            }
+        }
+
         test("Offerings public reads and protected writes use live runtime permissions") {
             TestApplication.create().use { app ->
                 request(app, Method.POST, "/offering-catalog", cookie = null).status shouldBe Status.UNAUTHORIZED

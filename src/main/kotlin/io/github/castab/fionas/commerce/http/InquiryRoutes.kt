@@ -306,8 +306,8 @@ fun createInquiryRoute(createInquiry: (CreateInquiry.Command) -> Inquiry): Contr
             ErrorCategory.VALIDATION_FAILED,
             "a value is invalid, for example a blank name or an email address without `@`, or `pricingInputs` cannot " +
                 "be priced: they do not fit the catalog revision (for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) " +
-                "or Fiona's pricing (for example `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`). The message names each " +
-                "violation's stable code.",
+                "or Fiona's pricing (for example `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`). Optional `violations` " +
+                "expose stable codes; the message is diagnostic.",
             "Email must contain exactly one @ after a non-empty local part",
         )
         returningError(

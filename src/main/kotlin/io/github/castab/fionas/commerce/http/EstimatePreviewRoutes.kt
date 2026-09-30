@@ -7,6 +7,7 @@ import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingSelections
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.runtime.http.ErrorCategory
+import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.offering.EstimatePreview
@@ -187,8 +188,9 @@ fun previewEstimateRoute(previewEstimate: (FionasPricingInputs) -> EstimatePrevi
             ErrorCategory.VALIDATION_FAILED,
             "a value is invalid, or the selection cannot be estimated: it does not fit the catalog revision (for " +
                 "example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) or Fiona's pricing (for example " +
-                "`INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`). The message names each violation's stable code.",
+                "`INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`). Optional `violations` expose stable codes; the message is diagnostic.",
             "The selection cannot be estimated: TOO_MANY_SELECTIONS (category topping allows at most 6 selections, got 7)",
+            violations = listOf(ValidationViolationResponse("TOO_MANY_SELECTIONS")),
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
     } bindContract Method.POST to { request: Request ->

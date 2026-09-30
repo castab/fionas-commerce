@@ -104,6 +104,13 @@ class MigrationLifecycleSpec :
                 database.history(FIONA_MIGRATION_SCHEMA)[3] shouldContain "V4__inquiry_list_and_pricing.sql"
                 database.count("commerce.users") shouldBe 0
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
+                database.history("commerce").map { it.substringBefore(' ') } shouldContain "7"
+                database.history("commerce").last() shouldContain "V7__financial_document_created_at.sql"
+                database
+                    .strings(
+                        "SELECT is_nullable || ' ' || data_type FROM information_schema.columns " +
+                            "WHERE table_schema = 'commerce' AND table_name = 'financial_document_snapshots' AND column_name = 'created_at'",
+                    ).single() shouldBe "NO timestamp with time zone"
                 database
                     .strings(
                         "SELECT (SELECT max(installed_on) FROM commerce.flyway_schema_history) <= " +

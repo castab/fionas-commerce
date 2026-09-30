@@ -5,6 +5,7 @@
 // validated and then dropped. The refund is prepared only from
 // GET /financial-documents/{documentId}/payments, and its own facts are verified by reading
 // that again, knowing nothing but the document id the operator is looking at.
+// Standalone receipts are also rediscovered through /payments/unapplied, including after partial allocation.
 
 const baseUrl = process.env.FIONAS_BASE_URL ?? "http://localhost:8080";
 const origin = process.env.FIONAS_ORIGIN ?? "http://localhost:8080";
@@ -195,7 +196,15 @@ async function main() {
     return current;
   }
 
-  async function payAndAllocate(amount) {
+  async function unappliedPayment(paymentId) {
+    const queue = (await request("GET", "/payments/unapplied", {
+      authenticated: true, expectedStatus: 200,
+    })).data;
+    check(Array.isArray(queue?.payments), "unapplied queue must contain complete payment histories");
+    return queue.payments.find((history) => history.payment.paymentId === paymentId);
+  }
+
+  async function payAndAllocate(amount, demonstratePartial = false) {
     const payment = (await request("POST", "/payments", {
       authenticated: true,
       body: { amount, currency: documentCurrency, method: "OTHER" },
@@ -205,17 +214,32 @@ async function main() {
     checkAmount(payment.amount, amount, "payment amount");
     check(payment.currency === documentCurrency && payment.method === "OTHER", "payment currency and method");
     check(typeof payment.receivedAt === "string" && payment.receivedAt.length > 0, "payment receivedAt");
+    const rediscovered = await unappliedPayment(payment.paymentId);
+    check(rediscovered, "a standalone payment must be rediscoverable before allocation");
+    checkAmount(rediscovered.reconciliation.unallocated, amount, "standalone available amount");
+    const allocatedAmount = demonstratePartial ? fromCents(cents(amount, "payment amount") / 2n) : amount;
     const allocation = (await request("POST", `/payments/${payment.paymentId}/allocations`, {
       authenticated: true,
-      body: { documentId, documentVersion, amount },
+      body: { documentId, documentVersion, amount: allocatedAmount },
       expectedStatus: 201,
     })).data;
     checkId(allocation?.allocationId, "allocation id");
     check(allocation.paymentId === payment.paymentId && allocation.documentId === documentId &&
       allocation.documentVersion === documentVersion, "allocation must identify the exact Invoice and payment");
-    checkAmount(allocation.amount, amount, "allocation amount");
+    checkAmount(allocation.amount, allocatedAmount, "allocation amount");
     check(allocation.currency === documentCurrency, "allocation currency");
     check(typeof allocation.allocatedAt === "string" && allocation.allocatedAt.length > 0, "allocation time");
+    if (demonstratePartial) {
+      const remaining = fromCents(cents(amount, "payment amount") - cents(allocatedAmount, "first allocation"));
+      const partial = await unappliedPayment(payment.paymentId);
+      check(partial, "partial allocation must leave the payment discoverable");
+      checkAmount(partial.reconciliation.unallocated, remaining, "partly allocated available amount");
+      console.log(`Rediscovered partial payment ${payment.paymentId}: ${money(remaining, documentCurrency)} available`);
+      await request("POST", `/payments/${payment.paymentId}/allocations`, {
+        authenticated: true, body: { documentId, documentVersion, amount: remaining }, expectedStatus: 201,
+      });
+    }
+    check(!(await unappliedPayment(payment.paymentId)), "a fully allocated payment must leave the unapplied queue");
     console.log(`Received ${money(amount, documentCurrency)} as payment ${payment.paymentId}; allocated ${allocation.allocationId}`);
     // The responses are deliberately not returned: later steps rediscover these facts.
   }
@@ -253,7 +277,7 @@ async function main() {
   }
 
   console.log("\nPayment 1");
-  await payAndAllocate("200.00");
+  await payAndAllocate("200.00", true);
   const afterFirst = await currentInvoice(20000n, 20000n);
   console.log(`Invoice balance: ${money(afterFirst.reconciliation.balance, documentCurrency)}`);
   console.log("\nPayment 2");
