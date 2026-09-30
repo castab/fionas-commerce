@@ -6,6 +6,7 @@ import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.openapi.fionaOpenApiDocument
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
@@ -15,6 +16,7 @@ import io.kotest.matchers.string.shouldStartWith
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.int
@@ -42,6 +44,33 @@ class OpenApiDocumentSpec :
         fun JsonElement.strings(vararg path: String) = at(*path).jsonArray.map { it.jsonPrimitive.content }
 
         fun schema(name: String) = document.at("components", "schemas", name).jsonObject
+
+        // Only schema-bearing keywords are traversed. Examples, defaults, constants, enums,
+        // and extensions are application data even when they contain a field named format.
+        fun checkSchemaFormats(value: JsonElement) {
+            if (value !is JsonObject) return // Boolean schemas carry no format keyword.
+            value["format"]?.let { (it is JsonPrimitive && it.isString) shouldBe true }
+            listOf("properties", "patternProperties", "dependentSchemas", "\$defs", "definitions").forEach { keyword ->
+                (value[keyword] as? JsonObject)?.values?.forEach(::checkSchemaFormats)
+            }
+            listOf(
+                "additionalProperties",
+                "items",
+                "contains",
+                "not",
+                "if",
+                "then",
+                "else",
+                "propertyNames",
+                "unevaluatedProperties",
+                "unevaluatedItems",
+                "contentSchema",
+                "additionalItems",
+            ).forEach { keyword -> value[keyword]?.let(::checkSchemaFormats) }
+            listOf("prefixItems", "allOf", "anyOf", "oneOf").forEach { keyword ->
+                (value[keyword] as? JsonArray)?.forEach(::checkSchemaFormats)
+            }
+        }
 
         fun operation(
             path: String,
@@ -341,17 +370,48 @@ class OpenApiDocumentSpec :
             schema("ValidationViolationResponse").text("properties", "code", "type") shouldBe "string"
             schema("ValidationViolationResponse").strings("required") shouldContainExactly listOf("code")
 
-            fun checkFormats(value: JsonElement) {
-                when (value) {
-                    is JsonObject -> {
-                        value["format"]?.let { (it is JsonPrimitive && it.isString) shouldBe true }
-                        value.values.forEach(::checkFormats)
-                    }
-                    is JsonArray -> value.forEach(::checkFormats)
-                    else -> Unit
+            document
+                .at("components", "schemas")
+                .jsonObject.values
+                .forEach(::checkSchemaFormats)
+        }
+
+        test("schema format checks preserve arbitrary payload format fields and still reject invalid schema keywords") {
+            val payload = Json.parseToJsonElement("""{"format":null,"properties":{"field":{"format":null}}}""")
+            val fixture =
+                Json
+                    .parseToJsonElement(
+                        """{
+                    "type":"object",
+                    "properties":{"timestamp":{"type":"string","format":"date-time"}},
+                    "additionalProperties":false,
+                    "example":$payload,
+                    "examples":[$payload],
+                    "default":$payload,
+                    "const":$payload,
+                    "enum":[$payload],
+                    "x-payload":$payload
+                }""",
+                    ).jsonObject
+            checkSchemaFormats(fixture)
+            listOf("example", "default", "const", "x-payload").forEach { fixture.getValue(it) shouldBe payload }
+            listOf("examples", "enum").forEach { fixture.getValue(it).jsonArray.single() shouldBe payload }
+
+            val invalidFormat = JsonObject(mapOf("format" to JsonNull))
+            shouldThrow<AssertionError> { checkSchemaFormats(invalidFormat) }
+            shouldThrow<AssertionError> { checkSchemaFormats(JsonObject(fixture + ("format" to JsonNull))) }
+            // The same invalid keyword must be found in real nested schemas, not just the root.
+            listOf("properties", "patternProperties", "dependentSchemas", "\$defs", "definitions").forEach { keyword ->
+                shouldThrow<AssertionError> {
+                    checkSchemaFormats(JsonObject(mapOf(keyword to JsonObject(mapOf("field" to invalidFormat)))))
                 }
             }
-            checkFormats(document.at("components", "schemas"))
+            listOf("items", "additionalProperties", "contains", "not", "if", "then", "else", "propertyNames").forEach { keyword ->
+                shouldThrow<AssertionError> { checkSchemaFormats(JsonObject(mapOf(keyword to invalidFormat))) }
+            }
+            listOf("prefixItems", "allOf", "anyOf", "oneOf").forEach { keyword ->
+                shouldThrow<AssertionError> { checkSchemaFormats(JsonObject(mapOf(keyword to JsonArray(listOf(invalidFormat))))) }
+            }
         }
 
         test("unapplied discovery reuses whole histories and me documents effective permissions") {

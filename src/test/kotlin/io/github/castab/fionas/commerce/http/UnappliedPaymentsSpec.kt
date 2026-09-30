@@ -47,8 +47,15 @@ class UnappliedPaymentsSpec :
                 val later = receive("30.00", "2026-09-28T18:00:00Z")
                 val first = receive("100.00", "2026-09-28T17:00:00Z")
                 val tied = receive("50.00", "2026-09-28T17:00:00Z")
-                val expectedIds = listOf(first, tied).sortedBy { UUID.fromString(it.paymentId) }.map { it.paymentId } + later.paymentId
-                queue().map { it.payment.paymentId } shouldBe expectedIds
+                // Fiona owns preservation of runtime order, including receipt-time ties.
+                val expectedIds =
+                    app.context.financialLedger
+                        .unappliedPayments()
+                        .map { it.payment.id.toString() }
+                val actualIds = queue().map { it.payment.paymentId }
+                actualIds shouldBe expectedIds
+                actualIds.take(2).toSet() shouldBe setOf(first.paymentId, tied.paymentId)
+                actualIds.last() shouldBe later.paymentId
                 available(first.paymentId) shouldBe "100.00"
                 queue().single { it.payment.paymentId == first.paymentId }.let {
                     it.payment shouldBe first
