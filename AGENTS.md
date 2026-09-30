@@ -176,7 +176,9 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
 - Offerings persistence (`OfferingsSnapshotRepository`, the `commerce.offerings_snapshots`,
   `commerce.offering_categories`, and `commerce.offerings` tables), the Offerings
   operations (`CreateOfferingsCatalog`, `AddOfferingCategory`, `AddOffering`,
-  `GetOfferingsCatalog`, `GetOfferingsCatalogRevision`, and the list and get reads), and
+  `GetOfferingsCatalog`, `GetOfferingsCatalogRevision`, update/retire/restore and retired
+  identity discovery, expected-revision concurrency, lifetime key reservation, and the list
+  and get reads), and
   the Offerings HTTP capability (`offeringsHttpCapability`, `OfferingsHttpBinding`,
   `OfferingsHttpAccess`, its contract routes and DTOs, and `offeringsOpenApiRenderer`).
 - principal session lifecycle and persistence (`context.sessions`, `SessionManager`,
@@ -467,9 +469,11 @@ catalog and where it is served; commerce-runtime implements everything else.
    every Offerings body to it (`OfferingsSchemas`), so `OfferingPriceDto` stays a
    `kind`-discriminated `oneOf`. A default renderer would silently degrade that contract;
    `OpenApiDocumentSpec` guards it. Never restate an Offerings schema.
-8. **`ReadWrite(accessControl)` protects administration.** The three `POST` routes require
-   the runtime's `CommercePermissions.OfferingsManage`. Fiona supplies one `AccessControl`
-   with cookie session authentication and live role resolution. Reads remain public.
+8. **`ReadWrite(accessControl)` protects administration.** Create/add/update/retire/restore
+   and dedicated retired identity discovery require the runtime's
+   `CommercePermissions.OfferingsManage` (`commerce.offerings.manage`). Fiona supplies one
+   `AccessControl` with cookie session authentication and live role resolution. Ordinary
+   active and exact historical reads remain public.
 9. **Pricing and selection policy is not the catalog.** A price is descriptive metadata.
    Fiona's rules (base fee, duration, guests, included toppings) are
    `FionasOfferingsEngine`'s; see [Fiona's pricing](#fionas-pricing).
@@ -480,6 +484,18 @@ catalog and where it is served; commerce-runtime implements everything else.
 11. **A missing capability is a runtime requirement.** If Fiona needs Offerings behavior
     the runtime does not expose, apply the
     [commerce-runtime gap rule](#commerce-runtime-gap-rule); never copy generic code here.
+12. **Management creates successors, never changes history.** Commerce-runtime 0.0.18 adds
+    no migration. Catalog persistence/history is append-only and immutable: edit replaces
+    properties in a successor revision; DELETE retires from the successor. Natural keys
+    remain reserved for life and must be restored, never re-added as unrelated identities.
+    Update and restore keep the path-owned key. Historical revisions remain valid pricing
+    sources after edits and retirement.
+13. **Clients own the observed revision.** Every mutation after creation, including add,
+    requires integer `expectedRevision` (JSON for add/update/restore, query for DELETE).
+    Stale requests receive `409 conflict` and must reload; Fiona never injects latest or
+    retries them. Local bootstrap and sequential test fixtures thread the revision each
+    successful response returns. Test helpers accept explicit revisions so stale behavior
+    remains testable. Fiona adds no lifecycle DTOs, state, persistence, or mechanics.
 
 ## Staff authentication and authorization
 
@@ -528,7 +544,7 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   live resolver remain the only authorization source.
 - Fiona composes one `AccessControl` from cookie `sessionAuthentication(context.sessions,
   SessionCookie("__Host-fionas_session"))` and the permission resolver. The runtime's
-  `OfferingsHttpAccess.ReadWrite(accessControl)` protects its write routes. The same
+  `OfferingsHttpAccess.ReadWrite(accessControl)` protects its mutations and retired discovery. The same
   control guards runtime administration at `/admin/access` and Fiona's
   `PUT /admin/users/{userId}/credentials/password`. The credential endpoint verifies the
   runtime user, stores a new hash, returns no secret material, and does not revoke existing
@@ -537,7 +553,7 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   and require `FinancialDocumentRead`. `GET /payments/unapplied` uses `PaymentRecord` for
   its operational queue; `RefundRecord` alone grants neither read. There is no new
   payment-read permission. Listing and reading inquiries require
-  `fionas.inquiries.read`. Inquiry submission, estimate previews, Offerings reads, health,
+  `fionas.inquiries.read`. Inquiry submission, estimate previews, ordinary Offerings reads, health,
   and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
   cookie-authenticated methods require a matching `Origin` and fail closed if none is
@@ -817,7 +833,7 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 
 ### Known upstream gaps (last audited at commerce 0.0.14)
 
-The application consumes commerce-runtime 0.0.17, with matching commerce-domain transitively.
+The application consumes commerce-runtime 0.0.18, with matching commerce-domain transitively.
 The application history schema gap is closed by commerce 0.0.15 (applications declare their
 own migration schema). The payment read gap is closed by commerce 0.0.16:
 `FinancialLedger.paymentHistory` and `paymentHistoriesForLineage` (each with a
@@ -825,7 +841,9 @@ own migration schema). The payment read gap is closed by commerce 0.0.16:
 (see [Financial documents and payments](#financial-documents-and-payments), rule 11). The
 unapplied discovery gap is closed by 0.0.17 (`unappliedPayments`), as are persisted financial
 version creation timestamps, structured validation errors, and invalid Offerings schema
-formats. The remaining gaps below have not been re-audited.
+formats. Commerce 0.0.18 supplies the managed Offerings lifecycle, retired discovery,
+lifetime key reservation, and expected-revision concurrency without a new migration.
+The remaining gaps below have not been re-audited.
 
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
@@ -919,7 +937,9 @@ formats. The remaining gaps below have not been re-audited.
   estimate unchanged), HTTP tests through the complete handler, schema tests,
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
   the lifecycle internals), `OfferingsCatalogSpec` (Fiona's catalog through the complete
-  handler: initialization, revisions, historical reads, price forms; integration only, the
+  handler: initialization, revisions, historical reads, price forms, offering and category
+  lifecycle smoke tests, stale-client rejection, and historical pricing after retirement;
+  retired-discovery authorization uses the existing live-permission spec; integration only, the
   runtime's suite owns the capability), `FionasOfferingsEngineSpec` (Fiona's pricing,
   purely, with exact `BigDecimal` amounts), `EstimatePreviewRoutesSpec` (the preview through
   the complete handler over a catalog built with the Offerings API, including revision

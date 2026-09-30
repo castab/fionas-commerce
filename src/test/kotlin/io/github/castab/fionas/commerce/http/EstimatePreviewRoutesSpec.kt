@@ -3,9 +3,11 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.ValidationErrorResponse
-import io.github.castab.commerce.runtime.offering.OfferingResultDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.perGuest
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
@@ -28,6 +30,7 @@ class EstimatePreviewRoutesSpec :
 
         // The revision whose choices the acceptance estimate is made from.
         var acceptanceRevision = 0
+        var catalogRevision = 0
 
         fun post(
             path: String,
@@ -38,31 +41,9 @@ class EstimatePreviewRoutesSpec :
             application.http(Request(Method.POST, path).header("Content-Type", "application/json").body(body))
         }
 
-        fun Response.catalogRevision() = CommerceJson.asA(bodyString(), OfferingResultDto.serializer()).revision
-
         fun Response.preview() = CommerceJson.asA(bodyString(), EstimatePreviewResponse.serializer())
 
         fun Response.error() = CommerceJson.asA(bodyString(), ErrorResponse.serializer())
-
-        fun addOffering(
-            key: String,
-            category: String,
-            displayName: String,
-            price: String? = null,
-            description: String? = null,
-        ): Int {
-            val optional =
-                listOfNotNull(description?.let { ",\"description\":\"$it\"" }, price?.let { ",\"price\":$it" }).joinToString("")
-            val response =
-                post(
-                    "/offering-catalog/offerings",
-                    """{"key":"$key","category":"$category","displayName":"$displayName"$optional}""",
-                )
-            response.status shouldBe Status.CREATED
-            return response.catalogRevision()
-        }
-
-        fun perGuest(amount: String) = """{"kind":"PER_QUANTITY","amount":"$amount","currency":"USD","dimension":"guest"}"""
 
         val toppings = listOf("sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough")
 
@@ -93,19 +74,8 @@ class EstimatePreviewRoutesSpec :
 
         beforeSpec {
             application = TestApplication.create()
-            // Fiona's catalog as an administrator would enter it, through commerce-runtime's API.
-            post("/offering-catalog", "").status shouldBe Status.CREATED
-            listOf(
-                """{"key":"soft-serve-flavor","displayName":"Soft Serve","minimumSelections":1,"maximumSelections":2}""",
-                """{"key":"topping","displayName":"Toppings","minimumSelections":4,"maximumSelections":6}""",
-                """{"key":"cone-option","displayName":"Cones","minimumSelections":1,"maximumSelections":1}""",
-            ).forEach { post("/offering-catalog/categories", it).status shouldBe Status.CREATED }
-            addOffering("vanilla", "soft-serve-flavor", "Vanilla")
-            addOffering("chocolate", "soft-serve-flavor", "Chocolate")
-            addOffering("horchata", "soft-serve-flavor", "Horchata", perGuest("0.50"), description = "Premium soft serve")
-            toppings.forEach { addOffering(it, "topping", it) }
-            addOffering("cup", "cone-option", "Cups")
-            acceptanceRevision = addOffering("waffle-cone", "cone-option", "Waffle cones", perGuest("0.75"))
+            acceptanceRevision = application.createAcceptanceCatalog()
+            catalogRevision = acceptanceRevision
         }
         afterSpec { application.close() }
 
@@ -192,7 +162,8 @@ class EstimatePreviewRoutesSpec :
 
         test("a selection is priced from the revision it was made from, never a later one") {
             // An administrator adds a premium flavor after the page was rendered from acceptanceRevision.
-            val later = addOffering("mango", "soft-serve-flavor", "Mango", perGuest("1.00"))
+            val later = application.addOffering(catalogRevision, "mango", "soft-serve-flavor", "Mango", perGuest("1.00"))
+            catalogRevision = later
             later shouldBe acceptanceRevision + 1
 
             // The old revision has no mango: choosing it there is rejected, not silently repriced.
@@ -264,7 +235,15 @@ class EstimatePreviewRoutesSpec :
         }
 
         test("unsupported catalog currency preserves structured policy code and the useful explanation") {
-            val later = addOffering("euro", "soft-serve-flavor", "Euro", """{"kind":"FIXED","amount":"1.00","currency":"EUR"}""")
+            val later =
+                application.addOffering(
+                    catalogRevision,
+                    "euro",
+                    "soft-serve-flavor",
+                    "Euro",
+                    """{"kind":"FIXED","amount":"1.00","currency":"EUR"}""",
+                )
+            catalogRevision = later
             val response = preview(request(revision = later, softServe = listOf("euro")))
             response.status shouldBe Status.UNPROCESSABLE_ENTITY
             val error = CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer())

@@ -277,7 +277,7 @@ class InquiryRoutesSpec :
             val response =
                 post(inquiryBody("pinned-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":${pricingBody(revision)}"""))
 
-            val later = application.addOffering("pistachio", "soft-serve-flavor", "Pistachio")
+            val later = application.addOffering(revision, "pistachio", "soft-serve-flavor", "Pistachio")
 
             later shouldBe revision + 1
             application

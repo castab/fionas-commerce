@@ -153,10 +153,18 @@ class OpenApiDocumentSpec :
                 Triple("/offering-catalog/categories", "get", "fionasOfferingsListCategories"),
                 Triple("/offering-catalog/categories", "post", "fionasOfferingsAddCategory"),
                 Triple("/offering-catalog/categories/{categoryKey}", "get", "fionasOfferingsGetCategory"),
+                Triple("/offering-catalog/categories/{categoryKey}", "put", "fionasOfferingsUpdateCategory"),
+                Triple("/offering-catalog/categories/{categoryKey}", "delete", "fionasOfferingsRetireCategory"),
+                Triple("/offering-catalog/categories/{categoryKey}/restore", "post", "fionasOfferingsRestoreCategory"),
                 Triple("/offering-catalog/categories/{categoryKey}/offerings", "get", "fionasOfferingsListCategoryOfferings"),
                 Triple("/offering-catalog/offerings", "get", "fionasOfferingsListOfferings"),
                 Triple("/offering-catalog/offerings", "post", "fionasOfferingsAddOffering"),
                 Triple("/offering-catalog/offerings/{offeringKey}", "get", "fionasOfferingsGetOffering"),
+                Triple("/offering-catalog/offerings/{offeringKey}", "put", "fionasOfferingsUpdateOffering"),
+                Triple("/offering-catalog/offerings/{offeringKey}", "delete", "fionasOfferingsRetireOffering"),
+                Triple("/offering-catalog/offerings/{offeringKey}/restore", "post", "fionasOfferingsRestoreOffering"),
+                Triple("/offering-catalog/retired/offerings", "get", "fionasOfferingsListRetiredOfferings"),
+                Triple("/offering-catalog/retired/categories", "get", "fionasOfferingsListRetiredCategories"),
             )
 
         val adminOperations =
@@ -307,6 +315,56 @@ class OpenApiDocumentSpec :
             adminOperations.forEach { (path, method, operationId) ->
                 operation(path, method).text("operationId") shouldBe operationId
                 operation(path, method).strings("tags") shouldContainExactly listOf("Staff administration")
+            }
+        }
+
+        test("Offerings add, update, and restore bodies retain required integer revisions and path-owned mutation keys") {
+            offeringOperations
+                .filter { (path, method) -> path != "/offering-catalog" && method in listOf("post", "put") }
+                .forEach { (path, method) ->
+                    val request = operation(path, method).at("requestBody", "content", "application/json", "schema")
+                    val body = schema(request.text("\$ref").substringAfterLast('/'))
+                    body.strings("required").contains("expectedRevision") shouldBe true
+                    body.text("properties", "expectedRevision", "type") shouldBe "integer"
+                    if (method == "put" || path.endsWith("/restore")) {
+                        body.at("properties").jsonObject.containsKey("key") shouldBe false
+                    }
+                }
+        }
+
+        test("Offerings retirement retains the required integer expectedRevision query parameter") {
+            offeringOperations.filter { it.second == "delete" }.forEach { (path, method) ->
+                val revision = operation(path, method).at("parameters").jsonArray.single { it.text("name") == "expectedRevision" }
+                revision.text("in") shouldBe "query"
+                revision.at("required") shouldBe JsonPrimitive(true)
+                revision.text("schema", "type") shouldBe "integer"
+            }
+        }
+
+        test("Offerings management retains runtime mutation and retired-discovery error responses") {
+            offeringOperations
+                .filter { (path, method) -> path != "/offering-catalog" && method in listOf("post", "put", "delete") }
+                .forEach { (path, method) ->
+                    operation(path, method).at("responses").jsonObject.keys shouldContainExactlyInAnyOrder
+                        listOf(
+                            if (method == "post" &&
+                                !path.endsWith("/restore")
+                            ) {
+                                "201"
+                            } else {
+                                "200"
+                            },
+                            "400",
+                            "401",
+                            "403",
+                            "404",
+                            "409",
+                            "422",
+                        )
+                }
+            listOf("offerings", "categories").forEach { kind ->
+                operation("/offering-catalog/retired/$kind", "get").at("responses").jsonObject.keys shouldContainExactlyInAnyOrder
+                    listOf("200", "401", "403", "404")
             }
         }
 

@@ -372,7 +372,7 @@ class FinancialDocumentRoutesSpec :
 
         test("a change order prices exactly the catalog revision it names, old or new, never a silent upgrade") {
             val estimate = newEstimate()
-            val mango = application.addOffering("mango", "soft-serve-flavor", "Mango", perGuest("1.00"))
+            val mango = application.addOffering(revision, "mango", "soft-serve-flavor", "Mango", perGuest("1.00"))
 
             // The old revision stays usable deliberately, and stays recorded as the source.
             val kept = changeOrder(estimate.id, pricingBody(revision, guests = 76, expectedVersion = 1)).document()

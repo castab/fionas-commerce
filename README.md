@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.17/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.17/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.18/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.18/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -38,8 +38,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.17`, which brings
-`commerce-domain:0.0.17` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.18`, which brings
+`commerce-domain:0.0.18` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -98,12 +98,20 @@ capability (see [Offerings catalog](#offerings-catalog)):
 | `POST /offering-catalog` | Initializes the empty catalog as revision 1. `409` if it exists. |
 | `GET /offering-catalog/revisions/{revision}` | Exactly the catalog as that revision recorded it. |
 | `GET /offering-catalog/categories` | The latest revision's categories, in order. |
-| `POST /offering-catalog/categories` | Appends a category in a new revision. |
+| `POST /offering-catalog/categories` | Adds a category in a successor revision; requires body `expectedRevision`. |
 | `GET /offering-catalog/categories/{categoryKey}` | One category of the latest revision. |
+| `PUT /offering-catalog/categories/{categoryKey}` | Replaces category properties in a successor revision; requires body `expectedRevision`. |
+| `DELETE /offering-catalog/categories/{categoryKey}` | Retires an empty category; requires query `expectedRevision`, returns the successor revision. |
+| `POST /offering-catalog/categories/{categoryKey}/restore` | Restores the same category identity with supplied properties; requires body `expectedRevision`. |
 | `GET /offering-catalog/categories/{categoryKey}/offerings` | That category and its offerings, in order. |
 | `GET /offering-catalog/offerings` | The latest revision's offerings, in order. |
-| `POST /offering-catalog/offerings` | Appends an offering to an existing category in a new revision. |
+| `POST /offering-catalog/offerings` | Adds an offering to an active category in a successor revision; requires body `expectedRevision`. |
 | `GET /offering-catalog/offerings/{offeringKey}` | One offering of the latest revision. |
+| `PUT /offering-catalog/offerings/{offeringKey}` | Replaces offering properties in a successor revision; requires body `expectedRevision`. |
+| `DELETE /offering-catalog/offerings/{offeringKey}` | Retires an offering; requires query `expectedRevision`, returns the successor revision. |
+| `POST /offering-catalog/offerings/{offeringKey}/restore` | Restores the same offering identity with supplied properties; requires body `expectedRevision`. |
+| `GET /offering-catalog/retired/offerings` | Administrative discovery: current revision and each retired offering's last representation and `lastSeenRevision`. |
+| `GET /offering-catalog/retired/categories` | Administrative discovery: current revision and each retired category's last representation and `lastSeenRevision`. |
 
 **Estimate preview API**, implemented by Fiona (see [Estimate preview](#estimate-preview)):
 
@@ -230,9 +238,23 @@ Offerings catalog. The split is deliberate:
   and their DTOs and schemas, validation, and the append-only snapshot tables in its
   `commerce` schema. Fiona has no Offerings tables, repositories, DTOs, or SQL of its own.
 
-The catalog is **immutable and revisioned**. Every change appends a complete new snapshot,
-`r1`, `r2`, …; nothing is updated or deleted, and any earlier revision can be read back
-exactly with `GET /offering-catalog/revisions/{revision}`.
+Catalog persistence/history is **append-only and immutable**; management mutations create
+complete successor revisions (`r1`, `r2`, …). Editing replaces properties in the successor;
+deleting retires the identity from that successor. Any earlier revision can be read back
+exactly with `GET /offering-catalog/revisions/{revision}` and remains a valid pricing source.
+Retired natural keys remain reserved for the catalog's lifetime: restore the same identity
+with new properties rather than re-add its key. Update and restore take the key from the
+path, never an editable body field; their bodies replace all properties, with omitted
+optional properties reset to defaults.
+
+> **Upgrading to commerce 0.0.18.** No runtime or Fiona migration is added. The existing
+> binding now exposes runtime-owned update, retire, restore, and retired discovery. Every
+> mutation after creation (including add) requires the caller's observed integer
+> `expectedRevision`: in the JSON body for add/update/restore, in the query for DELETE.
+> Thread the revision returned by each successful mutation; stale requests receive
+> `409 conflict`, create no successor, and must reload. Fiona never injects a current
+> revision or retries a stale mutation. Missing/malformed revisions are `400`, domain-invalid
+> revisions are `422`. This required field breaks pre-0.0.18 add clients.
 
 On a fresh database **the catalog does not exist**: startup applies migrations and nothing
 else, so `GET /offering-catalog` is `404 not_found` until it is initialized, once:
@@ -246,12 +268,12 @@ and offerings are then appended, each in its own new revision:
 
 ```bash
 curl -i -X POST localhost:8080/offering-catalog/categories -H 'Content-Type: application/json' \
-  -d '{"key":"soft-serve-flavor","displayName":"Soft Serve","minimumSelections":2,"maximumSelections":2}'
+  -d '{"expectedRevision":1,"key":"soft-serve-flavor","displayName":"Soft Serve","minimumSelections":2,"maximumSelections":2}'
 ```
 
 ```bash
 curl -i -X POST localhost:8080/offering-catalog/offerings -H 'Content-Type: application/json' \
-  -d '{"key":"vanilla","category":"soft-serve-flavor","displayName":"Vanilla","description":"Classic vanilla soft serve"}'
+  -d '{"expectedRevision":2,"key":"vanilla","category":"soft-serve-flavor","displayName":"Vanilla","description":"Classic vanilla soft serve"}'
 ```
 
 `GET /offering-catalog` returns the latest revision in one request, offerings grouped under
@@ -293,9 +315,9 @@ offering by name.
 Production catalog contents are administrative data, entered through the API (for example
 from Swagger UI at `/docs`) after deployment. Neither startup nor a migration seeds them.
 
-The three catalog `POST` routes require an active staff session with
+Every catalog mutation and dedicated retired-discovery read requires an active staff session with
 `commerce.offerings.manage`. The runtime enforces this through Fiona's `AccessControl`;
-catalog reads remain public.
+ordinary active and exact historical catalog reads remain public under the existing policy.
 
 ## Staff authentication
 
@@ -360,8 +382,8 @@ for example `https://shop.example.com`. Login and every unsafe request carrying 
 session cookie require a matching `Origin`; a missing or different origin receives `403`.
 When no origin is configured, browser login fails closed. Inquiry submission
 (`POST /inquiries`) and estimate previews remain public; listing and reading inquiries
-require `fionas.inquiries.read`. `/health`, `/ready`, and Offerings reads remain public;
-Offerings writes require `commerce.offerings.manage`. Every financial-document and payment
+require `fionas.inquiries.read`. `/health`, `/ready`, and ordinary Offerings reads remain public;
+Offerings mutations and retired discovery require `commerce.offerings.manage`. Every financial-document and payment
 route is staff-only.
 
 Future service credentials will be authenticated by a separate Fiona-specific mechanism
@@ -808,7 +830,7 @@ Fiona's own schemas are derived from the kotlinx.serialization descriptors of th
 DTOs, the wire format itself, so `required` matches what the server reads and writes: strings,
 `int32` integers, booleans, arrays, and nested objects, each its own component. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers. Commerce-runtime 0.0.17's Offerings
+contract metadata cannot declare response headers. Commerce-runtime 0.0.18's Offerings
 renderer omits invalid schema-level `"format": null` and preserves arbitrary example data.
 Fiona uses the runtime's `ValidationErrorResponse` and `ValidationViolationResponse`
 schemas for validation failures, with optional `violations`; ordinary errors retain
@@ -1011,8 +1033,10 @@ FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/setup-local-commerce.mj
 
 The script also accepts `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
 `FIONAS_ADMIN_USERNAME`; each defaults to the local port 8080 setup and username `admin`.
-It does not load `.env` files or install npm packages. The catalog is append-only, so the
-script stops if one already exists. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
+It does not load `.env` files or install npm packages. It intentionally seeds only a fresh
+catalog and stops if one already exists; existing catalogs are managed through revisioned
+mutations. Each add sends `expectedRevision` from the preceding successful response, with
+no intervening GET or automatic retry. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
 for the exact catalog entries and preview request.
 
 ### Smoke test Invoice payments and a refund locally
@@ -1121,7 +1145,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `RepricingSpec` | Change-order derivation: remove every current line, add every repriced line in order; identical charges are no financial change |
 | `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
 | `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded (no financial document either), minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |
-| `OfferingsCatalogSpec` | Fiona's Offerings catalog through the complete handler: absent until initialized; revisions 1–4 from initialization, a category, and two offerings; ordered reads; exact historical revisions; every price form round-trips; no update or delete route |
+| `OfferingsCatalogSpec` | Fiona's runtime catalog through the complete handler: initialization, ordered and historical reads, price forms; offering and empty-category update/retire/discover/restore; lifetime key reservation; required/stale revision rejection with no successor; historical pricing remains $681.25 |
 | `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (the inquiry receipt, list, and pricing inputs, financial documents, standalone receipts, allocations, and document payment histories with their linked fact schemas included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |

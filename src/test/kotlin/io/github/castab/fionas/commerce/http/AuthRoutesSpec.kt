@@ -218,14 +218,20 @@ class AuthRoutesSpec :
 
         test("Offerings public reads and protected writes use live runtime permissions") {
             TestApplication.create().use { app ->
+                val retiredPaths = listOf("/offering-catalog/retired/offerings", "/offering-catalog/retired/categories")
+                retiredPaths.forEach { request(app, Method.GET, it, cookie = null).status shouldBe Status.UNAUTHORIZED }
                 request(app, Method.POST, "/offering-catalog", cookie = null).status shouldBe Status.UNAUTHORIZED
                 request(app, Method.GET, "/offering-catalog", cookie = null).status shouldBe Status.NOT_FOUND
                 val admin = app.authorization.findUserByUsername("admin")!!
                 app.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
                 request(app, Method.POST, "/offering-catalog").status shouldBe Status.FORBIDDEN
+                retiredPaths.forEach { request(app, Method.GET, it).status shouldBe Status.FORBIDDEN }
                 app.authorization.assignRole(admin.id, CommerceRoles.Administrator)
                 request(app, Method.POST, "/offering-catalog").status shouldBe Status.CREATED
                 request(app, Method.GET, "/offering-catalog", cookie = null).status shouldBe Status.OK
+                request(app, Method.GET, "/offering-catalog/categories", cookie = null).status shouldBe Status.OK
+                request(app, Method.GET, "/offering-catalog/offerings", cookie = null).status shouldBe Status.OK
+                retiredPaths.forEach { request(app, Method.GET, it).status shouldBe Status.OK }
             }
         }
 

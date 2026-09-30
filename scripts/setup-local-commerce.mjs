@@ -103,7 +103,8 @@ async function main() {
     if (error instanceof HttpFailure && error.status === 409) {
       throw new Error(
         "Fiona's Offerings catalog already exists. This script seeds a fresh/disposable local database " +
-          "because the catalog is append-only. Reset the local database/volume before running it again.",
+          "only; existing catalogs are managed through revisioned mutations. " +
+          "Reset the local database/volume before running it again.",
       );
     }
     throw error;
@@ -117,7 +118,9 @@ async function main() {
   ];
   for (const category of categories) {
     const path = "/offering-catalog/categories";
-    const created = await request("POST", path, { body: category, authenticated: true, expectedStatus: 201 });
+    const created = await request("POST", path, {
+      body: { expectedRevision: catalogRevision, ...category }, authenticated: true, expectedStatus: 201,
+    });
     catalogRevision = revisionFrom(created.data, path);
     console.log(`Added category ${category.key}: revision ${catalogRevision}`);
   }
@@ -139,7 +142,9 @@ async function main() {
   ];
   for (const offering of offerings) {
     const path = "/offering-catalog/offerings";
-    const created = await request("POST", path, { body: offering, authenticated: true, expectedStatus: 201 });
+    const created = await request("POST", path, {
+      body: { expectedRevision: catalogRevision, ...offering }, authenticated: true, expectedStatus: 201,
+    });
     catalogRevision = revisionFrom(created.data, path);
     console.log(`Added offering ${offering.key}: revision ${catalogRevision}`);
   }

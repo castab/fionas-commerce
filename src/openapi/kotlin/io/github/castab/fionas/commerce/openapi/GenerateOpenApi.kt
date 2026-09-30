@@ -1,5 +1,7 @@
 package io.github.castab.fionas.commerce.openapi
 
+import io.github.castab.commerce.offering.OfferingCategoryKey
+import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
@@ -140,6 +142,28 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
                 transaction: Transaction,
                 catalogId: OfferingsCatalogId,
             ) = error("Rendering the OpenAPI document never reads a catalog")
+
+            override fun offeringKeyExistsInHistory(
+                transaction: Transaction,
+                catalogId: OfferingsCatalogId,
+                key: OfferingKey,
+            ) = error("Rendering the OpenAPI document never checks offering history")
+
+            override fun categoryKeyExistsInHistory(
+                transaction: Transaction,
+                catalogId: OfferingsCatalogId,
+                key: OfferingCategoryKey,
+            ) = error("Rendering the OpenAPI document never checks category history")
+
+            override fun retrieveRetiredOfferings(
+                transaction: Transaction,
+                reference: OfferingsSnapshotReference,
+            ) = error("Rendering the OpenAPI document never discovers retired offerings")
+
+            override fun retrieveRetiredCategories(
+                transaction: Transaction,
+                reference: OfferingsSnapshotReference,
+            ) = error("Rendering the OpenAPI document never discovers retired categories")
         }
     val documents = refusing<FinancialDocumentRepository>("Rendering the OpenAPI document never touches a financial document")
     val payments = refusing<PaymentRepository>("Rendering the OpenAPI document never touches a payment")

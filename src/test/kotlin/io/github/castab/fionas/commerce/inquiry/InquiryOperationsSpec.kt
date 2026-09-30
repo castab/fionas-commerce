@@ -139,7 +139,7 @@ class InquiryOperationsSpec :
             val pinned = inputs()
             val created = createInquiry()(command("pinned-${UUID.randomUUID()}@example.com", pricingInputs = pinned))
 
-            val later = application.addOffering("mint", "soft-serve-flavor", "Mint")
+            val later = application.addOffering(revision, "mint", "soft-serve-flavor", "Mint")
 
             later shouldBe revision + 1
             getInquiry()(created.id).pricingInputs?.catalogRevision shouldBe OfferingsRevision.of(revision)

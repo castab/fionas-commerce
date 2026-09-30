@@ -8,8 +8,8 @@ import org.http4k.contract.Tag
 import java.util.UUID
 
 /**
- * Fiona's primary Offerings catalog: what Fiona's sells, as commerce-runtime's append-only
- * catalog snapshots record it.
+ * Fiona's primary Offerings catalog: what Fiona sells, recorded as commerce-runtime's
+ * immutable catalog snapshots. Management mutations create successor revisions.
  *
  * The id is Fiona's choice and part of its source: never generated at startup, never
  * configured, and never stored in a Fiona table. Every environment has its own database, so
@@ -23,8 +23,9 @@ val FIONA_OFFERINGS_CATALOG_ID = OfferingsCatalogId(UUID.fromString("0cde8e0b-aa
  * implements every route, body, and revision rule: Fiona chooses only the catalog, the base
  * path, the operationId prefix (part of the API contract), and its OpenAPI group.
  *
- * [OfferingsHttpAccess.ReadWrite] exposes the three routes that append revisions and asks
- * the runtime to require `CommercePermissions.OfferingsManage` through [accessControl].
+ * [OfferingsHttpAccess.ReadWrite] exposes runtime-owned create/add/update/retire/restore
+ * and retired identity discovery, protected by `CommercePermissions.OfferingsManage` through
+ * [accessControl]. Existing-catalog mutations require the caller's observed expected revision.
  */
 fun fionaOfferingsBinding(accessControl: AccessControl) =
     OfferingsHttpBinding(

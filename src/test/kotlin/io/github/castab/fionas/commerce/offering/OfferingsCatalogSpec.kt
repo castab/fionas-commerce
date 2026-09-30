@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce.offering
 
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.offering.CatalogRevisionDto
 import io.github.castab.commerce.runtime.offering.CategoryDto
 import io.github.castab.commerce.runtime.offering.CategoryOfferingsDto
 import io.github.castab.commerce.runtime.offering.OfferingCategoryDto
@@ -10,7 +11,12 @@ import io.github.castab.commerce.runtime.offering.OfferingPriceDto
 import io.github.castab.commerce.runtime.offering.OfferingResultDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.commerce.runtime.offering.OfferingsDto
+import io.github.castab.commerce.runtime.offering.RetiredCategoriesDto
+import io.github.castab.commerce.runtime.offering.RetiredOfferingsDto
+import io.github.castab.fionas.commerce.http.EstimatePreviewResponse
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.pricingBody
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactly
@@ -28,12 +34,13 @@ import org.http4k.core.Status
  * at `/offering-catalog`, over real PostgreSQL.
  *
  * commerce-runtime's own suite covers the capability exhaustively; these specs prove that
- * Fiona's catalog really is the runtime's append-only snapshot catalog. They build one
- * catalog history in order, on a database of their own, so each test continues the last.
+ * Fiona composes the runtime's managed catalog with immutable, append-only history.
+ * Read tests build one history in order; lifecycle smoke tests each use a fresh catalog.
  */
 class OfferingsCatalogSpec :
     FunSpec({
         lateinit var application: TestApplication
+        var revision = 0
 
         beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
@@ -80,6 +87,7 @@ class OfferingsCatalogSpec :
             post("/offering-catalog").let {
                 it.status shouldBe Status.CREATED
                 val catalog = it.catalog()
+                revision = catalog.revision
                 catalog.catalogId shouldBe FIONA_OFFERINGS_CATALOG_ID.value.toString()
                 catalog.revision shouldBe 1
                 catalog.previousRevision.shouldBeNull()
@@ -97,6 +105,7 @@ class OfferingsCatalogSpec :
                 "/offering-catalog/categories",
                 """
                 {
+                  "expectedRevision": $revision,
                   "key": "soft-serve-flavor",
                   "displayName": "Soft Serve",
                   "description": "Choose your soft serve flavors",
@@ -107,12 +116,14 @@ class OfferingsCatalogSpec :
             ).let {
                 it.status shouldBe Status.CREATED
                 it.body(CategoryDto.serializer()) shouldBe CategoryDto(2, softServe)
+                revision = it.body(CategoryDto.serializer()).revision
             }
 
             post(
                 "/offering-catalog/offerings",
                 """
                 {
+                  "expectedRevision": $revision,
                   "key": "vanilla",
                   "category": "soft-serve-flavor",
                   "displayName": "Vanilla",
@@ -122,14 +133,16 @@ class OfferingsCatalogSpec :
             ).let {
                 it.status shouldBe Status.CREATED
                 it.body(OfferingResultDto.serializer()) shouldBe OfferingResultDto(3, vanilla)
+                revision = it.body(OfferingResultDto.serializer()).revision
             }
 
             post(
                 "/offering-catalog/offerings",
-                """{"key": "chocolate", "category": "soft-serve-flavor", "displayName": "Chocolate"}""",
+                """{"expectedRevision":$revision,"key":"chocolate","category":"soft-serve-flavor","displayName":"Chocolate"}""",
             ).let {
                 it.status shouldBe Status.CREATED
                 it.body(OfferingResultDto.serializer()) shouldBe OfferingResultDto(4, chocolate)
+                revision = it.body(OfferingResultDto.serializer()).revision
             }
         }
 
@@ -180,8 +193,13 @@ class OfferingsCatalogSpec :
         }
 
         test("every price form survives the round trip exactly") {
-            post("/offering-catalog/categories", """{"key": "test-category", "displayName": "Test Category"}""").status shouldBe
-                Status.CREATED
+            post(
+                "/offering-catalog/categories",
+                """{"expectedRevision":$revision,"key":"test-category","displayName":"Test Category"}""",
+            ).let {
+                it.status shouldBe Status.CREATED
+                revision = it.body(CategoryDto.serializer()).revision
+            }
             val fixed =
                 OfferingDto("fixed-item", "test-category", "Fixed Item", price = OfferingPriceDto("FIXED", "120.00", "USD"))
             val perQuantity =
@@ -205,7 +223,12 @@ class OfferingsCatalogSpec :
                    "price": {"kind": "PER_QUANTITY", "amount": "0.75", "currency": "USD", "dimension": "guest"}}""",
                 """{"key": "service-hour", "category": "test-category", "displayName": "Service Hour",
                    "price": {"kind": "PER_DURATION", "amount": "50.00", "currency": "USD", "interval": "PT1H"}}""",
-            ).forEach { post("/offering-catalog/offerings", it).status shouldBe Status.CREATED }
+            ).forEach { body ->
+                post("/offering-catalog/offerings", """{"expectedRevision":$revision,${body.drop(1)}""").let {
+                    it.status shouldBe Status.CREATED
+                    revision = it.body(OfferingResultDto.serializer()).revision
+                }
+            }
 
             listOf(fixed, perQuantity, perDuration).forEach { offering ->
                 get("/offering-catalog/offerings/${offering.key}").body(OfferingResultDto.serializer()).offering shouldBe offering
@@ -219,18 +242,182 @@ class OfferingsCatalogSpec :
                 )
         }
 
-        test("the catalog is append-only: no route replaces or removes a category or an offering") {
-            listOf(
-                Request(Method.PUT, "/offering-catalog"),
-                Request(Method.DELETE, "/offering-catalog"),
-                Request(Method.PUT, "/offering-catalog/categories/soft-serve-flavor"),
-                Request(Method.DELETE, "/offering-catalog/categories/soft-serve-flavor"),
-                Request(Method.PUT, "/offering-catalog/offerings/vanilla"),
-                Request(Method.PATCH, "/offering-catalog/offerings/vanilla"),
-                Request(Method.DELETE, "/offering-catalog/offerings/vanilla"),
-            ).forEach { request ->
-                application.http(request).status shouldBe Status.METHOD_NOT_ALLOWED
+        fun offeringMutation(
+            expectedRevision: Int,
+            displayName: String = "Horchata Soft Serve",
+            amount: String = "0.75",
+        ) = """{"expectedRevision":$expectedRevision,"category":"soft-serve-flavor","displayName":"$displayName",
+            "description":"Premium horchata soft serve",
+            "price":{"kind":"PER_QUANTITY","amount":"$amount","currency":"USD","dimension":"guest"}}"""
+
+        test("Horchata can be updated, retired, discovered, and restored without changing history or historical pricing") {
+            TestApplication.create().use { app ->
+                val originalRevision = app.createAcceptanceCatalog()
+
+                fun read(path: String) = app.http(Request(Method.GET, path))
+
+                val original = read("/offering-catalog/revisions/$originalRevision").catalog()
+                val updated = app.adminRequest(Method.PUT, "/offering-catalog/offerings/horchata", offeringMutation(originalRevision))
+                updated.status shouldBe Status.OK
+                val edited = updated.body(OfferingResultDto.serializer())
+                edited.revision shouldBe originalRevision + 1
+                edited.offering shouldBe
+                    OfferingDto(
+                        "horchata",
+                        "soft-serve-flavor",
+                        "Horchata Soft Serve",
+                        "Premium horchata soft serve",
+                        OfferingPriceDto("PER_QUANTITY", "0.75", "USD", dimension = "guest"),
+                    )
+                read("/offering-catalog")
+                    .catalog()
+                    .categories
+                    .flatMap { it.offerings }
+                    .single { it.key == "horchata" } shouldBe
+                    edited.offering
+                val editedHistory = read("/offering-catalog/revisions/${edited.revision}").catalog()
+
+                fun historicalPreview() {
+                    val preview =
+                        app.http(
+                            Request(
+                                Method.POST,
+                                "/estimate-preview",
+                            ).header("Content-Type", "application/json").body(pricingBody(originalRevision)),
+                        )
+                    preview.status shouldBe Status.OK
+                    preview.body(EstimatePreviewResponse.serializer()).catalogRevision shouldBe originalRevision
+                    preview.body(EstimatePreviewResponse.serializer()).total shouldBe "681.25"
+                    read("/offering-catalog/revisions/$originalRevision").catalog() shouldBe original
+                }
+                historicalPreview()
+
+                val retirement = app.adminRequest(Method.DELETE, "/offering-catalog/offerings/horchata?expectedRevision=${edited.revision}")
+                retirement.status shouldBe Status.OK
+                val retiredRevision = retirement.body(CatalogRevisionDto.serializer()).revision
+                retiredRevision shouldBe edited.revision + 1
+                read("/offering-catalog")
+                    .catalog()
+                    .categories
+                    .flatMap { it.offerings }
+                    .none { it.key == "horchata" } shouldBe true
+                read("/offering-catalog/revisions/${edited.revision}").catalog() shouldBe editedHistory
+                historicalPreview()
+
+                app
+                    .adminPost(
+                        "/offering-catalog/offerings",
+                        """{"expectedRevision":$retiredRevision,"key":"horchata","category":"soft-serve-flavor","displayName":"Unrelated item"}""",
+                    ).let {
+                        it.status shouldBe Status.CONFLICT
+                        it.body(ErrorResponse.serializer()).code shouldBe "conflict"
+                    }
+                app.adminGet("/offering-catalog/retired/offerings").let {
+                    it.status shouldBe Status.OK
+                    val discovery = it.body(RetiredOfferingsDto.serializer())
+                    discovery.revision shouldBe retiredRevision
+                    discovery.offerings.single().lastSeenRevision shouldBe edited.revision
+                    discovery.offerings.single().offering shouldBe edited.offering
+                }
+
+                val restored =
+                    app.adminPost(
+                        "/offering-catalog/offerings/horchata/restore",
+                        offeringMutation(retiredRevision, "Restored Horchata", "1.00"),
+                    )
+                restored.status shouldBe Status.OK
+                val restoredItem = restored.body(OfferingResultDto.serializer())
+                restoredItem.revision shouldBe retiredRevision + 1
+                restoredItem.offering shouldBe
+                    edited.offering.copy(
+                        displayName = "Restored Horchata",
+                        price = OfferingPriceDto("PER_QUANTITY", "1.00", "USD", dimension = "guest"),
+                    )
+                read("/offering-catalog/offerings/horchata").body(OfferingResultDto.serializer()) shouldBe restoredItem
+                app
+                    .adminGet("/offering-catalog/retired/offerings")
+                    .body(RetiredOfferingsDto.serializer())
+                    .offerings
+                    .shouldBeEmpty()
+                read("/offering-catalog/revisions/${edited.revision}").catalog() shouldBe editedHistory
+                historicalPreview()
             }
-            get("/offering-catalog/offerings/vanilla").body(OfferingResultDto.serializer()).offering shouldBe vanilla
+        }
+
+        test("missing and stale observed revisions cannot overwrite a newer offering or append a snapshot") {
+            TestApplication.create().use { app ->
+                val observed = app.createAcceptanceCatalog()
+                val path = "/offering-catalog/offerings/horchata"
+                app.adminRequest(Method.PUT, path, """{"category":"soft-serve-flavor","displayName":"Without revision"}""").let {
+                    it.status shouldBe Status.BAD_REQUEST
+                    it.body(ErrorResponse.serializer()).code shouldBe "malformed_request"
+                }
+                val newer = app.adminRequest(Method.PUT, path, offeringMutation(observed, "Newer Horchata", "1.00"))
+                newer.status shouldBe Status.OK
+                val current = newer.body(OfferingResultDto.serializer())
+                current.revision shouldBe observed + 1
+                app.adminRequest(Method.PUT, path, offeringMutation(observed, "Stale Horchata", "0.25")).let {
+                    it.status shouldBe Status.CONFLICT
+                    it.body(ErrorResponse.serializer()).code shouldBe "conflict"
+                }
+                app.http(Request(Method.GET, path)).body(OfferingResultDto.serializer()) shouldBe current
+                app.http(Request(Method.GET, "/offering-catalog")).catalog().revision shouldBe current.revision
+                app.http(Request(Method.GET, "/offering-catalog/revisions/${current.revision + 1}")).status shouldBe Status.NOT_FOUND
+            }
+        }
+
+        test("an empty category can be added, updated, retired, discovered, and restored with the same key") {
+            TestApplication.create().use { app ->
+                val created = app.adminPost("/offering-catalog")
+                created.status shouldBe Status.CREATED
+                val initial = created.catalog().revision
+                val added =
+                    app.adminPost(
+                        "/offering-catalog/categories",
+                        """{"expectedRevision":$initial,"key":"seasonal","displayName":"Seasonal"}""",
+                    )
+                added.status shouldBe Status.CREATED
+                val category = added.body(CategoryDto.serializer())
+                category.revision shouldBe initial + 1
+                val path = "/offering-catalog/categories/seasonal"
+                val updated =
+                    app.adminRequest(
+                        Method.PUT,
+                        path,
+                        """{"expectedRevision":${category.revision},"displayName":"Seasonal Choices","description":"Optional specials","maximumSelections":2}""",
+                    )
+                updated.status shouldBe Status.OK
+                val edited = updated.body(CategoryDto.serializer())
+                edited.revision shouldBe category.revision + 1
+                edited.category shouldBe OfferingCategoryDto("seasonal", "Seasonal Choices", "Optional specials", 0, 2)
+                app.http(Request(Method.GET, path)).body(CategoryDto.serializer()) shouldBe edited
+                val retired = app.adminRequest(Method.DELETE, "$path?expectedRevision=${edited.revision}")
+                retired.status shouldBe Status.OK
+                val retiredRevision = retired.body(CatalogRevisionDto.serializer()).revision
+                retiredRevision shouldBe edited.revision + 1
+                app.http(Request(Method.GET, path)).status shouldBe Status.NOT_FOUND
+                app.adminGet("/offering-catalog/retired/categories").let {
+                    it.status shouldBe Status.OK
+                    val discovery = it.body(RetiredCategoriesDto.serializer())
+                    discovery.revision shouldBe retiredRevision
+                    discovery.categories.single().lastSeenRevision shouldBe edited.revision
+                    discovery.categories.single().category shouldBe edited.category
+                }
+                val restored =
+                    app.adminPost(
+                        "$path/restore",
+                        """{"expectedRevision":$retiredRevision,"displayName":"Restored Seasonal","maximumSelections":3}""",
+                    )
+                restored.status shouldBe Status.OK
+                val restoredCategory = restored.body(CategoryDto.serializer())
+                restoredCategory.revision shouldBe retiredRevision + 1
+                restoredCategory.category shouldBe OfferingCategoryDto("seasonal", "Restored Seasonal", maximumSelections = 3)
+                app.http(Request(Method.GET, path)).body(CategoryDto.serializer()) shouldBe restoredCategory
+                app
+                    .adminGet("/offering-catalog/retired/categories")
+                    .body(RetiredCategoriesDto.serializer())
+                    .categories
+                    .shouldBeEmpty()
+            }
         }
     })
