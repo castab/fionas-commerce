@@ -2,10 +2,13 @@ package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
+import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
+import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
+import io.github.castab.fionas.commerce.inquiry.CatalogRevisionStale
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.EventDate
 import io.github.castab.fionas.commerce.inquiry.EventType
@@ -74,9 +77,10 @@ data class CreateInquiryRequest(
     @ApiProperty(
         description =
             "The configuration the customer chose, as `POST /estimate-preview` takes it; absent for a plain contact " +
-                "inquiry. It is checked with the same pricing, from exactly the catalog revision it names, and recorded " +
-                "with the inquiry pinned to that revision. Inputs the pricing rejects fail the request as they fail a " +
-                "preview, and nothing is recorded. The accepted concrete lines materialize an initial Estimate in the " +
+                "inquiry. The revision must still be current when validated, and selections must be exposed by the " +
+                "public inquiry form. Stale revisions fail with 409 CATALOG_REVISION_STALE; refresh the form and ask " +
+                "the customer to review before resubmission. Rejected inputs record nothing. Accepted concrete lines " +
+                "materialize an initial Estimate in the " +
                 "same transaction. Amounts are never accepted; the inquiry records customer intent and the ledger records financial lines.",
     )
     val pricingInputs: InquiryPricingInputs? = null,
@@ -114,8 +118,8 @@ enum class InquiryEventType {
 data class InquiryPricingInputs(
     @ApiProperty(
         description =
-            "The revision of Fiona's Offerings catalog the choices were made from, as `GET /offering-catalog` " +
-                "returned it. It is recorded as submitted and never replaced by a later one. At least 1.",
+            "The catalogRevision returned by GET /inquiry-form. It must equal the latest revision observed during " +
+                "submission validation. It remains inquiry history and is never replaced. At least 1.",
     )
     val catalogRevision: Int,
     @ApiProperty(description = "The guests the event is for. At least 1.")
@@ -225,6 +229,8 @@ data class InquiryListItem(
 )
 
 private val createInquiryRequest = jsonBody(CreateInquiryRequest.serializer())
+private val inquiryConflictBody = jsonBody(ErrorResponse.serializer())
+internal const val CATALOG_REVISION_STALE = "CATALOG_REVISION_STALE"
 private val inquiryReceiptResponse = jsonBody(InquiryReceiptResponse.serializer())
 private val inquiryResponse = jsonBody(InquiryResponse.serializer())
 private val inquiryListResponse = jsonBody(InquiryListResponse.serializer())
@@ -343,7 +349,11 @@ fun createInquiryRoute(
         )
         summary = "Record an inquiry"
         description =
-            "Records a prospective customer's inquiry. With pricing inputs, prices exactly once and atomically materializes " +
+            "Records a prospective customer's inquiry. Pricing inputs must name the current catalog revision observed " +
+            "during validation and use only categories and active offerings exposed by GET /inquiry-form. " +
+            "A stale revision fails with 409 CATALOG_REVISION_STALE and records nothing; fetch a fresh form and ask " +
+            "the customer to review updated selections/pricing before resubmission. With accepted pricing inputs, " +
+            "prices exactly once and atomically materializes " +
             "a canonical initial Estimate with self-contained financial lines; a plain inquiry creates no Estimate. " +
             "Requested pricing inputs remain inquiry history, not dependencies of the financial snapshot. The " +
             "customer is found by normalized email, or created with the inquiry in the same transaction; an existing " +
@@ -369,14 +379,18 @@ fun createInquiryRoute(
             "a value is invalid: a blank name, an email without `@`, a ZIP code without five digits, an invalid event date, " +
                 "or `pricingInputs` cannot " +
                 "be priced: they do not fit the catalog revision (for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) " +
-                "or Fiona's pricing (for example `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`). Optional `violations` " +
+                "or Fiona's pricing (for example `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`), or a category is not " +
+                "publicly selectable (`PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`). Optional `violations` " +
                 "expose stable codes; the message is diagnostic.",
             "Email must contain exactly one @ after a non-empty local part",
         )
-        returningError(
-            ErrorCategory.CONFLICT,
-            "a concurrent request created a customer with the same email first; retrying succeeds.",
-            "A customer with this email already exists; retry the request",
+        returning(
+            Status.CONFLICT,
+            inquiryConflictBody to
+                ErrorResponse(CATALOG_REVISION_STALE, "The inquiry form changed; fetch the current form and review before resubmitting"),
+            "`CATALOG_REVISION_STALE`: the submitted revision is older than the current revision observed during " +
+                "validation. Refresh GET /inquiry-form and ask the customer to review; never automatically resubmit. " +
+                "The same runtime envelope uses `conflict` if a concurrent request created the customer first; retry that request.",
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
     } bindContract Method.POST to { request: Request ->
@@ -402,10 +416,17 @@ fun createInquiryRoute(
                         },
                 )
             }
-        val created = createInquiry(command)
-        Response(Status.CREATED)
-            .header("Location", "/inquiries/${created.id.value}")
-            .with(inquiryReceiptResponse of InquiryReceiptResponse(created.id.value.toString(), created.createdAt.toString()))
+        try {
+            val created = createInquiry(command)
+            Response(Status.CREATED)
+                .header("Location", "/inquiries/${created.id.value}")
+                .with(inquiryReceiptResponse of InquiryReceiptResponse(created.id.value.toString(), created.createdAt.toString()))
+        } catch (failure: CommerceFailure.Conflict) {
+            if (failure.cause !is CatalogRevisionStale) throw failure
+            Response(Status.CONFLICT)
+                .with(inquiryConflictBody of ErrorResponse(CATALOG_REVISION_STALE, failure.message!!))
+                .header("Cache-Control", "no-store")
+        }
     }
 
 /**

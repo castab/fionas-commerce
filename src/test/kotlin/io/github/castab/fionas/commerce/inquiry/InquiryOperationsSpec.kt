@@ -59,7 +59,7 @@ class InquiryOperationsSpec :
             customers,
             inquiryRepository,
             pricingRepository,
-            pricing(),
+            PublicInquiryPricing(pricing(), application.context.offeringsSnapshotRepository::retrieveLatestVersion),
             testClock,
             MaterializeInquiryFinancialDocument(application.context.financialLedger, JdbiInquiryFinancialDocumentRepository(), testClock),
             { customerId },
@@ -163,9 +163,12 @@ class InquiryOperationsSpec :
 
             later shouldBe revision + 1
             getInquiry()(created.id).pricingInputs?.catalogRevision shouldBe OfferingsRevision.of(revision)
-            // An older revision stays requestable, and stays as requested.
-            val older = createInquiry()(command("older-${UUID.randomUUID()}@example.com", pricingInputs = inputs(revision)))
-            getInquiry()(older.id).pricingInputs?.catalogRevision shouldBe OfferingsRevision.of(revision)
+            val before = rows()
+            shouldThrow<CommerceFailure.Conflict> {
+                createInquiry()(command("older-${UUID.randomUUID()}@example.com", pricingInputs = inputs(revision)))
+            }.cause.let { (it as CatalogRevisionStale).currentRevision shouldBe OfferingsRevision.of(later) }
+            rows() shouldBe before
+            revision = later
         }
 
         test("a returning customer's new request records its own inputs and leaves earlier ones unchanged") {

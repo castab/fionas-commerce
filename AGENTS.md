@@ -129,13 +129,24 @@ verifying ownership of the address. Decide these explicitly before changing the 
 - **Requested pricing inputs are the customer's request, never amounts.** An inquiry may
   carry the `FionasPricingInputs` the customer configured (catalog revision, selections,
   guest count, duration), in `fionas.inquiry_pricing` and its ordered categories and
-  selections. `CreateInquiry` checks them with `FionasPricing` from exactly the revision they
-  name, exactly once inside its one transaction. Those exact concrete lines materialize
+  selections. `CreateInquiry` uses Fiona-local `PublicInquiryPricing` before any write:
+  categories must belong to the shared `publicOfferingQuestions` definition used by
+  `GetInquiryForm`, and the submitted revision must equal the latest observed in the
+  same READ COMMITTED transaction. Older revisions produce `409 CATALOG_REVISION_STALE`
+  in the runtime's `ErrorResponse` envelope; future/nonexistent revisions remain `404`.
+  No locks, nested transactions, automatic selection migration, or silent repricing.
+  A publication after that observation is allowed: price that immutable observed snapshot
+  with `FionasPricing`, exactly once. All active offerings in an exposed category are public;
+  the engine retains membership, retirement, cardinality and policy validation.
+  Hidden categories produce `422` with `PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`.
+  Those exact concrete lines materialize
   Estimate v1 through the transaction-taking `MaterializeInquiryFinancialDocument` core,
   shared with staff creation. Customer, inquiry, requested inputs, ledger snapshot/lines,
-  and the `INITIAL_ESTIMATE` relationship commit or roll back together. Rejections remain
-  the preview's own `404`/`422`. Inputs remain pinned inquiry history, never rewritten or
-  copied to the initial financial snapshot. A plain inquiry creates no Estimate.
+  and the `INITIAL_ESTIMATE` relationship commit or roll back together. All rejections write
+  nothing. Inputs remain pinned inquiry history, never rewritten or copied to the initial
+  financial snapshot. Financial documents have no dependency on offerings after materialization.
+  Public eligibility/current-revision rules must never constrain staff financial operations.
+  A plain inquiry skips catalog access/validation and creates no Estimate or association.
 - **The event ZIP code is required inquiry-owned location data.** Non-null `zipCode` is
   trimmed five-digit US text (leading zeroes preserved), held in the non-null
   `fionas.inquiries.zip_code` column and read only by staff with the inquiry. Blank is
@@ -169,7 +180,8 @@ verifying ownership of the address. Decide these explicitly before changing the 
   come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
 - The response exposes `definitionVersion` (5 for the current code-owned definition) and
   `catalogId`/`catalogRevision`. Clients submit the latter revision as
-  `pricingInputs.catalogRevision`; the existing exact-revision pricing remains authoritative.
+  `pricingInputs.catalogRevision`; inquiry submission requires it still to be current,
+  and exact-revision backend pricing remains authoritative.
   Change the definition version deliberately when code-owned questions/bindings change.
 - Contact information includes required event `zipCode`, bound to `/zipCode`, with a TEXT
   hint and text length/pattern semantics from `ZipCode`. Retain the guest-count question
@@ -452,9 +464,13 @@ Also:
   invalid/missing credential gets the same runtime `401 unauthenticated` envelope.
 - UI authentication never creates a principal/session or grants staff permissions. Keep
   it Fiona-local in HTTP; operations and domain/pricing code know nothing of credentials.
-- Authorized successful form responses have `Cache-Control: private, max-age=900,
-  stale-while-revalidate=3600`; failures have `no-store`, including exceptions rendered by
+- Authorized successful form responses have `Cache-Control: private, max-age=60,
+  must-revalidate`; failures have `no-store`, including exceptions rendered by
   the existing runtime error filter. Preserve definitionVersion and catalogRevision.
+  The shorter freshness and removal of stale-while-revalidate reduce stale submissions
+  after publication without removing caching. The future SvelteKit UI must invalidate/bypass
+  cached forms on `CATALOG_REVISION_STALE`, fetch the current form and ask the customer to
+  review updated choices/pricing before resubmission; never silently auto-resubmit.
 - Anonymous `POST /auth/login` uses one synchronized in-memory limiter per process,
   capacity five, one token per five minutes, keyed by connection source IP. All attempts
   count before origin/body/password checks, including success; success never resets it.
@@ -728,15 +744,19 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
 7. **Lines have a stable order**: base service, ice cream service, priced selections in
    submitted order, extra toppings.
 8. **The catalog revision is exact.** Pricing evaluates the revision the request names,
-   loaded with `OfferingsSnapshotReference(FIONA_OFFERINGS_CATALOG_ID, revision)`, never the
-   latest. A preview records nothing and performs no Fiona write, so it reads the snapshot
+   never silently substituting another. Public inquiry submission additionally requires
+   equality with the latest observed revision and prices that observed immutable snapshot.
+   Staff creation/change orders and previews may still deliberately request historical
+   `OfferingsSnapshotReference(FIONA_OFFERINGS_CATALOG_ID, revision)`. A preview records nothing and performs no Fiona write, so it reads the snapshot
    through the runtime's `GetOfferingsCatalogRevision`, which opens its own transaction. A
    persisted estimate or change order runs the same engine through `FionasPricing` inside
    the one transaction that writes it.
 9. **One input model, one pricing path.** `FionasPricingInputs` (catalog revision,
    `OfferingSelections`, `FionasOfferingsContext`) is what previews, persisted estimates,
    change orders, pricing-source history, and an inquiry's requested inputs share; `FionasPricing` turns it into lines and
-   reports rejections identically everywhere. It is strongly typed Fiona data: never a
+   reports engine rejections identically everywhere. Public inquiry eligibility and revision
+   constraints are additional inquiry-only checks, never engine or staff restrictions.
+   It is strongly typed Fiona data: never a
    metadata map or an opaque context.
    Rejections use runtime `offeringsValidationFailed(message, violations)`, preserving
    Fiona's explanations and stable structural/policy codes. HTTP `validation_failed` may
@@ -1057,8 +1077,13 @@ The remaining gaps below have not been re-audited.
   runtime's lineage; whole split-payment histories; historical discovery; runtime ordering;
   `FinancialDocumentRead` only), `InquiryRoutesSpec` (the public receipt never reveals a stored customer;
   inquiry list and detail require `fionas.inquiries.read`; keyset pages with timestamp ties;
-  requested pricing inputs pinned, rejected as a preview rejects them, and handed to an
-  estimate unchanged), HTTP tests through the complete handler, schema tests,
+  requested pricing inputs pinned, ordinary pricing errors preserved, and handed to an
+  estimate unchanged), `PublicInquirySubmissionSpec` (stale zero-write conflict, fresh
+  acceptance, every advertised option/duration, hidden categories and disguised offerings,
+  retirement, domain failures, plain inquiry without a catalog, and unrestricted staff
+  historical/hidden creation), `InquiryMaterializationSpec` (one evaluation, publication
+  after validation, cross-schema rollback and financial evolution after test-only catalog
+  removal), HTTP tests through the complete handler, schema tests,
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
   the lifecycle internals), `OfferingsCatalogSpec` (Fiona's catalog through the complete
   handler: initialization, revisions, historical reads, price forms, offering and category

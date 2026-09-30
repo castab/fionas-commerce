@@ -35,7 +35,7 @@ class InquiryFormRoutesSpec :
         fun TestApplication.form(): InquiryFormResponse {
             val response = http(Request(Method.GET, "/inquiry-form").withUiKey())
             response.status shouldBe Status.OK
-            response.header("Cache-Control") shouldBe "private, max-age=900, stale-while-revalidate=3600"
+            response.header("Cache-Control") shouldBe "private, max-age=60, must-revalidate"
             return CommerceJson.asA(response.bodyString(), InquiryFormResponse.serializer())
         }
 
@@ -423,7 +423,7 @@ class InquiryFormRoutesSpec :
             }
         }
 
-        test("category edits and retirements update the next form while previously rendered answers retain their revision") {
+        test("historical previews remain priced exactly but inquiry submissions reject the captured stale form") {
             TestApplication.create().use { fresh ->
                 val initial = fresh.createAcceptanceCatalog()
                 fresh
@@ -458,7 +458,13 @@ class InquiryFormRoutesSpec :
                             .body(
                                 """{"name":"Jane","email":"jane@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$inputs}""",
                             ),
-                    ).status shouldBe Status.CREATED
+                    ).let { stale ->
+                        stale.status shouldBe Status.CONFLICT
+                        CommerceJson.asA(stale.bodyString(), ErrorResponse.serializer()).code shouldBe "CATALOG_REVISION_STALE"
+                        fresh.database.count("fionas.customers") shouldBe 0
+                        fresh.database.count("fionas.inquiries") shouldBe 0
+                        fresh.database.count("commerce.financial_document_snapshots") shouldBe 0
+                    }
                 fresh
                     .http(
                         Request(Method.POST, "/estimate-preview")

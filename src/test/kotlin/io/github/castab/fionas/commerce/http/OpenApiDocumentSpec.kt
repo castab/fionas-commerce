@@ -450,6 +450,9 @@ class OpenApiDocumentSpec :
                     if (code == "rate_limited") {
                         (path to method) shouldBe ("/auth/login" to "post")
                         status shouldBe "429"
+                    } else if (code == "CATALOG_REVISION_STALE") {
+                        (path to method) shouldBe ("/inquiries" to "post")
+                        status shouldBe "409"
                     } else {
                         ErrorCategory.entries
                             .single { it.code == code }
@@ -555,6 +558,18 @@ class OpenApiDocumentSpec :
                 .getValue("email")
                 .jsonObject.keys
                 .contains("format") shouldBe false
+        }
+
+        test("documents public selection eligibility and the semantic stale conflict using the runtime envelope") {
+            val create = operation("/inquiries", "post")
+            create.text("description") shouldContain "current catalog revision observed"
+            create.text("description") shouldContain "categories and active offerings exposed by GET /inquiry-form"
+            create.text("responses", "409", "description") shouldContain "CATALOG_REVISION_STALE"
+            create.text("responses", "409", "description") shouldContain "never automatically resubmit"
+            create.text("responses", "409", "content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/ErrorResponse"
+            create.text("responses", "409", "content", "application/json", "example", "code") shouldBe "CATALOG_REVISION_STALE"
+            schema("InquiryPricingInputs").text("properties", "catalogRevision", "description") shouldContain "latest revision observed"
+            operation("/inquiry-form", "get").text("description") shouldContain "private, max-age=60, must-revalidate"
         }
 
         test("describes the public create response as a receipt of the new inquiry, naming no customer") {

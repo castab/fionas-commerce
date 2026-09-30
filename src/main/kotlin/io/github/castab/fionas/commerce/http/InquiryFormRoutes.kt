@@ -247,11 +247,13 @@ fun getInquiryFormRoute(
         description = "Public ordered questions for POST /inquiries. Input semantics and presentation hints are separate. " +
             "Service configuration is optional; when used, required fields and category limits apply. Copy catalogRevision " +
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
-            "do not reprice those submitted choices. Only configured Fiona categories appear; retired categories and offerings " +
+            "reject stale inquiry submissions with 409 CATALOG_REVISION_STALE; fetch a fresh form and ask the customer " +
+            "to review before resubmitting. Choices are never silently repriced. Only configured Fiona categories appear; " +
+            "retired categories and offerings " +
             "are absent. pricingPreview resolves policy/catalog facts for instant advisory browser arithmetic. " +
             "Contact details, event date/type, and pricing are validated on submission, independently of this metadata. " +
             "Requires the trusted server-side UI Bearer key. Successful responses have Cache-Control: " +
-            "private, max-age=900, stale-while-revalidate=3600; failures have no-store."
+            "private, max-age=60, must-revalidate; failures have no-store."
         tags += inquiries
         returning(
             Status.OK,
@@ -278,7 +280,7 @@ private val inquiryFormCaching =
             val response = next(request)
             response.header(
                 "Cache-Control",
-                if (response.status == Status.OK) "private, max-age=900, stale-while-revalidate=3600" else "no-store",
+                if (response.status == Status.OK) "private, max-age=60, must-revalidate" else "no-store",
             )
         }
     }

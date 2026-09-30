@@ -103,10 +103,15 @@ duplicate, and incorrect authorization all return `401 unauthenticated` with
 sessions still protect inquiry reads, administration, and financial operations.
 
 Authorized `GET /inquiry-form` responses carry
-`Cache-Control: private, max-age=900, stale-while-revalidate=3600` (15 minutes fresh,
-up to one hour stale while revalidating). Failures carry `Cache-Control: no-store`.
-The trusted UI can cache the response privately; form definition and catalog revisions
-retain their existing meaning.
+`Cache-Control: private, max-age=60, must-revalidate` (one minute fresh, then revalidate).
+Failures carry `Cache-Control: no-store`. This retains private caching while reducing
+stale-form failures under the strict current-revision submission policy: the former
+15-minute freshness and one-hour stale-while-revalidate allowance could repeatedly serve
+unsubmittable forms after a publication. A form already open can still become stale.
+On `CATALOG_REVISION_STALE`, the future SvelteKit UI must invalidate/bypass its cached form,
+fetch the current inquiry form, and ask the customer to review updated selections/pricing
+before resubmission. It must never silently migrate selections or automatically resubmit.
+That frontend behavior is not implemented in this backend repository.
 
 **Offerings Catalog API**, exposed by Fiona and implemented by commerce-runtime's Offerings
 capability (see [Offerings catalog](#offerings-catalog)):
@@ -219,17 +224,33 @@ confirmation page renders what the customer just submitted.
 
 `pricingInputs` is optional and has exactly the shape `POST /estimate-preview` and
 `POST /inquiries/{inquiryId}/estimates` take (`catalogRevision`, `guestCount`,
-`guestCountIsMinimum`, `durationMinutes`, `selections`). It is checked with the same Fiona
-pricing, from exactly the catalog revision it names, in the transaction that records the
-inquiry; inputs the pricing rejects fail with the preview's own `404` or `422`, and nothing
-is recorded. The operation prices exactly once and uses those exact concrete lines to
+`guestCountIsMinimum`, `durationMinutes`, `selections`). The revision describes the form
+the customer used; it is not permission to request historical pricing. `PublicInquiryPricing`
+requires it to equal the latest revision observed in the submission's READ COMMITTED
+transaction, before any write. An older revision fails with HTTP 409 and the runtime
+envelope `{"code":"CATALOG_REVISION_STALE","message":"…"}`; the message is diagnostic,
+and the code tells the frontend to refresh/review. A revision beyond the observed latest
+(or an uninitialized catalog) remains `404 not_found`. There is no locking: a publication
+after that observation does not invalidate an accepted submission, which prices the same
+immutable observed snapshot. No selections are silently reinterpreted or repriced.
+
+GET `/inquiry-form` and POST `/inquiries` share `publicOfferingQuestions`, Fiona's ordered
+code-owned category definition. Hidden/internal categories fail `422 validation_failed`
+with violation `PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`, even if catalog-valid. Every active
+offering in an exposed category is currently public; there is no separate per-offering
+visibility flag. The existing offerings engine still checks category membership, retirement,
+selection limits, guest count and duration. Ordinary catalog/pricing failures retain `404`/`422`.
+All rejections write nothing. The operation prices exactly once and uses those exact concrete lines to
 materialize Estimate v1 through the runtime ledger. One READ COMMITTED transaction includes
 customer lookup/creation, inquiry insert, requested pricing history, ledger snapshot/lines,
 and the canonical initial-estimate association. Any failure rolls everything back.
 The inputs are stored only as customer intent (`fionas.inquiry_pricing` and its ordered
 categories and selections), pinned to the submitted revision; amounts are never accepted.
 No catalog/offering provenance is written for the financial snapshot. Plain inquiries
-create no Estimate. The UI key requires no staff financial-create permission; staff routes
+create no Estimate or association and do not read the catalog. Public restrictions apply only
+to inquiry submission; staff creation/evolution continues independently of the public form,
+including historical catalog inputs and hidden categories. Offerings are not dependencies
+of a materialized financial document. The UI key requires no staff financial-create permission; staff routes
 retain their permissions. Staff read requested inputs back as `pricingInputs` on
 `GET /inquiries/{inquiryId}` and can submit that object unchanged to
 `POST /inquiries/{inquiryId}/estimates`. Street address and further event details remain
@@ -247,6 +268,8 @@ Errors use commerce-runtime's contract, `{"code": "...", "message": "..."}`:
 `malformed_request` (400), `unauthenticated` (401), `forbidden` (403), `not_found` (404),
 `conflict` (409), `illegal_transition` (409), `validation_failed` (422),
 `invariant_violated` (422), `internal_failure` (500, never describing the cause).
+Public inquiry submission additionally uses `CATALOG_REVISION_STALE` (409) in that same
+envelope, instructing the UI to fetch a fresh form and ask the customer to review it.
 Validation failures may also carry optional `violations`, each with a stable string `code`.
 Ordinary value-validation failures can omit that list. Clients use codes to identify
 failures and present `message` as diagnostic text; they never parse it for codes.
@@ -1318,7 +1341,8 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
-| `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation; new/reused customers; inquiry input history; plain inquiries; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; catalog changes, custom ledger changes and transitions without pricing metadata |
+| `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; plain inquiries without catalog access; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
+| `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff with historical revisions; plain inquiry without any catalog |
 | `InquiryFormRoutesSpec` | Explicit public questions and lifecycle, input constraints and submission bindings, runtime prices, incompatible configuration failures, and response-only local totals matching authoritative previews across catalog revisions |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |

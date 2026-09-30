@@ -9,7 +9,9 @@ import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingCategorySelection
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingSelections
+import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
+import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
@@ -36,6 +38,7 @@ import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.perGuest
 import io.github.castab.fionas.commerce.testing.testClock
@@ -105,12 +108,16 @@ class InquiryMaterializationSpec :
             documentId: UUID = UUID.randomUUID(),
             ownerRepository: InquiryFinancialDocumentRepository = associations,
             price: FionasPricing = pricing(),
+            latest: (
+                Transaction,
+                OfferingsCatalogId,
+            ) -> OfferingsSnapshot? = application.context.offeringsSnapshotRepository::retrieveLatestVersion,
         ) = CreateInquiry(
             application.transactor,
             customers,
             inquiries,
             requested,
-            price,
+            PublicInquiryPricing(price, latest),
             testClock,
             MaterializeInquiryFinancialDocument(application.context.financialLedger, ownerRepository, testClock) { documentId },
         )
@@ -142,11 +149,13 @@ class InquiryMaterializationSpec :
                 FionasPricing(
                     FionasOfferingsEngine(FIONAS_PRICING_POLICY) { UUID.randomUUID().also(generatedIds::add) },
                 ) { transaction, reference ->
-                    catalogReads++
-                    check(catalogReads == 1) { "Inquiry priced more than once" }
-                    application.context.offeringsSnapshotRepository.retrieveVersion(transaction, reference)
+                    error("Public pricing must use the already validated current snapshot: $reference in $transaction")
                 }
-            val inquiry = create(id, price = singlePricing)(command(submitted))
+            val inquiry =
+                create(id, price = singlePricing, latest = { transaction, catalogId ->
+                    catalogReads++
+                    application.context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, catalogId)
+                })(command(submitted))
             catalogReads shouldBe 1
             val restored = application.context.financialLedger.latest(id)
             (restored is FinancialDocument.Estimate) shouldBe true
@@ -204,9 +213,27 @@ class InquiryMaterializationSpec :
             }
         }
 
+        test("publication after observing current does not invalidate the accepted immutable snapshot") {
+            val accepted = revision
+            val id = UUID.randomUUID()
+            val submitted = inputs()
+            val inquiry =
+                create(id, latest = { transaction, catalogId ->
+                    val snapshot = application.context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, catalogId)
+                    revision = application.addOffering(accepted, "mint", "soft-serve-flavor", "Mint")
+                    snapshot
+                })(command(submitted))
+            revision shouldBe accepted + 1
+            application.transactor.inTransaction { requested.find(it, inquiry.id) } shouldBe submitted
+            application.context.financialLedger
+                .latest(id)
+                .total.amount
+                .compareTo(BigDecimal("681.25")) shouldBe 0
+        }
+
         test("plain inquiry creates customer and inquiry but no financial or pricing rows") {
             val before = counts()
-            val inquiry = create()(command(null))
+            val inquiry = create(latest = { _, _ -> error("Plain inquiry must never read the catalog") })(command(null))
             val after = counts()
             tables.forEach {
                 after.getValue(it) shouldBe
@@ -325,6 +352,11 @@ class InquiryMaterializationSpec :
                         """"price":${perGuest("9.00")}}""",
                 )
             updated.status shouldBe Status.OK
+            // Test-only destruction of catalog data proves the financial lineage has no read or FK
+            // dependency on it. Production catalog revisions remain immutable and are never deleted.
+            application.database.execute("DELETE FROM commerce.offerings")
+            application.database.execute("DELETE FROM commerce.offering_categories")
+            application.database.execute("DELETE FROM commerce.offerings_snapshots")
             // No pricing or catalog collaborator participates in these financial reads or transitions.
             application.context.financialLedger
                 .latest(id)

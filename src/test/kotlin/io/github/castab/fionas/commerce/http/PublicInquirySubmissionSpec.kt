@@ -1,0 +1,224 @@
+package io.github.castab.fionas.commerce.http
+
+import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationErrorResponse
+import io.github.castab.commerce.runtime.offering.CategoryDto
+import io.github.castab.fionas.commerce.testing.TOPPINGS
+import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withUiKey
+import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import org.http4k.core.Method
+import org.http4k.core.Request
+import org.http4k.core.Status
+import java.util.UUID
+
+/** Public submission through the full runtime handler, observing all committed state externally. */
+class PublicInquirySubmissionSpec :
+    FunSpec({
+        lateinit var app: TestApplication
+        var revision = 0
+        beforeSpec {
+            app = TestApplication.create()
+            revision = app.createAcceptanceCatalog()
+        }
+        afterSpec { app.close() }
+
+        val tables =
+            listOf(
+                "fionas.customers",
+                "fionas.inquiries",
+                "fionas.inquiry_pricing",
+                "fionas.inquiry_pricing_categories",
+                "fionas.inquiry_pricing_selections",
+                "commerce.financial_document_snapshots",
+                "commerce.financial_document_lines",
+                "fionas.inquiry_financial_documents",
+                "fionas.financial_document_pricing",
+                "fionas.financial_document_pricing_categories",
+                "fionas.financial_document_pricing_selections",
+            )
+
+        fun counts() = tables.associateWith(app.database::count)
+
+        fun form() =
+            CommerceJson.asA(
+                app.http(Request(Method.GET, "/inquiry-form").withUiKey()).bodyString(),
+                InquiryFormResponse.serializer(),
+            )
+
+        fun submit(inputs: String) =
+            app.http(
+                Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(
+                    """{"name":"Jane Doe","email":"public-${UUID.randomUUID()}@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$inputs}""",
+                ),
+            )
+
+        test("current form revision materializes exactly one canonical Estimate with expected concrete pricing") {
+            form().catalogRevision shouldBe revision
+            val response = submit(pricingBody(revision))
+            response.status shouldBe Status.CREATED
+            val receipt = CommerceJson.asA(response.bodyString(), InquiryReceiptResponse.serializer())
+            val ids =
+                app.database.strings(
+                    "SELECT document_id FROM fionas.inquiry_financial_documents WHERE inquiry_id = '${receipt.id}' AND purpose = 'INITIAL_ESTIMATE'",
+                )
+            ids.size shouldBe 1
+            val document =
+                CommerceJson.asA(
+                    app.adminGet("/financial-documents/${ids.single()}").bodyString(),
+                    FinancialDocumentResponse.serializer(),
+                )
+            document.stage shouldBe "ESTIMATE"
+            document.version shouldBe 1
+            document.total shouldBe "681.25"
+            document.pricing shouldBe null
+            app.database.strings("SELECT catalog_revision FROM fionas.inquiry_pricing WHERE inquiry_id = '${receipt.id}'") shouldBe
+                listOf(revision.toString())
+        }
+
+        test("stale captured form is a machine-readable conflict with zero writes; refreshed revision succeeds") {
+            val captured = form().catalogRevision
+            revision = app.addOffering(revision, "mint", "soft-serve-flavor", "Mint")
+            val before = counts()
+            val response = submit(pricingBody(captured))
+            response.status shouldBe Status.CONFLICT
+            response.header("Cache-Control") shouldBe "no-store"
+            val error = CommerceJson.asA(response.bodyString(), ErrorResponse.serializer())
+            error.code shouldBe "CATALOG_REVISION_STALE"
+            error.message shouldContain "review"
+            counts() shouldBe before
+            val refreshed = form()
+            refreshed.catalogRevision shouldBe captured + 1
+            submit(pricingBody(refreshed.catalogRevision)).status shouldBe Status.CREATED
+            app.database.count("fionas.inquiry_financial_documents") shouldBe before.getValue("fionas.inquiry_financial_documents") + 1
+        }
+
+        test("every advertised active option is accepted in a structurally valid selection for every advertised duration") {
+            val form = form()
+            val choices = form.sections.flatMap { it.fields }.mapNotNull { it.input as? InquiryFormInputResponse.OfferingChoice }
+            choices.map { it.category } shouldBe listOf("soft-serve-flavor", "topping", "cone-option")
+            choices.forEach { chosen ->
+                chosen.options.forEach { option ->
+                    form.pricingPreview.durationOptions.forEach { duration ->
+                        val selections =
+                            choices.map { category ->
+                                val keys =
+                                    if (category == chosen) {
+                                        listOf(option.key) + category.options.map { it.key }.filter { it != option.key }
+                                    } else {
+                                        category.options.map { it.key }
+                                    }
+                                PricingSelection(category.category, keys.take(category.minSelections.coerceAtLeast(1)))
+                            }
+                        val inputs =
+                            InquiryPricingInputs(
+                                form.catalogRevision,
+                                75,
+                                durationMinutes = duration.durationMinutes,
+                                selections = selections,
+                            )
+                        submit(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), inputs)).status shouldBe Status.CREATED
+                    }
+                }
+            }
+        }
+
+        test("engine validation still rejects unknown, mismatched, cardinality and context violations with zero writes") {
+            listOf(
+                pricingBody(revision, cones = listOf("unknown")),
+                pricingBody(revision, cones = listOf("vanilla")),
+                pricingBody(revision, toppings = TOPPINGS.take(2)),
+                pricingBody(revision, softServe = listOf("vanilla", "horchata", "chocolate")),
+                pricingBody(revision, guests = 0),
+                pricingBody(revision, minutes = 45),
+                pricingBody(999),
+            ).forEach { input ->
+                val before = counts()
+                val response = submit(input)
+                response.status shouldBe if (input == pricingBody(999)) Status.NOT_FOUND else Status.UNPROCESSABLE_ENTITY
+                counts() shouldBe before
+            }
+        }
+
+        test("active hidden category and its offering are forbidden publicly but remain usable by staff, including historical revisions") {
+            val category =
+                app.adminPost(
+                    "/offering-catalog/categories",
+                    """{"expectedRevision":$revision,"key":"staff-adjustment","displayName":"Staff adjustment","maximumSelections":1}""",
+                )
+            category.status shouldBe Status.CREATED
+            revision = CommerceJson.asA(category.bodyString(), CategoryDto.serializer()).revision
+            revision =
+                app.addOffering(
+                    revision,
+                    "travel-fee",
+                    "staff-adjustment",
+                    "Travel fee",
+                    """{"kind":"FIXED","amount":"25.00","currency":"USD"}""",
+                )
+            form()
+                .sections
+                .flatMap { it.fields }
+                .mapNotNull { it.input as? InquiryFormInputResponse.OfferingChoice }
+                .any { it.category == "staff-adjustment" } shouldBe false
+            val hidden =
+                pricingBody(revision).replace(
+                    "\"selections\":[",
+                    "\"selections\":[{\"category\":\"staff-adjustment\",\"offerings\":[\"travel-fee\"]},",
+                )
+            val before = counts()
+            val response = submit(hidden)
+            response.status shouldBe Status.UNPROCESSABLE_ENTITY
+            CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()).violations!!.map { it.code } shouldBe
+                listOf("PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED")
+            counts() shouldBe before
+            // Putting a hidden offering into a public category cannot bypass catalog membership checks.
+            val disguised = submit(pricingBody(revision, cones = listOf("travel-fee")))
+            disguised.status shouldBe Status.UNPROCESSABLE_ENTITY
+            counts() shouldBe before
+            val historical = revision
+            revision = app.addOffering(revision, "espresso", "soft-serve-flavor", "Espresso")
+            val inquiryId = app.createInquiry()
+            val staff = app.adminPost("/inquiries/$inquiryId/estimates", hidden)
+            staff.status shouldBe Status.CREATED
+            val document = CommerceJson.asA(staff.bodyString(), FinancialDocumentResponse.serializer())
+            document.total shouldBe "706.25"
+            document.pricing!!.catalogRevision shouldBe historical
+        }
+
+        test("retired public offerings and categories are absent from form and rejected at the accepted current revision") {
+            app.adminRequest(Method.DELETE, "/offering-catalog/offerings/horchata?expectedRevision=$revision").status shouldBe Status.OK
+            revision++
+            val before = counts()
+            submit(pricingBody(revision)).status shouldBe Status.UNPROCESSABLE_ENTITY
+            counts() shouldBe before
+            form()
+                .sections
+                .flatMap { it.fields }
+                .mapNotNull { it.input as? InquiryFormInputResponse.OfferingChoice }
+                .flatMap { it.options }
+                .any { it.key == "horchata" } shouldBe false
+            listOf("cup", "waffle-cone").forEach { key ->
+                app.adminRequest(Method.DELETE, "/offering-catalog/offerings/$key?expectedRevision=$revision").status shouldBe Status.OK
+                revision++
+            }
+            app.adminRequest(Method.DELETE, "/offering-catalog/categories/cone-option?expectedRevision=$revision").status shouldBe Status.OK
+            revision++
+            submit(pricingBody(revision, softServe = listOf("vanilla"))).status shouldBe Status.UNPROCESSABLE_ENTITY
+            counts() shouldBe before
+        }
+
+        test("plain inquiry works even without a catalog and creates no pricing, financial document or association") {
+            TestApplication.create().use { empty ->
+                empty.createInquiry()
+                tables.forEach { empty.database.count(it) shouldBe if (it in listOf("fionas.customers", "fionas.inquiries")) 1 else 0 }
+            }
+        }
+    })

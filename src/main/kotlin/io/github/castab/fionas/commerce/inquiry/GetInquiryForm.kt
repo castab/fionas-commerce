@@ -23,12 +23,7 @@ internal fun inquiryForm(
     snapshot: OfferingsSnapshot,
     policy: FionasPricingPolicy = FIONAS_PRICING_POLICY,
 ): InquiryForm {
-    val questions =
-        listOf(
-            OfferingQuestion(OfferingCategoryKey("soft-serve-flavor"), "Choose your soft serve flavors", InquiryFormControl.CARDS),
-            OfferingQuestion(policy.toppingCategory, "Choose your toppings", InquiryFormControl.CHECKBOXES),
-            OfferingQuestion(OfferingCategoryKey("cone-option"), "Choose your cones or cups", InquiryFormControl.CARDS),
-        )
+    val questions = publicOfferingQuestions(policy)
     val publicCategories = questions.mapNotNull { snapshot.category(it.category) }
     val offeringFields = questions.mapNotNull { question -> snapshot.category(question.category)?.let { question.field(it) } }
     val pricingPreview = inquiryPricingPreview(snapshot, publicCategories, policy)
@@ -149,7 +144,15 @@ internal fun inquiryForm(
     )
 }
 
-private data class OfferingQuestion(
+/** The single Fiona-owned public category definition, shared by form rendering and submission. */
+internal fun publicOfferingQuestions(policy: FionasPricingPolicy = FIONAS_PRICING_POLICY) =
+    listOf(
+        OfferingQuestion(OfferingCategoryKey("soft-serve-flavor"), "Choose your soft serve flavors", InquiryFormControl.CARDS),
+        OfferingQuestion(policy.toppingCategory, "Choose your toppings", InquiryFormControl.CHECKBOXES),
+        OfferingQuestion(OfferingCategoryKey("cone-option"), "Choose your cones or cups", InquiryFormControl.CARDS),
+    )
+
+internal data class OfferingQuestion(
     val category: OfferingCategoryKey,
     val label: String,
     val control: InquiryFormControl,

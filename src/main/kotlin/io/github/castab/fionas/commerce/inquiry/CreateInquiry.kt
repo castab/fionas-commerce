@@ -9,7 +9,6 @@ import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryDocumentPurpose
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
-import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.time.Clock
 import java.time.temporal.ChronoUnit
@@ -24,10 +23,9 @@ import java.util.UUID
  * runtime transaction, so an inquiry is never recorded without its customer, and a new
  * customer is never recorded without the inquiry that introduced them.
  *
- * Pricing inputs the customer configured are checked with Fiona's [pricing], from exactly the
- * catalog revision they name, read in the same transaction, and recorded with the inquiry.
- * Inputs the pricing rejects fail the request as they would fail an estimate preview, and
- * nothing is recorded. Those exact priced lines materialize the canonical initial Estimate;
+ * Pricing inputs must use the public form's categories and the current revision observed by
+ * [pricing] in this transaction. They are priced exactly once and recorded with the inquiry.
+ * Stale, hidden, or otherwise invalid inputs record nothing. Those exact priced lines materialize the canonical initial Estimate;
  * the inquiry retains the requested inputs, while the ledger retains self-contained lines.
  * A plain inquiry creates no financial document. Every write shares this operation's transaction.
  *
@@ -39,7 +37,7 @@ class CreateInquiry(
     private val customers: CustomerRepository,
     private val inquiries: InquiryRepository,
     private val pricingInputs: InquiryPricingRepository,
-    private val pricing: FionasPricing,
+    private val pricing: PublicInquiryPricing,
     private val clock: Clock,
     private val materialize: MaterializeInquiryFinancialDocument,
     private val newCustomerId: () -> CustomerId = { CustomerId(UUID.randomUUID()) },
