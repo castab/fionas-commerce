@@ -25,12 +25,15 @@ data class InquiryDocumentAssociation(
     val inquiryId: InquiryId,
     val documentId: UUID,
     val createdAt: Instant,
+    val purpose: InquiryDocumentPurpose = InquiryDocumentPurpose.RELATED,
 )
 
-/** One immutable financial-document snapshot and the Fiona [pricing] inputs that produced it. */
+enum class InquiryDocumentPurpose { INITIAL_ESTIMATE, RELATED }
+
+/** One self-contained snapshot with optional legacy staff pricing metadata. */
 data class PricedSnapshot(
     val persisted: FinancialDocumentVersion,
-    val pricing: FionasPricingInputs,
+    val pricing: FionasPricingInputs?,
 ) {
     val document: FinancialDocument get() = persisted.document
     val createdAt: Instant get() = persisted.createdAt
@@ -48,7 +51,7 @@ data class InquiryFinancialDocument(
 )
 
 /**
- * Every snapshot of one lineage, oldest first, each with its own pricing source. Historical
+ * Every snapshot of one lineage, oldest first, with optional legacy pricing metadata. Historical
  * snapshots carry no reconciliation: current settlement belongs to the latest snapshot.
  */
 data class InquiryFinancialDocumentHistory(
@@ -112,7 +115,7 @@ internal class FionaFinancialDocuments(
     }
 
     /**
-     * The lineage's latest snapshot, its pricing source, and its current settlement, read
+     * The lineage's latest snapshot, optional legacy pricing metadata, and current settlement, read
      * from the caller's transaction snapshot. [CommerceFailure.NotFound] for a lineage no inquiry owns.
      */
     fun current(
@@ -140,13 +143,13 @@ internal class FionaFinancialDocuments(
     ): InquiryFinancialDocument {
         val latest = ledger.latestVersion(transaction, documentId)
         val document = latest.document
-        val pricing = checkNotNull(pricingSources.find(transaction, document.reference)) { missingSource(document) }
+        val pricing = pricingSources.find(transaction, document.reference)
         return InquiryFinancialDocument(inquiryId, PricedSnapshot(latest, pricing), ledger.reconcile(transaction, document.reference))
     }
 
     /**
-     * Every snapshot of the lineage, oldest first, with its pricing source, read from the
-     * caller's transaction snapshot so no version appended meanwhile is seen without its source.
+     * Every snapshot of the lineage, oldest first, with optional legacy pricing metadata, read
+     * from the caller's transaction snapshot.
      * [CommerceFailure.NotFound] for a lineage no inquiry owns.
      */
     fun history(
@@ -158,7 +161,7 @@ internal class FionaFinancialDocuments(
         val versions =
             ledger.versionHistory(transaction, documentId).map { persisted ->
                 val document = persisted.document
-                PricedSnapshot(persisted, checkNotNull(sources[document.version]) { missingSource(document) })
+                PricedSnapshot(persisted, sources[document.version])
             }
         return InquiryFinancialDocumentHistory(inquiryId, documentId, versions)
     }
@@ -174,9 +177,6 @@ internal class FionaFinancialDocuments(
         transaction: Transaction,
         documentId: UUID,
     ): InquiryId = associations.inquiryOf(transaction, documentId) ?: throw notFound(documentId)
-
-    // Every Fiona snapshot is written with its pricing source in one transaction; a missing one is an internal failure.
-    private fun missingSource(document: FinancialDocument) = "Financial document ${document.reference} has no pricing source"
 
     private fun notFound(documentId: UUID) = CommerceFailure.NotFound("Financial document $documentId was not found")
 }

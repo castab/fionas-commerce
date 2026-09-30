@@ -76,7 +76,8 @@ data class CreateInquiryRequest(
             "The configuration the customer chose, as `POST /estimate-preview` takes it; absent for a plain contact " +
                 "inquiry. It is checked with the same pricing, from exactly the catalog revision it names, and recorded " +
                 "with the inquiry pinned to that revision. Inputs the pricing rejects fail the request as they fail a " +
-                "preview, and nothing is recorded. Amounts are never accepted; the inquiry records the inputs only.",
+                "preview, and nothing is recorded. The accepted concrete lines materialize an initial Estimate in the " +
+                "same transaction. Amounts are never accepted; the inquiry records customer intent and the ledger records financial lines.",
     )
     val pricingInputs: InquiryPricingInputs? = null,
     @ApiProperty(
@@ -342,7 +343,9 @@ fun createInquiryRoute(
         )
         summary = "Record an inquiry"
         description =
-            "Records a prospective customer's inquiry, with the configuration they chose when they submit one. The " +
+            "Records a prospective customer's inquiry. With pricing inputs, prices exactly once and atomically materializes " +
+            "a canonical initial Estimate with self-contained financial lines; a plain inquiry creates no Estimate. " +
+            "Requested pricing inputs remain inquiry history, not dependencies of the financial snapshot. The " +
             "customer is found by normalized email, or created with the inquiry in the same transaction; an existing " +
             "customer's stored name is never changed. The response is a receipt of the new inquiry alone and " +
             "describes no stored customer. The `Location` response header holds the new inquiry's path, " +

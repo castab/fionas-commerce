@@ -16,20 +16,42 @@ class JdbiInquiryFinancialDocumentRepository : InquiryFinancialDocumentRepositor
             transaction.handle
                 .createUpdate(
                     """
-                    INSERT INTO fionas.inquiry_financial_documents (document_id, inquiry_id, created_at)
-                    VALUES (:documentId, :inquiryId, :createdAt)
+                    INSERT INTO fionas.inquiry_financial_documents (document_id, inquiry_id, created_at, purpose)
+                    VALUES (:documentId, :inquiryId, :createdAt, :purpose)
                     """.trimIndent(),
                 ).bind("documentId", association.documentId)
                 .bind("inquiryId", association.inquiryId.value)
                 .bind("createdAt", association.createdAt)
+                .bind("purpose", association.purpose.name)
                 .execute()
         } catch (e: Exception) {
             if (e.isUniqueViolation()) {
-                throw CommerceFailure.Conflict("Financial document ${association.documentId} already belongs to an inquiry", e)
+                val message =
+                    when (association.purpose) {
+                        InquiryDocumentPurpose.INITIAL_ESTIMATE ->
+                            "Inquiry already has an initial estimate or the document already belongs to an inquiry"
+                        InquiryDocumentPurpose.RELATED -> "Financial document ${association.documentId} already belongs to an inquiry"
+                    }
+                throw CommerceFailure.Conflict(message, e)
             }
             throw e
         }
     }
+
+    override fun initialEstimateOf(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): UUID? =
+        transaction.handle
+            .createQuery(
+                """
+                SELECT document_id FROM fionas.inquiry_financial_documents
+                WHERE inquiry_id = :inquiryId AND purpose = 'INITIAL_ESTIMATE'
+                """.trimIndent(),
+            ).bind("inquiryId", inquiryId.value)
+            .map { row, _ -> row.getObject("document_id", UUID::class.java) }
+            .findOne()
+            .orElse(null)
 
     override fun inquiryOf(
         transaction: Transaction,

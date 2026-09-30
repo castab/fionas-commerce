@@ -13,8 +13,9 @@ import java.util.Currency
 import java.util.UUID
 
 /**
- * Fiona's change order: reprices the latest snapshot of a lineage from revised commercial
- * inputs and appends the result as its same-stage successor, whether it is an estimate, a
+ * Fiona's existing staff replacement action: materializes new lines from explicitly supplied
+ * commercial inputs and replaces the prior snapshot's concrete line set. It never reads old
+ * pricing inputs to reconstruct old lines. Appends a same-stage successor, whether an estimate, a
  * quote, or an invoice.
  *
  * In one runtime transaction: the lineage must belong to an inquiry, its latest version must

@@ -160,14 +160,13 @@ class FinancialDocumentRepositoriesSpec :
             }
         }
 
-        test("a copy needs a source") {
-            shouldThrow<IllegalStateException> {
-                application.transactor.inTransaction { transaction ->
-                    val (inquiryId, estimate) = inquiryAndEstimate(transaction)
-                    associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                    val quote = application.context.financialLedger.issueQuote(transaction, estimate.id)
-                    sources.copy(transaction, estimate.reference, quote.reference)
-                }
+        test("a materialized snapshot needs no pricing source to transition") {
+            application.transactor.inTransaction { transaction ->
+                val (inquiryId, estimate) = inquiryAndEstimate(transaction)
+                associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
+                val quote = application.context.financialLedger.issueQuote(transaction, estimate.id)
+                sources.copy(transaction, estimate.reference, quote.reference)
+                sources.find(transaction, quote.reference).shouldBeNull()
             }
         }
 

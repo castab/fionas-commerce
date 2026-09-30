@@ -230,7 +230,7 @@ data class RefundAllocationRequest(
 
 /**
  * One immutable financial-document snapshot, as commerce-runtime's ledger records it, with
- * the Fiona pricing inputs it was priced from. Settlement is derived, never stored.
+ * optional legacy staff pricing metadata. Settlement is derived, never stored.
  */
 @Serializable
 data class FinancialDocumentResponse(
@@ -249,8 +249,10 @@ data class FinancialDocumentResponse(
     val stage: String,
     @ApiProperty(description = "The id of the inquiry the lineage belongs to.", format = "uuid")
     val inquiryId: String,
-    @ApiProperty(description = "The commercial inputs Fiona priced this snapshot from.")
-    val pricing: DocumentPricing,
+    @ApiProperty(
+        description = "Optional legacy staff pricing metadata. Absent for inquiry-materialized snapshots; lines are authoritative.",
+    )
+    val pricing: DocumentPricing? = null,
     @ApiProperty(description = "The snapshot's lines, in order. Line ids are durable ledger facts.")
     val lines: List<FinancialDocumentLine>,
     @ApiProperty(description = "The sum of the lines' subtotals, an exact decimal.")
@@ -330,7 +332,7 @@ data class FinancialDocumentHistoryResponse(
     val id: String,
     @ApiProperty(description = "The id of the inquiry the lineage belongs to.", format = "uuid")
     val inquiryId: String,
-    @ApiProperty(description = "Every snapshot, oldest first, each with the pricing inputs it was priced from.")
+    @ApiProperty(description = "Every self-contained snapshot, oldest first, with optional legacy staff pricing metadata.")
     val versions: List<FinancialDocumentResponse>,
 )
 
@@ -587,7 +589,7 @@ private val financialDocuments =
     Tag(
         "Financial documents",
         "An inquiry's persisted estimates, quotes, and invoices: immutable commerce-runtime snapshots, priced by Fiona's " +
-            "server from commercial inputs, each with the pricing inputs it was priced from.",
+            "server from commercial inputs, with self-contained lines and optional legacy staff pricing metadata.",
     )
 
 private val payments = Tag("Payments", "Money received, allocations to exact financial-document snapshots, and refunds.")
@@ -955,7 +957,7 @@ fun listInquiryFinancialDocumentsRoute(
         summary = "List an inquiry's financial documents"
         description =
             "Every financial-document lineage the inquiry owns, oldest first, each at its latest snapshot with its " +
-            "pricing inputs and current settlement. Requires `commerce.financial-document.read`."
+            "optional legacy pricing metadata and current settlement. Requires `commerce.financial-document.read`."
         tags += financialDocuments
         returning(
             Status.OK,
@@ -982,7 +984,7 @@ fun getFinancialDocumentRoute(
         operationId = "getFinancialDocument"
         summary = "Read a financial document"
         description =
-            "The lineage's latest immutable snapshot, the pricing inputs it was priced from, and the settlement derived " +
+            "The lineage's latest immutable snapshot, optional legacy staff pricing metadata, and the settlement derived " +
             "from every payment applied to any of its versions. Only documents an inquiry owns exist here. Requires " +
             "`commerce.financial-document.read`."
         tags += financialDocuments
@@ -1005,7 +1007,7 @@ fun getFinancialDocumentHistoryRoute(
         operationId = "getFinancialDocumentHistory"
         summary = "Read a financial document's history"
         description =
-            "Every immutable snapshot of the lineage, oldest first, each with the pricing inputs Fiona priced it from. " +
+            "Every self-contained immutable snapshot of the lineage, oldest first, with optional legacy staff pricing metadata. " +
             "Historical snapshots carry no settlement; the current settlement is on `GET /financial-documents/{documentId}`. " +
             "Requires `commerce.financial-document.read`."
         tags += financialDocuments
@@ -1039,7 +1041,7 @@ fun issueQuoteRoute(
         summary = "Issue an estimate as a quote",
         description =
             "Issues the latest version, an estimate, as a quote: a new immutable snapshot with the same lines and the " +
-                "same pricing inputs, never repriced.",
+                "legacy pricing metadata when present, never repriced.",
         from = "an estimate",
         example = exampleQuote,
         transition = issueQuote,
@@ -1057,7 +1059,7 @@ fun issueInvoiceRoute(
         summary = "Issue a quote as an invoice",
         description =
             "Issues the latest version, a quote, as an invoice: a new immutable snapshot with the same lines and the " +
-                "same pricing inputs, never repriced. Payments applied to earlier versions stay attached to them and " +
+                "legacy pricing metadata when present, never repriced. Payments applied to earlier versions stay attached to them and " +
                 "still count toward the settlement. An estimate cannot become an invoice directly.",
         from = "a quote",
         example = exampleInvoice,
@@ -1509,7 +1511,7 @@ private fun PricedSnapshot.toResponse(
             is FinancialDocument.Invoice -> "INVOICE"
         },
     inquiryId = inquiryId.value.toString(),
-    pricing = pricing.toResponse(),
+    pricing = pricing?.toResponse(),
     lines = document.lineItems.map { it.toResponse() },
     subtotal = document.subtotal.decimal(),
     taxAmount = document.taxAmount.decimal(),

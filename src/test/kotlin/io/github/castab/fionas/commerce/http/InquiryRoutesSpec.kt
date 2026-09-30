@@ -491,9 +491,23 @@ class InquiryRoutesSpec :
                 post(inquiryBody("handoff-${UUID.randomUUID()}@example.com", extra = ""","message":"A birthday","pricingInputs":$inputs"""))
                     .receipt()
 
-            // Recording an inquiry creates no financial document.
-            application.database.count("commerce.financial_document_snapshots") shouldBe documents
-            // Staff start the estimate from the recorded inputs exactly as read, without reconstructing them.
+            // The UI key internally materializes one initial Estimate without staff create permission.
+            application.database.count("commerce.financial_document_snapshots") shouldBe documents + 1
+            val initialId =
+                application.database
+                    .strings(
+                        "SELECT document_id FROM fionas.inquiry_financial_documents WHERE inquiry_id = '${receipt.id}' AND purpose = 'INITIAL_ESTIMATE'",
+                    ).single()
+            val initial =
+                CommerceJson.asA(
+                    application.adminGet("/financial-documents/$initialId").bodyString(),
+                    FinancialDocumentResponse.serializer(),
+                )
+            initial.version shouldBe 1
+            initial.stage shouldBe "ESTIMATE"
+            initial.total shouldBe previewTotal
+            initial.pricing.shouldBeNull()
+            // Staff can still create a related estimate from the historical request.
             val requested =
                 Json
                     .parseToJsonElement(application.adminGet("/inquiries/${receipt.id}").bodyString())
@@ -504,7 +518,7 @@ class InquiryRoutesSpec :
             estimate.status shouldBe Status.CREATED
             val document = CommerceJson.asA(estimate.bodyString(), FinancialDocumentResponse.serializer())
             document.total shouldBe previewTotal
-            document.pricing.catalogRevision shouldBe revision
+            document.pricing!!.catalogRevision shouldBe revision
             CommerceJson.asA(requested, InquiryRequestedPricing.serializer()).let {
                 document.pricing shouldBe
                     DocumentPricing(it.catalogRevision, it.guestCount, it.guestCountIsMinimum, it.durationMinutes, it.selections)

@@ -21,6 +21,7 @@ import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRe
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
+import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
@@ -127,6 +128,7 @@ fun fionaApplication(
             val ledger = context.financialLedger
             val documentOwners = JdbiInquiryFinancialDocumentRepository()
             val pricingSources = JdbiFinancialDocumentPricingRepository()
+            val materialize = MaterializeInquiryFinancialDocument(ledger, documentOwners, clock)
             val createDocument =
                 CreateInquiryFinancialDocument(
                     context.transactor,
@@ -136,10 +138,19 @@ fun fionaApplication(
                     pricingSources,
                     pricing,
                     clock,
+                    materialize = materialize,
                 )
             val operations =
                 FionaOperations(
-                    createInquiry = CreateInquiry(context.transactor, customers, inquiries, inquiryPricing, pricing, clock)::invoke,
+                    createInquiry = CreateInquiry(
+                        context.transactor,
+                        customers,
+                        inquiries,
+                        inquiryPricing,
+                        pricing,
+                        clock,
+                        materialize,
+                    )::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
                     getInquiry = GetInquiry(context.transactor, customers, inquiries, inquiryPricing)::invoke,
                     getInquiryForm = GetInquiryForm(

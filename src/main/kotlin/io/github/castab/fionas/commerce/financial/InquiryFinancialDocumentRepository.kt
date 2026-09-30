@@ -9,6 +9,12 @@ import java.util.UUID
  * begins, commits, or rolls back a transaction; the calling operation owns the boundary.
  */
 interface InquiryFinancialDocumentRepository {
+    /** The canonical initial Estimate lineage, or null for an unpriced or older inquiry. */
+    fun initialEstimateOf(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): UUID?
+
     /**
      * Records that the lineage belongs to the inquiry. The inquiry and the lineage's first
      * snapshot must already exist in the same database.

@@ -402,6 +402,15 @@ class ArchitectureSpec :
             calls.filterNot { it.endsWith("(transaction") }.shouldBeEmpty()
         }
 
+        test("materialization accepts concrete lines and has no catalog, pricing source, or transaction boundary") {
+            val source = File(mainSources, "financial/MaterializeInquiryFinancialDocument.kt").codeWithoutComments()
+            listOf("FionasPricing", "Offerings", "OfferingKey", "catalogRevision", "FinancialDocumentPricingRepository", "inTransaction")
+                .filter { it in source }
+                .shouldBeEmpty()
+            source.contains("lines: List<LineItem>") shouldBe true
+            source.contains("ledger.create(transaction, first)") shouldBe true
+        }
+
         test("recording a refund joins one runtime transaction and reconciles in it") {
             val source = File(mainSources, "financial/RecordRefund.kt").readText()
             source.contains("transactor.inTransaction { transaction ->") shouldBe true

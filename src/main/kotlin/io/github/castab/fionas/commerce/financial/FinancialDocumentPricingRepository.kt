@@ -7,12 +7,12 @@ import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.util.UUID
 
 /**
- * Persistence of the Fiona pricing inputs each financial-document snapshot was priced from,
+ * Optional legacy staff metadata describing the Fiona pricing inputs used to construct lines,
  * one record per exact `(document id, version)`, inside the caller's [Transaction]. Never
  * begins, commits, or rolls back a transaction; the calling operation owns the boundary.
  *
- * The snapshot's commercial facts are commerce-runtime's; this is only why Fiona priced it
- * that way. Records are written once and never changed.
+ * The snapshot's self-contained commercial facts are commerce-runtime's. Inquiry-generated
+ * initial estimates do not write this metadata. Records are written once and never changed.
  */
 interface FinancialDocumentPricingRepository {
     /**
@@ -39,8 +39,8 @@ interface FinancialDocumentPricingRepository {
 
     /**
      * Records the pricing source of [from] unchanged as that of [to], a later snapshot of the
-     * same lineage, as a lifecycle transition that did not reprice requires. [from] must have
-     * a pricing source.
+     * same lineage. When [from] has no legacy metadata, this is a no-op: financial transitions
+     * depend only on the prior snapshot's concrete lines.
      */
     fun copy(
         transaction: Transaction,

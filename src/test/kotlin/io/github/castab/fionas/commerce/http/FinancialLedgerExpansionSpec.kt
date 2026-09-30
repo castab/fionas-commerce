@@ -117,7 +117,7 @@ class FinancialLedgerExpansionSpec :
                 document.version shouldBe 1
                 document.previousVersion.shouldBeNull()
                 document.inquiryId shouldBe inquiryId
-                document.pricing.catalogRevision shouldBe revision
+                document.pricing!!.catalogRevision shouldBe revision
                 document.pricing.guestCount shouldBe 75
                 document.lines.isNotEmpty() shouldBe true
                 document.total.toBigDecimal() shouldBe document.lines.map { it.total.toBigDecimal() }.reduce(BigDecimal::add)

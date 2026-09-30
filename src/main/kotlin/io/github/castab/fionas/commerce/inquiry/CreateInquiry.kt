@@ -6,6 +6,9 @@ import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.Email
+import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
+import io.github.castab.fionas.commerce.financial.InquiryDocumentPurpose
+import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
 import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.time.Clock
@@ -24,8 +27,9 @@ import java.util.UUID
  * Pricing inputs the customer configured are checked with Fiona's [pricing], from exactly the
  * catalog revision they name, read in the same transaction, and recorded with the inquiry.
  * Inputs the pricing rejects fail the request as they would fail an estimate preview, and
- * nothing is recorded. The priced lines are discarded: an inquiry records the request, never
- * amounts, and creates no financial document.
+ * nothing is recorded. Those exact priced lines materialize the canonical initial Estimate;
+ * the inquiry retains the requested inputs, while the ledger retains self-contained lines.
+ * A plain inquiry creates no financial document. Every write shares this operation's transaction.
  *
  * The result is the recorded [Inquiry] alone. It never carries the customer's stored record,
  * so a caller who submits someone else's email learns nothing about that customer.
@@ -37,6 +41,7 @@ class CreateInquiry(
     private val pricingInputs: InquiryPricingRepository,
     private val pricing: FionasPricing,
     private val clock: Clock,
+    private val materialize: MaterializeInquiryFinancialDocument,
     private val newCustomerId: () -> CustomerId = { CustomerId(UUID.randomUUID()) },
     private val newInquiryId: () -> InquiryId = { InquiryId(UUID.randomUUID()) },
 ) {
@@ -55,7 +60,7 @@ class CreateInquiry(
         // PostgreSQL stores microseconds; truncating keeps what is returned equal to what is stored.
         val now = clock.instant().truncatedTo(ChronoUnit.MICROS)
         return transactor.inTransaction { transaction ->
-            command.pricingInputs?.let { pricing.price(transaction, it) }
+            val lines = command.pricingInputs?.let { pricing.price(transaction, it).lineItems }
             val customer =
                 customers.findByEmail(transaction, command.email)
                     ?: Customer(newCustomerId(), command.name, command.email, now)
@@ -63,6 +68,15 @@ class CreateInquiry(
             val inquiry = Inquiry(newInquiryId(), customer.id, command.message, now, command.zipCode, command.eventDate, command.eventType)
             inquiries.insert(transaction, inquiry)
             command.pricingInputs?.let { pricingInputs.insert(transaction, inquiry.id, it) }
+            lines?.let {
+                materialize.create(
+                    transaction,
+                    inquiry.id,
+                    CreateInquiryFinancialDocument.Stage.ESTIMATE,
+                    it,
+                    InquiryDocumentPurpose.INITIAL_ESTIMATE,
+                )
+            }
             inquiry
         }
     }

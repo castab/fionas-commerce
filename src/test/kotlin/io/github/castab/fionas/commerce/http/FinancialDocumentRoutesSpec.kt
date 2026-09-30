@@ -217,7 +217,7 @@ class FinancialDocumentRoutesSpec :
             v2.previousVersion shouldBe 1
             v2.stage shouldBe "ESTIMATE"
             v2.total shouldBe "825.00"
-            v2.pricing.guestCount shouldBe 100
+            v2.pricing!!.guestCount shouldBe 100
             // Repricing replaces the line set: no line of v2 pretends to be a line of v1.
             (v2.lines.map { it.id } intersect v1.lines.map { it.id }.toSet()).shouldBeEmpty()
 
@@ -264,7 +264,7 @@ class FinancialDocumentRoutesSpec :
             v5.total shouldBe "850.00"
             v5.lines.first().charge() shouldBe
                 listOf("Base service", "2.5 hours · setup, staff & local travel", null, "275.00", "275.00", "0.00", "275.00", "USD")
-            v5.pricing.durationMinutes shouldBe 150
+            v5.pricing!!.durationMinutes shouldBe 150
             v5.reconciliation shouldBe DocumentReconciliation("300.00", "300.00", "550.00", "USD")
             allocatedVersions(id) shouldContainExactly listOf("3")
 
@@ -288,9 +288,9 @@ class FinancialDocumentRoutesSpec :
             history.versions.map { it.version } shouldContainExactly listOf(1, 2, 3, 4, 5)
             history.versions.map { it.stage } shouldContainExactly listOf("ESTIMATE", "ESTIMATE", "QUOTE", "INVOICE", "INVOICE")
             history.versions.map { it.total } shouldContainExactly listOf("681.25", "825.00", "825.00", "825.00", "850.00")
-            history.versions.map { it.pricing.guestCount } shouldContainExactly listOf(75, 100, 100, 100, 100)
-            history.versions.map { it.pricing.durationMinutes } shouldContainExactly listOf(120, 120, 120, 120, 150)
-            history.versions.map { it.pricing.catalogRevision }.toSet() shouldBe setOf(revision)
+            history.versions.map { it.pricing!!.guestCount } shouldContainExactly listOf(75, 100, 100, 100, 100)
+            history.versions.map { it.pricing!!.durationMinutes } shouldContainExactly listOf(120, 120, 120, 120, 150)
+            history.versions.map { it.pricing!!.catalogRevision }.toSet() shouldBe setOf(revision)
             history.versions.forEach { it.reconciliation.shouldBeNull() }
             // Every mutation response carries the runtime's metadata for that exact persisted version.
             val written = listOf(v1, v2, v3, v4, v5)
@@ -363,7 +363,7 @@ class FinancialDocumentRoutesSpec :
             changeOrder(estimate.id, pricingBody(revision, guests = 90, cones = listOf("cup"), expectedVersion = 5)).document().let {
                 it.stage shouldBe "INVOICE"
                 it.version shouldBe 6
-                it.pricing.guestCount shouldBe 90
+                it.pricing!!.guestCount shouldBe 90
             }
         }
 
@@ -383,7 +383,7 @@ class FinancialDocumentRoutesSpec :
 
             // The old revision stays usable deliberately, and stays recorded as the source.
             val kept = changeOrder(estimate.id, pricingBody(revision, guests = 76, expectedVersion = 1)).document()
-            kept.pricing.catalogRevision shouldBe revision
+            kept.pricing!!.catalogRevision shouldBe revision
             kept.total shouldBe "687.00"
             // The old revision has no mango: it is rejected, not repriced from the later revision.
             changeOrder(estimate.id, pricingBody(revision, softServe = listOf("mango"), expectedVersion = 2)).let {
@@ -392,10 +392,10 @@ class FinancialDocumentRoutesSpec :
             }
             // The newer revision is used only when named.
             val adopted = changeOrder(estimate.id, pricingBody(mango, softServe = listOf("mango"), expectedVersion = 2)).document()
-            adopted.pricing.catalogRevision shouldBe mango
+            adopted.pricing!!.catalogRevision shouldBe mango
             adopted.lines.map { it.description } shouldContain "Mango"
             // A persisted estimate from the old revision is still priced from it.
-            newEstimate(pricingBody(revision)).pricing.catalogRevision shouldBe revision
+            newEstimate(pricingBody(revision)).pricing!!.catalogRevision shouldBe revision
             // A revision that does not exist is not found.
             changeOrder(estimate.id, pricingBody(mango + 1, expectedVersion = 3)).let {
                 it.status shouldBe Status.NOT_FOUND

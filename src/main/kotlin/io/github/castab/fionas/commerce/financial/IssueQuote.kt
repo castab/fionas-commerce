@@ -8,13 +8,13 @@ import java.util.UUID
 
 /**
  * Issues the latest estimate of a Fiona lineage as a quote, without repricing: the quote is
- * a new immutable snapshot with the same lines, and Fiona records the estimate's exact
- * pricing source again for it.
+ * a new immutable snapshot with the same concrete lines. Fiona copies optional legacy
+ * pricing metadata when present; the transition does not require it.
  *
  * In one runtime transaction: the lineage must belong to an inquiry, its latest version must
  * be the one the caller acted on ([CommerceFailure.Conflict] otherwise), the runtime appends
  * the quote (`CommerceFailure.IllegalTransition` when the latest snapshot is not an
- * estimate), and the pricing source is copied to the new version.
+ * estimate), and any legacy pricing metadata is copied to the new version.
  */
 class IssueQuote(
     private val transactor: Transactor,

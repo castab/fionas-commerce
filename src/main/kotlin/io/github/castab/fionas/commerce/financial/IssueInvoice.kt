@@ -8,13 +8,13 @@ import java.util.UUID
 
 /**
  * Issues the latest quote of a Fiona lineage as an invoice, without repricing: the invoice
- * is a new immutable snapshot with the same lines, and Fiona records the quote's exact
- * pricing source again for it. There is no estimate-to-invoice shortcut.
+ * is a new immutable snapshot with the same concrete lines. Fiona copies optional legacy
+ * pricing metadata when present; the transition does not require it. There is no estimate-to-invoice shortcut.
  *
  * In one runtime transaction: the lineage must belong to an inquiry, its latest version must
  * be the one the caller acted on ([CommerceFailure.Conflict] otherwise), the runtime appends
  * the invoice (`CommerceFailure.IllegalTransition` when the latest snapshot is not a quote),
- * and the pricing source is copied to the new version. Payments applied to earlier
+ * and any legacy pricing metadata is copied to the new version. Payments applied to earlier
  * snapshots stay attached to them and still count toward the lineage's settlement.
  */
 class IssueInvoice(

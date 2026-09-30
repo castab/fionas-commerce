@@ -62,8 +62,8 @@ Fiona owns, and persists in its own tables:
 - Fiona's pricing: `FionasPricingInputs`, `FionasOfferingsContext`, `FionasPricingPolicy`,
   `FionasOfferingsEngine`, `FionasPricing`, and estimate previews (see
   [Fiona's pricing](#fionas-pricing));
-- which inquiry owns each commerce-runtime `FinancialDocument` lineage, the pricing inputs
-  of every financial snapshot, change-order intent, and payment acceptance policy (see
+- which inquiry owns each commerce-runtime `FinancialDocument` lineage and its semantic purpose,
+  optional legacy staff pricing metadata, change-order intent, and payment acceptance policy (see
   [Financial documents and payments](#financial-documents-and-payments));
 - Fiona bookings (future);
 - contacts (future);
@@ -130,10 +130,12 @@ verifying ownership of the address. Decide these explicitly before changing the 
   carry the `FionasPricingInputs` the customer configured (catalog revision, selections,
   guest count, duration), in `fionas.inquiry_pricing` and its ordered categories and
   selections. `CreateInquiry` checks them with `FionasPricing` from exactly the revision they
-  name, inside its one transaction, and discards the lines: rejections are the preview's
-  own `404`/`422`, the revision is pinned as submitted, and no `FinancialDocument` is
-  created. Staff read them back unchanged and may submit them to
-  `POST /inquiries/{inquiryId}/estimates`. They are never rewritten later.
+  name, exactly once inside its one transaction. Those exact concrete lines materialize
+  Estimate v1 through the transaction-taking `MaterializeInquiryFinancialDocument` core,
+  shared with staff creation. Customer, inquiry, requested inputs, ledger snapshot/lines,
+  and the `INITIAL_ESTIMATE` relationship commit or roll back together. Rejections remain
+  the preview's own `404`/`422`. Inputs remain pinned inquiry history, never rewritten or
+  copied to the initial financial snapshot. A plain inquiry creates no Estimate.
 - **The event ZIP code is required inquiry-owned location data.** Non-null `zipCode` is
   trimmed five-digit US text (leading zeroes preserved), held in the non-null
   `fionas.inquiries.zip_code` column and read only by staff with the inquiry. Blank is
@@ -299,10 +301,12 @@ no service locator. Keep wiring visible.
   `inTransaction` calls; pass the `Transaction` down instead.
 
 The shared runtime transaction is the seam that lets one Fiona operation atomically write
-Fiona-owned rows and runtime-owned commerce facts. Fiona's financial operations do: a
-first-snapshot document writes the runtime's snapshot, Fiona's inquiry association, and
-Fiona's pricing source in one transaction; a transition or change order writes the runtime's
-successor and its pricing source; standalone receipt and allocation are separate ledger
+Fiona-owned rows and runtime-owned commerce facts. A priced inquiry writes its customer,
+inquiry, requested inputs, runtime Estimate and canonical association in one transaction.
+Staff first-snapshot creation also writes optional legacy pricing metadata; a transition
+copies that metadata only when present, and a staff change order records its newly supplied
+inputs. No financial operation reconstructs old lines from old pricing inputs. Standalone
+receipt and allocation are separate ledger
 facts, while the combined payment operation writes both in one transaction.
 
 - **Ledger calls take the operation's `Transaction`.** Inside `inTransaction`, call only the
@@ -519,6 +523,9 @@ after runtime-owned migrations.
   default, backfill, or data transfer. The already-applied `V5` remains immutable.
   `V7` adds required inquiry event date/type with calendar-range and allowed-type checks,
   without defaults or backfill; it assumes empty pre-release inquiry data.
+  `V8` adds association `purpose` (`INITIAL_ESTIMATE` or `RELATED`) and a partial unique
+  index on inquiry id for `INITIAL_ESTIMATE`. Existing associations default to `RELATED`;
+  no canonical initial estimate is inferred for older inquiries.
   `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
@@ -737,8 +744,8 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
    match codes directly and never parse the diagnostic message. OpenAPI uses runtime
    `ValidationErrorResponse` and `ValidationViolationResponse`, never Fiona copies.
 10. **A preview is not an estimate document.** `POST /estimate-preview` requires the trusted server-side UI Bearer key,
-    remains stateless, and creates no `FinancialDocument`; persisted documents are a separate,
-    staff-only API.
+    remains stateless, and creates no `FinancialDocument`. Priced inquiry submission
+    internally materializes an Estimate using the UI key; explicit financial routes remain staff-only.
 
 ## Financial documents and payments
 
@@ -768,10 +775,21 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    one inquiry, revisions are versions inside a lineage. A lineage no inquiry owns does not
    exist in Fiona's API (`404`), even when the ledger holds it; every document route resolves
    the association first.
-3. **Every snapshot records why it was priced so.** `fionas.financial_document_pricing` (and
-   its ordered categories and selections) stores the `FionasPricingInputs` of each exact
-   `(document_id, version)`, written in the same transaction as the snapshot. A change order
-   records its revised inputs; a transition copies its source's inputs unchanged.
+   Association purpose describes the relationship: `INITIAL_ESTIMATE` is the canonical
+   inquiry-generated estimate, `RELATED` covers other lineages. A partial unique index
+   enforces at most one initial estimate per inquiry; staff creation remains `RELATED`.
+3. **Materialized snapshots stand alone.** Offerings are inputs to constructing concrete
+   lines, never financial-document identity or interpretation. Description, quantity, price,
+   tax and currency on the immutable snapshot are authoritative. Never re-read an old
+   offering, catalog revision or inquiry inputs to display or evolve its financial state.
+   Versions evolve from the previous financial snapshot plus explicit changes; newly priced
+   offerings may supply new lines, and custom lines need no offering identity.
+   `fionas.financial_document_pricing` and its child tables remain optional legacy staff
+   metadata in this scoped slice. Staff creation/change orders still write it and transitions
+   copy it when present; it is never used to reconstruct old lines. Inquiry-generated
+   initial estimates write none. Reads and transitions tolerate its absence. The staff HTTP
+   change-order route still offers complete replacement from newly supplied inputs; explicit
+   per-line/custom staff mutations and retiring legacy metadata require a follow-up slice.
    `PricedSnapshot` retains runtime `FinancialDocumentVersion`, including its authoritative
    PostgreSQL-owned `createdAt`. Current reads use `latestVersion(transaction, id)`;
    history uses `versionHistory(transaction, id)`, within existing REPEATABLE READ boundaries.
@@ -786,7 +804,7 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
 5. **Transitions never reprice**; they go through `issueQuote` and `issueInvoice`, and the
    runtime reports a transition the stage does not have (`IllegalTransition`). There is no
    estimate-to-invoice shortcut.
-6. **A change order replaces the line set.** It removes every current line and adds every
+6. **The existing staff change-order route replaces the line set.** It removes every current line and adds every
    repriced line in the engine's order (`repricing`); it never matches lines by
    description or position, and keeps the stage. Inputs that reproduce the current charges
    (ignoring line ids) are rejected as no financial change. A change to non-financial
@@ -886,7 +904,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the requested pricing inputs' `InquiryPricingRepository` and `JdbiInquiryPricingRepository`, the `CreateInquiry`, `GetInquiry`, and `ListInquiries` operations, and the customer form's `InquiryForm` values and `GetInquiryForm` adapter |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
-| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
+| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
@@ -1026,6 +1044,9 @@ The remaining gaps below have not been re-audited.
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
   invisible until commit), `FinancialDocumentAtomicitySpec` (a Fiona failure after a ledger
   write rolls back the runtime's snapshot, payment, and allocation with Fiona's rows),
+  `InquiryMaterializationSpec` (exact lines from one evaluation, customer reuse, plain inquiries,
+  rollback inside ledger and during/after association writes, canonical uniqueness, catalog
+  independence, custom ledger changes and transitions without pricing metadata),
   `FinancialDocumentRepositoriesSpec`, `RepricingSpec`, `FinancialDocumentReadConsistencySpec`
   (a paused REPEATABLE READ reader retains its snapshot while a concurrent writer commits),
   `FinancialDocumentRoutesSpec` (the

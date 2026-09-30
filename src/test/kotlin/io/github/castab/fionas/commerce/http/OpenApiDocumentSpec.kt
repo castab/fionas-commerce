@@ -13,6 +13,7 @@ import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.maps.shouldContainKey
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldStartWith
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -557,6 +558,8 @@ class OpenApiDocumentSpec :
         }
 
         test("describes the public create response as a receipt of the new inquiry, naming no customer") {
+            operation("/inquiries", "post").text("description") shouldContain "canonical initial Estimate"
+            operation("/inquiries", "post").text("description") shouldContain "a plain inquiry creates no Estimate"
             operation("/inquiries", "post").text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/InquiryReceiptResponse"
 
@@ -978,7 +981,7 @@ class OpenApiDocumentSpec :
         test("describes a financial document as immutable ledger facts, pricing source, and derived settlement") {
             val document = schema("FinancialDocumentResponse")
             document.strings("required") shouldContainExactly
-                listOf("id", "version", "createdAt", "stage", "inquiryId", "pricing", "lines", "subtotal", "taxAmount", "total", "currency")
+                listOf("id", "version", "createdAt", "stage", "inquiryId", "lines", "subtotal", "taxAmount", "total", "currency")
             val properties = document.at("properties").jsonObject
             properties.keys shouldBe
                 setOf(

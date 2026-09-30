@@ -170,7 +170,8 @@ class JdbiFinancialDocumentPricingRepository : FinancialDocumentPricingRepositor
                 .bind("fromVersion", from.version.number)
                 .bind("toVersion", to.version.number)
                 .execute()
-        check(copied == 1) { "Financial document $from has no pricing source to copy" }
+        // Materialized inquiry estimates have no legacy pricing metadata to carry forward.
+        if (copied == 0) return
         transaction.handle
             .createUpdate(
                 """

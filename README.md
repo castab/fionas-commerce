@@ -10,11 +10,13 @@ artifacts.
 > submits an inquiry, optionally with the configuration they chose, and staff list and read
 > them), serves Fiona's Offerings catalog through
 > commerce-runtime's reusable Offerings capability, and prices selections from it with
-> Fiona's own pricing (`POST /estimate-preview`, which records nothing). Staff turn an
+> Fiona's own pricing (`POST /estimate-preview`, which records nothing). Priced inquiry
+> submissions atomically materialize an initial Estimate; plain inquiries do not. Staff turn an
 > inquiry into persisted financial documents (an estimate, change orders, a quote, an
 > invoice) and record payments against them; the documents, payments, and settlement are
 > commerce-runtime's financial ledger, and Fiona records which inquiry owns each document and
-> the pricing inputs of every version. There are no bookings or payment-provider
+> optional legacy staff pricing metadata. Financial snapshots contain self-contained concrete
+> lines and need no offering/catalog data. There are no bookings or payment-provider
 > integrations yet. Staff authentication protects administration and every financial route.
 
 ## How it fits together
@@ -33,8 +35,8 @@ commerce-runtime      reusable runtime: PostgreSQL/HikariCP, JDBI, Flyway, Trans
 fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP API and
                        tables, Fiona's catalog id and where its catalog is served,
                        Fiona's pricing (FionasOfferingsEngine) and estimate previews,
-                       inquiry → financial-document ownership, per-version pricing
-                       sources, change-order and payment policy,
+                       inquiry → financial-document ownership and canonical initial estimate,
+                       optional legacy staff pricing metadata, change-order and payment policy,
                        application.conf, Logback, main(), deployable jar
 ```
 
@@ -85,7 +87,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 
 | Endpoint | Permission | Behavior |
 |---|---|---|
-| `POST /inquiries` | UI Bearer key | Records an inquiry, establishing its customer, with the pricing inputs the customer configured when present. `201` with a receipt (`id`, `createdAt`) and a `Location` header; never the stored customer. |
+| `POST /inquiries` | UI Bearer key | Records customer intent and atomically materializes one canonical initial Estimate when pricing inputs are present; a plain inquiry creates no Estimate. `201` with the unchanged receipt (`id`, `createdAt`) and `Location`; never the stored customer. |
 | `GET /inquiry-form` | UI Bearer key | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
@@ -145,8 +147,8 @@ Every route needs a staff session:
 | `POST /inquiries/{inquiryId}/estimates` | `commerce.financial-document.create` | Prices commercial inputs on the server and persists them as version 1 of a new estimate the inquiry owns. `201` with the document and `Location: /financial-documents/{documentId}`. |
 | `POST /inquiries/{inquiryId}/financial-documents` | `commerce.financial-document.create` | Prices commercial inputs and creates a new inquiry-owned Estimate, Quote, or Invoice at version 1, with no predecessor. `201` and `Location: /financial-documents/{documentId}`. |
 | `GET /inquiries/{inquiryId}/financial-documents` | `commerce.financial-document.read` | The inquiry's documents, each at its latest version with its current settlement. |
-| `GET /financial-documents/{documentId}` | `commerce.financial-document.read` | The latest version, its pricing inputs, and its current settlement. |
-| `GET /financial-documents/{documentId}/history` | `commerce.financial-document.read` | Every version, oldest first, each with its pricing inputs. |
+| `GET /financial-documents/{documentId}` | `commerce.financial-document.read` | The latest version, optional legacy staff pricing metadata, and current settlement. |
+| `GET /financial-documents/{documentId}/history` | `commerce.financial-document.read` | Every version, oldest first, with optional legacy staff pricing metadata. |
 | `POST /financial-documents/{documentId}/quote` | `commerce.financial-document.create` | Issues the latest estimate as a quote, unchanged. |
 | `POST /financial-documents/{documentId}/invoice` | `commerce.financial-document.create` | Issues the latest quote as an invoice, unchanged. |
 | `POST /financial-documents/{documentId}/change-orders` | `commerce.financial-document.create` | Reprices the latest version from revised inputs, in its current stage. |
@@ -220,9 +222,15 @@ confirmation page renders what the customer just submitted.
 `guestCountIsMinimum`, `durationMinutes`, `selections`). It is checked with the same Fiona
 pricing, from exactly the catalog revision it names, in the transaction that records the
 inquiry; inputs the pricing rejects fail with the preview's own `404` or `422`, and nothing
-is recorded. Only the inputs are stored (`fionas.inquiry_pricing` and its ordered
-categories and selections), pinned to the submitted revision; amounts are never accepted,
-and no financial document is created. Staff read them back as `pricingInputs` on
+is recorded. The operation prices exactly once and uses those exact concrete lines to
+materialize Estimate v1 through the runtime ledger. One READ COMMITTED transaction includes
+customer lookup/creation, inquiry insert, requested pricing history, ledger snapshot/lines,
+and the canonical initial-estimate association. Any failure rolls everything back.
+The inputs are stored only as customer intent (`fionas.inquiry_pricing` and its ordered
+categories and selections), pinned to the submitted revision; amounts are never accepted.
+No catalog/offering provenance is written for the financial snapshot. Plain inquiries
+create no Estimate. The UI key requires no staff financial-create permission; staff routes
+retain their permissions. Staff read requested inputs back as `pricingInputs` on
 `GET /inquiries/{inquiryId}` and can submit that object unchanged to
 `POST /inquiries/{inquiryId}/estimates`. Street address and further event details remain
 customer-authored `message` text; event date and type are stored separately on the inquiry.
@@ -675,7 +683,7 @@ commerce-domain      FinancialDocument (Estimate → Quote → Invoice), ChangeO
 commerce-runtime     financial snapshot persistence and lifecycle orchestration, payment and
                      allocation and refund persistence, reconciliation, transaction-aware ledger
                      operations (context.financialLedger)
-fionas-commerce      inquiry → document ownership, Fiona pricing inputs of every version,
+fionas-commerce      inquiry → document ownership/purpose, optional legacy staff pricing metadata,
                      server-authoritative starting stage and pricing, change-order intent,
                      payment acceptance and allocation policy, HTTP and auth
 ```
@@ -691,11 +699,23 @@ no copy of any of it, and no stored balance or payment status.
 each lineage: an inquiry may own several (an alternative or restarted proposal), a lineage
 belongs to one inquiry, and revisions of one proposal are versions of its lineage. A
 document no inquiry owns does not exist in Fiona's API (`404`), whatever else the ledger
-holds. `fionas.financial_document_pricing` and its ordered `…_categories` and
-`…_selections` record, for every version, the pricing inputs Fiona priced it from: catalog
+holds. Association `purpose` identifies the canonical `INITIAL_ESTIMATE`; other lineages
+are `RELATED`. A partial unique index permits at most one initial estimate per inquiry.
+Existing associations remain related, with no inference from creation time.
+
+**Materialization is the boundary.** Offerings help construct concrete lines. Once persisted,
+the snapshot's description, quantity, price, tax, currency and derived amounts stand alone.
+Financial reads, changes, quotes, invoices and payments need no originating catalog or
+inquiry inputs. Later versions evolve from the previous snapshot plus explicit changes;
+current offerings can suggest new lines, and custom lines require no offering identity.
+
+`fionas.financial_document_pricing` and its ordered `…_categories` and
+`…_selections` remain optional legacy staff metadata, recording inputs used to construct
+staff-created/replacement lines: catalog
 revision, guest count, whether the count is a minimum, duration, and the selections in
-submitted order (an explicitly empty category included). So the history answers both what
-was charged and why:
+submitted order (an explicitly empty category included). The inquiry-generated initial
+Estimate writes none, and reads/transitions work without it. This example is a staff-created
+lineage with legacy metadata:
 
 ```text
 D/v1 Estimate  $681.25   catalog r20, 75 guests, 120 minutes, selections X
@@ -732,7 +752,7 @@ curl -s -X POST localhost:8080/inquiries/$INQUIRY/estimates -b "$COOKIE" -H "Ori
 
 A document response has the ledger's facts (`id`, `version`, `createdAt`, `previousVersion`, `stage`
 `ESTIMATE`/`QUOTE`/`INVOICE`, `lines` with their durable ids, `subtotal`, `taxAmount`,
-`total`, `currency`), the owning `inquiryId`, the `pricing` inputs of that version, and, on
+`total`, `currency`), the owning `inquiryId`, optional legacy `pricing` metadata, and, on
 the latest version only, `reconciliation`: `grossAllocated`, `netApplied`, and `balance`,
 derived by commerce-runtime across every version of the lineage. Historical versions in
 `/history` carry no reconciliation. Every amount is an exact decimal string.
@@ -746,7 +766,7 @@ mutation responses all expose it. It stays unchanged on reread and is distinct f
 Fiona's inquiry-association timestamp; Fiona generates no document creation timestamp.
 
 **Transitions never reprice.** `quote` appends a quote with the estimate's lines and copies
-its pricing inputs to the new version; `invoice` does the same from a quote. There is no
+legacy pricing metadata only when present; `invoice` does the same from a quote. There is no
 estimate-to-invoice shortcut: a transition the latest version does not have is
 commerce-runtime's `409 illegal_transition`.
 
@@ -758,6 +778,10 @@ never matched by description or position, which would invent a line identity. In
 produce exactly the current charges (descriptions, quantities, prices, tax, currency, and
 order, ignoring line ids) are no financial change: `422` "The revised pricing produces no
 financial change".
+
+This existing staff HTTP route still replaces all lines from newly supplied inputs; it
+never reads old catalog inputs to reconstruct the previous snapshot. Per-line/custom staff
+HTTP changes and removal of legacy `financial_document_pricing` metadata are follow-up work.
 
 **Every document-lineage mutation names the version it acts on.** `expectedVersion` (transitions and change
 orders) and `documentVersion` (allocations and combined payments) must be the latest version; otherwise the request is
@@ -1092,7 +1116,10 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   `V6` replaces it with required `inquiries.zip_code` for empty inquiry data, without a
   default, backfill, or data transfer. The already-applied `V5` remains immutable. `V7`
   adds non-null `event_date` (`date`) and `event_type` (checked `text`) without defaults or
-  backfill, assuming empty pre-release inquiry data. Fiona never creates or
+  backfill, assuming empty pre-release inquiry data. `V8` adds association `purpose`, with
+  existing rows defaulting to `RELATED`, and a partial unique index permitting at most one
+  `INITIAL_ESTIMATE` per inquiry. It adds no catalog/offering columns to financial tables.
+  Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog and the financial ledger's snapshots,
   lines, payments, allocations, refunds, and refund allocations. None needs a Fiona copy.
@@ -1291,6 +1318,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
+| `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation; new/reused customers; inquiry input history; plain inquiries; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; catalog changes, custom ledger changes and transitions without pricing metadata |
 | `InquiryFormRoutesSpec` | Explicit public questions and lifecycle, input constraints and submission bindings, runtime prices, incompatible configuration failures, and response-only local totals matching authoritative previews across catalog revisions |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |

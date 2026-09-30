@@ -92,10 +92,12 @@ class DatabaseSchemaSpec :
             application.database.strings(
                 "SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas' AND tablename = 'inquiry_financial_documents' " +
                     "AND indexname <> 'inquiry_financial_documents_pkey'",
-            ) shouldContainExactly
+            ) shouldContainExactlyInAnyOrder
                 listOf(
                     "CREATE INDEX inquiry_financial_documents_inquiry_id_idx ON fionas.inquiry_financial_documents " +
                         "USING btree (inquiry_id, created_at)",
+                    "CREATE UNIQUE INDEX inquiry_financial_documents_initial_estimate_idx ON fionas.inquiry_financial_documents " +
+                        "USING btree (inquiry_id) WHERE (purpose = 'INITIAL_ESTIMATE'::text)",
                 )
         }
 
