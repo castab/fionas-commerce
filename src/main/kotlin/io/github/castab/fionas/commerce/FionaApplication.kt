@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce
 import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
+import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
@@ -31,6 +32,7 @@ import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
+import io.github.castab.fionas.commerce.inquiry.GetInquiryForm
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
@@ -136,6 +138,9 @@ fun fionaApplication(
                     createInquiry = CreateInquiry(context.transactor, customers, inquiries, inquiryPricing, pricing, clock)::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
                     getInquiry = GetInquiry(context.transactor, customers, inquiries, inquiryPricing)::invoke,
+                    getInquiryForm = GetInquiryForm(
+                        GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)::invoke,
+                    )::invoke,
                     previewEstimate =
                         PreviewEstimate(
                             getRevision = GetOfferingsCatalogRevision(context.transactor, context.offeringsSnapshotRepository)::invoke,

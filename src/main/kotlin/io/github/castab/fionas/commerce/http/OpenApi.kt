@@ -9,20 +9,26 @@ import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.ValidationErrorResponse
 import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import io.github.castab.commerce.runtime.http.jsonBody
+import io.github.castab.commerce.runtime.offering.OfferingDto
+import io.github.castab.commerce.runtime.offering.OfferingPriceDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.commerce.runtime.offering.offeringsOpenApiRenderer
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialInfo
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.PolymorphicKind
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.SerialKind
 import kotlinx.serialization.descriptors.StructureKind
 import kotlinx.serialization.descriptors.nonNullOriginal
+import kotlinx.serialization.json.JsonClassDiscriminator
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -149,8 +155,8 @@ annotation class ApiProperty(
  *
  * Only what the API's DTOs use is supported: objects whose properties are strings, `Int`s
  * (`integer`, `int32`), booleans, lists of those or of objects, and nested `@Serializable`
- * objects, each its own component. Anything else (other numbers, maps, enums, polymorphic
- * or nullable list items) fails rendering loudly, rather than publishing a schema that
+ * objects, enums, and sealed inputs with a string discriminator and explicit oneOf variants.
+ * Anything else (other numbers, maps, open polymorphism, or nullable list items) fails rendering loudly, rather than publishing a schema that
  * misdescribes the wire format; extend it when a DTO needs more.
  */
 private class KotlinxSchemas(
@@ -190,7 +196,45 @@ private class KotlinxSchemas(
         own(name, descriptor.serialName)
         if (name in components) return
         components[name] = JsonObject(emptyMap()) // Reserved while its properties are described.
-        components[name] = objectSchema(descriptor, prefix, components)
+        components[name] =
+            when (descriptor.kind) {
+                StructureKind.CLASS -> objectSchema(descriptor, prefix, components)
+                PolymorphicKind.SEALED -> sealedSchema(name, descriptor, prefix, components)
+                else -> error("OpenAPI component $name has unsupported kind ${descriptor.kind}")
+            }
+    }
+
+    /** Describes the actual sealed serializer, including each variant's required discriminator value. */
+    private fun sealedSchema(
+        name: String,
+        descriptor: SerialDescriptor,
+        prefix: String?,
+        components: MutableMap<String, JsonElement>,
+    ): JsonObject {
+        val discriminator =
+            descriptor.annotations
+                .filterIsInstance<JsonClassDiscriminator>()
+                .singleOrNull()
+                ?.discriminator
+                ?: CommerceJson.json.configuration.classDiscriminator
+        val variants = descriptor.getElementDescriptor(1)
+        val mapping = linkedMapOf<String, String>()
+        for (index in 0 until variants.elementsCount) {
+            val variant = variants.getElementDescriptor(index)
+            check(variant.kind == StructureKind.CLASS) { "Sealed variant ${variant.serialName} must be an object" }
+            val tag = variant.serialName
+            val variantName = name + "_" + tag.substringAfterLast('.')
+            own(variantName, tag)
+            components[variantName] = objectSchema(variant, prefix, components, discriminator to tag)
+            mapping[tag] = variantName
+        }
+        return buildJsonObject {
+            putJsonArray("oneOf") { mapping.values.forEach { add(reference(it)) } }
+            putJsonObject("discriminator") {
+                put("propertyName", discriminator)
+                putJsonObject("mapping") { mapping.forEach { (tag, variantName) -> put(tag, "#/components/schemas/$variantName") } }
+            }
+        }
     }
 
     private fun reference(name: String) = buildJsonObject { put("\$ref", "#/components/schemas/$name") }
@@ -218,10 +262,20 @@ private class KotlinxSchemas(
         descriptor: SerialDescriptor,
         prefix: String?,
         components: MutableMap<String, JsonElement>,
+        discriminator: Pair<String, String>? = null,
     ): JsonObject =
         buildJsonObject {
             put("type", "object")
             putJsonObject("properties") {
+                discriminator?.let { (property, tag) ->
+                    check((0 until descriptor.elementsCount).none { descriptor.getElementName(it) == property }) {
+                        "${descriptor.serialName} declares its serializer's discriminator $property as a property"
+                    }
+                    putJsonObject(property) {
+                        put("type", "string")
+                        put("const", tag)
+                    }
+                }
                 for (index in 0 until descriptor.elementsCount) {
                     put(descriptor.getElementName(index), propertySchema(descriptor, index, prefix, components))
                 }
@@ -229,7 +283,7 @@ private class KotlinxSchemas(
             val required =
                 (0 until descriptor.elementsCount)
                     .filterNot { descriptor.isElementOptional(it) || descriptor.getElementDescriptor(it).isNullable }
-                    .map(descriptor::getElementName)
+                    .map(descriptor::getElementName) + listOfNotNull(discriminator?.first)
             if (required.isNotEmpty()) putJsonArray("required") { required.forEach(::add) }
         }
 
@@ -276,6 +330,11 @@ private class KotlinxSchemas(
                     put("format", "int32")
                 }
             PrimitiveKind.BOOLEAN -> buildJsonObject { put("type", "boolean") }
+            SerialKind.ENUM ->
+                buildJsonObject {
+                    put("type", "string")
+                    putJsonArray("enum") { (0 until value.elementsCount).forEach { add(value.getElementName(it)) } }
+                }
             StructureKind.LIST -> {
                 val item = value.getElementDescriptor(0)
                 check(!item.isNullable) { "OpenAPI schemas do not support nullable list items; $property has them" }
@@ -285,6 +344,18 @@ private class KotlinxSchemas(
                 }
             }
             StructureKind.CLASS -> {
+                offerings.nestedSchema(value, prefix)?.let { schema ->
+                    schema.definitions.forEach { (name, node) ->
+                        own(name, OfferingsSchemas.OWNER)
+                        components[name] = node
+                    }
+                    return schema.node.jsonObject
+                }
+                val name = prefix.orEmpty() + value.serialName.substringAfterLast('.')
+                define(name, value, prefix, components)
+                reference(name)
+            }
+            PolymorphicKind.SEALED -> {
                 val name = prefix.orEmpty() + value.serialName.substringAfterLast('.')
                 define(name, value, prefix, components)
                 reference(name)
@@ -311,6 +382,28 @@ private class OfferingsSchemas {
 
     /** Whether [obj] is a body of commerce-runtime's Offerings routes. */
     fun describes(obj: Any) = obj.javaClass.packageName == OFFERINGS_PACKAGE
+
+    /** Offering options nested in Fiona's form keep the same runtime-owned schemas as catalog responses. */
+    fun nestedSchema(
+        descriptor: SerialDescriptor,
+        prefix: String?,
+    ): JsonSchema<JsonElement>? =
+        if (descriptor.serialName == OfferingDto.serializer().descriptor.serialName) {
+            // The reflective runtime renderer needs a complete example to discover nullable fields.
+            toSchema(
+                OfferingDto(
+                    "vanilla",
+                    "soft-serve-flavor",
+                    "Vanilla",
+                    "Soft serve",
+                    OfferingPriceDto("FIXED", "1.00", "USD"),
+                ),
+                null,
+                prefix,
+            )
+        } else {
+            null
+        }
 
     fun toSchema(
         obj: Any,

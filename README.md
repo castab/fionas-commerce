@@ -86,6 +86,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 | Endpoint | Permission | Behavior |
 |---|---|---|
 | `POST /inquiries` | public | Records an inquiry, establishing its customer, with the pricing inputs the customer configured when present. `201` with a receipt (`id`, `createdAt`) and a `Location` header; never the stored customer. |
+| `GET /inquiry-form` | public | Ordered questions, semantic input constraints, presentation hints, and current selectable offerings from one catalog revision. `404` before catalog initialization. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
 
@@ -222,6 +223,62 @@ Errors use commerce-runtime's contract, `{"code": "...", "message": "..."}`:
 Validation failures may also carry optional `violations`, each with a stable string `code`.
 Ordinary value-validation failures can omit that list. Clients use codes to identify
 failures and present `message` as diagnostic text; they never parse it for codes.
+
+## Customer inquiry form
+
+`GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
+resolved against one current Offerings snapshot. The response includes `definitionVersion`
+(currently 1), Fiona's stable `catalogId`, `catalogRevision`, and ordered `sections`.
+Definition version identifies the code-owned questions and bindings; catalog edits change
+the catalog revision independently. Sections are **Contact information**, **Build your
+ice cream service**, and **Additional information**. Within each section, `fields` are in
+display order. Each field has a stable `key`, `label`, optional `description`,
+`submissionPointer`, `required`, semantic `input`, and a separate `presentation.control`.
+
+The input is discriminated by `type`:
+
+| Type | Answer and metadata |
+|---|---|
+| `TEXT` | String; `minLength` and `maxLength` after trimming. Name must also be nonblank; blank optional notes count as absent. |
+| `EMAIL` | String; `maxLength` after trimming and lowercasing. Existing shallow email validation still applies. |
+| `INTEGER` | A signed 32-bit integer at least `minimum`; used for guest count. |
+| `BOOLEAN` | Boolean; `defaultValue` is false for the guest-count lower-bound flag. |
+| `INTEGER_CHOICE` | One integer `value` from the labeled `options`, derived from the pricing policy's allowed durations. |
+| `OFFERING_CHOICE` | Selected offering keys from `options`; category-owned `minSelections` and optional `maxSelections` (absent means unbounded). |
+
+Hints are `TEXT`, `TEXTAREA`, `NUMBER`, `CHECKBOX`, `SELECT`, `CARDS`, and
+`CHECKBOXES`. They express preferences; clients retain control of components,
+accessibility, styling, and layout. Multiline notes are a string with a textarea hint.
+No Svelte component names appear in the contract.
+
+Known category keys are referenced by Fiona's question configuration: soft serve,
+toppings, then cones/cups. An absent or retired category contributes no field. Additional
+active categories follow in catalog order, using their catalog names and descriptions.
+All option identity, display names, descriptions, prices, option order, and selection
+limits come from that same immutable snapshot. Options use commerce-runtime's existing
+`OfferingDto` / `OfferingPriceDto` representation, including all three price forms.
+Retired offerings disappear from the current form; no second catalog or form persistence
+is introduced. Catalog prices are descriptive metadata; use `POST /estimate-preview`
+for Fiona's total, including base service, guests, and extra toppings.
+
+The service section is optional, matching the existing optional `pricingInputs`.
+Field `required` applies when its section is used. For ordinary answers,
+`submissionPointer` is a JSON Pointer into `CreateInquiryRequest`; for example
+`/name` or `/pricingInputs/guestCount`. Each offering field contributes
+`{"category": input.category, "offerings": selectedKeys}` to
+`/pricingInputs/selections`, including empty selections for optional categories.
+Copy the response's `catalogRevision` to `pricingInputs.catalogRevision`.
+Preview and submit the same inputs; later catalog edits do not replace this revision.
+Submit answers only, never the definition, presentation hints, or prices.
+
+The form introduces no submission validation path: name, email, and message value
+objects, commerce-domain's structural selection validation, and Fiona's pricing engine
+remain authoritative. Clients that bypass form metadata still receive the existing
+`400`/`404`/`422` responses. Plain contact inquiries without service inputs still work.
+Structured phone, event date, address, and event contacts are deferred because the
+submission model does not yet store them; event facts remain customer-authored notes.
+Administration of the definition, historical form-definition reads, a generic form DSL,
+and a shared commerce UI abstraction are deliberately deferred.
 
 ## Offerings catalog
 
@@ -807,7 +864,7 @@ so changing an endpoint changes its documentation in the same place.
 The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
 `-Pversion=<version>`). It declares no server host, so it is the same in every
-environment. The stable `operationId`s are `createInquiry`, `listInquiries`, `getInquiry`,
+environment. The stable `operationId`s are `createInquiry`, `listInquiries`, `getInquiry`, `getInquiryForm`,
 `previewEstimate`, `createInquiryEstimate`, `createInquiryFinancialDocument`, `listInquiryFinancialDocuments`,
 `getFinancialDocument`, `getFinancialDocumentHistory`, `issueQuote`, `issueInvoice`,
 `createChangeOrder`, `recordPayment`, `recordStandalonePayment`, `allocatePayment`, `login`, `logout`, `getCurrentUser`, and
@@ -828,7 +885,10 @@ for nothing else: requests and responses stay kotlinx.serialization.
 
 Fiona's own schemas are derived from the kotlinx.serialization descriptors of the transport
 DTOs, the wire format itself, so `required` matches what the server reads and writes: strings,
-`int32` integers, booleans, arrays, and nested objects, each its own component. Known
+`int32` integers, booleans, arrays, enums, and nested objects, each its own component.
+The inquiry form's sealed input serializer produces an explicit `type` discriminator,
+a `oneOf` with one component per variant, and required constant discriminator values;
+nested Offering schemas retain the runtime's price union unchanged. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
 contract metadata cannot declare response headers. Commerce-runtime 0.0.18's Offerings
 renderer omits invalid schema-level `"format": null` and preserves arbitrary example data.
@@ -1133,6 +1193,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
+| `InquiryFormRoutesSpec` | Public ordered questions, input constraints and submission bindings, one catalog revision, runtime option text and prices, new and retired identities, catalog-owned selection limits, and form → preview → inquiry with backend validation |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `UnappliedPaymentsSpec` | Standalone receipt discovery with no inquiry, runtime ordering including ties, partial/full allocation, unapplied refunds and unavailable payment exclusion, payment-record authorization, and malformed allocation `documentId` body metadata |

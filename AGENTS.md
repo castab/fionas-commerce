@@ -138,6 +138,38 @@ verifying ownership of the address. Decide these explicitly before changing the 
   `message` until a slice introduces event details; never encode structured facts in
   `message` or bolt them onto the pricing inputs.
 
+## Fiona's customer inquiry form
+
+- `GET /inquiry-form` is public, a ContractRoute with operationId `getInquiryForm`.
+  `GetInquiryForm` reads one current snapshot through the runtime's `GetOfferingsCatalog`,
+  wired in the composition root, and adapts it into `InquiryForm`. No persistence, seeding,
+  second catalog, generic form DSL, or shared commerce form concept is introduced.
+- Fiona owns the ordered sections, stable question keys, labels, submission bindings, and
+  small rendering hints. Semantic inputs are distinct from hints: TEXT, EMAIL, INTEGER,
+  BOOLEAN, INTEGER_CHOICE, and OFFERING_CHOICE. No frontend component names.
+- Known category references are stable keys (soft serve, toppings from the pricing policy,
+  cones/cups), ordered by the question definition. Missing/retired categories are omitted;
+  other active categories follow in catalog order. Every active category is represented so
+  a required category can be answered without frontend business knowledge.
+- Offering choices project catalog-owned limits and active options from that single
+  snapshot. HTTP reuses the runtime's `dto()`, `OfferingDto`, and `OfferingPriceDto`;
+  never restate offering identity, price forms, or selection validation. Allowed durations
+  come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
+- The response exposes `definitionVersion` (1 for the current code-owned definition) and
+  `catalogId`/`catalogRevision`. Clients submit the latter revision as
+  `pricingInputs.catalogRevision`; the existing exact-revision pricing remains authoritative.
+  Change the definition version deliberately when code-owned questions/bindings change.
+- Each field's `submissionPointer` is a JSON Pointer into the existing request; offering
+  inputs append `{category, offerings}` at `/pricingInputs/selections`.
+  The service section remains optional, and field requirements apply when it is used.
+  The form advertises only supported answers. Phone, structured dates/locations, event
+  contacts, definition administration/history, and a reusable UI abstraction remain deferred.
+- Wire inputs are sealed serializable DTOs in `http`, with a `type` discriminator.
+  `KotlinxSchemas` derives explicit oneOf variants, discriminator mappings, required const
+  tags, and string enum values from descriptors. Offering options nested inside Fiona DTOs
+  still use `offeringsOpenApiRenderer`. Test the union and its runtime price references in
+  `OpenApiDocumentSpec`, and behavior through the complete handler in `InquiryFormRoutesSpec`.
+
 ## Generic commerce concepts
 
 Do not duplicate or re-model anything `commerce-domain` defines:
@@ -327,7 +359,8 @@ There is no later step called "update the spec". The rules:
    `offeringsOpenApiRenderer`, which only works on a reflective JSON (`OfferingsSchemas` in
    `http/OpenApi.kt`); `ArchitectureSpec` confines Jackson there. Fiona's own schemas are
    derived from the DTOs' serial descriptors (`KotlinxSchemas`: strings, `Int`s as `int32`
-   integers, booleans, lists, and nested `@Serializable` objects as components; anything
+   integers, booleans, lists, enums, sealed input unions with string discriminators, and
+   nested `@Serializable` objects as components; anything
    else fails loudly until a DTO needs it); what a type cannot say goes
    in `@ApiProperty` on the transport DTO property, referencing the domain's constants
    (for example `maxLength = CustomerName.MAX_LENGTH`). `@ApiProperty` is for
@@ -457,7 +490,8 @@ catalog and where it is served; commerce-runtime implements everything else.
    operations, or commands (update, delete, replace, retire) of Fiona's own.
 4. **Fiona never writes SQL against `commerce.offering*`**, reading or writing, and never
    calls `OfferingsSnapshotRepository` itself: the composition root hands it to the
-   runtime's own `GetOfferingsCatalogRevision` (previews) and hands its transaction-bound
+   runtime's own `GetOfferingsCatalogRevision` (previews) and `GetOfferingsCatalog`
+   (inquiry form), and hands its transaction-bound
    `retrieveVersion` to `FionasPricing` (persisted documents, which must read the exact
    revision in the transaction that writes them).
 5. **Fiona creates no Offerings tables or migrations.** The runtime's own migration stream
@@ -781,11 +815,11 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
-| `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the requested pricing inputs' `InquiryPricingRepository` and `JdbiInquiryPricingRepository`, the `CreateInquiry`, `GetInquiry`, and `ListInquiries` operations |
+| `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the requested pricing inputs' `InquiryPricingRepository` and `JdbiInquiryPricingRepository`, the `CreateInquiry`, `GetInquiry`, and `ListInquiries` operations, and the customer form's `InquiryForm` values and `GetInquiryForm` adapter |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
 | `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and pricing-source repositories, the read models, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
-| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
+| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
 Do not create empty packages or layers for future work. Avoid `service`, `manager`,

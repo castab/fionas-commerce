@@ -25,6 +25,7 @@ import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
+import io.github.castab.fionas.commerce.inquiry.InquiryForm
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
@@ -59,6 +60,7 @@ class FionaOperations(
     val createInquiry: (CreateInquiry.Command) -> Inquiry,
     val listInquiries: (ListInquiries.Command) -> InquiryPage,
     val getInquiry: (InquiryId) -> InquiryDetails,
+    val getInquiryForm: () -> InquiryForm,
     val previewEstimate: (FionasPricingInputs) -> EstimatePreview,
     val createInquiryEstimate: (InquiryId, FionasPricingInputs) -> InquiryFinancialDocument,
     val createInquiryFinancialDocument: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
@@ -96,6 +98,7 @@ fun fionaApiRoutes(
     auth: FionaAuthRoutes,
 ): List<ContractRoute> =
     listOf(
+        getInquiryFormRoute(operations.getInquiryForm),
         createInquiryRoute(operations.createInquiry),
         listInquiriesRoute(operations.listInquiries, auth.access),
         getInquiryRoute(operations.getInquiry, auth.access),

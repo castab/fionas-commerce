@@ -210,7 +210,7 @@ private val cursorQuery =
             "the previous page's last inquiry.",
     )
 
-private val inquiries = Tag("Inquiries", "A prospective customer's request to Fiona's, before any booking exists.")
+internal val inquiries = Tag("Inquiries", "A prospective customer's request to Fiona's, before any booking exists.")
 
 private val exampleSelections =
     listOf(

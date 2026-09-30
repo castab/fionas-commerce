@@ -195,6 +195,7 @@ class ArchitectureSpec :
             val routes =
                 fionaApiRoutes(
                     FionaOperations(
+                        getInquiryForm = { error("not called") },
                         createInquiry = { error("not called") },
                         listInquiries = { error("not called") },
                         getInquiry = { error("not called") },

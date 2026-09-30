@@ -50,6 +50,7 @@ import java.nio.file.Path
  */
 private val notInvoked =
     FionaOperations(
+        getInquiryForm = { error("Rendering the OpenAPI document never reads the inquiry form") },
         createInquiry = { error("Rendering the OpenAPI document never creates an inquiry") },
         listInquiries = { error("Rendering the OpenAPI document never lists inquiries") },
         getInquiry = { error("Rendering the OpenAPI document never reads an inquiry") },

@@ -80,6 +80,7 @@ class OpenApiDocumentSpec :
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
+                Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "404", "500"),
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "404", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "401", "403", "404", "500"),
@@ -120,6 +121,7 @@ class OpenApiDocumentSpec :
         // Each Fiona operation's tag.
         val tags =
             mapOf(
+                "getInquiryForm" to "Inquiries",
                 "createInquiry" to "Inquiries",
                 "listInquiries" to "Inquiries",
                 "getInquiry" to "Inquiries",
@@ -197,6 +199,18 @@ class OpenApiDocumentSpec :
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
+                "InquiryFormResponse",
+                "InquiryFormSectionResponse",
+                "InquiryFormFieldResponse",
+                "InquiryFormPresentation",
+                "InquiryFormIntegerOption",
+                "InquiryFormInputResponse",
+                "InquiryFormInputResponse_TEXT",
+                "InquiryFormInputResponse_EMAIL",
+                "InquiryFormInputResponse_INTEGER",
+                "InquiryFormInputResponse_BOOLEAN",
+                "InquiryFormInputResponse_INTEGER_CHOICE",
+                "InquiryFormInputResponse_OFFERING_CHOICE",
                 "CreateInquiryRequest",
                 "InquiryPricingInputs",
                 "InquiryReceiptResponse",
@@ -606,12 +620,41 @@ class OpenApiDocumentSpec :
         }
 
         test("gives every property of Fiona's schemas a type or a reference") {
-            fionaSchemas.forEach { name ->
+            fionaSchemas.filterNot { it == "InquiryFormInputResponse" }.forEach { name ->
                 schema(name)
                     .at("properties")
                     .jsonObject.values
                     .forEach { (it.jsonObject.keys intersect setOf("type", "\$ref")).size shouldBe 1 }
             }
+        }
+
+        test("inquiry form inputs have an explicit type union with distinct required discriminator values") {
+            operation("/inquiry-form", "get").text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/InquiryFormResponse"
+            schema("InquiryFormResponse").strings("required") shouldContainExactly
+                listOf("definitionVersion", "catalogId", "catalogRevision", "sections")
+            schema("InquiryFormFieldResponse").text("properties", "input", "\$ref") shouldBe
+                "#/components/schemas/InquiryFormInputResponse"
+            val union = schema("InquiryFormInputResponse")
+            union.text("discriminator", "propertyName") shouldBe "type"
+            val tags = listOf("TEXT", "EMAIL", "INTEGER", "BOOLEAN", "INTEGER_CHOICE", "OFFERING_CHOICE")
+            union.at("oneOf").jsonArray.map { it.text("\$ref") } shouldContainExactlyInAnyOrder
+                tags.map { "#/components/schemas/InquiryFormInputResponse_$it" }
+            tags.forEach { tag ->
+                val name = "InquiryFormInputResponse_$tag"
+                union.text("discriminator", "mapping", tag) shouldBe "#/components/schemas/$name"
+                schema(name).text("properties", "type", "const") shouldBe tag
+                schema(name).strings("required").contains("type") shouldBe true
+            }
+            schema("InquiryFormInputResponse_INTEGER_CHOICE").text("properties", "options", "items", "\$ref") shouldBe
+                "#/components/schemas/InquiryFormIntegerOption"
+            schema("InquiryFormIntegerOption").text("properties", "value", "type") shouldBe "integer"
+            schema("InquiryFormInputResponse_OFFERING_CHOICE").let {
+                it.strings("required") shouldContainExactly listOf("category", "minSelections", "options", "type")
+                it.text("properties", "options", "items", "\$ref") shouldBe "#/components/schemas/OfferingDto"
+            }
+            schema("InquiryFormPresentation").strings("properties", "control", "enum") shouldContainExactly
+                listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES")
         }
 
         test("describes the estimate preview request from its serial descriptors: integers, a boolean, and nested lists") {
