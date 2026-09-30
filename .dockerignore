@@ -1,0 +1,23 @@
+# Keep the build context to what the image build needs (Dockerfile copies explicit paths,
+# this mainly keeps the context upload small and secrets out of it).
+.git
+.github
+.idea
+.claude
+.gradle
+.kotlin
+build
+out
+*.iml
+
+# Local configuration and credentials must never enter an image build context.
+.env
+.env.*
+!.env.example
+
+README.md
+AGENTS.md
+scripts
+compose.yaml
+Dockerfile
+.dockerignore

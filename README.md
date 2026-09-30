@@ -1006,7 +1006,45 @@ with the application, its dependencies, `application.conf`, `logback.xml`, the F
 migrations (Flyway's service files are merged), and the Swagger UI assets served at
 `/docs`. This is the deployable artifact. The
 Gradle `application` plugin also provides `./gradlew run` and `installDist` for local
-use. No Spring Boot or container image is involved yet.
+use. No Spring Boot is involved.
+
+### Container image
+
+The [`Dockerfile`](Dockerfile) builds the executable jar on Java 25 and runs it on a
+Java 25 JRE as a non-root user. The runtime base is glibc (Debian/Ubuntu), not Alpine,
+because `argon2-jvm` loads a native Argon2 library. Resolving `commerce-runtime` needs a
+GitHub Packages token at build time, passed as build arguments that exist only in the
+build stage, never in the final image:
+
+```bash
+docker build --build-arg GITHUB_ACTOR=<user> --build-arg GITHUB_TOKEN=<read:packages token> -t fionas-commerce .
+```
+
+```bash
+docker run --rm -p 8080:8080 -e DATABASE_JDBC_URL=... -e DATABASE_USERNAME=... -e DATABASE_PASSWORD=... fionas-commerce
+```
+
+The image build runs `shadowJar` only; lint and tests stay in CI.
+
+### Deploying on Railway
+
+[`railway.toml`](railway.toml) selects the Dockerfile builder and health-checks `/ready`.
+Railway passes service variables to a Dockerfile build only when the Dockerfile declares
+them with `ARG`, which is why `GITHUB_ACTOR` and `GITHUB_TOKEN` are declared there. Set
+these variables on the service (Railway also injects `PORT`):
+
+| Variable | Value |
+|---|---|
+| `GITHUB_ACTOR`, `GITHUB_TOKEN` | A GitHub user and a token with `read:packages` (seal the token). Railway also exposes service variables to the running container, so use a read-only token. |
+| `DATABASE_JDBC_URL` | `jdbc:postgresql://${{Postgres.PGHOST}}:${{Postgres.PGPORT}}/${{Postgres.PGDATABASE}}` |
+| `DATABASE_USERNAME` | `${{Postgres.PGUSER}}` |
+| `DATABASE_PASSWORD` | `${{Postgres.PGPASSWORD}}` |
+| `FIONAS_TRUSTED_ORIGINS` | The service's public origin, for example `https://<domain>` |
+| `FIONAS_BOOTSTRAP_ADMIN_*` | First provisioning only; remove after the admin exists |
+
+Replace `Postgres` with the name of your Railway PostgreSQL service. The application is
+tested against PostgreSQL 18. It applies its migrations on startup
+(`MIGRATIONS_ON_STARTUP=migrate`, the default).
 
 ## Testing
 
