@@ -34,7 +34,7 @@ import org.http4k.core.with
 
 @Serializable
 data class InquiryFormResponse(
-    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions. Currently 5.")
+    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions.")
     val definitionVersion: Int,
     @ApiProperty(description = "Fiona's stable catalog identity.", format = "uuid")
     val catalogId: String,

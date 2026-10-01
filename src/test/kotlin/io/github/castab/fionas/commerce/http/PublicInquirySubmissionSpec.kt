@@ -105,7 +105,7 @@ class PublicInquirySubmissionSpec :
             app.database.count("fionas.inquiry_financial_documents") shouldBe before.getValue("fionas.inquiry_financial_documents") + 1
         }
 
-        test("every advertised active option is accepted in a structurally valid selection for every advertised duration") {
+        test("every advertised available option is accepted in a structurally valid selection for every advertised duration") {
             val form = form()
             val choices = form.sections.flatMap { it.fields }.mapNotNull { it.input as? InquiryFormInputResponse.OfferingChoice }
             choices.map { it.category } shouldBe listOf("soft-serve-flavor", "topping", "cone-option")
