@@ -1,10 +1,15 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.runtime.authorization.CurrentPrincipalDto
+import io.github.castab.commerce.runtime.authorization.PermissionsDto
+import io.github.castab.commerce.runtime.authorization.RuntimePermissions
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.PrincipalStatus
+import io.github.castab.commerce.staff.RoleDefinition
+import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.ServiceIdentity
 import io.github.castab.commerce.staff.User
@@ -19,9 +24,14 @@ import io.github.castab.fionas.commerce.staff.SecretPassword
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.testClock
+import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldBeSorted
+import io.kotest.matchers.collections.shouldContainAll
+import io.kotest.matchers.collections.shouldNotContain
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldMatch
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
@@ -180,12 +190,123 @@ class AuthRoutesSpec :
             }
         }
 
-        test("me handles a known service principal explicitly") {
+        test("me handles a known service principal explicitly; authorization/me describes it as a SERVICE") {
             TestApplication.create().use { app ->
                 val serviceId = ServiceId(UUID.randomUUID())
                 app.authorization.createService(ServiceIdentity(serviceId, "future-adapter", PrincipalStatus.ACTIVE, emptySet()))
+                // A runtime session is enough to exercise principal semantics; no service token transport is mounted.
                 val cookie = "__Host-fionas_session=${app.sessions.create(serviceId).token.value}"
                 request(app, Method.GET, "/auth/me", cookie).status shouldBe Status.FORBIDDEN
+
+                fun principal() =
+                    request(app, Method.GET, "/authorization/me", cookie).let {
+                        it.status shouldBe Status.OK
+                        CommerceJson.asA(it.bodyString(), CurrentPrincipalDto.serializer())
+                    }
+                principal().let {
+                    it.principal.kind shouldBe "SERVICE"
+                    it.principal.id shouldBe serviceId.value.toString()
+                    it.principal.displayName shouldBe "future-adapter"
+                    it.permissions shouldBe emptyList()
+                    it.permissionCatalogRevision shouldBe app.authorization.permissionCatalog.revision
+                }
+                // Its effective permissions are whatever the service currently holds, resolved live.
+                val role = RoleKey("fionas.test-inquiry-reader")
+                app.authorization.createRole(
+                    RoleDefinition(
+                        role,
+                        "Inquiry reader",
+                        "Test role.",
+                        setOf(FionaPermissions.InquiriesRead, CommercePermissions.RoleRead),
+                    ),
+                )
+                app.authorization.assignRole(serviceId, role)
+                principal().permissions shouldBe listOf(CommercePermissions.RoleRead.value, FionaPermissions.InquiriesRead.value).sorted()
+                request(app, Method.GET, "/auth/me", cookie).status shouldBe Status.FORBIDDEN
+            }
+        }
+
+        test("authorization/me describes the USER session with live permissions and requires only authentication") {
+            TestApplication.create().use { app ->
+                val cookie = app.adminCookie
+                val admin = checkNotNull(app.authorization.findUserByUsername("admin"))
+
+                fun principal() =
+                    request(app, Method.GET, "/authorization/me", cookie).let {
+                        it.status shouldBe Status.OK
+                        CommerceJson.asA(it.bodyString(), CurrentPrincipalDto.serializer())
+                    }
+                request(app, Method.GET, "/authorization/me", cookie = null).status shouldBe Status.UNAUTHORIZED
+                // The trusted UI key establishes no principal.
+                app.http(Request(Method.GET, "/authorization/me").withUiKey()).status shouldBe Status.UNAUTHORIZED
+                val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
+                principal().let {
+                    it.principal.kind shouldBe "USER"
+                    it.principal.id shouldBe admin.id.value.toString()
+                    it.principal.displayName shouldBe "Test Administrator"
+                    it.permissions.shouldBeSorted()
+                    it.permissions shouldBe grants.map { key -> key.value }.sorted()
+                    it.permissionCatalogRevision shouldMatch Regex("sha256:[0-9a-f]{64}")
+                }
+                // Grant changes appear on the next call of the same session, and RoleRead is never required.
+                val limited = setOf(CommercePermissions.PaymentRecord, FionaPermissions.InquiriesRead)
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, limited)
+                principal().permissions shouldBe limited.map { it.value }.sorted()
+                app.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+                principal().permissions shouldBe emptyList()
+                // A safe GET needs no Origin, like Fiona's other authenticated reads.
+                request(app, Method.GET, "/authorization/me", cookie, origin = null).status shouldBe Status.OK
+                request(app, Method.GET, "/auth/me", cookie, origin = null).status shouldBe Status.OK
+                // Undeclared methods are derived from the contract's routes, this one included.
+                request(app, Method.OPTIONS, "/authorization/me", cookie).status shouldBe Status.METHOD_NOT_ALLOWED
+            }
+        }
+
+        test("the administration permission catalog is the running runtime and Fiona catalog, with the principal's revision") {
+            TestApplication.create().use { app ->
+                val response = request(app, Method.GET, "/admin/access/permissions")
+                response.status shouldBe Status.OK
+                val catalog = CommerceJson.asA(response.bodyString(), PermissionsDto.serializer())
+                val keys = catalog.permissions.map { it.key }
+                keys shouldContainAll
+                    listOf(
+                        FionaPermissions.CredentialsManage.value,
+                        FionaPermissions.InquiriesRead.value,
+                        CommercePermissions.RoleRead.value,
+                        CommercePermissions.PrincipalRead.value,
+                        // Runtime-owned since 0.0.20: the catalog is the composed one, not a hand-kept subset.
+                        RuntimePermissions.ServiceCredentialManage.value,
+                    )
+                keys.shouldBeSorted()
+                keys shouldBe
+                    app.authorization.permissionCatalog.definitions
+                        .map { it.key.value }
+                catalog.permissions.single { it.key == FionaPermissions.InquiriesRead.value }.group shouldBe "fionas.inquiries"
+                catalog.permissions.single { it.key == FionaPermissions.CredentialsManage.value }.group shouldBe "fionas.credentials"
+                catalog.revision shouldBe app.authorization.permissionCatalog.revision
+                // The catalog revision the current principal reports is the served catalog's own.
+                CommerceJson
+                    .asA(
+                        request(app, Method.GET, "/authorization/me").bodyString(),
+                        CurrentPrincipalDto.serializer(),
+                    ).permissionCatalogRevision shouldBe catalog.revision
+                // Catalog membership grants nothing: bootstrap never expands the Administrator role to match it.
+                checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions shouldNotContain
+                    RuntimePermissions.ServiceCredentialManage
+            }
+        }
+
+        test("the permission catalog requires live RoleRead on the existing session") {
+            TestApplication.create().use { app ->
+                val cookie = app.adminCookie
+                request(app, Method.GET, "/admin/access/permissions", cookie = null).status shouldBe Status.UNAUTHORIZED
+                request(app, Method.GET, "/admin/access/permissions", cookie).status shouldBe Status.OK
+                val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, grants - CommercePermissions.RoleRead)
+                request(app, Method.GET, "/admin/access/permissions", cookie).status shouldBe Status.FORBIDDEN
+                request(app, Method.GET, "/authorization/me", cookie).status shouldBe Status.OK
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, grants)
+                request(app, Method.GET, "/admin/access/permissions", cookie).status shouldBe Status.OK
             }
         }
 

@@ -50,7 +50,7 @@ class OpenApiRoutesSpec :
             }
         }
 
-        test("the document Swagger UI reads offers the Offerings catalog's operations alongside Fiona's") {
+        test("the document Swagger UI reads offers the bound runtime capabilities' operations alongside Fiona's") {
             val document = Json.parseToJsonElement(get("/openapi.json").bodyString()).jsonObject
             val operationIds =
                 document
@@ -73,6 +73,9 @@ class OpenApiRoutesSpec :
                     "fionasOfferingsAddOffering",
                     "fionasOfferingsGetCatalog",
                     "fionasOfferingsGetCatalogRevision",
+                    "getCurrentUser",
+                    "authorizationCurrentPrincipal",
+                    "authorizationListPermissions",
                 )
         }
 

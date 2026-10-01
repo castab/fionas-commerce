@@ -221,6 +221,9 @@ class OpenApiDocumentSpec :
                 Triple("/admin/access/permissions", "get", "authorizationListPermissions"),
             )
 
+        // commerce-runtime's current-principal capability, where Fiona binds it.
+        val principalOperations = listOf(Triple("/authorization/me", "get", "authorizationCurrentPrincipal"))
+
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
@@ -313,6 +316,8 @@ class OpenApiDocumentSpec :
                 "PermissionKeysDto",
                 "PermissionsDto",
                 "PermissionDto",
+                "CurrentPrincipalDto",
+                "PrincipalSummaryDto",
             )
 
         test("is an OpenAPI 3.1 document of Fiona's Commerce API at the application's version") {
@@ -327,6 +332,7 @@ class OpenApiDocumentSpec :
                     "Payments",
                     "Authentication",
                     "Staff administration",
+                    "Authorization",
                     "Offerings catalog",
                 )
         }
@@ -342,7 +348,7 @@ class OpenApiDocumentSpec :
 
         test("describes exactly Fiona and bound runtime capability routes, excluding /health and /ready") {
             document.at("paths").jsonObject.mapValues { (_, methods) -> methods.jsonObject.keys } shouldBe
-                (operations.keys + offeringOperations + adminOperations)
+                (operations.keys + offeringOperations + adminOperations + principalOperations)
                     .groupBy({ it.first }, { it.second })
                     .mapValues { it.value.toSet() }
         }
@@ -366,6 +372,36 @@ class OpenApiDocumentSpec :
                 operation(path, method).text("operationId") shouldBe operationId
                 operation(path, method).strings("tags") shouldContainExactly listOf("Staff administration")
             }
+        }
+
+        test("mounts commerce-runtime's current-principal route under the Authorization tag") {
+            principalOperations.forEach { (path, method, operationId) ->
+                val route = operation(path, method)
+                route.text("operationId") shouldBe operationId
+                route.strings("tags") shouldContainExactly listOf("Authorization")
+                route.at("responses").jsonObject.keys shouldContainExactlyInAnyOrder listOf("200", "401")
+                route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                    "#/components/schemas/CurrentPrincipalDto"
+                (route["security"] as? JsonArray).isNullOrEmpty() shouldBe true
+            }
+            // Fiona's staff profile remains its own Authentication route.
+            operation("/auth/me", "get").text("operationId") shouldBe "getCurrentUser"
+        }
+
+        test("mounts one permission catalog route, so every operationId is unique") {
+            // commerce-runtime 0.0.20's standalone catalog capability reuses the administration route's
+            // fixed authorizationListPermissions operationId, so only the administration route is mounted.
+            document
+                .at("paths")
+                .jsonObject.keys
+                .filter { it.endsWith("/permissions") && !it.contains('{') } shouldBe
+                listOf("/admin/access/permissions")
+            val operationIds =
+                document
+                    .at("paths")
+                    .jsonObject.values
+                    .flatMap { methods -> methods.jsonObject.values.map { it.text("operationId") } }
+            operationIds.size shouldBe operationIds.toSet().size
         }
 
         test("Offerings add, update, and restore bodies retain required integer revisions and path-owned mutation keys") {
