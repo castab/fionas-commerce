@@ -12,6 +12,7 @@ import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
+import io.kotest.matchers.collections.shouldNotContain
 import io.kotest.matchers.maps.shouldContainKey
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
@@ -370,8 +371,9 @@ class OpenApiDocumentSpec :
                         when (operationId) {
                             // Public: credentials obtain a session, so none is required.
                             "login" -> emptyList()
-                            // Logout revokes browser sessions only; a service token is never advertised for it.
-                            "logout" -> listOf(setOf("staffSession"))
+                            // Logout revokes browser sessions only and is idempotent cleanup without one:
+                            // staffSession OR anonymous ({}). A service token is never advertised for it.
+                            "logout" -> listOf(setOf("staffSession"), emptySet())
                             else -> eitherTransport
                         }
                 }
@@ -386,6 +388,13 @@ class OpenApiDocumentSpec :
             // /auth/me authenticates either transport, then rejects a SERVICE with its documented 403.
             requirements("/auth/me", "get") shouldBe eitherTransport
             operation("/auth/me", "get").text("responses", "403", "description") shouldContain "SERVICE"
+        }
+
+        test("logout is staffSession OR anonymous, never a service bearer token") {
+            val logout = requirements("/auth/logout", "post")
+            logout shouldBe listOf(setOf("staffSession"), emptySet())
+            logout.flatten() shouldNotContain "serviceAccessToken"
+            operation("/auth/logout", "post").text("responses", "403", "description") shouldContain "SERVICE"
         }
 
         test("public authentication endpoints require neither scheme") {

@@ -97,12 +97,10 @@ fun fionaOpenApi(version: String): ContractRenderer =
         version = OpenApiVersion._3_1_0,
     )
 
-/** The name of Fiona's staff browser session cookie (see `SessionCookie`). */
-const val STAFF_SESSION_COOKIE = "__Host-fionas_session"
-
 /**
  * OpenAPI security that a request satisfies with any one of [alternatives]: each renders as
- * its own security requirement object, which OpenAPI reads as OR.
+ * its own security requirement object, which OpenAPI reads as OR. When [allowsAnonymous],
+ * an empty requirement object `{}` follows them: the route also succeeds unauthenticated.
  *
  * Documentation only: its filter does nothing, and Fiona's `AccessControl` (or, for logout,
  * the runtime's session authentication) enforces authentication. http4k's `OrSecurity`
@@ -112,6 +110,7 @@ const val STAFF_SESSION_COOKIE = "__Host-fionas_session"
  */
 class DocumentedSecurity internal constructor(
     internal val alternatives: List<Security>,
+    internal val allowsAnonymous: Boolean = false,
 ) : Security {
     override val filter: Filter = Filter.NoOp
 }
@@ -130,8 +129,12 @@ private val staffSessionScheme: Security =
  */
 val principalSecurity: Security = DocumentedSecurity(listOf(staffSessionScheme, serviceAccessTokenOpenApiSecurity))
 
-/** A staff browser session only: `POST /auth/logout`, which revokes sessions and nothing else. */
-val staffSessionSecurity: Security = DocumentedSecurity(listOf(staffSessionScheme))
+/**
+ * A staff browser session or no authentication: `POST /auth/logout`, which revokes sessions and
+ * nothing else, and is idempotent cleanup without one. A service access token is deliberately
+ * absent: it is no logout mechanism, and a token-only request is `403`.
+ */
+val optionalStaffSessionSecurity: Security = DocumentedSecurity(listOf(staffSessionScheme), allowsAnonymous = true)
 
 /** Renders [DocumentedSecurity] like an OR of http4k's standard OpenAPI 3 schemes. */
 private val documentedSecurityRenderer =
@@ -144,7 +147,8 @@ private val documentedSecurityRenderer =
 
             override fun <NODE> ref(): Render<NODE> =
                 {
-                    array(security.alternatives.mapNotNull { OpenApi3SecurityRenderer.ref<NODE>(it) }.map { it(this) })
+                    val anonymous = if (security.allowsAnonymous) listOf(obj(emptyList<Pair<String, NODE>>())) else emptyList()
+                    array(security.alternatives.mapNotNull { OpenApi3SecurityRenderer.ref<NODE>(it) }.map { it(this) } + anonymous)
                 }
         }
     }

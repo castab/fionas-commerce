@@ -25,6 +25,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
+import io.kotest.matchers.string.shouldStartWith
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -86,7 +87,7 @@ class ServicePrincipalAuthSpec :
                 app.authorization.createRole(RoleDefinition(role, "Staff", null, permissions))
                 app.authorization.assignRole(id, role)
             }
-            return "__Host-fionas_session=${app.sessions.create(id).token.value}"
+            return "$STAFF_SESSION_COOKIE=${app.sessions.create(id).token.value}"
         }
 
         test("a service exchanges its credential at the public token endpoint for a short-lived bearer token") {
@@ -301,10 +302,22 @@ class ServicePrincipalAuthSpec :
                 // A session revoked elsewhere (for example by disabling the user) is cleared the same way.
                 val admin = checkNotNull(app.authorization.findUserByUsername("admin"))
                 val stale = app.sessions.create(admin.id).also { app.sessions.revoke(it.token) }
-                logout("__Host-fionas_session=${stale.token.value}").let {
+                logout("$STAFF_SESSION_COOKIE=${stale.token.value}").let {
                     it.status shouldBe Status.NO_CONTENT
                     checkNotNull(it.header("Set-Cookie")) shouldContain "Max-Age=0"
                 }
+            }
+        }
+
+        test("anonymous logout is idempotent cleanup: no cookie and no authentication still clears the cookie") {
+            TestApplication.create().use { app ->
+                val response = app.http(Request(Method.POST, "/auth/logout"))
+                response.status shouldBe Status.NO_CONTENT
+                val cleared = checkNotNull(response.header("Set-Cookie"))
+                cleared shouldStartWith "$STAFF_SESSION_COOKIE="
+                cleared shouldContain "Max-Age=0"
+                // Optional authentication never makes a token a logout mechanism.
+                app.http(Request(Method.POST, "/auth/logout").asFionasWeb(app)).status shouldBe Status.FORBIDDEN
             }
         }
 

@@ -67,6 +67,12 @@ private val currentUserBody = jsonBody(CurrentUserResponse.serializer())
 private val setPasswordBody = jsonBody(SetStaffPasswordRequest.serializer())
 private val authTag = Tag("Authentication", "Staff browser sessions and service access tokens.")
 
+/**
+ * The name of Fiona's staff browser session cookie: the one `SessionCookie` Fiona composes and
+ * the cookie its OpenAPI `staffSession` scheme names. Fiona's policy, not commerce-runtime's.
+ */
+const val STAFF_SESSION_COOKIE = "__Host-fionas_session"
+
 /** Where SERVICE principals exchange a credential for a short-lived access token. */
 const val SERVICE_TOKEN_PATH = "/auth/service/token"
 
@@ -198,7 +204,7 @@ fun logoutRoute(
             "browser sessions are revoked: a SERVICE access token is not revoked by this route (it expires, and disabling " +
             "the service suspends it), and a request authenticated only by one is answered 403."
         tags += authTag
-        security = staffSessionSecurity
+        security = optionalStaffSessionSecurity
         returning(Status.NO_CONTENT to "The session, if any, is revoked and the browser cookie is cleared.")
         returningError(
             ErrorCategory.FORBIDDEN,

@@ -561,7 +561,10 @@ Also:
   `access.authenticated()`) or `principalAccess(permission, …)` (behind
   `access.requirePermission(permission)`) in `http/AuthRoutes.kt`, while the handler still
   states its enforcement explicitly; the helpers never enforce anything. Public routes (login,
-  the token endpoint) declare no security; logout declares `staffSession` only.
+  the token endpoint) declare no security; logout declares `staffSession` OR anonymous (`{}`,
+  `DocumentedSecurity(..., allowsAnonymous = true)`), never `serviceAccessToken`. The cookie name
+  is one constant, `STAFF_SESSION_COOKIE` (`http/AuthRoutes.kt`), used by the composed
+  `SessionCookie` and the `staffSession` scheme alike.
 - **Logout is session-only.** `POST /auth/logout` applies `BrowserOrigin`, then the runtime's
   `sessionAuthentication(sessions, cookie)`: a valid session is revoked and the cookie cleared
   (`204`); a cookie whose session the runtime no longer accepts is still cleared (`204`);
@@ -1337,7 +1340,7 @@ The remaining gaps below have not been re-audited.
   token is `403` and stays valid, a valid session is revoked, a stale cookie is still cleared;
   administrator provisioning and rotation through `/admin/access`), `OpenApiDocumentSpec` (the
   document's paths, operationIds, statuses, schemas, and security: `staffSession` OR
-  `serviceAccessToken` on every protected Fiona route, `staffSession` only on logout, nothing on
+  `serviceAccessToken` on every protected Fiona route, `staffSession` OR anonymous on logout, nothing on
   login and the token endpoint, and the runtime routes' upstream metadata gap pinned), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
   complete handler, and parity with the generator), `GenerateOpenApiSpec` (the build
   artifact, byte-deterministic), and `ArchitectureSpec`.

@@ -201,7 +201,7 @@ class AuthRoutesSpec :
                 val serviceId = ServiceId(UUID.randomUUID())
                 app.authorization.createService(ServiceIdentity(serviceId, "future-adapter", PrincipalStatus.ACTIVE, emptySet()))
                 // A runtime session is enough to exercise principal semantics; no service token transport is mounted.
-                val cookie = "__Host-fionas_session=${app.sessions.create(serviceId).token.value}"
+                val cookie = "$STAFF_SESSION_COOKIE=${app.sessions.create(serviceId).token.value}"
                 request(app, Method.GET, "/auth/me", cookie).status shouldBe Status.FORBIDDEN
 
                 fun principal() =

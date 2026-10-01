@@ -36,6 +36,7 @@ import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.OPENAPI_PATH
+import io.github.castab.fionas.commerce.http.STAFF_SESSION_COOKIE
 import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.fionaServiceAuthentication
@@ -262,7 +263,7 @@ fun fionaOpenApiDocument(version: String = fionaVersion()): String {
     val renderingAuth =
         FionaAuthRoutes(
             notInvokedSessions,
-            SessionCookie("__Host-fionas_session"),
+            SessionCookie(STAFF_SESSION_COOKIE),
             renderingAccess,
             Filter.NoOp,
         )

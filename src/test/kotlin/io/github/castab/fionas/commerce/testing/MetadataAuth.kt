@@ -7,6 +7,7 @@ import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.runtime.session.SessionToken
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
+import io.github.castab.fionas.commerce.http.STAFF_SESSION_COOKIE
 import io.github.castab.fionas.commerce.openapi.renderingOnlyAccess
 import org.http4k.core.Filter
 import org.http4k.core.NoOp
@@ -39,7 +40,7 @@ val metadataAuth =
                     principalId: PrincipalId,
                 ): Unit = error("not called")
             },
-        cookie = SessionCookie("__Host-fionas_session"),
+        cookie = SessionCookie(STAFF_SESSION_COOKIE),
         access = renderingOnlyAccess(),
         origin = Filter.NoOp,
     )

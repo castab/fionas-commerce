@@ -32,6 +32,7 @@ import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.LoginRateLimit
+import io.github.castab.fionas.commerce.http.STAFF_SESSION_COOKIE
 import io.github.castab.fionas.commerce.http.apiDocs
 import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
@@ -126,7 +127,7 @@ fun fionaApplication(
             val credentials = JdbiCredentialRepository()
             val hasher = PasswordHasher()
             BootstrapFirstAdmin(context.transactor, context.authorization, credentials, hasher, clock).invoke(bootstrap)
-            val cookie = SessionCookie("__Host-fionas_session")
+            val cookie = SessionCookie(STAFF_SESSION_COOKIE)
             val origin = BrowserOrigin(trustedOrigins, cookie)
             // Session first: a request carrying a staff session stays that USER even if it also carries a token.
             val authenticate =

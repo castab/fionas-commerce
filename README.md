@@ -1258,7 +1258,10 @@ schemes for the two authentication transports: `staffSession` (an API key in the
 them as two separate requirement objects, meaning either one (OR), never both together; this
 includes the customer routes, `GET /auth/me` (which then rejects a SERVICE), the inquiry,
 financial-document, and payment routes, and the password route. `POST /auth/logout` lists
-`staffSession` only; `POST /auth/login` and `POST /auth/service/token` declare no security. The
+`staffSession` OR anonymous (`{}`), never `serviceAccessToken`: it is idempotent browser cleanup
+(a live session is revoked, an active or stale cookie cleared, and a request with no cookie also
+succeeds with `204`), while a request authenticated only by a service access token is `403`
+because service tokens are not logout sessions. `POST /auth/login` and `POST /auth/service/token` declare no security. The
 schemes are documentation only: enforcement stays each route's `AccessControl`. **Known gap:**
 the runtime capability routes (`/offering-catalog`, `/admin/access`, `/authorization/me`)
 enforce the same `AccessControl` but carry no security metadata, because commerce-runtime
