@@ -6,6 +6,7 @@ import io.github.castab.commerce.offering.OfferingCategorySelection
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingSelections
 import io.github.castab.commerce.offering.OfferingsRevision
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import io.github.castab.commerce.runtime.http.jsonBody
@@ -13,6 +14,7 @@ import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.offering.EstimatePreview
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.Tag
@@ -22,6 +24,7 @@ import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.core.then
 import org.http4k.core.with
 import java.time.Duration
 
@@ -167,23 +170,18 @@ private fun exampleLine(
  */
 fun previewEstimateRoute(
     previewEstimate: (FionasPricingInputs) -> EstimatePreview,
-    uiApiKey: UiApiKey,
+    access: AccessControl,
 ): ContractRoute =
     "/estimate-preview" meta {
         operationId = "previewEstimate"
-        security = uiApiKeySecurity(uiApiKey)
-        returningError(
-            ErrorCategory.UNAUTHENTICATED,
-            "the trusted server-side UI Bearer credential is missing or invalid.",
-            "Authentication is required",
-        )
+        serviceAccess(FionaPermissions.EstimatePreviewCreate)
         summary = "Preview an estimate"
         description =
             "Prices a selection from one exact revision of Fiona's Offerings catalog for an event's guest count and " +
             "service duration: the base service, the ice cream service, catalog prices of the chosen offerings, and " +
             "extra toppings. Nothing is recorded, and the result is not a quote. The catalog revision is never " +
             "replaced by a later one, so a selection made from an old revision is priced, or rejected, as that " +
-            "revision stands."
+            "revision stands. Requires `${FionaPermissions.EstimatePreviewCreate.value}`."
         tags += estimates
         receiving(estimatePreviewRequest to exampleRequest)
         returning(Status.OK, estimatePreviewResponse to exampleResponse, "The estimate's lines and totals.")
@@ -203,18 +201,19 @@ fun previewEstimateRoute(
             violations = listOf(ValidationViolationResponse("TOO_MANY_SELECTIONS")),
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
-    } bindContract Method.POST to { request: Request ->
-        val body = estimatePreviewRequest(request)
-        val inputs =
-            pricingInputs(
-                body.catalogRevision,
-                body.guestCount,
-                body.guestCountIsMinimum,
-                body.durationMinutes,
-                body.selections.map { it.category to it.offerings },
-            )
-        Response(Status.OK).with(estimatePreviewResponse of previewEstimate(inputs).toResponse())
-    }
+    } bindContract Method.POST to
+        access.requirePermission(FionaPermissions.EstimatePreviewCreate).then { request: Request ->
+            val body = estimatePreviewRequest(request)
+            val inputs =
+                pricingInputs(
+                    body.catalogRevision,
+                    body.guestCount,
+                    body.guestCountIsMinimum,
+                    body.durationMinutes,
+                    body.selections.map { it.category to it.offerings },
+                )
+            Response(Status.OK).with(estimatePreviewResponse of previewEstimate(inputs).toResponse())
+        }
 
 private fun EstimatePreview.toResponse() =
     EstimatePreviewResponse(

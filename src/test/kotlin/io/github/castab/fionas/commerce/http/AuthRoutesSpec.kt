@@ -21,10 +21,12 @@ import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.staff.PasswordHasher
 import io.github.castab.fionas.commerce.staff.SecretPassword
+import io.github.castab.fionas.commerce.testing.FIONAS_WEB_PERMISSIONS
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.testClock
-import io.github.castab.fionas.commerce.testing.withUiKey
+import io.github.castab.fionas.commerce.testing.withBearer
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeSorted
 import io.kotest.matchers.collections.shouldContainAll
@@ -95,8 +97,12 @@ class AuthRoutesSpec :
                         CommercePermissions.RoleRead,
                         CommercePermissions.RoleManage,
                         CommercePermissions.RoleAssign,
+                        RuntimePermissions.ServiceCredentialManage,
                         FionaPermissions.CredentialsManage,
                         FionaPermissions.InquiriesRead,
+                        FionaPermissions.InquiriesCreate,
+                        FionaPermissions.InquiryFormRead,
+                        FionaPermissions.EstimatePreviewCreate,
                     )
                 val hash = app.database.strings("SELECT password_hash FROM fionas.user_credentials").single()
                 hash.startsWith("\$argon2id\$") shouldBe true
@@ -237,8 +243,19 @@ class AuthRoutesSpec :
                         CommerceJson.asA(it.bodyString(), CurrentPrincipalDto.serializer())
                     }
                 request(app, Method.GET, "/authorization/me", cookie = null).status shouldBe Status.UNAUTHORIZED
-                // The trusted UI key establishes no principal.
-                app.http(Request(Method.GET, "/authorization/me").withUiKey()).status shouldBe Status.UNAUTHORIZED
+                // The retired static UI key establishes no principal.
+                app.http(Request(Method.GET, "/authorization/me").withBearer("deterministic-test-ui-key")).status shouldBe
+                    Status.UNAUTHORIZED
+                // A service access token establishes the SERVICE principal, with its role's live permissions.
+                app.http(Request(Method.GET, "/authorization/me").asFionasWeb(app)).let {
+                    it.status shouldBe Status.OK
+                    val service = CommerceJson.asA(it.bodyString(), CurrentPrincipalDto.serializer())
+                    service.principal.kind shouldBe "SERVICE"
+                    service.principal.id shouldBe
+                        app.web.id.value
+                            .toString()
+                    service.permissions shouldBe FIONAS_WEB_PERMISSIONS.map { key -> key.value }.sorted()
+                }
                 val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
                 principal().let {
                     it.principal.kind shouldBe "USER"
@@ -292,7 +309,7 @@ class AuthRoutesSpec :
                     ).permissionCatalogRevision shouldBe catalog.revision
                 // Catalog membership grants nothing: bootstrap never expands the Administrator role to match it.
                 checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions shouldNotContain
-                    RuntimePermissions.ServiceCredentialManage
+                    CommercePermissions.BookingRead
             }
         }
 
@@ -368,6 +385,10 @@ class AuthRoutesSpec :
                 request(app, Method.GET, "/admin/access/permissions").bodyString().let { catalog ->
                     catalog shouldContain FionaPermissions.CredentialsManage.value
                     catalog shouldContain FionaPermissions.InquiriesRead.value
+                    catalog shouldContain FionaPermissions.InquiriesCreate.value
+                    catalog shouldContain FionaPermissions.InquiryFormRead.value
+                    catalog shouldContain FionaPermissions.EstimatePreviewCreate.value
+                    catalog shouldContain RuntimePermissions.ServiceCredentialManage.value
                 }
                 val created =
                     request(app, Method.POST, "/admin/access/users", body = """{"username":"new-staff","displayName":"New Staff"}""")

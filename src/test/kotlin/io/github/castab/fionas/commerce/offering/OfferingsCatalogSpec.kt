@@ -17,9 +17,9 @@ import io.github.castab.commerce.runtime.offering.RetiredCategoriesDto
 import io.github.castab.commerce.runtime.offering.RetiredOfferingsDto
 import io.github.castab.fionas.commerce.http.EstimatePreviewResponse
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactly
@@ -309,7 +309,7 @@ class OfferingsCatalogSpec :
                             Request(
                                 Method.POST,
                                 "/estimate-preview",
-                            ).withUiKey().header("Content-Type", "application/json").body(pricingBody(originalRevision)),
+                            ).asFionasWeb(app).header("Content-Type", "application/json").body(pricingBody(originalRevision)),
                         )
                     preview.status shouldBe Status.OK
                     preview.body(EstimatePreviewResponse.serializer()).catalogRevision shouldBe originalRevision

@@ -12,10 +12,10 @@ import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldBeUnique
@@ -59,7 +59,7 @@ class InquiryRoutesSpec :
             http(
                 Request(Method.POST, "/inquiries")
                     .withSubmissionKey()
-                    .withUiKey()
+                    .asFionasWeb(this)
                     .header("Content-Type", "application/json")
                     .body(body),
             )
@@ -428,7 +428,10 @@ class InquiryRoutesSpec :
             ).forEach { inputs ->
                 val preview =
                     application.http(
-                        Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(inputs),
+                        Request(
+                            Method.POST,
+                            "/estimate-preview",
+                        ).asFionasWeb(application).header("Content-Type", "application/json").body(inputs),
                     )
                 val submitted = post(inquiryBody("rejected-${UUID.randomUUID()}@example.com", pricing = inputs))
 
@@ -486,7 +489,10 @@ class InquiryRoutesSpec :
             val inputs = pricingBody(revision)
             val preview =
                 application.http(
-                    Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(inputs),
+                    Request(
+                        Method.POST,
+                        "/estimate-preview",
+                    ).asFionasWeb(application).header("Content-Type", "application/json").body(inputs),
                 )
             preview.status shouldBe Status.OK
             val previewTotal = CommerceJson.asA(preview.bodyString(), EstimatePreviewResponse.serializer()).total

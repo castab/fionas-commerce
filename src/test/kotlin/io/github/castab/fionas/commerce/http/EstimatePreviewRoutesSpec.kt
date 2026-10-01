@@ -6,9 +6,9 @@ import io.github.castab.commerce.runtime.http.ValidationErrorResponse
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.perGuest
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
@@ -39,7 +39,7 @@ class EstimatePreviewRoutesSpec :
         ) = if (path.startsWith("/offering-catalog")) {
             application.adminPost(path, body)
         } else {
-            application.http(Request(Method.POST, path).withUiKey().header("Content-Type", "application/json").body(body))
+            application.http(Request(Method.POST, path).asFionasWeb(application).header("Content-Type", "application/json").body(body))
         }
 
         fun Response.preview() = CommerceJson.asA(bodyString(), EstimatePreviewResponse.serializer())

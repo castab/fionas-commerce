@@ -351,25 +351,22 @@ private fun RouteMetaDsl.staffErrors() {
 }
 
 /**
- * `POST /inquiries`: records an inquiry, establishing its customer. Public. The route only
+ * `POST /inquiries`: records an inquiry, establishing its customer. Requires
+ * `fionas.inquiries.create`, normally held by the web frontend's SERVICE principal. The route only
  * translates between transport and application values; [createInquiry] does the work, and
  * failures reach callers through commerce-runtime's error handling. The response is a
  * receipt of the new inquiry only: a public caller never reads a stored customer back.
  */
 fun createInquiryRoute(
     createInquiry: (CreateInquiry.Command) -> Inquiry,
-    uiApiKey: UiApiKey,
+    access: AccessControl,
 ): ContractRoute =
     "/inquiries" meta {
         operationId = "createInquiry"
         headers += submissionKeyHeader
+        // The key is read by the handler, after authorization, so an unauthorized caller always gets `401` or `403`.
         preFlightExtraction = PreFlightExtraction.None
-        security = uiApiKeySecurity(uiApiKey)
-        returningError(
-            ErrorCategory.UNAUTHENTICATED,
-            "the trusted server-side UI Bearer credential is missing or invalid.",
-            "Authentication is required",
-        )
+        serviceAccess(FionaPermissions.InquiriesCreate)
         summary = "Record an inquiry"
         description =
             "Records a prospective customer's inquiry. Idempotency-Key is required: a successful same-key/same-intent " +
@@ -387,7 +384,8 @@ fun createInquiryRoute(
             "customer is found by normalized email, or created with the inquiry in the same transaction; an existing " +
             "customer's stored name is never changed. The response is a receipt of the new inquiry alone: it " +
             "describes no stored customer and does not expose the initial Estimate. The `Location` response header " +
-            "holds the new inquiry's path, `/inquiries/{inquiryId}`, which staff read."
+            "holds the new inquiry's path, `/inquiries/{inquiryId}`, which staff read. " +
+            "Requires `${FionaPermissions.InquiriesCreate.value}`."
         tags += inquiries
         receiving(createInquiryRequest to exampleRequest)
         returning(Status.CREATED, inquiryReceiptResponse to exampleReceipt, "The recorded inquiry's receipt. `Location` holds its path.")
@@ -425,46 +423,47 @@ fun createInquiryRoute(
                 "The same runtime envelope uses `conflict` if a concurrent request created the customer first; retry that request.",
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
-    } bindContract Method.POST to { request: Request ->
-        val submissionKey = submissionKey(request)
-        val body = createInquiryRequest(request)
-        val command =
-            validating {
-                CreateInquiry.Command(
-                    name = CustomerName.of(body.name),
-                    email = Email.of(body.email),
-                    message = InquiryMessage.ofOptional(body.message),
-                    zipCode = ZipCode.of(body.zipCode),
-                    eventDate = EventDate.of(body.eventDate),
-                    eventType = body.eventType.toDomain(),
-                    submissionKey = submissionKey,
-                    pricingInputs =
-                        pricingInputs(
-                            body.pricingInputs.catalogRevision,
-                            body.pricingInputs.guestCount,
-                            body.pricingInputs.guestCountIsMinimum,
-                            body.pricingInputs.durationMinutes,
-                            body.pricingInputs.selections.map { it.category to it.offerings },
-                        ),
-                )
-            }
-        try {
-            val created = createInquiry(command)
-            Response(Status.CREATED)
-                .header("Location", "/inquiries/${created.id.value}")
-                .with(inquiryReceiptResponse of InquiryReceiptResponse(created.id.value.toString(), created.createdAt.toString()))
-        } catch (failure: CommerceFailure.Conflict) {
-            val code =
-                when (failure.cause) {
-                    is CatalogRevisionStale -> CATALOG_REVISION_STALE
-                    is IdempotencyKeyReused -> IDEMPOTENCY_KEY_REUSED
-                    else -> throw failure
+    } bindContract Method.POST to
+        access.requirePermission(FionaPermissions.InquiriesCreate).then { request: Request ->
+            val submissionKey = submissionKey(request)
+            val body = createInquiryRequest(request)
+            val command =
+                validating {
+                    CreateInquiry.Command(
+                        name = CustomerName.of(body.name),
+                        email = Email.of(body.email),
+                        message = InquiryMessage.ofOptional(body.message),
+                        zipCode = ZipCode.of(body.zipCode),
+                        eventDate = EventDate.of(body.eventDate),
+                        eventType = body.eventType.toDomain(),
+                        submissionKey = submissionKey,
+                        pricingInputs =
+                            pricingInputs(
+                                body.pricingInputs.catalogRevision,
+                                body.pricingInputs.guestCount,
+                                body.pricingInputs.guestCountIsMinimum,
+                                body.pricingInputs.durationMinutes,
+                                body.pricingInputs.selections.map { it.category to it.offerings },
+                            ),
+                    )
                 }
-            Response(Status.CONFLICT)
-                .with(inquiryConflictBody of ErrorResponse(code, failure.message!!))
-                .header("Cache-Control", "no-store")
+            try {
+                val created = createInquiry(command)
+                Response(Status.CREATED)
+                    .header("Location", "/inquiries/${created.id.value}")
+                    .with(inquiryReceiptResponse of InquiryReceiptResponse(created.id.value.toString(), created.createdAt.toString()))
+            } catch (failure: CommerceFailure.Conflict) {
+                val code =
+                    when (failure.cause) {
+                        is CatalogRevisionStale -> CATALOG_REVISION_STALE
+                        is IdempotencyKeyReused -> IDEMPOTENCY_KEY_REUSED
+                        else -> throw failure
+                    }
+                Response(Status.CONFLICT)
+                    .with(inquiryConflictBody of ErrorResponse(code, failure.message!!))
+                    .header("Cache-Control", "no-store")
+            }
         }
-    }
 
 private fun submissionKey(request: Request): InquirySubmissionKey {
     val value = submissionKeyHeader(request)

@@ -7,6 +7,7 @@ import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingsSnapshot
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
@@ -18,6 +19,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryFormInput
 import io.github.castab.fionas.commerce.inquiry.inquiryForm
 import io.github.castab.fionas.commerce.inquiry.publicInquiryOfferings
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonClassDiscriminator
@@ -241,11 +243,10 @@ private val exampleInquiryForm =
 
 fun getInquiryFormRoute(
     getInquiryForm: () -> InquiryForm,
-    uiApiKey: UiApiKey,
+    access: AccessControl,
 ): ContractRoute =
     "/inquiry-form" meta {
         operationId = "getInquiryForm"
-        security = uiApiKeySecurity(uiApiKey)
         summary = "Read the customer inquiry form"
         description = "Public ordered questions for POST /inquiries. Input semantics and presentation hints are separate. " +
             "Service configuration is required: every inquiry is a request for configured ice cream service, priced on " +
@@ -258,7 +259,8 @@ fun getInquiryFormRoute(
             "Temporary unavailability is distinct from disabled/retired and does not invalidate the form. " +
             "pricingPreview resolves policy/catalog facts for visible options for instant advisory browser arithmetic. " +
             "Contact details, event date/type, and pricing are validated on submission, independently of this metadata. " +
-            "Requires the trusted server-side UI Bearer key. Successful responses have Cache-Control: " +
+            "Requires `${FionaPermissions.InquiryFormRead.value}`, normally held by the server-side web frontend's SERVICE " +
+            "principal through a short-lived access token from POST $SERVICE_TOKEN_PATH. Successful responses have Cache-Control: " +
             "private, max-age=60, must-revalidate; failures have no-store."
         tags += inquiries
         returning(
@@ -267,7 +269,7 @@ fun getInquiryFormRoute(
             "The question definition with choices from one current catalog revision.",
         )
         returningError(ErrorCategory.NOT_FOUND, "Fiona's catalog has not been initialized.", "Offerings catalog was not found")
-        returningError(ErrorCategory.UNAUTHENTICATED, "the UI credential is missing or invalid.", "Authentication is required")
+        serviceAccess(FionaPermissions.InquiryFormRead)
         returningError(
             ErrorCategory.INTERNAL_FAILURE,
             "the public catalog cannot be represented/priced across every allowed duration " +
@@ -276,9 +278,12 @@ fun getInquiryFormRoute(
             INTERNAL_FAILURE,
         )
     } bindContract Method.GET to
-        inquiryFormCaching.then(CommerceErrorHandling).then { _: Request ->
-            Response(Status.OK).with(inquiryFormBody of getInquiryForm().toResponse())
-        }
+        inquiryFormCaching
+            .then(access.requirePermission(FionaPermissions.InquiryFormRead))
+            .then(CommerceErrorHandling)
+            .then { _: Request ->
+                Response(Status.OK).with(inquiryFormBody of getInquiryForm().toResponse())
+            }
 
 private val inquiryFormCaching =
     Filter { next ->

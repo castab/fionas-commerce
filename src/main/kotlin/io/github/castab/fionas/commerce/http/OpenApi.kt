@@ -157,7 +157,8 @@ annotation class ApiProperty(
  * [offerings], so the runtime alone describes them.
  *
  * Only what the API's DTOs use is supported: objects whose properties are strings, `Int`s
- * (`integer`, `int32`), booleans, lists of those or of objects, and nested `@Serializable`
+ * (`integer`, `int32`), `Long`s (`integer`, `int64`; the runtime's service token response
+ * states its lifetime in seconds as one), booleans, lists of those or of objects, and nested `@Serializable`
  * objects, enums, and sealed inputs with a string discriminator and explicit oneOf variants.
  * Anything else (other numbers, maps, open polymorphism, or nullable list items) fails rendering loudly, rather than publishing a schema that
  * misdescribes the wire format; extend it when a DTO needs more.
@@ -333,6 +334,11 @@ private class KotlinxSchemas(
                 buildJsonObject {
                     put("type", "integer")
                     put("format", "int32")
+                }
+            PrimitiveKind.LONG ->
+                buildJsonObject {
+                    put("type", "integer")
+                    put("format", "int64")
                 }
             PrimitiveKind.BOOLEAN -> buildJsonObject { put("type", "boolean") }
             SerialKind.ENUM ->

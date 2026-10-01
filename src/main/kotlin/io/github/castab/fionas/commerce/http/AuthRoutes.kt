@@ -1,10 +1,14 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.authenticatedPrincipal
 import io.github.castab.commerce.runtime.http.errorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
+import io.github.castab.commerce.runtime.serviceauth.ServiceAuthenticationHttpCapability
+import io.github.castab.commerce.runtime.serviceauth.serviceAccessTokenOpenApiSecurity
+import io.github.castab.commerce.runtime.serviceauth.serviceAuthenticationHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
@@ -17,6 +21,7 @@ import io.github.castab.fionas.commerce.staff.SecretPassword
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
+import org.http4k.contract.RouteMetaDsl
 import org.http4k.contract.Tag
 import org.http4k.contract.bindContract
 import org.http4k.contract.div
@@ -60,7 +65,19 @@ data class SetStaffPasswordRequest(
 private val loginBody = jsonBody(LoginRequest.serializer())
 private val currentUserBody = jsonBody(CurrentUserResponse.serializer())
 private val setPasswordBody = jsonBody(SetStaffPasswordRequest.serializer())
-private val authTag = Tag("Authentication", "Fiona staff browser sessions.")
+private val authTag = Tag("Authentication", "Staff browser sessions and service access tokens.")
+
+/** Where SERVICE principals exchange a credential for a short-lived access token. */
+const val SERVICE_TOKEN_PATH = "/auth/service/token"
+
+/**
+ * commerce-runtime's service token endpoint, mounted at [SERVICE_TOKEN_PATH] in Fiona's
+ * contract. Fiona owns only where it is served; issuing and verifying tokens is the runtime's.
+ * The endpoint is public by design (a credential obtains the token), so production protects
+ * it with edge rate limiting and/or private reachability.
+ */
+fun fionaServiceAuthentication(context: CommerceRuntimeContext): ServiceAuthenticationHttpCapability =
+    serviceAuthenticationHttpCapability(context, SERVICE_TOKEN_PATH, setOf(authTag))
 
 /** Shared by Fiona's password route and the runtime's principal and role administration routes. */
 val staffAdministrationTag = Tag("Staff administration", "Staff accounts, credentials, roles, and permissions.")
@@ -72,6 +89,27 @@ val staffAdministrationTag = Tag("Staff administration", "Staff accounts, creden
  */
 val authorizationTag =
     Tag("Authorization", "The principal that authenticated the request, USER or SERVICE, and its effective permissions.")
+
+/**
+ * Route metadata for an operation the server-side web frontend calls as a SERVICE principal:
+ * the runtime's service bearer scheme (documentation only) and the normal distinction between
+ * `401` (no valid authentication) and `403` (an authenticated principal without [permission]).
+ * Enforcement is the route's `AccessControl.requirePermission(permission)`, which also accepts
+ * a staff session holding the permission; nothing trusts a caller for being a service.
+ */
+internal fun RouteMetaDsl.serviceAccess(permission: PermissionKey) {
+    security = serviceAccessTokenOpenApiSecurity
+    returningError(
+        ErrorCategory.UNAUTHENTICATED,
+        "no valid authentication: the service access token (or staff session) is missing, malformed, unknown, or expired.",
+        "Authentication is required",
+    )
+    returningError(
+        ErrorCategory.FORBIDDEN,
+        "the authenticated principal lacks `${permission.value}`.",
+        "The authenticated principal is not permitted to perform this request",
+    )
+}
 
 fun loginRoute(
     login: (String, SecretPassword) -> IssuedSession?,
@@ -149,7 +187,8 @@ fun currentUserRoute(
         operationId = "getCurrentUser"
         summary = "Read the authenticated staff identity"
         description =
-            "Returns the current human staff profile, role keys, and effective live permissions. Requires only an active staff session."
+            "Returns the current human staff profile, role keys, and effective live permissions. Requires only an active staff " +
+            "session; a SERVICE principal's access token authenticates but is answered with 403, never a staff profile."
         tags += authTag
         returning(
             Status.OK,
@@ -165,7 +204,7 @@ fun currentUserRoute(
         returningError(ErrorCategory.UNAUTHENTICATED, "there is no active session.", "Authentication is required")
         returningError(
             ErrorCategory.FORBIDDEN,
-            "the principal is not an active human staff user.",
+            "the principal is not an active human staff user, for example a SERVICE principal.",
             "The current principal is not an active staff user",
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure.", INTERNAL_FAILURE)

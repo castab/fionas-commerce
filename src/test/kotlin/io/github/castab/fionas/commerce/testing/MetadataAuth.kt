@@ -7,7 +7,6 @@ import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.runtime.session.SessionToken
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
-import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.openapi.renderingOnlyAccess
 import org.http4k.core.Filter
 import org.http4k.core.NoOp
@@ -43,5 +42,4 @@ val metadataAuth =
         cookie = SessionCookie("__Host-fionas_session"),
         access = renderingOnlyAccess(),
         origin = Filter.NoOp,
-        uiApiKey = UiApiKey(TEST_UI_API_KEY),
     )

@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce.staff
 
 import de.mkammerer.argon2.Argon2Factory
 import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
+import io.github.castab.commerce.runtime.authorization.RuntimePermissions
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.session.IssuedSession
@@ -50,10 +51,22 @@ class PasswordHasher {
         }
 }
 
-/** Fiona's own permissions, for Fiona-specific actions only; generic commerce actions use `CommercePermissions`. */
+/**
+ * Fiona's own permissions, for Fiona-specific actions only; generic commerce actions use `CommercePermissions`.
+ *
+ * Each names a capability, never a kind of caller: a staff user or a SERVICE principal (for
+ * example the server-side web frontend) holds them only through its current roles.
+ */
 object FionaPermissions {
     val CredentialsManage = PermissionKey("fionas.credentials.manage")
     val InquiriesRead = PermissionKey("fionas.inquiries.read")
+    val InquiriesCreate = PermissionKey("fionas.inquiries.create")
+    val InquiryFormRead = PermissionKey("fionas.inquiry-form.read")
+    val EstimatePreviewCreate = PermissionKey("fionas.estimate-preview.create")
+
+    private val inquiries = PermissionGroup("fionas.inquiries")
+    private val pricing = PermissionGroup("fionas.pricing")
+
     val definitions =
         listOf(
             PermissionDefinition(
@@ -66,7 +79,25 @@ object FionaPermissions {
                 InquiriesRead,
                 "Read inquiries",
                 "List Fiona's inquiries and read each one with its customer's contact details and requested configuration",
-                PermissionGroup("fionas.inquiries"),
+                inquiries,
+            ),
+            PermissionDefinition(
+                InquiriesCreate,
+                "Submit inquiries",
+                "Record a customer's inquiry with its configured service, which prices and materializes its initial Estimate",
+                inquiries,
+            ),
+            PermissionDefinition(
+                InquiryFormRead,
+                "Read the inquiry form",
+                "Read the customer inquiry form with its current catalog choices and advisory pricing facts",
+                inquiries,
+            ),
+            PermissionDefinition(
+                EstimatePreviewCreate,
+                "Preview estimates",
+                "Price a selection from an exact catalog revision without recording anything",
+                pricing,
             ),
         )
 }
@@ -165,9 +196,12 @@ class BootstrapAdmin(
 /**
  * Startup operation: only the first staff user can be provisioned this way.
  *
- * The Administrator role it creates lists its grants explicitly. They are fixed when the role
- * is created: a later release that grants more never changes an Administrator role that
- * already exists, whose grants are managed through the runtime's administration API.
+ * The Administrator role it creates lists its grants explicitly, including the runtime's
+ * `ServiceCredentialManage` (so the first administrator can provision a service principal's
+ * credential, not only its identity and roles) and Fiona's customer-operation permissions.
+ * They are fixed when the role is created: a later release that grants more never changes an
+ * Administrator role that already exists, whose grants are managed through the runtime's
+ * administration API.
  */
 class BootstrapFirstAdmin(
     private val transactor: Transactor,
@@ -196,7 +230,7 @@ class BootstrapFirstAdmin(
                         RoleDefinition(
                             CommerceRoles.Administrator,
                             "Administrator",
-                            "May administer Fiona's staff access, inquiries, offerings catalog, financial documents, payments, and refunds",
+                            "May administer Fiona's staff and service access, inquiries, offerings catalog, financial documents, payments, and refunds",
                             setOf(
                                 CommercePermissions.OfferingsManage,
                                 CommercePermissions.FinancialDocumentRead,
@@ -208,8 +242,12 @@ class BootstrapFirstAdmin(
                                 CommercePermissions.RoleRead,
                                 CommercePermissions.RoleManage,
                                 CommercePermissions.RoleAssign,
+                                RuntimePermissions.ServiceCredentialManage,
                                 FionaPermissions.CredentialsManage,
                                 FionaPermissions.InquiriesRead,
+                                FionaPermissions.InquiriesCreate,
+                                FionaPermissions.InquiryFormRead,
+                                FionaPermissions.EstimatePreviewCreate,
                             ),
                         ),
                     )

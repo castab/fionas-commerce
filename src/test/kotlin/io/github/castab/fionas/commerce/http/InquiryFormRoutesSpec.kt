@@ -15,11 +15,11 @@ import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.setOfferingState
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
@@ -37,7 +37,7 @@ class InquiryFormRoutesSpec :
         var revision = 0
 
         fun TestApplication.form(): InquiryFormResponse {
-            val response = http(Request(Method.GET, "/inquiry-form").withUiKey())
+            val response = http(Request(Method.GET, "/inquiry-form").asFionasWeb(this))
             response.status shouldBe Status.OK
             response.header("Cache-Control") shouldBe "private, max-age=60, must-revalidate"
             return CommerceJson.asA(response.bodyString(), InquiryFormResponse.serializer())
@@ -183,7 +183,7 @@ class InquiryFormRoutesSpec :
                     .map { it.availability } shouldBe
                     listOf(OfferingAvailabilityDto.UNAVAILABLE, OfferingAvailabilityDto.UNAVAILABLE)
                 fresh.setOfferingState(latest, "chocolate", selectionState = OfferingSelectionStateDto.DISABLED)
-                val failed = fresh.http(Request(Method.GET, "/inquiry-form").withUiKey())
+                val failed = fresh.http(Request(Method.GET, "/inquiry-form").asFionasWeb(fresh))
                 failed.status shouldBe Status.INTERNAL_SERVER_ERROR
                 failed.header("Cache-Control") shouldBe "no-store"
                 CommerceJson.asA(failed.bodyString(), ErrorResponse.serializer()).code shouldBe "internal_failure"
@@ -192,7 +192,7 @@ class InquiryFormRoutesSpec :
 
         test("a missing catalog returns the runtime not-found envelope; the read initializes nothing") {
             TestApplication.create().use { fresh ->
-                val response = fresh.http(Request(Method.GET, "/inquiry-form").withUiKey())
+                val response = fresh.http(Request(Method.GET, "/inquiry-form").asFionasWeb(fresh))
                 response.status shouldBe Status.NOT_FOUND
                 response.header("Cache-Control") shouldBe "no-store"
                 CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()).code shouldBe "not_found"
@@ -332,7 +332,11 @@ class InquiryFormRoutesSpec :
                     ).input as InquiryFormInputResponse.IntegerChoice
             ).options.map { it.value } shouldContainExactly
                 FIONAS_PRICING_POLICY.allowedDurations.sorted().map { Math.toIntExact(it.toMinutes()) }
-            val json = CommerceJson.parse(application.http(Request(Method.GET, "/inquiry-form").withUiKey()).bodyString()).jsonObject
+            val json =
+                CommerceJson
+                    .parse(
+                        application.http(Request(Method.GET, "/inquiry-form").asFionasWeb(application)).bodyString(),
+                    ).jsonObject
             json
                 .getValue("sections")
                 .jsonArray
@@ -399,7 +403,7 @@ class InquiryFormRoutesSpec :
             val response =
                 application.http(
                     Request(Method.POST, "/estimate-preview")
-                        .withUiKey()
+                        .asFionasWeb(application)
                         .header("Content-Type", "application/json")
                         .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), inputs)),
                 )
@@ -451,7 +455,10 @@ class InquiryFormRoutesSpec :
                             ""","total":"0.01","lines":[{"unitPrice":"0.01"}]}"""
                     val response =
                         fresh.http(
-                            Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(forged),
+                            Request(
+                                Method.POST,
+                                "/estimate-preview",
+                            ).asFionasWeb(fresh).header("Content-Type", "application/json").body(forged),
                         )
                     response.status shouldBe Status.OK
                     BigDecimal(CommerceJson.asA(response.bodyString(), EstimatePreviewResponse.serializer()).total)
@@ -480,7 +487,7 @@ class InquiryFormRoutesSpec :
                 val response =
                     fresh.http(
                         Request(Method.POST, "/estimate-preview")
-                            .withUiKey()
+                            .asFionasWeb(fresh)
                             .header("Content-Type", "application/json")
                             .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), historical)),
                     )
@@ -500,7 +507,7 @@ class InquiryFormRoutesSpec :
                 TestApplication.create().use { fresh ->
                     val initial = fresh.createAcceptanceCatalog()
                     fresh.addOffering(initial, "invalid-flavor", "soft-serve-flavor", "Invalid flavor", price)
-                    val response = fresh.http(Request(Method.GET, "/inquiry-form").withUiKey())
+                    val response = fresh.http(Request(Method.GET, "/inquiry-form").asFionasWeb(fresh))
                     response.status shouldBe Status.INTERNAL_SERVER_ERROR
                     response.header("Cache-Control") shouldBe "no-store"
                     CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()) shouldBe
@@ -564,13 +571,17 @@ class InquiryFormRoutesSpec :
                     .map { it.key } shouldContainExactly listOf("vanilla", "chocolate")
                 val inputs = pricingBody(edited.catalogRevision)
                 fresh
-                    .http(Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(inputs))
-                    .status shouldBe Status.OK
+                    .http(
+                        Request(
+                            Method.POST,
+                            "/estimate-preview",
+                        ).asFionasWeb(fresh).header("Content-Type", "application/json").body(inputs),
+                    ).status shouldBe Status.OK
                 fresh
                     .http(
                         Request(Method.POST, "/inquiries")
                             .withSubmissionKey()
-                            .withUiKey()
+                            .asFionasWeb(fresh)
                             .header("Content-Type", "application/json")
                             .body(
                                 """{"name":"Jane","email":"jane@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$inputs}""",
@@ -585,7 +596,7 @@ class InquiryFormRoutesSpec :
                 fresh
                     .http(
                         Request(Method.POST, "/estimate-preview")
-                            .withUiKey()
+                            .asFionasWeb(fresh)
                             .header("Content-Type", "application/json")
                             .body(pricingBody(current.catalogRevision)),
                     ).status shouldBe Status.UNPROCESSABLE_ENTITY
@@ -614,7 +625,7 @@ class InquiryFormRoutesSpec :
                 application.http(
                     Request(Method.POST, "/inquiries")
                         .withSubmissionKey()
-                        .withUiKey()
+                        .asFionasWeb(application)
                         .header("Content-Type", "application/json")
                         .body(
                             CommerceJson.json.encodeToString(
@@ -633,7 +644,7 @@ class InquiryFormRoutesSpec :
             application
                 .http(
                     Request(Method.POST, "/estimate-preview")
-                        .withUiKey()
+                        .asFionasWeb(application)
                         .header("Content-Type", "application/json")
                         .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), inputs)),
                 ).status shouldBe Status.OK
@@ -646,7 +657,7 @@ class InquiryFormRoutesSpec :
                 application.http(
                     Request(Method.POST, "/inquiries")
                         .withSubmissionKey()
-                        .withUiKey()
+                        .asFionasWeb(application)
                         .header("Content-Type", "application/json")
                         .body(
                             """{"name":"Jane","email":"unconfigured@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY"}""",

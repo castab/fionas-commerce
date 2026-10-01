@@ -133,7 +133,7 @@ fun TestApplication.createInquiry(
         http(
             Request(Method.POST, "/inquiries")
                 .withSubmissionKey()
-                .withUiKey()
+                .asFionasWeb(this)
                 .header("Content-Type", "application/json")
                 .body(
                     """{"name":"Jane Doe","email":"$email","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY",""" +

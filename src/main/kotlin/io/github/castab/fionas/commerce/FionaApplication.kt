@@ -4,12 +4,14 @@ import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.authorization.currentPrincipalHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
+import io.github.castab.commerce.runtime.http.authentication
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
+import io.github.castab.commerce.runtime.session.SessionAuthenticator
 import io.github.castab.commerce.runtime.session.SessionCookie
-import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.CreateChangeOrder
@@ -30,10 +32,10 @@ import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.LoginRateLimit
-import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.http.apiDocs
 import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
+import io.github.castab.fionas.commerce.http.fionaServiceAuthentication
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
@@ -89,6 +91,14 @@ const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
  * operations that write them price from the runtime's snapshot read in that same transaction.
  * An inquiry's requested pricing inputs are checked with the same pricing, in the transaction
  * that records the inquiry.
+ *
+ * Every protected route uses one `AccessControl`. It authenticates a staff browser session
+ * first and otherwise a SERVICE principal's short-lived access token (both runtime-owned
+ * mechanisms), so a request is exactly one principal, USER or SERVICE, authorized by that
+ * principal's current roles. A session wins over a token on the same request; nothing merges
+ * identities. Fiona's browser Origin policy applies only to login and cookie-carrying unsafe
+ * requests, never to a token-only request. Services obtain tokens at the runtime's token
+ * endpoint, which Fiona mounts; startup never provisions a service or a credential.
  */
 fun fionaApplication(
     clock: Clock = Clock.systemUTC(),
@@ -101,7 +111,6 @@ fun fionaApplication(
             ?.filter(String::isNotBlank)
             ?.toSet()
             ?: emptySet(),
-    uiApiKey: UiApiKey = UiApiKey.fromEnvironment(),
     loginRateLimit: LoginRateLimit = LoginRateLimit(),
 ): ApplicationContributions =
     ApplicationContributions(
@@ -119,12 +128,14 @@ fun fionaApplication(
             BootstrapFirstAdmin(context.transactor, context.authorization, credentials, hasher, clock).invoke(bootstrap)
             val cookie = SessionCookie("__Host-fionas_session")
             val origin = BrowserOrigin(trustedOrigins, cookie)
-            val access =
-                AccessControl(
-                    origin.filter.then(sessionAuthentication(context.sessions, cookie)),
-                    context.authorization,
+            // Session first: a request carrying a staff session stays that USER even if it also carries a token.
+            val authenticate =
+                authentication(
+                    SessionAuthenticator(context.sessions, cookie),
+                    ServiceAccessTokenAuthenticator(context.serviceAccessTokens),
                 )
-            val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, uiApiKey, loginRateLimit)
+            val access = AccessControl(origin.filter.then(authenticate), context.authorization)
+            val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, loginRateLimit)
             // Fiona's pricing, over exact catalog revisions read in the caller's transaction.
             val pricing =
                 FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), context.offeringsSnapshotRepository::retrieveVersion)
@@ -202,7 +213,11 @@ fun fionaApplication(
             // The permission catalog is served once, by the administration capability: commerce-runtime
             // 0.0.20's standalone catalog route has the same fixed operationId, so it is not also mounted.
             val currentPrincipal = currentPrincipalHttpCapability(access, "/authorization/me", setOf(authorizationTag))
-            listOf(fionaApi(operations, offerings, authorizationAdmin, currentPrincipal, fionaVersion(), auth), apiDocs())
+            val serviceAuthentication = fionaServiceAuthentication(context)
+            listOf(
+                fionaApi(operations, offerings, authorizationAdmin, currentPrincipal, serviceAuthentication, fionaVersion(), auth),
+                apiDocs(),
+            )
         },
     )
 

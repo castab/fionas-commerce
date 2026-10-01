@@ -16,13 +16,13 @@ import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.perGuest
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContain
@@ -131,10 +131,13 @@ class FinancialDocumentRoutesSpec :
                         Request(
                             Method.POST,
                             "/estimate-preview",
-                        ).withUiKey().header("Content-Type", "application/json").body(invalidInputs),
+                        ).asFionasWeb(application).header("Content-Type", "application/json").body(invalidInputs),
                     ),
                     application.http(
-                        Request(Method.POST, "/inquiries").withSubmissionKey().withUiKey().header("Content-Type", "application/json").body(
+                        Request(
+                            Method.POST,
+                            "/inquiries",
+                        ).withSubmissionKey().asFionasWeb(application).header("Content-Type", "application/json").body(
                             """{"name":"Rejected","email":"rejected@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$invalidInputs}""",
                         ),
                     ),
@@ -167,7 +170,7 @@ class FinancialDocumentRoutesSpec :
                     Request(
                         Method.POST,
                         "/estimate-preview",
-                    ).withUiKey().header("Content-Type", "application/json").body(pricingBody(revision)),
+                    ).asFionasWeb(application).header("Content-Type", "application/json").body(pricingBody(revision)),
                 )
             preview.status shouldBe Status.OK
             val previewed = CommerceJson.asA(preview.bodyString(), EstimatePreviewResponse.serializer())
@@ -621,7 +624,7 @@ class FinancialDocumentRoutesSpec :
                     Request(
                         Method.POST,
                         "/estimate-preview",
-                    ).withUiKey().header("Content-Type", "application/json").body(pricingBody(revision)),
+                    ).asFionasWeb(application).header("Content-Type", "application/json").body(pricingBody(revision)),
                 ).status shouldBe Status.OK
             application.database.count("commerce.financial_document_snapshots") shouldBe documents
             application.database.count("fionas.financial_document_pricing") shouldBe sources

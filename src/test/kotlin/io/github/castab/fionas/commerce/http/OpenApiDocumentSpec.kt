@@ -80,18 +80,26 @@ class OpenApiDocumentSpec :
             method: String,
         ) = document.at("paths", path, method).jsonObject
 
-        test("only the three UI routes declare Bearer security and login documents rate limiting") {
-            val scheme = document.at("components", "securitySchemes", "fionasUiApiKey")
+        test(
+            "only the three web frontend routes declare service bearer security, the token endpoint is public, and login documents rate limiting",
+        ) {
+            val scheme = document.at("components", "securitySchemes", "serviceAccessToken")
             scheme.text("type") shouldBe "http"
             scheme.text("scheme") shouldBe "bearer"
+            document.at("components", "securitySchemes").jsonObject.keys shouldBe setOf("serviceAccessToken")
+            fionaOpenApiDocument() shouldNotContain "fionasUiApiKey"
             val protected = setOf("/inquiry-form" to "get", "/estimate-preview" to "post", "/inquiries" to "post")
             document.at("paths").jsonObject.forEach { (path, methods) ->
                 methods.jsonObject.forEach { (method, endpoint) ->
                     val security = endpoint.jsonObject["security"] as? JsonArray
-                    val hasUiKey = security?.any { "fionasUiApiKey" in it.jsonObject } == true
-                    hasUiKey shouldBe ((path to method) in protected)
+                    val bearer = security?.any { "serviceAccessToken" in it.jsonObject } == true
+                    bearer shouldBe ((path to method) in protected)
                 }
             }
+            // A credential obtains a token, so the token endpoint cannot require one: it declares no security requirement.
+            val token = operation("/auth/service/token", "post")
+            (token["security"] as? JsonArray)?.forEach { requirement -> requirement.jsonObject.keys shouldBe emptySet() }
+            token.strings("tags") shouldContainExactly listOf("Authentication")
             operation("/auth/login", "post").text("responses", "429", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/ErrorResponse"
             operation("/auth/login", "post").text("responses", "429", "content", "application/json", "example", "code") shouldBe
@@ -101,11 +109,11 @@ class OpenApiDocumentSpec :
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
-                Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "404", "500"),
-                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "404", "409", "422", "500"),
+                Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "403", "404", "500"),
+                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "401", "403", "404", "500"),
-                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "401", "404", "422", "500"),
+                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "401", "403", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/estimates", "post", "createInquiryEstimate") to
                     listOf("201", "400", "401", "403", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "post", "createInquiryFinancialDocument") to
@@ -189,6 +197,10 @@ class OpenApiDocumentSpec :
                 Triple("/offering-catalog/retired/offerings", "get", "fionasOfferingsListRetiredOfferings"),
                 Triple("/offering-catalog/retired/categories", "get", "fionasOfferingsListRetiredCategories"),
             )
+
+        // commerce-runtime's service token endpoint, mounted by Fiona.
+        val serviceAuthenticationOperations =
+            mapOf(Triple("/auth/service/token", "post", "serviceAuthenticationIssueToken") to listOf("200", "400", "401"))
 
         val adminOperations =
             listOf(
@@ -320,6 +332,9 @@ class OpenApiDocumentSpec :
                 "PrincipalSummaryDto",
             )
 
+        // The runtime's service token endpoint bodies, described from their serial descriptors.
+        val serviceAuthenticationSchemas = setOf("ServiceAccessTokenRequestDto", "ServiceAccessTokenDto")
+
         test("is an OpenAPI 3.1 document of Fiona's Commerce API at the application's version") {
             document.text("openapi") shouldBe "3.1.0"
             document.text("info", "title") shouldBe "Fiona's Commerce API"
@@ -348,7 +363,7 @@ class OpenApiDocumentSpec :
 
         test("describes exactly Fiona and bound runtime capability routes, excluding /health and /ready") {
             document.at("paths").jsonObject.mapValues { (_, methods) -> methods.jsonObject.keys } shouldBe
-                (operations.keys + offeringOperations + adminOperations + principalOperations)
+                (operations.keys + offeringOperations + adminOperations + principalOperations + serviceAuthenticationOperations.keys)
                     .groupBy({ it.first }, { it.second })
                     .mapValues { it.value.toSet() }
         }
@@ -365,6 +380,19 @@ class OpenApiDocumentSpec :
                 .values
                 .flatMap { methods -> methods.jsonObject.values.map { it.text("operationId") } }
                 .forEach { it shouldStartWith "fionasOfferings" }
+        }
+
+        test("mounts commerce-runtime's service token endpoint unchanged at /auth/service/token") {
+            serviceAuthenticationOperations.forEach { (route, statuses) ->
+                val (path, method, operationId) = route
+                operation(path, method).text("operationId") shouldBe operationId
+                operation(path, method).at("responses").jsonObject.keys shouldContainExactlyInAnyOrder statuses
+            }
+            schema("ServiceAccessTokenRequestDto").strings("required") shouldContainExactlyInAnyOrder listOf("serviceId", "secret")
+            val token = schema("ServiceAccessTokenDto")
+            token.strings("required") shouldContainExactlyInAnyOrder listOf("accessToken", "tokenType", "expiresAt", "expiresIn")
+            token.text("properties", "expiresIn", "type") shouldBe "integer"
+            token.text("properties", "expiresIn", "format") shouldBe "int64"
         }
 
         test("mounts commerce-runtime's authorization administration contract unchanged") {
@@ -1171,7 +1199,7 @@ class OpenApiDocumentSpec :
             }
             // Runtime 0.0.20 emits these enum definitions as well as inline enums on offering properties.
             val offeringStateSchemas = setOf("OfferingSelectionStateDto", "OfferingAvailabilityDto")
-            schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + reached + offeringStateSchemas
+            schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + serviceAuthenticationSchemas + reached + offeringStateSchemas
         }
 
         test("gives each body an example that satisfies its schema's required properties") {

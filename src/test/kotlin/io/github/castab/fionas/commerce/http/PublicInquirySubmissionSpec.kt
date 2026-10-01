@@ -9,12 +9,12 @@ import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.setOfferingState
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
@@ -48,13 +48,13 @@ class PublicInquirySubmissionSpec :
 
         fun form() =
             CommerceJson.asA(
-                app.http(Request(Method.GET, "/inquiry-form").withUiKey()).bodyString(),
+                app.http(Request(Method.GET, "/inquiry-form").asFionasWeb(app)).bodyString(),
                 InquiryFormResponse.serializer(),
             )
 
         fun submit(inputs: String) =
             app.http(
-                Request(Method.POST, "/inquiries").withSubmissionKey().withUiKey().header("Content-Type", "application/json").body(
+                Request(Method.POST, "/inquiries").withSubmissionKey().asFionasWeb(app).header("Content-Type", "application/json").body(
                     """{"name":"Jane Doe","email":"public-${UUID.randomUUID()}@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$inputs}""",
                 ),
             )
@@ -240,7 +240,7 @@ class PublicInquirySubmissionSpec :
                     app.http(
                         Request(Method.POST, "/inquiries")
                             .withSubmissionKey()
-                            .withUiKey()
+                            .asFionasWeb(app)
                             .header("Content-Type", "application/json")
                             .body(body),
                     )
@@ -256,7 +256,7 @@ class PublicInquirySubmissionSpec :
                     empty.http(
                         Request(Method.POST, "/inquiries")
                             .withSubmissionKey()
-                            .withUiKey()
+                            .asFionasWeb(empty)
                             .header("Content-Type", "application/json")
                             .body(
                                 """{"name":"Jane","email":"jane@example.com","zipCode":"92626","eventDate":"2026-12-05",""" +
@@ -279,7 +279,7 @@ class PublicInquirySubmissionSpec :
                     key: String = UUID.randomUUID().toString(),
                 ) = Request(Method.POST, "/inquiries")
                     .withSubmissionKey(key)
-                    .withUiKey()
+                    .asFionasWeb(fresh)
                     .header("Content-Type", "application/json")
                     .body(
                         """{"name":"Jane","email":"states@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"OTHER","pricingInputs":$inputs}""",
@@ -320,7 +320,7 @@ class PublicInquirySubmissionSpec :
                         val preview =
                             fresh.http(
                                 Request(Method.POST, "/estimate-preview")
-                                    .withUiKey()
+                                    .asFionasWeb(fresh)
                                     .header("Content-Type", "application/json")
                                     .body(inputs),
                             )

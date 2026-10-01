@@ -479,9 +479,31 @@ class ArchitectureSpec :
             ).filterNot { it in bootstrap }.shouldBeEmpty()
             // Fiona defines no duplicates of generic commerce permissions: only Fiona-specific actions.
             FionaPermissions.definitions.map { it.key } shouldContainExactly
-                listOf(FionaPermissions.CredentialsManage, FionaPermissions.InquiriesRead)
+                listOf(
+                    FionaPermissions.CredentialsManage,
+                    FionaPermissions.InquiriesRead,
+                    FionaPermissions.InquiriesCreate,
+                    FionaPermissions.InquiryFormRead,
+                    FionaPermissions.EstimatePreviewCreate,
+                )
             FionaPermissions.definitions.forEach { it.key.value shouldStartWith "fionas." }
-            // Fresh Administrators can discover inquiries; existing roles are never changed at startup.
-            bootstrap.contains("FionaPermissions.InquiriesRead") shouldBe true
+            // Fresh Administrators can discover inquiries, use the customer operations, and issue
+            // service credentials; existing roles are never changed at startup.
+            listOf(
+                "FionaPermissions.InquiriesRead",
+                "FionaPermissions.InquiriesCreate",
+                "FionaPermissions.InquiryFormRead",
+                "FionaPermissions.EstimatePreviewCreate",
+                "RuntimePermissions.ServiceCredentialManage",
+            ).filterNot { it in bootstrap }.shouldBeEmpty()
+        }
+
+        test("no static API key remains: callers authenticate as principals through commerce-runtime") {
+            val retired = listOf("UiApiKey", "uiApiKey", "FIONAS_UI_API_KEY", "fionasUiApiKey")
+            sources().containing(retired).shouldBeEmpty()
+            listOf(File("src/main/resources/application.conf"), File(".env.example"), File("src/openapi"))
+                .flatMap { root -> root.walk().filter { it.isFile }.toList() }
+                .filter { file -> retired.any { it in file.readText() } }
+                .shouldBeEmpty()
         }
     })

@@ -5,10 +5,13 @@ import io.github.castab.commerce.offering.OfferingCategorySelection
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingSelections
 import io.github.castab.commerce.offering.OfferingsRevision
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.authentication
 import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
@@ -21,7 +24,6 @@ import io.github.castab.fionas.commerce.http.InquiryEventType
 import io.github.castab.fionas.commerce.http.InquiryPricingInputs
 import io.github.castab.fionas.commerce.http.InquiryReceiptResponse
 import io.github.castab.fionas.commerce.http.PricingSelection
-import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.http.createInquiryRoute
 import io.github.castab.fionas.commerce.http.fionaOpenApi
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
@@ -29,13 +31,12 @@ import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
 import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
-import io.github.castab.fionas.commerce.testing.TEST_UI_API_KEY
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.testClock
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -143,7 +144,7 @@ class InquiryIdempotencySpec :
                     InquiryEventType.valueOf(command.eventType.name),
                 )
             return Request(Method.POST, "/inquiries")
-                .withUiKey()
+                .asFionasWeb(app)
                 .withSubmissionKey(command.submissionKey.value)
                 .header("Content-Type", "application/json")
                 .body(CommerceJson.json.encodeToString(CreateInquiryRequest.serializer(), dto))
@@ -153,7 +154,14 @@ class InquiryIdempotencySpec :
             CommerceErrorHandling.then(
                 contract {
                     renderer = fionaOpenApi("test")
-                    routes += createInquiryRoute(operation::invoke, UiApiKey(TEST_UI_API_KEY))
+                    routes +=
+                        createInquiryRoute(
+                            operation::invoke,
+                            AccessControl(
+                                authentication(ServiceAccessTokenAuthenticator(app.context.serviceAccessTokens)),
+                                app.authorization,
+                            ),
+                        )
                 },
             )
 

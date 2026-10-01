@@ -6,7 +6,7 @@ import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
-import io.github.castab.fionas.commerce.http.UiApiKey
+import io.github.castab.fionas.commerce.testing.TEST_SERVICE_TOKENS
 import io.github.castab.fionas.commerce.testing.TestDatabase
 import io.github.castab.fionas.commerce.testing.sqlState
 import io.github.castab.fionas.commerce.testing.testClock
@@ -49,7 +49,6 @@ class MigrationLifecycleSpec :
                 fionaApplication(
                     testClock,
                     bootstrap = null,
-                    uiApiKey = UiApiKey("migration-test-key"),
                 ),
             onStartup: OnStartup = OnStartup.MIGRATE,
         ): CommerceRuntime =
@@ -58,6 +57,7 @@ class MigrationLifecycleSpec :
                     server = CommerceRuntimeConfiguration.Server(port = 0),
                     database = database.configuration,
                     migrations = CommerceRuntimeConfiguration.Migrations(onStartup = onStartup),
+                    serviceTokens = TEST_SERVICE_TOKENS,
                 ),
                 application,
             )

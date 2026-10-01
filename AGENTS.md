@@ -124,8 +124,9 @@ verifying ownership of the address. Decide these explicitly before changing the 
   `InquiryDetails.pricingInputs`, and `InquiryResponse.pricingInputs` are non-null; an
   omitted or `null` request value is a `LensFailure` (`400 malformed_request`) that writes
   nothing. Never reintroduce nullable plumbing, transitional flags, or a separate endpoint.
-- **Submission requires the UI key; reading is staff-only.** `POST /inquiries` requires the trusted server-side UI Bearer key.
-  `GET /inquiries` and `GET /inquiries/{inquiryId}` require Fiona's
+- **Submission requires `fionas.inquiries.create`; reading requires `fionas.inquiries.read`.**
+  `POST /inquiries` is normally called by the web frontend's SERVICE principal with a service
+  access token. `GET /inquiries` and `GET /inquiries/{inquiryId}` require Fiona's
   `fionas.inquiries.read`. There is no public confirmation lookup: a confirmation renders
   what the customer just submitted.
 - **The inbox is a primitive, not a query API.** `ListInquiries` returns the newest
@@ -161,7 +162,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
 - **Public submission identity is explicit and durable.** Only `POST /inquiries` requires
   exactly one `Idempotency-Key`: 1–128 ASCII letters/digits/underscore/hyphen, case-sensitive,
   untrimmed, opaque and non-secret (UUIDs work). Invalid/missing/repeated keys are a
-  `LensFailure` (`400 malformed_request`), after UI authentication and before the command.
+  `LensFailure` (`400 malformed_request`), after authorization and before the command.
   `CreateInquiry.Command` carries `InquirySubmissionKey`; the transport header never leaks
   into repositories as an HTTP concept. Other public/staff routes require no key.
 - **Idempotency precedes current business validation.** Canonical command fingerprint →
@@ -214,7 +215,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
 
 ## Fiona's customer inquiry form
 
-- `GET /inquiry-form` requires the trusted server-side UI Bearer key, a ContractRoute with operationId `getInquiryForm`.
+- `GET /inquiry-form` requires `fionas.inquiry-form.read`, a ContractRoute with operationId `getInquiryForm`.
   `GetInquiryForm` reads one current snapshot through the runtime's `GetOfferingsCatalog`,
   wired in the composition root, and adapts it into `InquiryForm`. No persistence, seeding,
   second catalog, generic form DSL, or shared commerce form concept is introduced.
@@ -361,11 +362,13 @@ Offerings capability to Fiona's catalog (`offeringsHttpCapability(context,
 fionaOfferingsBinding(accessControl))`), mounts the runtime's authorization administration
 capability at `/admin/access` and the runtime's current-principal capability at
 `/authorization/me` (`currentPrincipalHttpCapability(accessControl, "/authorization/me",
-setOf(authorizationTag))`) with that same `AccessControl`, builds Fiona's financial
+setOf(authorizationTag))`) with that same `AccessControl`, mounts the runtime's service
+token endpoint (`fionaServiceAuthentication(context)`, `serviceAuthenticationHttpCapability` at
+`/auth/service/token`), builds Fiona's financial
 operations on `context.financialLedger` with Fiona's own association and pricing-source
 repositories and one `FionasPricing` (the engine plus the runtime's transaction-bound
 catalog read), and contributes exactly two route handlers:
-`fionaApi(operations, offerings, authorizationAdmin, currentPrincipal, version, auth)`
+`fionaApi(operations, offerings, authorizationAdmin, currentPrincipal, serviceAuthentication, version, auth)`
 (the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
 the migration phase before composing anything), starts it, installs the shutdown hook,
 and blocks. Keep `main()` thin: no schema, Flyway, or migration decisions belong in it. There is no DI framework, no annotation scanning,
@@ -484,7 +487,7 @@ There is no later step called "update the spec". The rules:
    `offeringsOpenApiRenderer`, which only works on a reflective JSON (`OfferingsSchemas` in
    `http/OpenApi.kt`); `ArchitectureSpec` confines Jackson there. Fiona's own schemas are
    derived from the DTOs' serial descriptors (`KotlinxSchemas`: strings, `Int`s as `int32`
-   integers, booleans, lists, enums, sealed input unions with string discriminators, and
+   and `Long`s as `int64` integers, booleans, lists, enums, sealed input unions with string discriminators, and
    nested `@Serializable` objects as components; anything
    else fails loudly until a DTO needs it); what a type cannot say goes
    in `@ApiProperty` on the transport DTO property, referencing the domain's constants
@@ -523,18 +526,44 @@ Also:
   `libs.versions.toml`), never a newer BOM; `ArchitectureSpec` fails when two http4k
   versions meet on the classpath.
 
-## Trusted UI authentication and login limiting
+## Service authentication, customer operations, and login limiting
 
-- `FIONAS_UI_API_KEY` is required when composing Fiona's API. It has no fallback and must
-  match Bearer token syntax. `UiApiKey` retains only a SHA-256 digest, redacts text forms,
-  and compares fixed-length digests with `MessageDigest.isEqual`. No credential logging.
-- Only `GET /inquiry-form`, `POST /estimate-preview`, and `POST /inquiries` attach
-  `uiApiKeyAuthentication` via their contract's Bearer security. The key belongs to the
-  trusted server-side UI, never browser JavaScript. Exactly one key; configuration plus
-  restart/redeploy handles rotation. Accept only a single Authorization header; every
-  invalid/missing credential gets the same runtime `401 unauthenticated` envelope.
-- UI authentication never creates a principal/session or grants staff permissions. Keep
-  it Fiona-local in HTTP; operations and domain/pricing code know nothing of credentials.
+- **No static API key.** The former `UiApiKey`/`FIONAS_UI_API_KEY` mechanism is removed and
+  must not return as a second credential. Software callers authenticate as SERVICE
+  principals through commerce-runtime 0.0.20's service authentication; Fiona composes it and
+  never recreates token issuing, verification, credential storage, or hashing.
+- **One `AccessControl`, two runtime mechanisms, session first.** The composition root builds
+  `authentication(SessionAuthenticator(context.sessions, cookie),
+  ServiceAccessTokenAuthenticator(context.serviceAccessTokens))` behind `BrowserOrigin` and binds it
+  with `AccessControl(..., context.authorization)`. A request is exactly one principal, USER or
+  SERVICE; a valid session wins over a token on the same request, and identities are never
+  merged. Authorization is the principal's current role grants, resolved live; tokens carry no
+  permissions. Never trust a caller for being a service, never forbid a permission because the
+  holder is a service, and never assume a principal is human: routes that need a human check it
+  explicitly (`GET /auth/me` uses `as? UserId` and answers a service `403`).
+- **Customer operations use ordinary permissions.** `GET /inquiry-form` requires
+  `fionas.inquiry-form.read`, `POST /estimate-preview` `fionas.estimate-preview.create`, and
+  `POST /inquiries` `fionas.inquiries.create`, each through `access.requirePermission(...)`
+  outside the handler. `401` means no valid authentication, `403` an authenticated principal
+  without the permission. Their OpenAPI metadata uses the runtime's
+  `serviceAccessTokenOpenApiSecurity` (documentation only) through `serviceAccess(permission)`
+  in `http/AuthRoutes.kt`. Permissions describe capabilities, never callers: no `fionas.ui`,
+  `fionas.frontend`, or `fionas.trusted`.
+- **The token endpoint is the runtime's.** `fionaServiceAuthentication(context)` mounts
+  `serviceAuthenticationHttpCapability` at `/auth/service/token` in Fiona's one contract. It is
+  public (no security) and keeps the runtime's uniform `401`. Fiona builds no token endpoint and
+  no limiter for it; deployments protect it with edge/reverse-proxy rate limiting and/or private
+  reachability, because each valid-shaped attempt costs one Argon2id verification.
+- **Configuration.** `application.conf` declares `serviceTokens { signingKey = "", issuer = "" }`,
+  so `SERVICE_TOKENS_SIGNING_KEY` and `SERVICE_TOKENS_ISSUER` are required and startup fails
+  without them. The signing key belongs only to fionas-commerce and is never a service
+  credential or given to a frontend; the issuer is distinct per deployment
+  (`fionas-commerce-local`, `-staging`, `-production`). The lifetime keeps the runtime default.
+  Never log a credential secret, verifier, access token, or signing key.
+- **Provisioning is administration, never startup.** Startup never creates `fionas-web`, a
+  role for it, or a credential. An administrator creates the service, a `fionas.web` role
+  granting exactly the three customer-operation permissions, assigns it, and issues a
+  credential through `/admin/access`; rotation is create B, deploy B, verify, revoke A.
 - Authorized successful form responses have `Cache-Control: private, max-age=60,
   must-revalidate`; failures have `no-store`, including exceptions rendered by
   the existing runtime error filter. Preserve definitionVersion and catalogRevision.
@@ -753,19 +782,26 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   later startup never overwrites an existing credential.
 - The Administrator role grants exactly OfferingsManage, FinancialDocumentRead,
   FinancialDocumentCreate, PaymentRecord, RefundRecord, PrincipalRead, PrincipalManage, RoleRead,
-  RoleManage, RoleAssign, and Fiona's `fionas.credentials.manage` and `fionas.inquiries.read`. It has no wildcard or
+  RoleManage, RoleAssign, the runtime's `RuntimePermissions.ServiceCredentialManage` (without it
+  the first administrator could create a service but never issue its credential), and Fiona's
+  `fionas.credentials.manage`, `fionas.inquiries.read`, `fionas.inquiries.create`,
+  `fionas.inquiry-form.read`, and `fionas.estimate-preview.create`. It has no wildcard or
   automatic future grants. Grants are fixed when bootstrap creates the role; startup never
   mutates an existing Administrator role, whose grants are managed through `/admin/access`:
-  an Administrator created by an earlier release gains `fionas.inquiries.read` (or
-  `commerce.refund.record`) only through the documented read-modify-replace grant.
+  an Administrator created by an earlier release gains any of these (for example
+  `fionas.inquiries.read`, `commerce.refund.record`, or `commerce.service-credential.manage`)
+  only through the documented read-modify-replace grant.
 - Generic commerce actions use commerce-domain's `CommercePermissions`
   (`FinancialDocumentRead`, `FinancialDocumentCreate`, `PaymentRecord`, `RefundRecord`); never define a Fiona
   duplicate. Only Fiona-specific actions get a Fiona permission.
-- Fiona contributes `fionas.credentials.manage` and `fionas.inquiries.read` through
+- Fiona contributes `fionas.credentials.manage` (group `fionas.credentials`),
+  `fionas.inquiries.read`, `fionas.inquiries.create`, `fionas.inquiry-form.read` (group
+  `fionas.inquiries`), and `fionas.estimate-preview.create` (group `fionas.pricing`) through
   `ApplicationContributions.permissionDefinitions`. The runtime permission catalog and
   live resolver remain the only authorization source.
-- Fiona composes one `AccessControl` from cookie `sessionAuthentication(context.sessions,
-  SessionCookie("__Host-fionas_session"))` and the permission resolver. The runtime's
+- Fiona composes one `AccessControl` from the cookie `SessionAuthenticator(context.sessions,
+  SessionCookie("__Host-fionas_session"))`, then the `ServiceAccessTokenAuthenticator`, and the
+  runtime's authorization directory. The runtime's
   `OfferingsHttpAccess.ReadWrite(accessControl)` protects its mutations and retired discovery. The same
   control guards runtime administration at `/admin/access` and Fiona's
   `PUT /admin/users/{userId}/credentials/password`. The credential endpoint verifies the
@@ -775,13 +811,17 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   and require `FinancialDocumentRead`. `GET /payments/unapplied` uses `PaymentRecord` for
   its operational queue; `RefundRecord` alone grants neither read. There is no new
   payment-read permission. Listing and reading inquiries require
-  `fionas.inquiries.read`. Inquiry submission, the inquiry form, and estimate previews require the UI key. Ordinary Offerings reads, health,
+  `fionas.inquiries.read`. Inquiry submission, the inquiry form, and estimate previews require
+  their own Fiona permissions. Ordinary Offerings reads, the service token endpoint, health,
   and readiness remain public.
 - `FIONAS_TRUSTED_ORIGINS` names exact permitted browser origins. Login and unsafe
   cookie-authenticated methods require a matching `Origin` and fail closed if none is
-  configured. Fiona's CSRF policy is separate from the reusable runtime session filter.
-- Future service credentials map to `ServiceId` and reuse this authorization path;
-  service credential authentication is not part of this slice.
+  configured. Fiona's CSRF policy is separate from the reusable runtime session filter. A
+  token-only request carries no cookie and is never rejected for lacking an `Origin`.
+- Service credentials map to `ServiceId` and reuse this authorization path (see
+  [Service authentication, customer operations, and login limiting](#service-authentication-customer-operations-and-login-limiting)).
+  Caller/actor delegation, user impersonation by a BFF, OAuth/OIDC, refresh tokens, and
+  signing-key rotation are not part of this slice.
 - `GET /auth/me` returns sorted effective `permissions` directly from
   `context.authorization.permissionResolver.permissionsFor`, alongside profile and roles.
   It requires only an active human session, never `commerce.role.read`. Grants and role
@@ -794,9 +834,9 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   SERVICE, with its live effective permissions and `permissionCatalogRevision`, no profile
   or role keys, and no permission requirement beyond authentication. Never replace one with
   the other, widen `/auth/me` to services, or add Fiona DTOs, role resolution, or resolver
-  calls for `/authorization/me`. A future SERVICE-authenticated BFF calling it receives the
-  BFF's own service identity, never the browser user's; there is no delegation. The UI key
-  establishes no principal and never authenticates either route; both use `AccessControl`
+  calls for `/authorization/me`. A SERVICE-authenticated BFF calling it with its access token
+  receives the BFF's own service identity, never the browser user's; there is no delegation.
+  Both use `AccessControl`
   (`Authorization` and `Authentication` OpenAPI tags respectively).
 - **One permission catalog route.** `GET /admin/access/permissions` (administration
   capability, `commerce.role.read`) is Fiona's only catalog endpoint: the complete runtime +
@@ -877,9 +917,10 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
    carry optional `violations: [{code: ...}]`; ordinary validation can omit it. Clients
    match codes directly and never parse the diagnostic message. OpenAPI uses runtime
    `ValidationErrorResponse` and `ValidationViolationResponse`, never Fiona copies.
-10. **A preview is not an estimate document.** `POST /estimate-preview` requires the trusted server-side UI Bearer key,
+10. **A preview is not an estimate document.** `POST /estimate-preview` requires `fionas.estimate-preview.create`,
     remains stateless, and creates no `FinancialDocument`. Priced inquiry submission
-    internally materializes an Estimate using the UI key; explicit financial routes remain staff-only.
+    (`fionas.inquiries.create`) internally materializes an Estimate without any staff
+    financial permission; explicit financial routes keep their commerce permissions.
 
 ### Persisted pricing inputs
 
@@ -1085,7 +1126,7 @@ real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
-webhooks, service credentials, OAuth/OIDC, self-service password resets, event publishing,
+webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, event publishing,
 outbox, NATS, projections, CQRS, bookings and booking conversion, booking lifecycle
 transitions, a generic line-source identity, stored balances or payment statuses, tax,
 travel fees, minimum orders, inventory, availability schedules/windows, catalog seeding or import, deposit
@@ -1130,12 +1171,15 @@ lifetime key reservation, and expected-revision concurrency without a new migrat
 Commerce 0.0.20 stores aggregate-owned snapshot values in their snapshot rows, binds every
 `AccessControl` to one `AuthorizationDirectory` (`AccessControl(authentication,
 context.authorization)`), requires a `PermissionGroup` on each `PermissionDefinition` (Fiona's
-are `fionas.credentials` and `fionas.inquiries`), and adds runtime service credentials. The
-authorization administration capability Fiona mounts at `/admin/access` now includes
-`/services/{serviceId}/credentials` (list with `PrincipalRead`; create and revoke with the
-runtime's `RuntimePermissions.ServiceCredentialManage`, which no Fiona bootstrap grant
-includes). Fiona mounts no service token endpoint and authenticates no service token;
-service authentication remains out of scope.
+are `fionas.credentials`, `fionas.inquiries`, and `fionas.pricing`), and adds runtime service
+credentials and service access tokens. The authorization administration capability Fiona
+mounts at `/admin/access` includes `/services/{serviceId}/credentials` (list with
+`PrincipalRead`; create and revoke with the runtime's `RuntimePermissions.ServiceCredentialManage`,
+which the bootstrap Administrator is granted). Fiona mounts the runtime's service token endpoint
+and accepts its tokens through the generalized `authentication(...)`; see
+[Service authentication, customer operations, and login limiting](#service-authentication-customer-operations-and-login-limiting).
+The service token response states `expiresIn` as a `Long`, so `KotlinxSchemas` renders `Long`
+as an `int64` integer.
 The remaining gaps below have not been re-audited.
 
 - **The two catalog capabilities share one operationId.** `authorizationAdministrationHttpCapability`
@@ -1257,8 +1301,12 @@ The remaining gaps below have not been re-audited.
   runtime's suite owns the capability), `FionasOfferingsEngineSpec` (Fiona's pricing,
   purely, with exact `BigDecimal` amounts), `EstimatePreviewRoutesSpec` (the preview through
   the complete handler over a catalog built with the Offerings API, including revision
-  pinning), `OpenApiDocumentSpec` (the document's paths, operationIds,
-  statuses, and schemas), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
+  pinning), `ServicePrincipalAuthSpec` (SERVICE principals through the real application:
+  credential → `/auth/service/token` → token; `401`/`403`/authorized for each customer route;
+  independent, live permissions on one token; the retired UI key authenticates nothing; session
+  precedence; Origin only for cookies; `/auth/me` safe for services; administrator provisioning
+  and rotation through `/admin/access`), `OpenApiDocumentSpec` (the document's paths, operationIds,
+  statuses, security schemes, and schemas), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
   complete handler, and parity with the generator), `GenerateOpenApiSpec` (the build
   artifact, byte-deterministic), and `ArchitectureSpec`.
 - Run `./gradlew ktlintCheck test build` before considering work complete.

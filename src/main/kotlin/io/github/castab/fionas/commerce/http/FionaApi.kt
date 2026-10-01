@@ -7,6 +7,7 @@ import io.github.castab.commerce.runtime.authorization.CurrentPrincipalHttpCapab
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
+import io.github.castab.commerce.runtime.serviceauth.ServiceAuthenticationHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
@@ -88,7 +89,6 @@ class FionaAuthRoutes(
     val cookie: SessionCookie,
     val access: AccessControl,
     val origin: Filter,
-    val uiApiKey: UiApiKey,
     val loginRateLimit: LoginRateLimit = LoginRateLimit(),
 )
 
@@ -101,11 +101,11 @@ fun fionaApiRoutes(
     auth: FionaAuthRoutes,
 ): List<ContractRoute> =
     listOf(
-        getInquiryFormRoute(operations.getInquiryForm, auth.uiApiKey),
-        createInquiryRoute(operations.createInquiry, auth.uiApiKey),
+        getInquiryFormRoute(operations.getInquiryForm, auth.access),
+        createInquiryRoute(operations.createInquiry, auth.access),
         listInquiriesRoute(operations.listInquiries, auth.access),
         getInquiryRoute(operations.getInquiry, auth.access),
-        previewEstimateRoute(operations.previewEstimate, auth.uiApiKey),
+        previewEstimateRoute(operations.previewEstimate, auth.access),
         createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
         createInquiryFinancialDocumentRoute(operations.createInquiryFinancialDocument, auth.access),
         listInquiryFinancialDocumentsRoute(operations.listInquiryFinancialDocuments, auth.access),
@@ -129,10 +129,11 @@ fun fionaApiRoutes(
 /**
  * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of the
  * commerce-runtime capabilities Fiona mounts, each implemented and described by the runtime:
- * Fiona's Offerings catalog ([offerings]), authorization administration
- * ([authorizationAdmin], which also serves the one permission catalog route), and the
- * request's principal ([currentPrincipal]). The contract also serves its own OpenAPI
- * document at [OPENAPI_PATH], rendered from those same routes. [version] is the document's
+ * Fiona's Offerings catalog ([offerings]), staff and service access administration
+ * ([authorizationAdmin], which also serves the one permission catalog route), the
+ * request's principal ([currentPrincipal]), and the service token endpoint
+ * ([serviceAuthentication]). The contract also serves its own OpenAPI document at
+ * [OPENAPI_PATH], rendered from those same routes. [version] is the document's
  * `info.version`.
  *
  * Only the route handlers read request bodies, once (no pre-flight extraction), and
@@ -144,6 +145,7 @@ fun fionaApi(
     offerings: OfferingsHttpCapability,
     authorizationAdmin: AuthorizationAdministrationHttpCapability,
     currentPrincipal: CurrentPrincipalHttpCapability,
+    serviceAuthentication: ServiceAuthenticationHttpCapability,
     version: String,
     auth: FionaAuthRoutes,
 ): RoutingHttpHandler {
@@ -151,7 +153,8 @@ fun fionaApi(
         fionaApiRoutes(operations, auth) +
             offerings.contractRoutes +
             authorizationAdmin.contractRoutes +
-            currentPrincipal.contractRoutes
+            currentPrincipal.contractRoutes +
+            serviceAuthentication.contractRoutes
     return routes(
         undeclaredMethods(apiRoutes),
         contract {

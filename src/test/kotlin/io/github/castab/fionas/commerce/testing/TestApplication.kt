@@ -7,12 +7,21 @@ import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
 import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
+import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenDto
 import io.github.castab.commerce.runtime.session.SessionManager
+import io.github.castab.commerce.staff.PermissionKey
+import io.github.castab.commerce.staff.PrincipalStatus
+import io.github.castab.commerce.staff.RoleDefinition
+import io.github.castab.commerce.staff.RoleKey
+import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.staff.ServiceIdentity
 import io.github.castab.fionas.commerce.fionaApplication
 import io.github.castab.fionas.commerce.http.LoginRateLimit
-import io.github.castab.fionas.commerce.http.UiApiKey
+import io.github.castab.fionas.commerce.http.SERVICE_TOKEN_PATH
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import org.http4k.core.HttpHandler
 import org.http4k.core.Method
@@ -22,6 +31,7 @@ import org.http4k.core.Status
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.Base64
 import java.util.UUID
 
 /** A fixed test time with nanoseconds, which PostgreSQL cannot store. */
@@ -61,6 +71,51 @@ class TestApplication private constructor(
             )
         check(response.status == Status.NO_CONTENT) { "Test admin login failed: ${response.status} ${response.bodyString()}" }
         checkNotNull(response.header("Set-Cookie")).substringBefore(';')
+    }
+
+    /**
+     * The server-side web frontend's SERVICE principal, provisioned as an administrator would:
+     * service `fionas-web`, role `fionas.web` granting exactly [FIONAS_WEB_PERMISSIONS], and one
+     * credential. Created on first use.
+     */
+    val web: TestService by lazy { provisionService("fionas-web", FIONAS_WEB_PERMISSIONS, RoleKey("fionas.web")) }
+
+    /** An access token for [web], obtained like the frontend obtains one: its credential at the token endpoint. */
+    val webToken: String by lazy { serviceToken(web) }
+
+    /**
+     * Creates an ACTIVE service named [name] holding [permissions] through [role] (no role when
+     * [permissions] is empty), and one credential for it. Tests may change its role grants
+     * afterwards through [authorization] to observe live authorization.
+     */
+    fun provisionService(
+        name: String,
+        permissions: Set<PermissionKey>,
+        role: RoleKey = RoleKey("test.${name.lowercase()}-${UUID.randomUUID()}"),
+    ): TestService {
+        val id = ServiceId(UUID.randomUUID())
+        authorization.createService(ServiceIdentity(id, name, PrincipalStatus.ACTIVE, emptySet()))
+        if (permissions.isNotEmpty()) {
+            authorization.createRole(RoleDefinition(role, name, null, permissions))
+            authorization.assignRole(id, role)
+        }
+        val secret =
+            context.serviceCredentials
+                .create(id, "test credential")
+                .secret.value
+        return TestService(id, role, secret)
+    }
+
+    /** Exchanges [service]'s credential for an access token at the runtime's token endpoint. */
+    fun serviceToken(service: TestService): String {
+        val response =
+            http(
+                Request(Method.POST, SERVICE_TOKEN_PATH)
+                    .header("Content-Type", "application/json")
+                    .body("""{"serviceId":"${service.id.value}","secret":"${service.secret}"}"""),
+            )
+        check(response.status == Status.OK) { "Service token exchange failed: ${response.status} ${response.bodyString()}" }
+        return CommerceJson.asA(response.bodyString(), ServiceAccessTokenDto.serializer()).accessToken
     }
 
     fun adminPost(
@@ -103,7 +158,6 @@ class TestApplication private constructor(
                         clock,
                         bootstrap,
                         setOf(TEST_ORIGIN),
-                        uiApiKey = UiApiKey(TEST_UI_API_KEY),
                         loginRateLimit = loginRateLimit,
                     )
                 var context: CommerceRuntimeContext? = null
@@ -114,6 +168,7 @@ class TestApplication private constructor(
                                 server = CommerceRuntimeConfiguration.Server(port = 0),
                                 database = database.configuration,
                                 migrations = CommerceRuntimeConfiguration.Migrations(onStartup = OnStartup.MIGRATE),
+                                serviceTokens = TEST_SERVICE_TOKENS,
                             ),
                         application =
                             ApplicationContributions(
@@ -136,9 +191,33 @@ class TestApplication private constructor(
 
 const val TEST_ORIGIN = "https://fionas.test"
 
-const val TEST_UI_API_KEY = "deterministic-test-ui-key"
+/**
+ * Test-only service token signing: the base64 of the 32 distinct bytes 0..31, and an issuer
+ * naming the test deployment. Not a deployment secret, and never given to test clients: they
+ * obtain tokens through a service credential and the token endpoint, as the frontend does.
+ */
+val TEST_SERVICE_TOKENS =
+    CommerceRuntimeConfiguration.ServiceTokens(
+        signingKey = Base64.getEncoder().encodeToString(ByteArray(32) { it.toByte() }),
+        issuer = "fionas-commerce-test",
+    )
 
-fun Request.withUiKey(): Request = header("Authorization", "Bearer $TEST_UI_API_KEY")
+/** What the web frontend's role `fionas.web` grants: Fiona's three customer operations, nothing else. */
+val FIONAS_WEB_PERMISSIONS =
+    setOf(FionaPermissions.InquiryFormRead, FionaPermissions.EstimatePreviewCreate, FionaPermissions.InquiriesCreate)
+
+/** A provisioned SERVICE principal, its role, and its credential secret. */
+data class TestService(
+    val id: ServiceId,
+    val role: RoleKey,
+    val secret: String,
+)
+
+/** Sends [token] as the request's `Authorization: Bearer` credential. */
+fun Request.withBearer(token: String): Request = header("Authorization", "Bearer $token")
+
+/** A request from the server-side web frontend, authenticated by its service access token. */
+fun Request.asFionasWeb(app: TestApplication): Request = withBearer(app.webToken)
 
 /** A new logical submission by default; replay tests supply and retain an explicit key. */
 fun Request.withSubmissionKey(key: String = UUID.randomUUID().toString()): Request = header("Idempotency-Key", key)

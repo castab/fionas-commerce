@@ -4,10 +4,10 @@ import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
-import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldNotContain
@@ -47,7 +47,7 @@ class InquiryIdempotencyRoutesSpec :
             value: String,
             key: String? = UUID.randomUUID().toString(),
         ): Request {
-            val request = Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(value)
+            val request = Request(Method.POST, "/inquiries").asFionasWeb(app).header("Content-Type", "application/json").body(value)
             return key?.let { request.withSubmissionKey(it) } ?: request
         }
 

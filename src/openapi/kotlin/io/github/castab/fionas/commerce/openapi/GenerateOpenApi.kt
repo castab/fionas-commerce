@@ -21,20 +21,24 @@ import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.commerce.runtime.serviceauth.IssuedServiceAccessToken
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessToken
 import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokens
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentialSecret
 import io.github.castab.commerce.runtime.serviceauth.ServiceCredentials
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.runtime.session.SessionToken
 import io.github.castab.commerce.staff.PrincipalId
+import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.OPENAPI_PATH
-import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
+import io.github.castab.fionas.commerce.http.fionaServiceAuthentication
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.FionaPermissions
@@ -47,6 +51,7 @@ import org.jdbi.v3.core.Jdbi
 import java.lang.reflect.Proxy
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 
 /**
  * Operations for rendering the contract only. Rendering never calls an operation, so none
@@ -106,11 +111,29 @@ private val notInvokedSessions =
     }
 
 /**
+ * Service access tokens for rendering only: the service token endpoint's contract documents
+ * the token lifetime, so this carries the runtime's default (15 minutes) and nothing else. It
+ * holds no signing key, and it never issues, signs, or resolves a token.
+ */
+private val renderingOnlyServiceAccessTokens =
+    object : ServiceAccessTokens {
+        override val lifetime: Duration = Duration.ofMinutes(15)
+
+        override fun issue(
+            serviceId: ServiceId,
+            secret: ServiceCredentialSecret,
+        ): IssuedServiceAccessToken? = error("Rendering the OpenAPI document never issues or resolves a service token")
+
+        override fun resolve(token: ServiceAccessToken): ServiceId? =
+            error("Rendering the OpenAPI document never issues or resolves a service token")
+    }
+
+/**
  * A `CommerceRuntimeContext` for rendering only: its transactor opens no connection, its
  * repositories refuse every call, and rendering calls none of them.
  *
- * The Offerings and authorization capabilities require a runtime context even to describe
- * their contract routes. A composed runtime needs a database, so this source set builds a
+ * The Offerings, authorization, and service authentication capabilities require a runtime
+ * context even to describe their contract routes. A composed runtime needs a database, so this source set builds a
  * rendering-only context reflectively, including the financial ledger the context carries.
  * The transactor opens no connection, and route rendering invokes no repository or
  * operation. This provisional workaround exists only in the OpenAPI source set and never
@@ -212,7 +235,7 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
             notInvokedSessions,
             authorization,
             refusing<ServiceCredentials>("Rendering the OpenAPI document never touches a service credential"),
-            refusing<ServiceAccessTokens>("Rendering the OpenAPI document never issues a service token"),
+            renderingOnlyServiceAccessTokens,
         )
 }
 
@@ -242,14 +265,22 @@ fun fionaOpenApiDocument(version: String = fionaVersion()): String {
             SessionCookie("__Host-fionas_session"),
             renderingAccess,
             Filter.NoOp,
-            UiApiKey("rendering-only-not-a-deployment-key"),
         )
     val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(renderingAccess))
     val authorizationAdmin =
         authorizationAdministrationHttpCapability(context, renderingAccess, "/admin/access", setOf(staffAdministrationTag))
     val currentPrincipal = currentPrincipalHttpCapability(renderingAccess, "/authorization/me", setOf(authorizationTag))
+    val serviceAuthentication = fionaServiceAuthentication(context)
     val response =
-        fionaApi(notInvoked, offerings, authorizationAdmin, currentPrincipal, version, renderingAuth)(Request(Method.GET, OPENAPI_PATH))
+        fionaApi(
+            notInvoked,
+            offerings,
+            authorizationAdmin,
+            currentPrincipal,
+            serviceAuthentication,
+            version,
+            renderingAuth,
+        )(Request(Method.GET, OPENAPI_PATH))
     check(response.status == Status.OK) { "Rendering the OpenAPI document failed: ${response.status}" }
     return response.bodyString()
 }
