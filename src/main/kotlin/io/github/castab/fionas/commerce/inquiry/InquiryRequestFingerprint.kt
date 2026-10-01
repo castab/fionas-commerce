@@ -7,7 +7,7 @@ import java.util.HexFormat
 
 /**
  * Stable v1 binary encoding of canonical application intent, independent of wire JSON.
- * Length-prefixed UTF-16 code units, presence bits, explicit list lengths and fixed-width integers avoid
+ * Length-prefixed UTF-16 code units, the optional message's presence bit, explicit list lengths and fixed-width integers avoid
  * ambiguous concatenation. Submitted list order determines financial line order and is retained.
  * Changing this encoding requires a deliberate compatibility decision for durable replay.
  */
@@ -22,19 +22,19 @@ internal fun CreateInquiry.Command.fingerprint(): String {
         output.text(zipCode.value)
         output.text(eventDate.value.toString())
         output.text(eventType.name)
-        output.writeBoolean(pricingInputs != null)
-        pricingInputs?.let { inputs ->
-            output.writeInt(inputs.catalogRevision.number)
-            output.writeInt(inputs.context.guestCount)
-            output.writeBoolean(inputs.context.guestCountIsMinimum)
-            output.writeLong(inputs.context.duration.seconds)
-            output.writeInt(inputs.context.duration.nano)
-            output.writeInt(inputs.selections.categories.size)
-            inputs.selections.categories.forEach { block ->
-                output.text(block.category.value)
-                output.writeInt(block.offerings.size)
-                block.offerings.forEach { output.text(it.value) }
-            }
+        // Fixed v1 marker, formerly a presence bit when pricing was optional. Every command is now
+        // priced; keeping the byte keeps already-committed v1 fingerprints replayable unchanged.
+        output.writeBoolean(true)
+        output.writeInt(pricingInputs.catalogRevision.number)
+        output.writeInt(pricingInputs.context.guestCount)
+        output.writeBoolean(pricingInputs.context.guestCountIsMinimum)
+        output.writeLong(pricingInputs.context.duration.seconds)
+        output.writeInt(pricingInputs.context.duration.nano)
+        output.writeInt(pricingInputs.selections.categories.size)
+        pricingInputs.selections.categories.forEach { block ->
+            output.text(block.category.value)
+            output.writeInt(block.offerings.size)
+            block.offerings.forEach { output.text(it.value) }
         }
     }
     return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()))

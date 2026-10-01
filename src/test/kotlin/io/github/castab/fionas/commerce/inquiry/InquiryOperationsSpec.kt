@@ -94,7 +94,7 @@ class InquiryOperationsSpec :
             email: String,
             name: String = "Jane Doe",
             message: String? = "Ice cream for a birthday party",
-            pricingInputs: FionasPricingInputs? = null,
+            pricingInputs: FionasPricingInputs = inputs(),
         ) = CreateInquiry.Command(
             CustomerName.of(name),
             Email.of(email),
@@ -133,7 +133,8 @@ class InquiryOperationsSpec :
             read.customer.name shouldBe CustomerName("Jane Doe")
             read.customer.email shouldBe Email(email)
             read.customer.createdAt shouldBe STORED_INSTANT
-            read.pricingInputs.shouldBeNull()
+            read.pricingInputs shouldBe inputs()
+            application.transactor.inTransaction { JdbiInquiryFinancialDocumentRepository().documentsOf(it, inquiryId) }.size shouldBe 1
         }
 
         test("an inquiry with a known email reuses that customer and does not overwrite its name") {
@@ -164,7 +165,7 @@ class InquiryOperationsSpec :
             val later = application.addOffering(revision, "mint", "soft-serve-flavor", "Mint")
 
             later shouldBe revision + 1
-            getInquiry()(created.id).pricingInputs?.catalogRevision shouldBe OfferingsRevision.of(revision)
+            getInquiry()(created.id).pricingInputs.catalogRevision shouldBe OfferingsRevision.of(revision)
             val before = rows()
             shouldThrow<CommerceFailure.Conflict> {
                 createInquiry()(command("older-${UUID.randomUUID()}@example.com", pricingInputs = inputs(revision)))
@@ -230,7 +231,7 @@ class InquiryOperationsSpec :
 
             shouldThrow<IllegalStateException> {
                 createInquiry(customerId, inquiryId, pricingRepository = failingPricing)(
-                    command("atomic-pricing-${UUID.randomUUID()}@example.com", pricingInputs = inputs()),
+                    command("atomic-pricing-${UUID.randomUUID()}@example.com"),
                 )
             }
 

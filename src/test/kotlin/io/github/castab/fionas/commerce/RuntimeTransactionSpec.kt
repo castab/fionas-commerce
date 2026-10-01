@@ -1,10 +1,12 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.inquiry
+import io.github.castab.fionas.commerce.testing.requestedPricing
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldBeNull
@@ -19,11 +21,12 @@ class RuntimeTransactionSpec :
         lateinit var application: TestApplication
         val customers = JdbiCustomerRepository()
         val inquiries = JdbiInquiryRepository()
+        val requested = JdbiInquiryPricingRepository()
 
         beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
 
-        test("a customer and an inquiry written in one runtime transaction both roll back when it fails") {
+        test("a customer, an inquiry and its requested inputs written in one runtime transaction all roll back when it fails") {
             val customer = customer()
             val inquiry = inquiry(customer)
 
@@ -32,6 +35,7 @@ class RuntimeTransactionSpec :
                     application.transactor.inTransaction { transaction ->
                         customers.insert(transaction, customer)
                         inquiries.insert(transaction, inquiry)
+                        requested.insert(transaction, inquiry.id, requestedPricing())
                         // Both writes are visible inside the transaction...
                         customers.findById(transaction, customer.id) shouldBe customer
                         inquiries.findById(transaction, inquiry.id) shouldBe inquiry
@@ -44,6 +48,7 @@ class RuntimeTransactionSpec :
             application.transactor.inTransaction { transaction ->
                 customers.findById(transaction, customer.id).shouldBeNull()
                 inquiries.findById(transaction, inquiry.id).shouldBeNull()
+                requested.find(transaction, inquiry.id).shouldBeNull()
             }
         }
 
@@ -56,6 +61,7 @@ class RuntimeTransactionSpec :
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
                 inquiries.insert(transaction, inquiry)
+                requested.insert(transaction, inquiry.id, requestedPricing())
                 // A repository that auto-committed or used its own transaction would already
                 // have made these rows visible to another connection.
                 application.database.count("fionas.customers") shouldBe customersBefore

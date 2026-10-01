@@ -4,7 +4,7 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 
 /**
- * Persistence of the Fiona pricing inputs a customer configured with an [Inquiry], at most one
+ * Persistence of the Fiona pricing inputs a customer configured with an [Inquiry], exactly one
  * record per inquiry, inside the caller's [Transaction]. Never begins, commits, or rolls back
  * a transaction; the calling operation owns the boundary.
  *
@@ -19,7 +19,7 @@ interface InquiryPricingRepository {
         inputs: FionasPricingInputs,
     )
 
-    /** The pricing inputs requested with [inquiryId], or `null` when none were. */
+    /** The pricing inputs requested with [inquiryId], or `null` when no inquiry has that id. */
     fun find(
         transaction: Transaction,
         inquiryId: InquiryId,

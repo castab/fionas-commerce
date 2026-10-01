@@ -18,6 +18,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.perGuest
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
@@ -316,7 +317,9 @@ class FinancialDocumentRoutesSpec :
                     InquiryFinancialDocumentsResponse.serializer(),
                 )
             listed.inquiryId shouldBe inquiryId
-            listed.documents shouldContainExactly listOf(latest)
+            // Beside the inquiry's own initial Estimate, created with it at the same fixed instant.
+            listed.documents.map { it.id } shouldContainExactlyInAnyOrder listOf(application.initialEstimateOf(inquiryId), latest.id)
+            listed.documents.single { it.id == latest.id } shouldBe latest
         }
 
         test("an inquiry may own several lineages") {
@@ -331,13 +334,16 @@ class FinancialDocumentRoutesSpec :
                     InquiryFinancialDocumentsResponse.serializer(),
                 )
             // Both were created at the fixed test instant, so their order is not asserted.
-            listed.documents.map { it.id } shouldContainExactlyInAnyOrder listOf(first.id, second.id)
+            listed.documents.map { it.id } shouldContainExactlyInAnyOrder
+                listOf(application.initialEstimateOf(inquiryId), first.id, second.id)
+            // A new inquiry owns exactly its initial Estimate.
+            val fresh = application.createInquiry()
             CommerceJson
                 .asA(
-                    get("/inquiries/${application.createInquiry()}/financial-documents").bodyString(),
+                    get("/inquiries/$fresh/financial-documents").bodyString(),
                     InquiryFinancialDocumentsResponse.serializer(),
                 ).documents
-                .shouldBeEmpty()
+                .map { it.id } shouldContainExactly listOf(application.initialEstimateOf(fresh))
         }
 
         test("the caller cannot supply lines, amounts, or totals: the server prices every persisted document") {

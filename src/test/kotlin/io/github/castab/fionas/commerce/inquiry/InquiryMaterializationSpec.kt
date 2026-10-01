@@ -92,7 +92,7 @@ class InquiryMaterializationSpec :
             FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), application.context.offeringsSnapshotRepository::retrieveVersion)
 
         fun command(
-            input: FionasPricingInputs? = inputs(),
+            input: FionasPricingInputs = inputs(),
             email: String = "materialized-${UUID.randomUUID()}@example.com",
         ) = CreateInquiry.Command(
             CustomerName("Jane Doe"),
@@ -233,20 +233,6 @@ class InquiryMaterializationSpec :
                 .latest(id)
                 .total.amount
                 .compareTo(BigDecimal("681.25")) shouldBe 0
-        }
-
-        test("plain inquiry creates customer and inquiry but no financial or pricing rows") {
-            val before = counts()
-            val inquiry = create(latest = { _, _ -> error("Plain inquiry must never read the catalog") })(command(null))
-            val after = counts()
-            tables.forEach {
-                after.getValue(it) shouldBe
-                    before.getValue(it) + if (it in listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_submissions")) 1 else 0
-            }
-            application.transactor.inTransaction { transaction ->
-                associations.initialEstimateOf(transaction, inquiry.id).shouldBeNull()
-                associations.documentsOf(transaction, inquiry.id) shouldBe emptyList()
-            }
         }
 
         test("failure inside ledger line persistence rolls back the entire submission across both schemas") {

@@ -12,6 +12,7 @@ import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.inquiry
+import io.github.castab.fionas.commerce.testing.insertInquiryRecord
 import io.github.castab.fionas.commerce.testing.sqlState
 import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FunSpec
@@ -39,7 +40,7 @@ class JdbiInquiryRepositorySpec :
             val inquiry = inquiry(customer).copy(zipCode = ZipCode("02108"))
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry)
+                insertInquiryRecord(transaction, inquiry)
             }
             application.transactor.inTransaction { inquiries.findById(it, inquiry.id) } shouldBe inquiry
             application.transactor.inTransaction { inquiries.listNewestFirst(it, null, 100).single { it.id == inquiry.id } } shouldBe
@@ -79,7 +80,7 @@ class JdbiInquiryRepositorySpec :
 
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry)
+                insertInquiryRecord(transaction, inquiry)
             }
 
             application.transactor.inTransaction { inquiries.findById(it, inquiry.id) } shouldBe inquiry
@@ -117,7 +118,7 @@ class JdbiInquiryRepositorySpec :
 
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry)
+                insertInquiryRecord(transaction, inquiry)
             }
 
             application.transactor
@@ -150,7 +151,7 @@ class JdbiInquiryRepositorySpec :
             val oldest = inquiry(customer, createdAt = Instant.parse("2200-01-01T00:00:00Z"))
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                (tied + oldest + newest).forEach { inquiries.insert(transaction, it) }
+                (tied + oldest + newest).forEach { insertInquiryRecord(transaction, it) }
             }
             // PostgreSQL orders uuids as their canonical lowercase text.
             val expected = listOf(newest) + tied.sortedByDescending { it.id.value.toString() } + oldest
@@ -218,6 +219,25 @@ class JdbiInquiryRepositorySpec :
 
             application.transactor.inTransaction { requested.find(it, inquiry.id) } shouldBe inputs
             application.transactor.inTransaction { requested.find(it, InquiryId(UUID.randomUUID())) }.shouldBeNull()
+        }
+
+        test("an inquiry cannot commit without its requested pricing inputs") {
+            val customer = customer()
+            val inquiry = inquiry(customer)
+            val before = application.database.count("fionas.inquiries")
+
+            val failure =
+                shouldThrowAny {
+                    application.transactor.inTransaction { transaction ->
+                        customers.insert(transaction, customer)
+                        inquiries.insert(transaction, inquiry)
+                    }
+                }
+
+            // The deferred reference is checked at commit, so the whole transaction rolls back.
+            failure.sqlState() shouldBe "23503"
+            application.database.count("fionas.inquiries") shouldBe before
+            application.transactor.inTransaction { customers.findById(it, customer.id) }.shouldBeNull()
         }
 
         test("requested pricing inputs cannot exist without their inquiry") {

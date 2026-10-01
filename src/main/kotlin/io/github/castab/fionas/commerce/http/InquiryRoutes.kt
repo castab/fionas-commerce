@@ -79,14 +79,15 @@ data class CreateInquiryRequest(
     val message: String? = null,
     @ApiProperty(
         description =
-            "The configuration the customer chose, as `POST /estimate-preview` takes it; absent for a plain contact " +
-                "inquiry. The revision must still be current when validated, and selections must be exposed by the " +
-                "public inquiry form. Stale revisions fail with 409 CATALOG_REVISION_STALE; refresh the form and ask " +
-                "the customer to review before resubmission. Rejected inputs record nothing. Accepted concrete lines " +
-                "materialize an initial Estimate in the " +
-                "same transaction. Amounts are never accepted; the inquiry records customer intent and the ledger records financial lines.",
+            "Required: the ice cream service the customer configured, as `POST /estimate-preview` takes it. Every " +
+                "inquiry is a request for configured service. The revision must still be current when validated, and " +
+                "selections must be exposed by the public inquiry form. Stale revisions fail with 409 " +
+                "CATALOG_REVISION_STALE; refresh the form and ask the customer to review before resubmission. Rejected " +
+                "inputs record nothing. Accepted inputs are priced exactly once, and their concrete lines materialize " +
+                "the inquiry's initial Estimate in the same transaction. Amounts are never accepted; the inquiry " +
+                "records customer intent and the ledger records financial lines.",
     )
-    val pricingInputs: InquiryPricingInputs? = null,
+    val pricingInputs: InquiryPricingInputs,
     @ApiProperty(
         description =
             "Required event ZIP code for staff service-area/travel review; not the customer's home address. " +
@@ -167,10 +168,10 @@ data class InquiryResponse(
     val createdAt: String,
     @ApiProperty(
         description =
-            "The configuration the customer submitted with the inquiry, exactly as recorded; absent when none was. " +
+            "The configuration the customer submitted with the inquiry, exactly as recorded; every inquiry has one. " +
                 "Its properties are those `POST /inquiries/{inquiryId}/estimates` takes.",
     )
-    val pricingInputs: InquiryRequestedPricing? = null,
+    val pricingInputs: InquiryRequestedPricing,
     @ApiProperty(description = "The event's required ZIP code as recorded with this inquiry.", pattern = ZipCode.PATTERN)
     val zipCode: String,
     @ApiProperty(description = "The recorded event calendar date, without a time or time zone.", format = "date")
@@ -374,31 +375,32 @@ fun createInquiryRoute(
             "Records a prospective customer's inquiry. Idempotency-Key is required: a successful same-key/same-intent " +
             "replay returns the original 201 receipt and Location without catalog access or pricing, even after publication. " +
             "A successful key reused for changed intent fails with 409 IDEMPOTENCY_KEY_REUSED. Failed attempts do not consume keys. " +
+            "Every inquiry is a request for configured ice cream service, so `pricingInputs` is required. " +
             "For new submissions, pricing inputs must name the current catalog revision observed " +
             "during validation and use only public categories with enabled, available offerings. Disabled offerings are " +
             "hidden from GET /inquiry-form; unavailable options stay visible but cannot be selected. " +
             "A stale revision fails with 409 CATALOG_REVISION_STALE and records nothing; fetch a fresh form and ask " +
-            "the customer to review updated selections/pricing before resubmission. With accepted pricing inputs, " +
-            "prices exactly once and atomically materializes " +
-            "a canonical initial Estimate with self-contained financial lines; a plain inquiry creates no Estimate. " +
+            "the customer to review updated selections/pricing before resubmission. Every accepted inquiry is " +
+            "priced authoritatively exactly once and atomically materializes exactly one canonical initial Estimate " +
+            "(version 1) with self-contained financial lines; the inquiry and its Estimate commit together or not at all. " +
             "Requested pricing inputs remain inquiry history, not dependencies of the financial snapshot. The " +
             "customer is found by normalized email, or created with the inquiry in the same transaction; an existing " +
-            "customer's stored name is never changed. The response is a receipt of the new inquiry alone and " +
-            "describes no stored customer. The `Location` response header holds the new inquiry's path, " +
-            "`/inquiries/{inquiryId}`, which staff read."
+            "customer's stored name is never changed. The response is a receipt of the new inquiry alone: it " +
+            "describes no stored customer and does not expose the initial Estimate. The `Location` response header " +
+            "holds the new inquiry's path, `/inquiries/{inquiryId}`, which staff read."
         tags += inquiries
         receiving(createInquiryRequest to exampleRequest)
         returning(Status.CREATED, inquiryReceiptResponse to exampleReceipt, "The recorded inquiry's receipt. `Location` holds its path.")
         returningError(
             ErrorCategory.MALFORMED_REQUEST,
             "Idempotency-Key is missing, repeated or invalid, or the body is not JSON, " +
-                "lacks a required name, email, ZIP, event date or type, " +
+                "lacks (or nulls) a required name, email, ZIP, event date or type, or `pricingInputs`, " +
                 "has an unknown event type, or a field has the wrong type.",
             "Malformed request: body 'body'",
         )
         returningError(
             ErrorCategory.NOT_FOUND,
-            "`pricingInputs` names a catalog revision that does not exist.",
+            "Fiona's catalog has not been initialized, or `pricingInputs` names a catalog revision that does not exist.",
             "Offerings catalog revision r12 was not found",
         )
         returningError(
@@ -437,15 +439,13 @@ fun createInquiryRoute(
                     eventType = body.eventType.toDomain(),
                     submissionKey = submissionKey,
                     pricingInputs =
-                        body.pricingInputs?.let {
-                            pricingInputs(
-                                it.catalogRevision,
-                                it.guestCount,
-                                it.guestCountIsMinimum,
-                                it.durationMinutes,
-                                it.selections.map { selection -> selection.category to selection.offerings },
-                            )
-                        },
+                        pricingInputs(
+                            body.pricingInputs.catalogRevision,
+                            body.pricingInputs.guestCount,
+                            body.pricingInputs.guestCountIsMinimum,
+                            body.pricingInputs.durationMinutes,
+                            body.pricingInputs.selections.map { it.category to it.offerings },
+                        ),
                 )
             }
         try {
@@ -576,7 +576,7 @@ private fun InquiryDetails.toResponse() =
         email = customer.email.value,
         message = inquiry.message?.value,
         createdAt = inquiry.createdAt.toString(),
-        pricingInputs = pricingInputs?.toResponse(),
+        pricingInputs = pricingInputs.toResponse(),
         zipCode = inquiry.zipCode.value,
         eventDate = inquiry.eventDate.value.toString(),
         eventType = InquiryEventType.valueOf(inquiry.eventType.name),

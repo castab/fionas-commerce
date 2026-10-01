@@ -117,8 +117,18 @@ fun pricingBody(
         extra + "}"
 }
 
-/** Records an inquiry through the public API and returns its id. */
-fun TestApplication.createInquiry(email: String = "jane-${UUID.randomUUID()}@example.com"): String {
+/**
+ * Records an inquiry through the public API and returns its id. Like a real client, it configures
+ * the service against the catalog's current revision ([pricing] of that revision), so it is
+ * priced and has its initial Estimate, as every accepted inquiry does.
+ */
+fun TestApplication.createInquiry(
+    email: String = "jane-${UUID.randomUUID()}@example.com",
+    pricing: (currentRevision: Int) -> String = { pricingBody(it) },
+): String {
+    val catalog = http(Request(Method.GET, "/offering-catalog"))
+    check(catalog.status == Status.OK) { "An inquiry needs Fiona's catalog: ${catalog.status}" }
+    val current = CommerceJson.asA(catalog.bodyString(), OfferingsCatalogDto.serializer()).revision
     val response =
         http(
             Request(Method.POST, "/inquiries")
@@ -126,9 +136,18 @@ fun TestApplication.createInquiry(email: String = "jane-${UUID.randomUUID()}@exa
                 .withUiKey()
                 .header("Content-Type", "application/json")
                 .body(
-                    """{"name":"Jane Doe","email":"$email","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","message":"Ice cream for a birthday."}""",
+                    """{"name":"Jane Doe","email":"$email","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY",""" +
+                        """"message":"Ice cream for a birthday.","pricingInputs":${pricing(current)}}""",
                 ),
         )
-    check(response.status == Status.CREATED) { "Recording an inquiry failed: ${response.status}" }
+    check(response.status == Status.CREATED) { "Recording an inquiry failed: ${response.status} ${response.bodyString()}" }
     return checkNotNull(response.header("Location")).substringAfterLast('/')
 }
+
+/** The id of [inquiryId]'s canonical initial Estimate, which every accepted inquiry has exactly one of. */
+fun TestApplication.initialEstimateOf(inquiryId: String): String =
+    database
+        .strings(
+            "SELECT document_id FROM fionas.inquiry_financial_documents " +
+                "WHERE inquiry_id = '$inquiryId' AND purpose = 'INITIAL_ESTIMATE'",
+        ).single()

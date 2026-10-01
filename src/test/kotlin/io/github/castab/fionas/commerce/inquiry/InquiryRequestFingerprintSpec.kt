@@ -56,7 +56,6 @@ class InquiryRequestFingerprintSpec :
                 "zip" to original.copy(zipCode = ZipCode.of("92626")),
                 "date" to original.copy(eventDate = EventDate.of("2026-12-06")),
                 "type" to original.copy(eventType = EventType.WEDDING),
-                "absent pricing" to original.copy(pricingInputs = null),
                 "revision" to original.copy(pricingInputs = inputs.copy(catalogRevision = OfferingsRevision.of(21))),
                 "guests" to context(inputs.context.copy(guestCount = 76)),
                 "minimum guests" to context(inputs.context.copy(guestCountIsMinimum = true)),
@@ -74,6 +73,10 @@ class InquiryRequestFingerprintSpec :
             )
         differences.forEach { (field, changed) ->
             test("fingerprint includes $field") { changed.fingerprint() shouldNotBe original.fingerprint() }
+        }
+        test("the v1 encoding is pinned, so committed submissions keep replaying") {
+            // Computed by the implementation in which pricing was still optional; every priced command keeps it.
+            original.fingerprint() shouldBe "68940eb88234f50a41c92a4154967309210a5862bd531f27c693795640c49285"
         }
         test("canonical normalization and command key do not affect fingerprints") {
             original

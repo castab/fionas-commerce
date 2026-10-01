@@ -161,7 +161,13 @@ class FinancialDocumentAtomicitySpec :
                         newDocumentId = { id },
                     )
                 shouldThrow<IllegalStateException> {
-                    create(CreateInquiryFinancialDocument.Command(InquiryId(UUID.fromString(application.createInquiry())), stage, inputs()))
+                    create(
+                        CreateInquiryFinancialDocument.Command(
+                            InquiryId(UUID.fromString(application.createInquiry())),
+                            stage,
+                            inputs(),
+                        ),
+                    )
                 }
                 stored(id) shouldBe listOf(0, 0, 0, 0)
             }

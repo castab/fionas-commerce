@@ -115,6 +115,15 @@ verifying ownership of the address. Decide these explicitly before changing the 
 
 ### Inquiries and the staff inbox
 
+- **Every Fiona inquiry is a request for configured ice cream service.** A valid inquiry
+  includes a current catalog revision, service quantity/duration, and required offering
+  selections. Every accepted inquiry is priced exactly once and atomically materializes
+  Estimate v1. There is one inquiry model and one successful creation path: no contact-only
+  inquiry, no optional `pricingInputs`, and no successful inquiry without its Estimate.
+  `CreateInquiryRequest.pricingInputs`, `CreateInquiry.Command.pricingInputs`,
+  `InquiryDetails.pricingInputs`, and `InquiryResponse.pricingInputs` are non-null; an
+  omitted or `null` request value is a `LensFailure` (`400 malformed_request`) that writes
+  nothing. Never reintroduce nullable plumbing, transitional flags, or a separate endpoint.
 - **Submission requires the UI key; reading is staff-only.** `POST /inquiries` requires the trusted server-side UI Bearer key.
   `GET /inquiries` and `GET /inquiries/{inquiryId}` require Fiona's
   `fionas.inquiries.read`. There is no public confirmation lookup: a confirmation renders
@@ -126,10 +135,11 @@ verifying ownership of the address. Decide these explicitly before changing the 
   The `inquiries_created_at_id_idx` index serves every page. Never add search,
   filters, inquiry status, offsets, or a generic pagination framework here without a
   dedicated slice.
-- **Requested pricing inputs are the customer's request, never amounts.** An inquiry may
-  carry the `FionasPricingInputs` the customer configured (catalog revision, selections,
+- **Requested pricing inputs are the customer's request, never amounts.** Every inquiry
+  carries the `FionasPricingInputs` the customer configured (catalog revision, selections,
   guest count, duration), in `fionas.inquiry_pricing` and its ordered categories and
-  selections. New `CreateInquiry` commands use Fiona-local `PublicInquiryPricing` before business writes:
+  selections; Fiona `V10`'s deferred foreign key from `inquiries.id` to `inquiry_pricing`
+  makes them mandatory at commit. New `CreateInquiry` commands use Fiona-local `PublicInquiryPricing` before business writes:
   categories must belong to the shared `publicOfferingQuestions` definition used by
   `GetInquiryForm`, and the submitted revision must equal the latest observed in the
   same READ COMMITTED transaction. Older revisions produce `409 CATALOG_REVISION_STALE`
@@ -148,7 +158,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
   nothing, including their key claim. Inputs remain pinned inquiry history, never rewritten or copied to the initial
   financial snapshot. Financial documents have no dependency on offerings after materialization.
   Public eligibility/current-revision rules must never constrain staff financial operations.
-  A plain inquiry skips catalog access/validation and creates no Estimate or association.
+  Every inquiry reads the catalog: none is accepted before the catalog is initialized (`404`).
 - **Public submission identity is explicit and durable.** Only `POST /inquiries` requires
   exactly one `Idempotency-Key`: 1–128 ASCII letters/digits/underscore/hyphen, case-sensitive,
   untrimmed, opaque and non-secret (UUIDs work). Invalid/missing/repeated keys are a
@@ -175,10 +185,12 @@ verifying ownership of the address. Decide these explicitly before changing the 
   may use that key. No independent finalization transaction, Redis, JVM mutex or TTL.
 - **Fingerprint semantic intent, never raw bytes or prices.** `InquiryRequestFingerprint`
   hashes stable v1 length-prefixed UTF-16 code units/binary canonical values with SHA-256. Include all
-  inquiry values and pricing presence/revision/context/ordered categories/offerings; exclude
+  inquiry values and pricing revision/context/ordered categories/offerings; exclude
   command key, generated identities, clocks, current catalog and derived financial amounts.
   Preserve order because it determines materialized line order. Normalized text and optional
-  defaults remain equivalent. Encoding changes require durable replay compatibility decisions.
+  defaults remain equivalent. Encoding changes require durable replay compatibility decisions:
+  the byte that once marked pricing presence is a constant v1 marker, keeping every committed
+  (priced) fingerprint replayable; `InquiryRequestFingerprintSpec` pins a v1 hash.
   One key plus one semantic request yields one committed result; never claim application code
   literally executes once. Different keys mean distinct commands, even for the same email/body.
   Preserve customer-matching concurrency policy; never deduplicate by email or body similarity.
@@ -219,7 +231,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
   snapshot. HTTP reuses the runtime's `dto()`, `OfferingDto`, and `OfferingPriceDto`;
   never restate offering identity, price forms, or selection validation. Allowed durations
   come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
-- The response exposes `definitionVersion` (6 for the current code-owned definition) and
+- The response exposes `definitionVersion` (7 for the current code-owned definition) and
   `catalogId`/`catalogRevision`. Clients submit the latter revision as
   `pricingInputs.catalogRevision`; inquiry submission requires it still to be current,
   and exact-revision backend pricing remains authoritative.
@@ -264,7 +276,9 @@ verifying ownership of the address. Decide these explicitly before changing the 
   never trusted totals or line items; the form introduces no alternate validation path.
 - Each field's `submissionPointer` is a JSON Pointer into the existing request; offering
   inputs append `{category, offerings}` at `/pricingInputs/selections`.
-  The service section remains optional, and field requirements apply when it is used.
+  The service section is required (`optional = false`), as `pricingInputs` is; only
+  Additional information is optional, and field requirements apply when a section is used.
+  Clients need not call `POST /estimate-preview` before submitting.
   The form advertises only supported answers. Phone, street addresses, event
   contacts, definition administration/history, and a reusable UI abstraction remain deferred.
 - Wire inputs are sealed serializable DTOs in `http`, with a `type` discriminator.
@@ -604,6 +618,9 @@ after runtime-owned migrations.
   `V9` adds Fiona-only `inquiry_submissions`, with unique command key and inquiry id,
   bounded key/SHA-256 checks and a deferred inquiry FK. It does not modify or reference
   runtime structures. Existing inquiries receive no invented submission keys.
+  `V10` adds a deferred foreign key from `inquiries.id` to Fiona's `inquiry_pricing`, so no
+  inquiry commits without requested inputs. It invents none: a disposable database holding
+  an inquiry recorded without them fails `V10` and must be recreated.
   `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
@@ -1126,7 +1143,7 @@ The remaining gaps below have not been re-audited.
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
   invisible until commit), `FinancialDocumentAtomicitySpec` (a Fiona failure after a ledger
   write rolls back the runtime's snapshot, payment, and allocation with Fiona's rows),
-  `InquiryMaterializationSpec` (exact lines from one evaluation, customer reuse, plain inquiries,
+  `InquiryMaterializationSpec` (exact lines from one evaluation, customer reuse,
   rollback inside ledger and during/after association writes, canonical uniqueness, catalog
   independence, custom ledger changes and transitions without pricing metadata),
   `FinancialDocumentRepositoriesSpec`, `RepricingSpec`, `FinancialDocumentReadConsistencySpec`
@@ -1142,7 +1159,8 @@ The remaining gaps below have not been re-audited.
   requested pricing inputs pinned, ordinary pricing errors preserved, and handed to an
   estimate unchanged), `PublicInquirySubmissionSpec` (stale zero-write conflict, fresh
   acceptance, every advertised option/duration, hidden categories and disguised offerings,
-  retirement, domain failures, plain inquiry without a catalog, and unrestricted staff
+  retirement, domain failures, missing/null pricing inputs and an uninitialized catalog with
+  zero writes, and unrestricted staff
   historical/hidden creation), `InquiryMaterializationSpec` (one evaluation, publication
   after validation, cross-schema rollback and financial evolution after test-only catalog
   removal), `InquiryIdempotencySpec` (forced/observed PostgreSQL same/different key contention,

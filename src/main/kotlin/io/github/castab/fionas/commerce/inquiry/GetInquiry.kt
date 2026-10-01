@@ -25,6 +25,11 @@ class GetInquiry(
                 checkNotNull(customers.findById(transaction, inquiry.customerId)) {
                     "Inquiry ${id.value} references a missing customer"
                 }
-            InquiryDetails(inquiry, customer, pricingInputs.find(transaction, id))
+            // The deferred foreign key guarantees every inquiry has requested pricing inputs.
+            val requested =
+                checkNotNull(pricingInputs.find(transaction, id)) {
+                    "Inquiry ${id.value} has no requested pricing inputs"
+                }
+            InquiryDetails(inquiry, customer, requested)
         }
 }

@@ -85,6 +85,9 @@ class InquiryRoutesSpec :
                 "fionas.inquiries",
                 "fionas.inquiry_pricing",
                 "fionas.inquiry_pricing_selections",
+                "commerce.financial_document_snapshots",
+                "commerce.financial_document_lines",
+                "fionas.inquiry_financial_documents",
             ).map(application.database::count)
 
         /** Runs [block] while the bootstrap administrator holds only [permissions], then restores the Administrator role. */
@@ -112,7 +115,9 @@ class InquiryRoutesSpec :
             zipCode: String = "92626",
             eventDate: String = "2026-12-05",
             eventType: String = "BIRTHDAY",
-        ) = """{"name":"$name","email":"$email","zipCode":"$zipCode","eventDate":"$eventDate","eventType":"$eventType"$extra}"""
+            pricing: String? = pricingBody(revision),
+        ) = """{"name":"$name","email":"$email","zipCode":"$zipCode","eventDate":"$eventDate","eventType":"$eventType"$extra""" +
+            pricing?.let { ""","pricingInputs":$it""" }.orEmpty() + "}"
 
         // POST /inquiries: public, and a receipt of the new inquiry only.
 
@@ -216,9 +221,15 @@ class InquiryRoutesSpec :
         test("missing, null or numeric ZIP is a malformed request and writes nothing") {
             val before = rows()
             listOf(
-                """{"name":"Jane","email":"missing-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY"}""",
-                """{"name":"Jane","email":"null-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","zipCode":null}""",
-                """{"name":"Jane","email":"numeric-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","zipCode":2108}""",
+                """{"name":"Jane","email":"missing-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":${pricingBody(
+                    revision,
+                )}}""",
+                """{"name":"Jane","email":"null-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":${pricingBody(
+                    revision,
+                )},"zipCode":null}""",
+                """{"name":"Jane","email":"numeric-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":${pricingBody(
+                    revision,
+                )},"zipCode":2108}""",
             ).forEach { body ->
                 post(body).let {
                     it.status shouldBe Status.BAD_REQUEST
@@ -292,7 +303,7 @@ class InquiryRoutesSpec :
             rows() shouldBe before
         }
 
-        test("an unreadable body is a malformed request, and nothing is recorded") {
+        test("an unreadable body, including missing or null pricing inputs, is a malformed request, and nothing is recorded") {
             val before = rows()
 
             post("""{"email":"jane@example.com"}""").let {
@@ -300,9 +311,11 @@ class InquiryRoutesSpec :
                 it.error().code shouldBe "malformed_request"
             }
             post("""{not json""").error().code shouldBe "malformed_request"
-            post(inquiryBody("jane@example.com", extra = ""","pricingInputs":{"catalogRevision":$revision}""")).let {
-                it.status shouldBe Status.BAD_REQUEST
-                it.error().code shouldBe "malformed_request"
+            listOf(null, "null", """{"catalogRevision":$revision}""", "[]").forEach { pricing ->
+                post(inquiryBody("jane@example.com", pricing = pricing)).let {
+                    it.status shouldBe Status.BAD_REQUEST
+                    it.error().code shouldBe "malformed_request"
+                }
             }
 
             rows() shouldBe before
@@ -347,9 +360,10 @@ class InquiryRoutesSpec :
                 it.id shouldBe id
                 it.name shouldBe "Ada"
                 it.message.shouldBeNull()
-                it.pricingInputs.shouldBeNull()
+                it.pricingInputs.catalogRevision shouldBe revision
             }
-            response.keys() shouldBe setOf("id", "customerId", "name", "email", "createdAt", "zipCode", "eventDate", "eventType")
+            response.keys() shouldBe
+                setOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType")
         }
 
         test("an authorized read of an unknown inquiry is not found, and a malformed id a malformed request") {
@@ -367,26 +381,12 @@ class InquiryRoutesSpec :
 
         // The configured request survives the handoff to staff.
 
-        test("a plain contact inquiry without pricing inputs is still recorded") {
-            val before = application.database.count("fionas.inquiry_pricing")
-
-            val response = post(inquiryBody("plain-${UUID.randomUUID()}@example.com", extra = ""","message":"Just a question.""""))
-
-            response.status shouldBe Status.CREATED
-            application
-                .adminGet("/inquiries/${response.receipt().id}")
-                .inquiry()
-                .pricingInputs
-                .shouldBeNull()
-            application.database.count("fionas.inquiry_pricing") shouldBe before
-        }
-
         test("the configured pricing inputs survive persistence and are returned to staff exactly as submitted") {
             val inputs =
                 pricingBody(revision, guests = 120, minutes = 180, toppings = TOPPINGS.reversed())
                     .replace("\"guestCount\":120", "\"guestCount\":120,\"guestCountIsMinimum\":true")
 
-            val response = post(inquiryBody("configured-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":$inputs"""))
+            val response = post(inquiryBody("configured-${UUID.randomUUID()}@example.com", pricing = inputs))
 
             response.status shouldBe Status.CREATED
             response.keys() shouldBe setOf("id", "createdAt")
@@ -407,7 +407,7 @@ class InquiryRoutesSpec :
 
         test("the requested catalog revision is pinned: a later catalog revision never replaces it") {
             val response =
-                post(inquiryBody("pinned-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":${pricingBody(revision)}"""))
+                post(inquiryBody("pinned-${UUID.randomUUID()}@example.com", pricing = pricingBody(revision)))
 
             val later = application.addOffering(revision, "pistachio", "soft-serve-flavor", "Pistachio")
 
@@ -416,7 +416,7 @@ class InquiryRoutesSpec :
                 .adminGet("/inquiries/${response.receipt().id}")
                 .inquiry()
                 .pricingInputs
-                ?.catalogRevision shouldBe revision
+                .catalogRevision shouldBe revision
             revision = later
         }
 
@@ -433,13 +433,13 @@ class InquiryRoutesSpec :
                     application.http(
                         Request(Method.POST, "/estimate-preview").withUiKey().header("Content-Type", "application/json").body(inputs),
                     )
-                val submitted = post(inquiryBody("rejected-${UUID.randomUUID()}@example.com", extra = ""","pricingInputs":$inputs"""))
+                val submitted = post(inquiryBody("rejected-${UUID.randomUUID()}@example.com", pricing = inputs))
 
                 preview.status.successful shouldBe false
                 submitted.status shouldBe preview.status
                 submitted.error() shouldBe preview.error()
             }
-            post(inquiryBody("rejected@example.com", extra = ""","pricingInputs":${pricingBody(999)}""")).error().code shouldBe "not_found"
+            post(inquiryBody("rejected@example.com", pricing = pricingBody(999))).error().code shouldBe "not_found"
 
             rows() shouldBe before
         }
@@ -449,7 +449,7 @@ class InquiryRoutesSpec :
             val inputs = pricingBody(revision, extra = forged)
 
             val response =
-                post(inquiryBody("forged-${UUID.randomUUID()}@example.com", extra = ""","total":"1.00","pricingInputs":$inputs"""))
+                post(inquiryBody("forged-${UUID.randomUUID()}@example.com", extra = ""","total":"1.00"""", pricing = inputs))
 
             response.status shouldBe Status.CREATED
             val read = application.adminGet("/inquiries/${response.receipt().id}")
@@ -464,7 +464,7 @@ class InquiryRoutesSpec :
 
         test("a returning customer's new request keeps its own inputs, and the earlier one is unchanged") {
             val email = "repeat-${UUID.randomUUID()}@example.com"
-            val first = post(inquiryBody(email, extra = ""","pricingInputs":${pricingBody(revision, guests = 50)}""")).receipt()
+            val first = post(inquiryBody(email, pricing = pricingBody(revision, guests = 50))).receipt()
             val firstInputs = application.adminGet("/inquiries/${first.id}").inquiry().pricingInputs
 
             val second =
@@ -472,7 +472,7 @@ class InquiryRoutesSpec :
                     inquiryBody(
                         email,
                         name = "Someone Else",
-                        extra = ""","pricingInputs":${pricingBody(revision, guests = 200, minutes = 90)}""",
+                        pricing = pricingBody(revision, guests = 200, minutes = 90),
                     ),
                 ).receipt()
 
@@ -480,9 +480,9 @@ class InquiryRoutesSpec :
             val firstRead = application.adminGet("/inquiries/${first.id}").inquiry()
             secondRead.customerId shouldBe firstRead.customerId
             firstRead.pricingInputs shouldBe firstInputs
-            firstRead.pricingInputs?.guestCount shouldBe 50
-            secondRead.pricingInputs?.guestCount shouldBe 200
-            secondRead.pricingInputs?.durationMinutes shouldBe 90
+            firstRead.pricingInputs.guestCount shouldBe 50
+            secondRead.pricingInputs.guestCount shouldBe 200
+            secondRead.pricingInputs.durationMinutes shouldBe 90
         }
 
         test("preview → public inquiry with the same inputs → staff read → an estimate priced as the preview, with nothing re-entered") {
@@ -496,7 +496,7 @@ class InquiryRoutesSpec :
             val documents = application.database.count("commerce.financial_document_snapshots")
 
             val receipt =
-                post(inquiryBody("handoff-${UUID.randomUUID()}@example.com", extra = ""","message":"A birthday","pricingInputs":$inputs"""))
+                post(inquiryBody("handoff-${UUID.randomUUID()}@example.com", extra = ""","message":"A birthday"""", pricing = inputs))
                     .receipt()
 
             // The UI key internally materializes one initial Estimate without staff create permission.
@@ -592,10 +592,15 @@ class InquiryRoutesSpec :
         test("inquiries are listed newest first, a bounded page at a time, with the default and maximum page sizes") {
             val clock = SteppingClock(Instant.parse("2026-10-01T12:00:00Z"))
             TestApplication.create(clock = clock).use { app ->
+                val current = app.createAcceptanceCatalog()
                 val ids =
                     List(105) { index ->
                         clock.now = Instant.parse("2026-10-01T12:00:00Z").plus(Duration.ofMinutes(index.toLong()))
-                        app.post(inquiryBody("inbox-$index@example.com", name = "Customer $index")).receipt().id
+                        app
+                            .post(
+                                inquiryBody("inbox-$index@example.com", name = "Customer $index", pricing = pricingBody(current)),
+                            ).receipt()
+                            .id
                     }
                 val newestFirst = ids.reversed()
 
@@ -644,11 +649,12 @@ class InquiryRoutesSpec :
         test("inquiries recorded at the same instant are neither repeated nor skipped across pages") {
             val clock = SteppingClock(Instant.parse("2026-10-02T09:00:00Z"))
             TestApplication.create(clock = clock).use { app ->
-                val older = app.post(inquiryBody("older@example.com")).receipt().id
+                val current = app.createAcceptanceCatalog()
+                val older = app.post(inquiryBody("older@example.com", pricing = pricingBody(current))).receipt().id
                 clock.now = Instant.parse("2026-10-02T09:30:00.123456Z")
-                val tied = List(9) { app.post(inquiryBody("tied-$it@example.com")).receipt().id }
+                val tied = List(9) { app.post(inquiryBody("tied-$it@example.com", pricing = pricingBody(current))).receipt().id }
                 clock.now = Instant.parse("2026-10-02T10:00:00Z")
-                val newer = app.post(inquiryBody("newer@example.com")).receipt().id
+                val newer = app.post(inquiryBody("newer@example.com", pricing = pricingBody(current))).receipt().id
 
                 val walked = mutableListOf<String>()
                 var cursor: String? = null
@@ -670,15 +676,16 @@ class InquiryRoutesSpec :
         test("an inquiry recorded while staff page through the list never shifts a later page") {
             val clock = SteppingClock(Instant.parse("2026-10-03T09:00:00Z"))
             TestApplication.create(clock = clock).use { app ->
+                val current = app.createAcceptanceCatalog()
                 val ids =
                     List(6) { index ->
                         clock.now = Instant.parse("2026-10-03T09:00:00Z").plusSeconds(index.toLong())
-                        app.post(inquiryBody("stable-$index@example.com")).receipt().id
+                        app.post(inquiryBody("stable-$index@example.com", pricing = pricingBody(current))).receipt().id
                     }.reversed()
                 val first = app.adminGet("/inquiries?limit=3").list()
 
                 clock.now = Instant.parse("2026-10-03T10:00:00Z")
-                app.post(inquiryBody("arrived-later@example.com"))
+                app.post(inquiryBody("arrived-later@example.com", pricing = pricingBody(current)))
 
                 app
                     .adminGet("/inquiries?limit=3&cursor=${first.nextCursor}")

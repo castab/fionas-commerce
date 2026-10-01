@@ -42,7 +42,7 @@ data class InquiryFormResponse(
         description = "The single current catalog revision resolved for this response. Submit it as pricingInputs.catalogRevision.",
     )
     val catalogRevision: Int,
-    @ApiProperty(description = "Sections in display order. The service section is optional, as pricingInputs is on POST /inquiries.")
+    @ApiProperty(description = "Sections in display order. The service section is required, as pricingInputs is on POST /inquiries.")
     val sections: List<InquiryFormSectionResponse>,
     @ApiProperty(
         description =
@@ -248,7 +248,8 @@ fun getInquiryFormRoute(
         security = uiApiKeySecurity(uiApiKey)
         summary = "Read the customer inquiry form"
         description = "Public ordered questions for POST /inquiries. Input semantics and presentation hints are separate. " +
-            "Service configuration is optional; when used, required fields and category limits apply. Copy catalogRevision " +
+            "Service configuration is required: every inquiry is a request for configured ice cream service, priced on " +
+            "submission into an initial Estimate. Required fields and category limits apply. Copy catalogRevision " +
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
             "reject stale inquiry submissions with 409 CATALOG_REVISION_STALE; fetch a fresh form and ask the customer " +
             "to review before resubmitting. Choices are never silently repriced. Only configured Fiona categories appear; " +
@@ -294,7 +295,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
     // Reuse the runtime's conversion, including every price form, without re-modeling its DTOs.
     val categories = catalog.dto().categories.associateBy { it.key }
     return InquiryFormResponse(
-        definitionVersion = 6,
+        definitionVersion = 7,
         catalogId = catalog.catalogId.value.toString(),
         catalogRevision = catalog.revision.number,
         sections =

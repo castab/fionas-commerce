@@ -202,7 +202,7 @@ class InquiryFormRoutesSpec :
 
         test("public form returns ordered questions, submission bindings, and separate presentation hints") {
             val form = application.form()
-            form.definitionVersion shouldBe 6
+            form.definitionVersion shouldBe 7
             form.catalogRevision shouldBe revision
             form.sections.map { it.key to it.title } shouldContainExactly
                 listOf(
@@ -211,7 +211,10 @@ class InquiryFormRoutesSpec :
                     "service" to "Build your ice cream service",
                     "additional" to "Additional information",
                 )
-            form.sections.map { it.optional } shouldContainExactly listOf(false, false, true, true)
+            // Every inquiry configures the service; only the additional information may be omitted.
+            form.sections.map { it.optional } shouldContainExactly listOf(false, false, false, true)
+            form.sections.single { it.key == "service" }.description shouldBe
+                "Choose your guest count, service duration, and ice cream options."
             form.fields().map { it.key } shouldContainExactly
                 listOf(
                     "name",
@@ -638,16 +641,17 @@ class InquiryFormRoutesSpec :
             submit(inputs.copy(guestCount = 0)).status shouldBe Status.UNPROCESSABLE_ENTITY
             submit(inputs.copy(durationMinutes = 91)).status shouldBe Status.UNPROCESSABLE_ENTITY
             submit(inputs.copy(selections = emptyList())).status shouldBe Status.UNPROCESSABLE_ENTITY
-            val plain =
+            // Answering only the required contact and event sections omits the required service section.
+            val unconfigured =
                 application.http(
                     Request(Method.POST, "/inquiries")
                         .withSubmissionKey()
                         .withUiKey()
                         .header("Content-Type", "application/json")
                         .body(
-                            """{"name":"Jane","email":"plain@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY"}""",
+                            """{"name":"Jane","email":"unconfigured@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY"}""",
                         ),
                 )
-            plain.status shouldBe Status.CREATED
+            unconfigured.status shouldBe Status.BAD_REQUEST
         }
     })

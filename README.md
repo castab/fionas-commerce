@@ -7,11 +7,11 @@ application built on the reusable
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
-> submits an inquiry, optionally with the configuration they chose, and staff list and read
+> submits an inquiry with the ice cream service they configured, and staff list and read
 > them), serves Fiona's Offerings catalog through
 > commerce-runtime's reusable Offerings capability, and prices selections from it with
-> Fiona's own pricing (`POST /estimate-preview`, which records nothing). Priced inquiry
-> submissions atomically materialize an initial Estimate; plain inquiries do not. Staff turn an
+> Fiona's own pricing (`POST /estimate-preview`, which records nothing). Every accepted
+> inquiry is priced and atomically materializes its initial Estimate. Staff turn an
 > inquiry into persisted financial documents (an estimate, change orders, a quote, an
 > invoice) and record payments against them; the documents, payments, and settlement are
 > commerce-runtime's financial ledger, and Fiona records which inquiry owns each document and
@@ -87,7 +87,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 
 | Endpoint | Permission | Behavior |
 |---|---|---|
-| `POST /inquiries` | UI Bearer key | Requires `Idempotency-Key`. Records customer intent and atomically materializes one canonical initial Estimate when pricing inputs are present; a plain inquiry creates no Estimate. `201` with the receipt (`id`, `createdAt`) and `Location`; identical successful retries return the same receipt. Never exposes the stored customer. |
+| `POST /inquiries` | UI Bearer key | Requires `Idempotency-Key`. Requires `pricingInputs`. Records customer intent, prices it exactly once, and atomically materializes exactly one canonical initial Estimate v1. `201` with the receipt (`id`, `createdAt`) and `Location`; identical successful retries return the same receipt. Never exposes the stored customer. |
 | `GET /inquiry-form` | UI Bearer key | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
@@ -222,7 +222,13 @@ public response is a receipt of the new inquiry only: it never contains the stor
 customer's id, name, or email, so submitting someone else's address reveals nothing. A
 confirmation page renders what the customer just submitted.
 
-`pricingInputs` is optional and has exactly the shape `POST /estimate-preview` and
+Every Fiona inquiry is a request for configured ice cream service. A valid inquiry includes
+a current catalog revision, service quantity/duration (`guestCount`, `durationMinutes`), and
+the required offering selections; every accepted inquiry is priced exactly once and
+atomically materializes Estimate v1. There is no contact-only inquiry: an omitted or `null`
+`pricingInputs` is `400 malformed_request` and records nothing.
+
+`pricingInputs` is required and has exactly the shape `POST /estimate-preview` and
 `POST /inquiries/{inquiryId}/estimates` take (`catalogRevision`, `guestCount`,
 `guestCountIsMinimum`, `durationMinutes`, `selections`). The revision describes the form
 the customer used; it is not permission to request historical pricing. `PublicInquiryPricing`
@@ -249,8 +255,10 @@ idempotency claim, customer lookup/creation, inquiry insert, requested pricing h
 and the canonical initial-estimate association. Any failure rolls everything back.
 The inputs are stored only as customer intent (`fionas.inquiry_pricing` and its ordered
 categories and selections), pinned to the submitted revision; amounts are never accepted.
-No catalog/offering provenance is written for the financial snapshot. Plain inquiries
-create no Estimate or association and do not read the catalog. Public restrictions apply only
+No catalog/offering provenance is written for the financial snapshot. Every inquiry reads the
+current catalog, so none can be accepted before the catalog is initialized. A deferred
+foreign key (`V10`) makes the requested inputs mandatory: an inquiry row cannot commit
+without them. Public restrictions apply only
 to inquiry submission; staff creation/evolution continues independently of the public form,
 including historical catalog inputs and hidden categories. Offerings are not dependencies
 of a materialized financial document. The UI key requires no staff financial-create permission; staff routes
@@ -279,9 +287,10 @@ Keys have no expiration or cleanup in this release, and prior inquiries are not 
 
 The fingerprint is a versioned, deterministic binary encoding of canonical application
 values, hashed with SHA-256: normalized name/email/optional message, ZIP, event date/type,
-pricing presence, revision, guests/minimum flag, exact duration, and all category/offering
-identities in submitted order. Length-prefixed UTF-16 code units, presence bits, fixed-width integers
-and list lengths avoid ambiguous concatenation. Raw JSON, the key, generated ids,
+revision, guests/minimum flag, exact duration, and all category/offering
+identities in submitted order. Length-prefixed UTF-16 code units, the optional message's presence bit, fixed-width integers
+and list lengths avoid ambiguous concatenation. The byte that once marked pricing presence is
+now a constant v1 marker, so every committed (priced) fingerprint replays unchanged. Raw JSON, the key, generated ids,
 timestamps, current catalog state and derived prices are excluded. Property order,
 insignificant JSON whitespace, normalized text and omitted default false remain equivalent;
 category/offering order remains meaningful. Changing the encoding requires a deliberate
@@ -295,8 +304,7 @@ Same key with changed canonical intent returns `409 IDEMPOTENCY_KEY_REUSED` in t
 is exposed. `CATALOG_REVISION_STALE` remains distinct and applies to new, uncommitted
 commands. Failed attempts do not consume keys, so a corrected same-key retry may succeed.
 The guarantee is one key plus one semantic request yields one committed inquiry result;
-it does not promise application code literally executes once. Plain inquiries share these
-semantics and still skip the catalog and ledger. Different keys are distinct commands,
+it does not promise application code literally executes once. Different keys are distinct commands,
 even with identical payloads/email; the existing concurrent new-email conflict remains unchanged.
 
 The future SvelteKit implementation must create one non-secret submission token per logical
@@ -330,7 +338,7 @@ failures and present `message` as diagnostic text; they never parse it for codes
 
 `GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
 resolved against one current Offerings snapshot. The response includes `definitionVersion`
-(currently 6), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
+(currently 7), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
 advisory `pricingPreview` facts.
 Definition version identifies the code-owned questions and bindings; catalog edits change
 the catalog revision independently. Sections are **Contact information**, **Event details**, **Build your
@@ -441,11 +449,13 @@ price supports 90 minutes at 1.5 units, while a 45-minute interval fails for 120
 A required category outside the public definition or insufficient enabled visible options for a
 public category's minimum also fails rather than publishing an unusable form. Enabled options
 count toward that minimum even while unavailable: temporary unavailability alone never causes
-a form `500`, and the optional plain/contact inquiry remains usable. Optional
+a form `500`. Optional
 hidden catalog offerings are not subjected to public-form compatibility checks.
 
-The service section is optional, matching the existing optional `pricingInputs`.
-Field `required` applies when its section is used. For ordinary answers,
+The service section is required, matching the required `pricingInputs`: an inquiry cannot
+be submitted without configuring the service. Only **Additional information** is optional;
+field `required` applies when its section is used. The browser need not call
+`POST /estimate-preview` first: `POST /inquiries` performs the authoritative pricing. For ordinary answers,
 `submissionPointer` is a JSON Pointer into `CreateInquiryRequest`; for example
 `/name` or `/pricingInputs/guestCount`. Each offering field contributes
 `{"category": input.category, "offerings": selectedKeys}` to
@@ -457,7 +467,7 @@ Submit answers only, never the definition, presentation hints, or prices.
 The form introduces no submission validation path: name, email, ZIP, event date/type, and message value
 objects, commerce-domain's structural selection validation, and Fiona's pricing engine
 remain authoritative. Clients that bypass form metadata still receive the existing
-`400`/`404`/`422` responses. Plain contact inquiries without service inputs still work.
+`400`/`404`/`422` responses.
 Structured phone, street address, and event contacts remain deferred.
 Administration of the definition, historical form-definition reads, a generic form DSL,
 and a shared commerce UI abstraction are deliberately deferred. Duration-dependent option
@@ -1225,6 +1235,10 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   `INITIAL_ESTIMATE` per inquiry. It adds no catalog/offering columns to financial tables.
   `V9` adds durable `inquiry_submissions` with unique key/inquiry identity, stored fingerprint and
   a deferred FK to Fiona's inquiry; existing inquiries are not assigned synthetic keys.
+  `V10` adds a deferred foreign key from `inquiries.id` to `inquiry_pricing`, so no inquiry
+  commits without its requested pricing inputs. It invents no inputs: a disposable
+  development database holding an inquiry recorded without them fails `V10` and must be
+  recreated.
   Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog and the financial ledger's snapshots,
@@ -1348,7 +1362,8 @@ FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/spoof-payment.mjs
 
 The script accepts the same `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
 `FIONAS_ADMIN_USERNAME` defaults as the catalog setup script; `FIONAS_ADMIN_PASSWORD` is
-required. It creates a real local inquiry and direct Invoice v1, records and allocates
+required. It creates a real local inquiry, configured with the same service it then invoices (so the
+inquiry also has its initial Estimate), and a direct Invoice v1, records and allocates
 `$200.00` and `$150.00`, refunds `$50.00` from the second payment's allocation, then pays
 the server-returned reopened balance. Each standalone receipt is rediscovered through
 `GET /payments/unapplied`; the first is allocated in two parts, with a read showing its
@@ -1426,15 +1441,15 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
 | `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates on its own (its Offerings and ledger tables included); nothing Fiona-owned in `commerce`, and `public` holds no Fiona objects or migration metadata; each stream's `flyway_schema_history` is in its own schema; the association and pricing-source keys reference the runtime's exact snapshots; no Fiona table or column restates a ledger fact |
 | `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: runtime migrations first (the runtime's financial ledger before Fiona's `V3`; an application migration depending on them succeeds), independent version spaces, each history in its own schema (none in `public`), repeat startup applies nothing, failures prevent composition |
-| `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order |
-| `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
-| `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
-| `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; plain inquiries without catalog access; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
-| `InquiryRequestFingerprintSpec` | Every semantic scalar, optional presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
-| `InquiryIdempotencyRoutesSpec` | Full-handler priced/plain replay with exact receipts and unchanged rows; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |
-| `InquiryIdempotencySpec` | Forced overlapping PostgreSQL same/different requests for priced/plain commands, observed unique-key waits, either winner accepted; failed owner releases key to waiter; late rollback; incomplete claims rejected at commit; application-to-HTTP lost-response recovery and no replay pricing/catalog lookup |
-| `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff with historical revisions; plain inquiry without any catalog |
-| `InquiryFormRoutesSpec` | Explicit public questions and lifecycle, input constraints and submission bindings, runtime prices, incompatible configuration failures, and response-only local totals matching authoritative previews across catalog revisions |
+| `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order; an inquiry cannot commit without them |
+| `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer, inquiry and requested inputs roll back together, and nothing is visible before commit |
+| `InquiryOperationsSpec` | New customer + inquiry + initial Estimate together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
+| `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
+| `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
+| `InquiryIdempotencyRoutesSpec` | Full-handler replay with exact receipts, no second inquiry/Estimate/association; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |
+| `InquiryIdempotencySpec` | Forced overlapping PostgreSQL same/different commands, observed unique-key waits, either winner accepted; failed owner releases key to waiter; late rollback; incomplete claims rejected at commit; application-to-HTTP lost-response recovery and no replay pricing/catalog lookup |
+| `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff with historical revisions; missing/null `pricingInputs` malformed with zero writes; no inquiry before catalog initialization |
+| `InquiryFormRoutesSpec` | Explicit public questions and lifecycle (service section required, unconfigured submissions malformed), input constraints and submission bindings, runtime prices, incompatible configuration failures, and response-only local totals matching authoritative previews across catalog revisions |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |

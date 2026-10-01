@@ -14,13 +14,13 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.inquiry
+import io.github.castab.fionas.commerce.testing.insertInquiryRecord
 import io.github.castab.fionas.commerce.testing.sqlState
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.throwables.shouldThrowAny
@@ -43,7 +43,6 @@ class FinancialDocumentRepositoriesSpec :
     FunSpec({
         lateinit var application: TestApplication
         val customers = JdbiCustomerRepository()
-        val inquiries = JdbiInquiryRepository()
         val associations = JdbiInquiryFinancialDocumentRepository()
         val sources = JdbiFinancialDocumentPricingRepository()
 
@@ -78,7 +77,7 @@ class FinancialDocumentRepositoriesSpec :
         /** A persisted inquiry and the first snapshot of a new commerce-runtime lineage, in [transaction]. */
         fun inquiryAndEstimate(transaction: Transaction): Pair<InquiryId, FinancialDocument> {
             val customer = customer().also { customers.insert(transaction, it) }
-            val inquiry = inquiry(customer).also { inquiries.insert(transaction, it) }
+            val inquiry = inquiry(customer).also { insertInquiryRecord(transaction, it) }
             val estimate = application.context.financialLedger.create(transaction, newLineage())
             return inquiry.id to estimate
         }

@@ -78,14 +78,11 @@ class InquiryIdempotencySpec :
 
         fun counts() = tables.associateWith(app.database::count)
 
-        fun command(
-            priced: Boolean = true,
-            key: InquirySubmissionKey = InquirySubmissionKey(UUID.randomUUID().toString()),
-        ) = CreateInquiry.Command(
-            CustomerName("Jane"),
-            Email.of("race-${UUID.randomUUID()}@example.com"),
-            InquiryMessage("Birthday"),
-            if (priced) {
+        fun command(key: InquirySubmissionKey = InquirySubmissionKey(UUID.randomUUID().toString())) =
+            CreateInquiry.Command(
+                CustomerName("Jane"),
+                Email.of("race-${UUID.randomUUID()}@example.com"),
+                InquiryMessage("Birthday"),
                 FionasPricingInputs(
                     OfferingsRevision.of(revision),
                     OfferingSelections(
@@ -99,15 +96,12 @@ class InquiryIdempotencySpec :
                         ),
                     ),
                     FionasOfferingsContext(75, false, Duration.ofMinutes(120)),
-                )
-            } else {
-                null
-            },
-            ZipCode("02108"),
-            EventDate.of("2026-12-05"),
-            EventType.BIRTHDAY,
-            key,
-        )
+                ),
+                ZipCode("02108"),
+                EventDate.of("2026-12-05"),
+                EventType.BIRTHDAY,
+                key,
+            )
 
         fun operation(
             claims: InquirySubmissionRepository = submissions,
@@ -130,7 +124,7 @@ class InquiryIdempotencySpec :
 
         fun request(command: CreateInquiry.Command): Request {
             val pricing =
-                command.pricingInputs?.let { input ->
+                command.pricingInputs.let { input ->
                     InquiryPricingInputs(
                         input.catalogRevision.number,
                         input.context.guestCount,
@@ -215,78 +209,74 @@ class InquiryIdempotencySpec :
             counts() shouldBe committed
         }
 
-        listOf(false, true).forEach { priced ->
-            listOf(false, true).forEach { different ->
-                test(
-                    "overlapping ${if (priced) "priced" else "plain"} ${if (different) "different" else "identical"} commands serialize to one committed result",
-                ) {
-                    val start = CountDownLatch(1)
-                    val attempted = CountDownLatch(2)
-                    val claimed = CountDownLatch(1)
-                    val resume = CountDownLatch(1)
-                    val pausing =
-                        object : InquirySubmissionRepository by submissions {
-                            override fun claim(
-                                transaction: Transaction,
-                                key: InquirySubmissionKey,
-                                fingerprint: String,
-                                inquiryId: InquiryId,
-                                createdAt: java.time.Instant,
-                            ): Boolean {
-                                attempted.countDown()
-                                val owned = submissions.claim(transaction, key, fingerprint, inquiryId, createdAt)
-                                if (owned) {
-                                    claimed.countDown()
-                                    check(resume.await(30, TimeUnit.SECONDS))
-                                }
-                                return owned
+        listOf(false, true).forEach { different ->
+            test("overlapping ${if (different) "different" else "identical"} commands serialize to one committed result") {
+                val start = CountDownLatch(1)
+                val attempted = CountDownLatch(2)
+                val claimed = CountDownLatch(1)
+                val resume = CountDownLatch(1)
+                val pausing =
+                    object : InquirySubmissionRepository by submissions {
+                        override fun claim(
+                            transaction: Transaction,
+                            key: InquirySubmissionKey,
+                            fingerprint: String,
+                            inquiryId: InquiryId,
+                            createdAt: java.time.Instant,
+                        ): Boolean {
+                            attempted.countDown()
+                            val owned = submissions.claim(transaction, key, fingerprint, inquiryId, createdAt)
+                            if (owned) {
+                                claimed.countDown()
+                                check(resume.await(30, TimeUnit.SECONDS))
                             }
+                            return owned
                         }
-                    val http = handler(operation(claims = pausing))
-                    val first = command(priced)
-                    val second = if (different) first.copy(email = Email.of("other-${UUID.randomUUID()}@example.com")) else first
-                    val before = counts()
-                    val calls =
-                        listOf(first, second).map { input ->
-                            CompletableFuture.supplyAsync {
-                                check(start.await(30, TimeUnit.SECONDS))
-                                http(request(input))
-                            }
+                    }
+                val http = handler(operation(claims = pausing))
+                val first = command()
+                val second = if (different) first.copy(email = Email.of("other-${UUID.randomUUID()}@example.com")) else first
+                val before = counts()
+                val calls =
+                    listOf(first, second).map { input ->
+                        CompletableFuture.supplyAsync {
+                            check(start.await(30, TimeUnit.SECONDS))
+                            http(request(input))
                         }
-                    try {
-                        start.countDown()
-                        attempted.await(30, TimeUnit.SECONDS) shouldBe true
-                        claimed.await(30, TimeUnit.SECONDS) shouldBe true
-                        awaitDatabaseWait()
-                        calls.forEach { it.isDone shouldBe false }
-                    } finally {
-                        resume.countDown()
                     }
-                    val responses = calls.map { it.get(30, TimeUnit.SECONDS) }
-                    if (different) {
-                        responses.count { it.status == Status.CREATED } shouldBe 1
-                        val loser = responses.single { it.status == Status.CONFLICT }
-                        CommerceJson.asA(loser.bodyString(), ErrorResponse.serializer()).code shouldBe "IDEMPOTENCY_KEY_REUSED"
-                        val winnerIndex = responses.indexOfFirst { it.status == Status.CREATED }
-                        val expected = listOf(first, second)[winnerIndex]
-                        app.database.strings("SELECT email FROM fionas.customers WHERE email = '${expected.email.value}'") shouldBe
-                            listOf(expected.email.value)
-                    } else {
-                        responses.map { it.status } shouldBe listOf(Status.CREATED, Status.CREATED)
-                        responses[0].bodyString() shouldBe responses[1].bodyString()
-                        responses[0].header("Location") shouldBe responses[1].header("Location")
-                    }
-                    val after = counts()
-                    listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_submissions").forEach {
-                        after.getValue(it) shouldBe before.getValue(it) + 1
-                    }
-                    listOf(
-                        "commerce.financial_document_snapshots",
-                        "fionas.inquiry_financial_documents",
-                        "fionas.inquiry_pricing",
-                    ).forEach {
-                        after.getValue(it) shouldBe before.getValue(it) + if (priced) 1 else 0
-                    }
+                try {
+                    start.countDown()
+                    attempted.await(30, TimeUnit.SECONDS) shouldBe true
+                    claimed.await(30, TimeUnit.SECONDS) shouldBe true
+                    awaitDatabaseWait()
+                    calls.forEach { it.isDone shouldBe false }
+                } finally {
+                    resume.countDown()
+                }
+                val responses = calls.map { it.get(30, TimeUnit.SECONDS) }
+                if (different) {
+                    responses.count { it.status == Status.CREATED } shouldBe 1
+                    val loser = responses.single { it.status == Status.CONFLICT }
+                    CommerceJson.asA(loser.bodyString(), ErrorResponse.serializer()).code shouldBe "IDEMPOTENCY_KEY_REUSED"
+                    val winnerIndex = responses.indexOfFirst { it.status == Status.CREATED }
+                    val expected = listOf(first, second)[winnerIndex]
+                    app.database.strings("SELECT email FROM fionas.customers WHERE email = '${expected.email.value}'") shouldBe
+                        listOf(expected.email.value)
+                } else {
+                    responses.map { it.status } shouldBe listOf(Status.CREATED, Status.CREATED)
+                    responses[0].bodyString() shouldBe responses[1].bodyString()
+                    responses[0].header("Location") shouldBe responses[1].header("Location")
+                }
+                val after = counts()
+                listOf(
+                    "fionas.customers",
+                    "fionas.inquiries",
+                    "fionas.inquiry_submissions",
+                    "fionas.inquiry_pricing",
+                    "commerce.financial_document_snapshots",
+                    "fionas.inquiry_financial_documents",
+                ).forEach {
+                    after.getValue(it) shouldBe before.getValue(it) + 1
                 }
             }
         }

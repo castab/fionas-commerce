@@ -35,6 +35,8 @@ async function request(method, path, { body, authenticated = false, expectedStat
     if (!uiApiKey) throw new Error("Set FIONAS_UI_API_KEY to the local backend's configured UI key");
     headers.set("Authorization", `Bearer ${uiApiKey}`);
   }
+  // One logical submission per call; fetch is not retried here, so a fresh key per call is safe.
+  if (method === "POST" && path === "/inquiries") headers.set("Idempotency-Key", crypto.randomUUID());
 
   let response;
   try {
@@ -140,6 +142,19 @@ async function main() {
   const catalogRevision = catalog.revision;
   console.log(`Using catalog revision ${catalogRevision}`);
 
+  // Every inquiry is a request for configured service; staff price the same configuration below.
+  const configuration = {
+    catalogRevision,
+    guestCount: 75,
+    guestCountIsMinimum: false,
+    durationMinutes: 120,
+    selections: [
+      { category: "soft-serve-flavor", offerings: ["vanilla", "horchata"] },
+      { category: "topping", offerings: ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"] },
+      { category: "cone-option", offerings: ["waffle-cone"] },
+    ],
+  };
+
   const inquiry = (await request("POST", "/inquiries", {
     body: {
       name: "Local Payment Smoke Test",
@@ -148,6 +163,7 @@ async function main() {
       eventDate: "2026-12-05",
       eventType: "CORPORATE",
       message: "Local developer smoke test: partial payments, refund, and final settlement.",
+      pricingInputs: configuration,
     },
     expectedStatus: 201,
   })).data;
@@ -157,18 +173,7 @@ async function main() {
 
   const document = (await request("POST", `/inquiries/${inquiryId}/financial-documents`, {
     authenticated: true,
-    body: {
-      stage: "INVOICE",
-      catalogRevision,
-      guestCount: 75,
-      guestCountIsMinimum: false,
-      durationMinutes: 120,
-      selections: [
-        { category: "soft-serve-flavor", offerings: ["vanilla", "horchata"] },
-        { category: "topping", offerings: ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"] },
-        { category: "cone-option", offerings: ["waffle-cone"] },
-      ],
-    },
+    body: { stage: "INVOICE", ...configuration },
     expectedStatus: 201,
   })).data;
   checkId(document?.id, "document id");

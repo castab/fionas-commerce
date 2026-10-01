@@ -11,6 +11,7 @@ import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -190,12 +191,12 @@ class FinancialDocumentReadConsistencySpec :
                 pause.resume.countDown()
             }
 
+            // The inquiry's initial Estimate is listed too; it stays at v1 throughout.
+            val initial = UUID.fromString(application.initialEstimateOf(inquiryId.value.toString()))
             val before = reader.get(30, TimeUnit.SECONDS)
-            before.map { it.latest.document.version } shouldContainExactly listOf(Version.INITIAL)
-            before.single().reconciliation.documentReference shouldBe
-                before
-                    .single()
-                    .latest.document.reference
+            before.associate { it.latest.document.id to it.latest.document.version } shouldBe
+                mapOf(initial to Version.INITIAL, id to Version.INITIAL)
+            before.forEach { it.reconciliation.documentReference shouldBe it.latest.document.reference }
 
             val after =
                 ListInquiryFinancialDocuments(
@@ -205,11 +206,9 @@ class FinancialDocumentReadConsistencySpec :
                     associations,
                     sources,
                 )(inquiryId)
-            after.map { it.latest.document.version } shouldContainExactly listOf(Version.of(2))
-            after.single().reconciliation.documentReference shouldBe
-                after
-                    .single()
-                    .latest.document.reference
+            after.associate { it.latest.document.id to it.latest.document.version } shouldBe
+                mapOf(initial to Version.INITIAL, id to Version.of(2))
+            after.forEach { it.reconciliation.documentReference shouldBe it.latest.document.reference }
         }
 
         test("reads change no database rows") {
@@ -234,7 +233,7 @@ class FinancialDocumentReadConsistencySpec :
                 application.context.financialLedger,
                 associations,
                 sources,
-            )(inquiryId).size shouldBe 1
+            )(inquiryId).size shouldBe 2 // The inquiry's initial Estimate and the staff estimate.
             state() shouldBe before
         }
     })

@@ -1,14 +1,22 @@
 package io.github.castab.fionas.commerce.inquiry
 
+import io.github.castab.commerce.offering.OfferingCategoryKey
+import io.github.castab.commerce.offering.OfferingCategorySelection
+import io.github.castab.commerce.offering.OfferingKey
+import io.github.castab.commerce.offering.OfferingSelections
+import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
+import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TEST_INSTANT
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import java.time.Duration
 import java.util.UUID
 
 class InquiryValuesSpec :
@@ -47,6 +55,12 @@ class InquiryValuesSpec :
 
         test("inquiry details pair an inquiry only with its own customer") {
             val customer = Customer(CustomerId(UUID.randomUUID()), CustomerName("Jane Doe"), Email("jane@example.com"), TEST_INSTANT)
+            val requested =
+                FionasPricingInputs(
+                    OfferingsRevision.of(1),
+                    OfferingSelections(listOf(OfferingCategorySelection(OfferingCategoryKey("cone-option"), listOf(OfferingKey("cup"))))),
+                    FionasOfferingsContext(75, false, Duration.ofMinutes(120)),
+                )
             val inquiry =
                 Inquiry(
                     InquiryId(UUID.randomUUID()),
@@ -58,10 +72,10 @@ class InquiryValuesSpec :
                     EventType.BIRTHDAY,
                 )
 
-            InquiryDetails(inquiry, customer, null).customer shouldBe customer
+            InquiryDetails(inquiry, customer, requested).customer shouldBe customer
             InquirySummary(inquiry, customer).customer shouldBe customer
             shouldThrow<IllegalArgumentException> {
-                InquiryDetails(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer, null)
+                InquiryDetails(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer, requested)
             }
             shouldThrow<IllegalArgumentException> {
                 InquirySummary(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer)

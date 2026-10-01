@@ -94,8 +94,8 @@ internal fun inquiryForm(
             InquiryFormSection(
                 "service",
                 "Build your ice cream service",
-                "Choose your guest count, service duration, and ice cream options, or send us a message to discuss your event.",
-                true,
+                "Choose your guest count, service duration, and ice cream options.",
+                false,
                 listOf(
                     InquiryFormField(
                         "guestCount",

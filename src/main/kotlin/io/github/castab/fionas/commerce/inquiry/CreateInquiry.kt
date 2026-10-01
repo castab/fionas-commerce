@@ -24,11 +24,13 @@ import java.util.UUID
  * runtime transaction, so an inquiry is never recorded without its customer, and a new
  * customer is never recorded without the inquiry that introduced them.
  *
- * Pricing inputs must use the public form's categories and the current revision observed by
- * [pricing] in this transaction. They are priced exactly once and recorded with the inquiry.
- * Stale, hidden, or otherwise invalid inputs record nothing. Those exact priced lines materialize the canonical initial Estimate;
- * the inquiry retains the requested inputs, while the ledger retains self-contained lines.
- * A plain inquiry creates no financial document. Every write shares this operation's transaction.
+ * Every Fiona inquiry is a request for configured ice cream service, so every command carries
+ * pricing inputs. They must use the public form's categories and the current revision observed
+ * by [pricing] in this transaction, and are priced exactly once and recorded with the inquiry.
+ * Stale, hidden, or otherwise invalid inputs record nothing. Those exact priced lines materialize
+ * the canonical initial Estimate v1; the inquiry retains the requested inputs, while the ledger
+ * retains self-contained lines. Every write shares this operation's transaction, so the inquiry
+ * and its initial Estimate commit together or not at all.
  *
  * The result is the recorded [Inquiry] alone. It never carries the customer's stored record,
  * so a caller who submits someone else's email learns nothing about that customer.
@@ -55,7 +57,7 @@ class CreateInquiry(
         val name: CustomerName,
         val email: Email,
         val message: InquiryMessage?,
-        val pricingInputs: FionasPricingInputs? = null,
+        val pricingInputs: FionasPricingInputs,
         val zipCode: ZipCode,
         val eventDate: EventDate,
         val eventType: EventType,
@@ -79,23 +81,21 @@ class CreateInquiry(
                 }
                 return@inTransaction checkNotNull(inquiries.findById(transaction, existing.inquiryId))
             }
-            val lines = command.pricingInputs?.let { pricing.price(transaction, it).lineItems }
+            val lines = pricing.price(transaction, command.pricingInputs).lineItems
             val customer =
                 customers.findByEmail(transaction, command.email)
                     ?: Customer(newCustomerId(), command.name, command.email, now)
                         .also { customers.insert(transaction, it) }
             val inquiry = Inquiry(inquiryId, customer.id, command.message, now, command.zipCode, command.eventDate, command.eventType)
             inquiries.insert(transaction, inquiry)
-            command.pricingInputs?.let { pricingInputs.insert(transaction, inquiry.id, it) }
-            lines?.let {
-                materialize.create(
-                    transaction,
-                    inquiry.id,
-                    CreateInquiryFinancialDocument.Stage.ESTIMATE,
-                    it,
-                    InquiryDocumentPurpose.INITIAL_ESTIMATE,
-                )
-            }
+            pricingInputs.insert(transaction, inquiry.id, command.pricingInputs)
+            materialize.create(
+                transaction,
+                inquiry.id,
+                CreateInquiryFinancialDocument.Stage.ESTIMATE,
+                lines,
+                InquiryDocumentPurpose.INITIAL_ESTIMATE,
+            )
             inquiry
         }
     }

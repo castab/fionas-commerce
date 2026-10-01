@@ -67,14 +67,29 @@ class PublicInquirySubmissionSpec :
 
         test("current form revision materializes exactly one canonical Estimate with expected concrete pricing") {
             form().catalogRevision shouldBe revision
+            val before = counts()
             val response = submit(pricingBody(revision))
             response.status shouldBe Status.CREATED
+            val after = counts()
+            // One inquiry, its requested inputs, one Estimate v1 and its association; no legacy staff pricing metadata.
+            listOf(
+                "fionas.customers",
+                "fionas.inquiry_submissions",
+                "fionas.inquiries",
+                "fionas.inquiry_pricing",
+                "commerce.financial_document_snapshots",
+                "fionas.inquiry_financial_documents",
+            ).forEach { after.getValue(it) shouldBe before.getValue(it) + 1 }
+            after.getValue("fionas.inquiry_pricing_categories") shouldBe before.getValue("fionas.inquiry_pricing_categories") + 3
+            after.getValue("fionas.financial_document_pricing") shouldBe before.getValue("fionas.financial_document_pricing")
             val receipt = CommerceJson.asA(response.bodyString(), InquiryReceiptResponse.serializer())
             val ids =
                 app.database.strings(
                     "SELECT document_id FROM fionas.inquiry_financial_documents WHERE inquiry_id = '${receipt.id}' AND purpose = 'INITIAL_ESTIMATE'",
                 )
             ids.size shouldBe 1
+            app.database.strings("SELECT document_id FROM fionas.inquiry_financial_documents WHERE inquiry_id = '${receipt.id}'") shouldBe
+                ids
             val document =
                 CommerceJson.asA(
                     app.adminGet("/financial-documents/${ids.single()}").bodyString(),
@@ -83,6 +98,8 @@ class PublicInquirySubmissionSpec :
             document.stage shouldBe "ESTIMATE"
             document.version shouldBe 1
             document.total shouldBe "681.25"
+            document.lines.size shouldBe
+                after.getValue("commerce.financial_document_lines") - before.getValue("commerce.financial_document_lines")
             document.pricing shouldBe null
             app.database.strings("SELECT catalog_revision FROM fionas.inquiry_pricing WHERE inquiry_id = '${receipt.id}'") shouldBe
                 listOf(revision.toString())
@@ -220,13 +237,41 @@ class PublicInquirySubmissionSpec :
             counts() shouldBe before
         }
 
-        test("plain inquiry works even without a catalog and creates no pricing, financial document or association") {
+        test("missing or null pricing inputs are a malformed request with zero writes") {
+            val contact =
+                """"name":"Jane Doe","email":"unconfigured-${UUID.randomUUID()}@example.com","zipCode":"92626",""" +
+                    """"eventDate":"2026-12-05","eventType":"BIRTHDAY","message":"Just a question.""""
+            listOf("{$contact}", """{$contact,"pricingInputs":null}""").forEach { body ->
+                val before = counts()
+                val response =
+                    app.http(
+                        Request(Method.POST, "/inquiries")
+                            .withSubmissionKey()
+                            .withUiKey()
+                            .header("Content-Type", "application/json")
+                            .body(body),
+                    )
+                response.status shouldBe Status.BAD_REQUEST
+                CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()).code shouldBe "malformed_request"
+                counts() shouldBe before
+            }
+        }
+
+        test("without an initialized catalog no inquiry can be accepted, and nothing is recorded") {
             TestApplication.create().use { empty ->
-                empty.createInquiry()
-                tables.forEach {
-                    empty.database.count(it) shouldBe
-                        if (it in listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_submissions")) 1 else 0
-                }
+                val response =
+                    empty.http(
+                        Request(Method.POST, "/inquiries")
+                            .withSubmissionKey()
+                            .withUiKey()
+                            .header("Content-Type", "application/json")
+                            .body(
+                                """{"name":"Jane","email":"jane@example.com","zipCode":"92626","eventDate":"2026-12-05",""" +
+                                    """"eventType":"BIRTHDAY","pricingInputs":${pricingBody(1)}}""",
+                            ),
+                    )
+                response.status shouldBe Status.NOT_FOUND
+                tables.forEach { empty.database.count(it) shouldBe 0 }
             }
         }
 

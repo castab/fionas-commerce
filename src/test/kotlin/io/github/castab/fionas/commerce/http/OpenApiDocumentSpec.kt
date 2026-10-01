@@ -14,6 +14,7 @@ import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.maps.shouldContainKey
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
 import io.kotest.matchers.string.shouldStartWith
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -532,18 +533,20 @@ class OpenApiDocumentSpec :
             schema("CurrentUserResponse").text("properties", "permissions", "items", "type") shouldBe "string"
         }
 
-        test("describes the create request: required name and email, optional message and pricing inputs, and their limits") {
+        test("describes the create request: required name, email and pricing inputs, an optional message, and their limits") {
             val body = operation("/inquiries", "post").at("requestBody")
             body.at("required") shouldBe JsonPrimitive(true)
             body.text("content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/CreateInquiryRequest"
 
             val request = schema("CreateInquiryRequest")
             request.text("type") shouldBe "object"
-            request.strings("required") shouldContainExactly listOf("name", "email", "zipCode", "eventDate", "eventType")
+            request.strings("required") shouldContainExactly listOf("name", "email", "pricingInputs", "zipCode", "eventDate", "eventType")
             val properties = request.at("properties").jsonObject
             properties.keys.toList() shouldContainExactly
                 listOf("name", "email", "message", "pricingInputs", "zipCode", "eventDate", "eventType")
             properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryPricingInputs"
+            properties.getValue("pricingInputs").text("description") shouldContain "Required"
+            properties.getValue("pricingInputs").text("description") shouldNotContain "absent"
             val text = properties - listOf("pricingInputs", "eventDate", "eventType")
             text.values.forEach { it.text("type") shouldBe "string" }
             text.mapValues { (_, property) -> property.at("maxLength").jsonPrimitive.int } shouldBe
@@ -597,7 +600,14 @@ class OpenApiDocumentSpec :
 
         test("describes the public create response as a receipt of the new inquiry, naming no customer") {
             operation("/inquiries", "post").text("description") shouldContain "canonical initial Estimate"
-            operation("/inquiries", "post").text("description") shouldContain "a plain inquiry creates no Estimate"
+            operation("/inquiries", "post").text("description").let {
+                it shouldContain "`pricingInputs` is required"
+                it shouldContain "exactly one canonical initial Estimate"
+                it shouldContain "commit together or not at all"
+                it shouldContain "does not expose the initial Estimate"
+                it shouldNotContain "plain"
+            }
+            operation("/inquiries", "post").text("responses", "400", "description") shouldContain "`pricingInputs`"
             operation("/inquiries", "post").text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/InquiryReceiptResponse"
 
@@ -617,7 +627,7 @@ class OpenApiDocumentSpec :
 
             val response = schema("InquiryResponse")
             response.strings("required") shouldContainExactly
-                listOf("id", "customerId", "name", "email", "createdAt", "zipCode", "eventDate", "eventType")
+                listOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType")
             val properties = response.at("properties").jsonObject
             properties.keys.toList() shouldContainExactly
                 listOf("id", "customerId", "name", "email", "message", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType")
@@ -733,10 +743,17 @@ class OpenApiDocumentSpec :
                 listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES", "DATE")
         }
 
-        test("inquiry form v6 reuses required runtime state enums and documents public visibility and structural rejections") {
+        test("inquiry form v7 reuses required runtime state enums and documents public visibility and structural rejections") {
             val form = operation("/inquiry-form", "get")
-            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 6
+            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 7
+            form
+                .at("responses", "200", "content", "application/json", "example", "sections")
+                .jsonArray
+                .single { it.text("key") == "service" }
+                .at("optional") shouldBe JsonPrimitive(false)
             val description = form.text("description")
+            description shouldContain "Service configuration is required"
+            description shouldNotContain "optional"
             description shouldContain "selectionState=ENABLED"
             description shouldContain "availability=UNAVAILABLE"
             description shouldContain "unselectable"

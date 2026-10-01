@@ -42,12 +42,10 @@ class InquiryIdempotencyRoutesSpec :
         fun counts() = tables.associateWith(app.database::count)
 
         fun body(
-            pricing: String? = null,
+            pricing: String = pricingBody(revision),
             email: String = "retry-${UUID.randomUUID()}@example.com",
-        ) =
-            """{"name":"Jane","email":"$email","message":"Birthday","zipCode":"02108","eventDate":"2026-12-05","eventType":"BIRTHDAY"${pricing?.let {
-                ",\"pricingInputs\":$it"
-            } ?: ""}}"""
+        ) = """{"name":"Jane","email":"$email","message":"Birthday","zipCode":"02108","eventDate":"2026-12-05",""" +
+            """"eventType":"BIRTHDAY","pricingInputs":$pricing}"""
 
         fun request(
             value: String,
@@ -69,22 +67,21 @@ class InquiryIdempotencyRoutesSpec :
             replay.header("Location") shouldBe first.header("Location")
         }
 
-        listOf(false, true).forEach { priced ->
-            test("sequential ${if (priced) "priced" else "plain"} replay preserves receipt and all row counts") {
-                val key = UUID.randomUUID().toString()
-                val request = request(body(if (priced) pricingBody(revision) else null), key)
-                val before = counts()
-                val first = app.http(request)
-                val committed = counts()
-                sameReceipt(first, app.http(request))
-                counts() shouldBe committed
-                committed.getValue("fionas.inquiries") shouldBe before.getValue("fionas.inquiries") + 1
-                committed.getValue("fionas.inquiry_submissions") shouldBe before.getValue("fionas.inquiry_submissions") + 1
-                committed.getValue("commerce.financial_document_snapshots") shouldBe
-                    before.getValue("commerce.financial_document_snapshots") + if (priced) 1 else 0
-                committed.getValue("fionas.inquiry_financial_documents") shouldBe
-                    before.getValue("fionas.inquiry_financial_documents") + if (priced) 1 else 0
-            }
+        test("sequential replay preserves the receipt and creates no second inquiry, Estimate or association") {
+            val key = UUID.randomUUID().toString()
+            val request = request(body(), key)
+            val before = counts()
+            val first = app.http(request)
+            val committed = counts()
+            sameReceipt(first, app.http(request))
+            counts() shouldBe committed
+            listOf(
+                "fionas.inquiries",
+                "fionas.inquiry_submissions",
+                "fionas.inquiry_pricing",
+                "commerce.financial_document_snapshots",
+                "fionas.inquiry_financial_documents",
+            ).forEach { committed.getValue(it) shouldBe before.getValue(it) + 1 }
         }
 
         test("replay precedes freshness and different current intent conflicts without reprocessing") {
@@ -128,10 +125,6 @@ class InquiryIdempotencyRoutesSpec :
                 }
                 counts() shouldBe committed
             }
-            val plain = body(email = "plain-mismatch@example.com")
-            val plainKey = UUID.randomUUID().toString()
-            app.http(request(plain, plainKey)).status shouldBe Status.CREATED
-            app.http(request(plain.replace("Birthday", "Something else"), plainKey)).error().code shouldBe "IDEMPOTENCY_KEY_REUSED"
         }
 
         test("transport differences, normalization, absent optional defaults and untrusted totals do not change intent") {

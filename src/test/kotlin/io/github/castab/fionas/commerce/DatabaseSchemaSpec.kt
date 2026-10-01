@@ -134,6 +134,15 @@ class DatabaseSchemaSpec :
             ) shouldContainExactly listOf("PRIMARY KEY (inquiry_id)")
         }
 
+        test("every inquiry must commit with its requested pricing inputs, checked at commit by a deferred foreign key") {
+            application.database.foreignKeys("inquiries") shouldContainExactlyInAnyOrder
+                listOf("customer_id → fionas.customers(id)", "id → fionas.inquiry_pricing(inquiry_id)")
+            application.database.strings(
+                "SELECT conname || ' ' || condeferrable::text || ' ' || condeferred::text FROM pg_constraint " +
+                    "WHERE conrelid = 'fionas.inquiries'::regclass AND contype = 'f' ORDER BY conname",
+            ) shouldContainExactly listOf("inquiries_customer_id_fkey false false", "inquiries_pricing_fkey true true")
+        }
+
         test("the newest-first inquiry list has an index on its exact ordering") {
             application.database.strings(
                 "SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas' AND tablename = 'inquiries' " +
@@ -255,7 +264,7 @@ class DatabaseSchemaSpec :
                 ).forEach { it shouldStartWith "commerce." }
         }
 
-        test("inquiries reference their customer, and customer emails are unique") {
+        test("inquiries reference their customer and requested pricing, and customer emails are unique") {
             application.database.strings(
                 """
                 SELECT tc.constraint_type || ' ' || tc.table_name || '(' || kcu.column_name || ')'
@@ -268,6 +277,7 @@ class DatabaseSchemaSpec :
             ) shouldContainExactly
                 listOf(
                     "FOREIGN KEY inquiries(customer_id)",
+                    "FOREIGN KEY inquiries(id)",
                     "PRIMARY KEY customers(id)",
                     "PRIMARY KEY inquiries(id)",
                     "UNIQUE customers(email)",
