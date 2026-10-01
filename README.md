@@ -177,6 +177,28 @@ The runtime administration capability is mounted at `/admin/access`: it exposes 
 services, roles, permission catalog, role grants, and principal role assignments in the
 same OpenAPI document. Its routes use Fiona's session cookie and trusted Origin policy.
 
+**Authorization reads**, two of them commerce-runtime's own contract routes:
+
+| Endpoint | Requires | Answers |
+|---|---|---|
+| `GET /auth/me` | An active human staff session (USER only; a SERVICE is `403`) | Fiona's staff profile (id, username, names), role keys, and live effective permissions. |
+| `GET /authorization/me` | Any authenticated principal, USER or SERVICE | The runtime's description of the request's principal (`kind`, `id`, `displayName`), its sorted live effective permissions, and `permissionCatalogRevision`. |
+| `GET /admin/access/permissions` | `commerce.role.read` | The complete permission catalog, runtime and Fiona permissions together, ordered by key, with its `revision` (`sha256:…`). |
+
+`/auth/me` answers "who is the current Fiona staff user?"; `/authorization/me` answers
+"which principal authenticated this backend request?". Both use the same session cookie
+and `AccessControl`; neither accepts the UI key, which establishes no principal. Once Fiona
+adopts the runtime's service-authentication transport, a backend-for-frontend calling
+`/authorization/me` with its own service credential receives its own SERVICE identity and
+permissions, never the browser user's: there is no delegation. A client can compare
+`permissionCatalogRevision` with the catalog's `revision` to detect a changed vocabulary.
+Effective permissions only guide what a UI shows; every operation still enforces its own.
+
+`/admin/access/permissions` is Fiona's only catalog route. Commerce-runtime 0.0.20's
+standalone `permissionCatalogHttpCapability` reuses the administration route's fixed
+`authorizationListPermissions` operationId, so only one of the two can be mounted in a
+single OpenAPI document; Fiona keeps the administration one.
+
 **Runtime infrastructure**, served by commerce-runtime and not in the OpenAPI document:
 
 | Endpoint | Behavior |
@@ -1082,7 +1104,7 @@ so changing an endpoint changes its documentation in the same place.
 - **`GET /openapi.json`** is the machine-readable contract, served live by the application.
   It needs no database and describes Fiona's API (inquiries, estimate previews, financial
   documents, payments, and authentication) and the runtime capabilities Fiona mounts
-  (`/offering-catalog`, `/admin/access`), not the runtime's `/health` and `/ready` or the
+  (`/offering-catalog`, `/admin/access`, `/authorization/me`), not the runtime's `/health` and `/ready` or the
   documentation routes.
 
   ```bash
@@ -1112,7 +1134,8 @@ environment. The stable `operationId`s are `createInquiry`, `listInquiries`, `ge
 `fionasOfferingsGetCatalogRevision`, `fionasOfferingsListCategories`,
 `fionasOfferingsAddCategory`, `fionasOfferingsGetCategory`,
 `fionasOfferingsListCategoryOfferings`, `fionasOfferingsListOfferings`,
-`fionasOfferingsAddOffering`, and `fionasOfferingsGetOffering`.
+`fionasOfferingsAddOffering`, and `fionasOfferingsGetOffering`, and for the request's
+principal the runtime's `authorizationCurrentPrincipal`. Every operationId is unique.
 
 The Offerings routes are commerce-runtime's own contract routes, mounted in the same
 contract, so their documentation is the runtime's: the same routes serve requests and
@@ -1135,7 +1158,8 @@ Fiona uses the runtime's `ValidationErrorResponse` and `ValidationViolationRespo
 schemas for validation failures, with optional `violations`; ordinary errors retain
 `ErrorResponse`. Commerce-runtime accepts Fiona's OpenAPI tags: Swagger UI groups
 catalog operations under **Offerings catalog** and runtime administration plus Fiona's
-password route under **Staff administration**; Fiona's own routes are grouped under
+password route under **Staff administration**, and `/authorization/me` under
+**Authorization**; Fiona's own routes are grouped under
 **Inquiries**, **Estimates**, **Financial documents**, **Payments**, and **Authentication**. Every Fiona endpoint must be part of the
 contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
 

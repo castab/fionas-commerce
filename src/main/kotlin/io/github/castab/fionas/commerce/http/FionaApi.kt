@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.authorization.AuthorizationAdministrationHttpCapability
+import io.github.castab.commerce.runtime.authorization.CurrentPrincipalHttpCapability
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
@@ -126,10 +127,13 @@ fun fionaApiRoutes(
     )
 
 /**
- * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of Fiona's
- * Offerings catalog, which commerce-runtime's [offerings] capability implements and
- * describes. The contract also serves its own OpenAPI document at [OPENAPI_PATH], rendered
- * from those same routes. [version] is the document's `info.version`.
+ * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of the
+ * commerce-runtime capabilities Fiona mounts, each implemented and described by the runtime:
+ * Fiona's Offerings catalog ([offerings]), authorization administration
+ * ([authorizationAdmin], which also serves the one permission catalog route), and the
+ * request's principal ([currentPrincipal]). The contract also serves its own OpenAPI
+ * document at [OPENAPI_PATH], rendered from those same routes. [version] is the document's
+ * `info.version`.
  *
  * Only the route handlers read request bodies, once (no pre-flight extraction), and
  * failures reach commerce-runtime's error handling as they did before the API was a
@@ -139,10 +143,15 @@ fun fionaApi(
     operations: FionaOperations,
     offerings: OfferingsHttpCapability,
     authorizationAdmin: AuthorizationAdministrationHttpCapability,
+    currentPrincipal: CurrentPrincipalHttpCapability,
     version: String,
     auth: FionaAuthRoutes,
 ): RoutingHttpHandler {
-    val apiRoutes = fionaApiRoutes(operations, auth) + offerings.contractRoutes + authorizationAdmin.contractRoutes
+    val apiRoutes =
+        fionaApiRoutes(operations, auth) +
+            offerings.contractRoutes +
+            authorizationAdmin.contractRoutes +
+            currentPrincipal.contractRoutes
     return routes(
         undeclaredMethods(apiRoutes),
         contract {

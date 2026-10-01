@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
+import io.github.castab.commerce.runtime.authorization.currentPrincipalHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
@@ -31,6 +32,7 @@ import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.UiApiKey
 import io.github.castab.fionas.commerce.http.apiDocs
+import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
@@ -77,7 +79,9 @@ const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
  * with ordinary Kotlin from the runtime's `CommerceRuntimeContext`, so every Fiona write
  * goes through the runtime's single `Transactor`. Fiona's Offerings catalog is
  * commerce-runtime's Offerings capability bound to Fiona's catalog; its contract routes join
- * the same API contract as Fiona's own. Estimate previews read exact catalog revisions
+ * the same API contract as Fiona's own, as do the runtime's authorization administration
+ * (which serves the permission catalog) and current-principal capabilities, all bound to one
+ * `AccessControl` over `context.authorization`. Estimate previews read exact catalog revisions
  * through the runtime's own `GetOfferingsCatalogRevision` and price them with Fiona's
  * [FionasOfferingsEngine]. Persisted financial documents are commerce-runtime's
  * `FinancialLedger`, called with the caller's transaction; Fiona's own repositories store
@@ -194,7 +198,11 @@ fun fionaApplication(
             val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(access))
             val authorizationAdmin =
                 authorizationAdministrationHttpCapability(context, access, "/admin/access", setOf(staffAdministrationTag))
-            listOf(fionaApi(operations, offerings, authorizationAdmin, fionaVersion(), auth), apiDocs())
+            // The request's principal, USER or SERVICE, resolved through the same AccessControl and catalog.
+            // The permission catalog is served once, by the administration capability: commerce-runtime
+            // 0.0.20's standalone catalog route has the same fixed operationId, so it is not also mounted.
+            val currentPrincipal = currentPrincipalHttpCapability(access, "/authorization/me", setOf(authorizationTag))
+            listOf(fionaApi(operations, offerings, authorizationAdmin, currentPrincipal, fionaVersion(), auth), apiDocs())
         },
     )
 

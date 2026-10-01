@@ -65,6 +65,14 @@ private val authTag = Tag("Authentication", "Fiona staff browser sessions.")
 /** Shared by Fiona's password route and the runtime's principal and role administration routes. */
 val staffAdministrationTag = Tag("Staff administration", "Staff accounts, credentials, roles, and permissions.")
 
+/**
+ * The runtime's authorization read for whichever principal authenticated the request,
+ * `/authorization/me` (a USER or a SERVICE). It administers nothing, so it is not staff
+ * administration, and it is not Fiona's staff profile at `/auth/me`.
+ */
+val authorizationTag =
+    Tag("Authorization", "The principal that authenticated the request, USER or SERVICE, and its effective permissions.")
+
 fun loginRoute(
     login: (String, SecretPassword) -> IssuedSession?,
     cookie: SessionCookie,
@@ -123,6 +131,15 @@ fun logoutRoute(
         }
 }
 
+/**
+ * `GET /auth/me`: who the current Fiona human staff user is, with Fiona's staff profile
+ * (username, names, role keys) and effective live permissions. Only an active USER is
+ * described; any other authenticated principal, a SERVICE included, is `403`.
+ *
+ * Not the runtime's `GET /authorization/me`, which describes whichever principal authenticated
+ * the request, USER or SERVICE, with its effective permissions and the permission catalog
+ * revision, and no Fiona profile.
+ */
 fun currentUserRoute(
     currentUser: (UserId) -> User?,
     currentPermissions: (UserId) -> Set<PermissionKey>,

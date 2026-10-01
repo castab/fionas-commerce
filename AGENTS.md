@@ -336,7 +336,8 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
   `authenticatedPrincipal` request lens, and `AccessControl` permission enforcement.
 - human users, service identities, principal status, roles, role permissions, role
   assignments, live permission resolution, and the permission catalog
-  (`context.authorization`); the authorization administration HTTP capability.
+  (`context.authorization`); the authorization administration HTTP capability (which also
+  serves the permission catalog) and the current-principal HTTP capability.
 - the financial ledger: `FinancialLedger` (`context.financialLedger`), the
   `FinancialDocumentRepository` and `PaymentRepository`, their tables
   (`commerce.financial_document_snapshots`, whose rows hold their lines since 0.0.20,
@@ -358,10 +359,13 @@ factory builds repositories and operations from the `CommerceRuntimeContext` wit
 ordinary Kotlin, hands the operations to the API as `FionaOperations`, binds the runtime's
 Offerings capability to Fiona's catalog (`offeringsHttpCapability(context,
 fionaOfferingsBinding(accessControl))`), mounts the runtime's authorization administration
-capability at `/admin/access` with that same `AccessControl`, builds Fiona's financial
+capability at `/admin/access` and the runtime's current-principal capability at
+`/authorization/me` (`currentPrincipalHttpCapability(accessControl, "/authorization/me",
+setOf(authorizationTag))`) with that same `AccessControl`, builds Fiona's financial
 operations on `context.financialLedger` with Fiona's own association and pricing-source
 repositories and one `FionasPricing` (the engine plus the runtime's transaction-bound
-catalog read), and contributes exactly two route handlers: `fionaApi(operations, offerings, authorizationAdmin, version, auth)`
+catalog read), and contributes exactly two route handlers:
+`fionaApi(operations, offerings, authorizationAdmin, currentPrincipal, version, auth)`
 (the API contract) and `apiDocs()` (Swagger UI). `Main.kt` loads configuration, calls `commerceRuntime(...)` (which runs
 the migration phase before composing anything), starts it, installs the shutdown hook,
 and blocks. Keep `main()` thin: no schema, Flyway, or migration decisions belong in it. There is no DI framework, no annotation scanning,
@@ -783,6 +787,24 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   It requires only an active human session, never `commerce.role.read`. Grants and role
   assignments are resolved live; never derive them from role keys, hard-code an
   Administrator mapping, or store permissions in sessions.
+- **Two different `/me` endpoints, deliberately.** `GET /auth/me` is Fiona's: "who is the
+  current Fiona human staff user?", USER only (any other principal, a SERVICE included, is
+  `403`), with Fiona's staff profile and role keys. `GET /authorization/me` is the runtime's
+  `currentPrincipalHttpCapability`: "which principal authenticated this request?", USER or
+  SERVICE, with its live effective permissions and `permissionCatalogRevision`, no profile
+  or role keys, and no permission requirement beyond authentication. Never replace one with
+  the other, widen `/auth/me` to services, or add Fiona DTOs, role resolution, or resolver
+  calls for `/authorization/me`. A future SERVICE-authenticated BFF calling it receives the
+  BFF's own service identity, never the browser user's; there is no delegation. The UI key
+  establishes no principal and never authenticates either route; both use `AccessControl`
+  (`Authorization` and `Authentication` OpenAPI tags respectively).
+- **One permission catalog route.** `GET /admin/access/permissions` (administration
+  capability, `commerce.role.read`) is Fiona's only catalog endpoint: the complete runtime +
+  Fiona vocabulary with the `revision` that `/authorization/me` reports. Do not also mount
+  `permissionCatalogHttpCapability`: in commerce 0.0.20 both capabilities use the same
+  fixed `authorizationListPermissions` operationId, so one OpenAPI document cannot hold both
+  (see the known upstream gaps). Catalog membership grants nothing; bootstrap never expands
+  the Administrator role to cover newly listed permissions.
 
 ## Fiona's pricing
 
@@ -1115,6 +1137,13 @@ runtime's `RuntimePermissions.ServiceCredentialManage`, which no Fiona bootstrap
 includes). Fiona mounts no service token endpoint and authenticates no service token;
 service authentication remains out of scope.
 The remaining gaps below have not been re-audited.
+
+- **The two catalog capabilities share one operationId.** `authorizationAdministrationHttpCapability`
+  includes the same internal catalog route as `permissionCatalogHttpCapability`, with the
+  fixed operationId `authorizationListPermissions`, so a host can mount only one of them
+  per OpenAPI document. Fiona mounts the administration one. Never wrap, clone, or rebuild a
+  runtime route to rename it here. Minimal upstream fix: a distinct operationId for the
+  administration catalog route, or a host-chosen operationId prefix as Offerings binds have.
 
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.

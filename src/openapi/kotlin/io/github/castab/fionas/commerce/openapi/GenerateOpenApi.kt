@@ -10,6 +10,7 @@ import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
 import io.github.castab.commerce.runtime.authorization.PermissionCatalog
 import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.authorization.commercePermissionDefinitions
+import io.github.castab.commerce.runtime.authorization.currentPrincipalHttpCapability
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.http.AccessControl
@@ -32,6 +33,7 @@ import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.OPENAPI_PATH
 import io.github.castab.fionas.commerce.http.UiApiKey
+import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
@@ -245,7 +247,9 @@ fun fionaOpenApiDocument(version: String = fionaVersion()): String {
     val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(renderingAccess))
     val authorizationAdmin =
         authorizationAdministrationHttpCapability(context, renderingAccess, "/admin/access", setOf(staffAdministrationTag))
-    val response = fionaApi(notInvoked, offerings, authorizationAdmin, version, renderingAuth)(Request(Method.GET, OPENAPI_PATH))
+    val currentPrincipal = currentPrincipalHttpCapability(renderingAccess, "/authorization/me", setOf(authorizationTag))
+    val response =
+        fionaApi(notInvoked, offerings, authorizationAdmin, currentPrincipal, version, renderingAuth)(Request(Method.GET, OPENAPI_PATH))
     check(response.status == Status.OK) { "Rendering the OpenAPI document failed: ${response.status}" }
     return response.bodyString()
 }
