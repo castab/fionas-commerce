@@ -248,7 +248,7 @@ fun getInquiryFormRoute(
     "/inquiry-form" meta {
         operationId = "getInquiryForm"
         summary = "Read the customer inquiry form"
-        description = "Public ordered questions for POST /inquiries. Input semantics and presentation hints are separate. " +
+        description = "Ordered customer-facing questions for POST /inquiries. Input semantics and presentation hints are separate. " +
             "Service configuration is required: every inquiry is a request for configured ice cream service, priced on " +
             "submission into an initial Estimate. Required fields and category limits apply. Copy catalogRevision " +
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
@@ -259,8 +259,9 @@ fun getInquiryFormRoute(
             "Temporary unavailability is distinct from disabled/retired and does not invalidate the form. " +
             "pricingPreview resolves policy/catalog facts for visible options for instant advisory browser arithmetic. " +
             "Contact details, event date/type, and pricing are validated on submission, independently of this metadata. " +
-            "Requires `${FionaPermissions.InquiryFormRead.value}`, normally held by the server-side web frontend's SERVICE " +
-            "principal through a short-lived access token from POST $SERVICE_TOKEN_PATH. Successful responses have Cache-Control: " +
+            "Requires `${FionaPermissions.InquiryFormRead.value}`, held by any authenticated principal: normally the server-side " +
+            "web frontend's SERVICE principal (an access token from POST $SERVICE_TOKEN_PATH), or a staff user granted it. " +
+            "Successful responses have Cache-Control: " +
             "private, max-age=60, must-revalidate; failures have no-store."
         tags += inquiries
         returning(
@@ -269,7 +270,7 @@ fun getInquiryFormRoute(
             "The question definition with choices from one current catalog revision.",
         )
         returningError(ErrorCategory.NOT_FOUND, "Fiona's catalog has not been initialized.", "Offerings catalog was not found")
-        serviceAccess(FionaPermissions.InquiryFormRead)
+        principalAccess(FionaPermissions.InquiryFormRead)
         returningError(
             ErrorCategory.INTERNAL_FAILURE,
             "the public catalog cannot be represented/priced across every allowed duration " +

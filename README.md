@@ -169,7 +169,7 @@ Every route needs a staff session:
 | Endpoint | Behavior |
 |---|---|
 | `POST /auth/login` | Anonymous; verifies a staff password and sets Fiona's secure session cookie. Requires a trusted browser origin. Per-IP burst of five; one attempt refills every five minutes; `429` with `Retry-After` when exhausted. |
-| `POST /auth/logout` | Revokes the runtime session and clears the cookie, including on repeated logout. |
+| `POST /auth/logout` | Revokes the staff browser session and clears the cookie, including on repeated logout or a stale cookie. Session-only: a request authenticated only by a service access token is `403`, and no token is revoked. |
 | `GET /auth/me` | Returns the active human staff profile, current role keys, and sorted effective live `permissions`; requires no role-administration permission. |
 | `PUT /admin/users/{userId}/credentials/password` | Sets a runtime user's Fiona password; requires `fionas.credentials.manage` and trusted Origin. |
 | `POST /auth/service/token` | commerce-runtime's endpoint, mounted by Fiona: public; a SERVICE principal exchanges `{"serviceId","secret"}` for a short-lived bearer access token. `401` for every authentication failure, `400` for a malformed body. `Cache-Control: no-store`. |
@@ -631,7 +631,11 @@ human staff profile, role keys, and sorted effective `permissions` without secre
 Permissions come directly from the runtime's live resolver, so later grant or assignment
 changes appear without a new login. Reading your own permissions requires no
 `commerce.role.read`; that permission governs role administration. `POST /auth/logout` revokes the runtime
-session and clears the cookie; repeating it is safe. No raw session token is sent in JSON.
+session and clears the cookie; repeating it, or presenting a cookie whose session is already revoked or expired,
+still clears the cookie with `204`. It authenticates through the runtime's session authentication only: it
+revokes browser sessions and nothing else, so a request authenticated only by a service access token is `403`.
+Service access tokens are never revoked by logout; they expire, and disabling the service suspends them.
+No raw session token is sent in JSON.
 
 Login stays anonymous and is limited in memory per connection source IP: a burst of five
 attempts, then one attempt refilled every five minutes, up to five. Successful, malformed,
@@ -726,10 +730,17 @@ Authorization: Bearer <token> → SERVICE PrincipalId → current roles → curr
                               → AccessControl → handler
 ```
 
-Fiona's one `AccessControl` tries the staff session cookie first and then the service access
-token, so a request is exactly one principal: a USER or a SERVICE. A request carrying both a
-valid session and a valid token stays the session's user; identities are never merged. Routes
-that need a human say so explicitly: `GET /auth/me` answers a service `403`. Authorization is
+USER and SERVICE are first-class principals. Staff browser sessions and service access
+tokens are two authentication transports feeding Fiona's one `AccessControl`, which tries the
+staff session cookie first and then the service access token, so a request is exactly one
+principal: a USER or a SERVICE. A request carrying both a valid session and a valid token stays
+the session's user; identities are never merged. Permission-protected routes do not care which
+kind of principal holds the permission: a SERVICE granted `fionas.inquiries.read` may list
+inquiries, and one granted a commerce permission may use that permission's routes; the three
+customer routes are simply what `fionas-web` is granted. Routes that need a human say so
+explicitly: `GET /auth/me` is the human staff profile and answers a service `403`, while
+`GET /authorization/me` describes any authenticated principal. `POST /auth/logout` revokes only
+staff browser sessions. Authorization is
 resolved live: granting or removing a role permission changes what an existing token may do
 on its next request, and disabling a service suspends its tokens immediately.
 
@@ -1240,11 +1251,21 @@ catalog operations under **Offerings catalog** and runtime administration plus F
 password route under **Staff administration**, and `/authorization/me` under
 **Authorization**; Fiona's own routes are grouped under
 **Inquiries**, **Estimates**, **Financial documents**, **Payments**, and **Authentication** (which
-also holds the runtime's `POST /auth/service/token`). The three web frontend routes
-(`GET /inquiry-form`, `POST /estimate-preview`, `POST /inquiries`) declare the runtime's
-`serviceAccessToken` HTTP bearer security scheme (`serviceAccessTokenOpenApiSecurity`); it is
-documentation only, and their `AccessControl` enforces authentication and permission. The token
-endpoint declares no security. Every Fiona endpoint must be part of the
+also holds the runtime's `POST /auth/service/token`). The document declares two security
+schemes for the two authentication transports: `staffSession` (an API key in the
+`__Host-fionas_session` cookie) and `serviceAccessToken` (HTTP bearer, the runtime's
+`serviceAccessTokenOpenApiSecurity`). Every Fiona route behind the shared `AccessControl` lists
+them as two separate requirement objects, meaning either one (OR), never both together; this
+includes the customer routes, `GET /auth/me` (which then rejects a SERVICE), the inquiry,
+financial-document, and payment routes, and the password route. `POST /auth/logout` lists
+`staffSession` only; `POST /auth/login` and `POST /auth/service/token` declare no security. The
+schemes are documentation only: enforcement stays each route's `AccessControl`. **Known gap:**
+the runtime capability routes (`/offering-catalog`, `/admin/access`, `/authorization/me`)
+enforce the same `AccessControl` but carry no security metadata, because commerce-runtime
+0.0.20 offers the host no way to add it and does not mark its public Offerings reads as public,
+so a contract-wide default would mislabel them. Fiona does not wrap or clone runtime routes to
+change their metadata; see [`AGENTS.md`](AGENTS.md#known-upstream-gaps-last-audited-at-commerce-0014).
+Every Fiona endpoint must be part of the
 contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
 
 ## Requirements

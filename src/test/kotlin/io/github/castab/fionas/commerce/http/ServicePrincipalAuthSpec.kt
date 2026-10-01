@@ -23,6 +23,7 @@ import io.github.castab.fionas.commerce.testing.withBearer
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -251,23 +252,77 @@ class ServicePrincipalAuthSpec :
             }
         }
 
-        test("/auth/me and logout are safe for a SERVICE principal") {
+        test("/auth/me rejects a SERVICE principal safely") {
             TestApplication.create().use { app ->
                 val me = app.http(Request(Method.GET, "/auth/me").asFionasWeb(app))
                 me.status shouldBe Status.FORBIDDEN
                 me.error() shouldBe ErrorResponse("forbidden", "The current principal is not an active staff user")
-                // A token holder has no session to revoke; the administrator's session is untouched.
+            }
+        }
+
+        test("logout is session-only: a SERVICE token is refused, never pretended revoked, and stays valid") {
+            TestApplication.create().use { app ->
                 app.adminGet("/auth/me").status shouldBe Status.OK
-                val sessions =
-                    app.database.strings(
-                        "SELECT coalesce(revoked_at::text, 'active') FROM commerce.principal_sessions ORDER BY created_at",
-                    )
-                app.http(Request(Method.POST, "/auth/logout").asFionasWeb(app)).status shouldBe Status.NO_CONTENT
+
+                fun sessions() =
+                    app.database.strings("SELECT coalesce(revoked_at::text, 'active') FROM commerce.principal_sessions ORDER BY created_at")
+                val before = sessions()
+                val refused = app.http(Request(Method.POST, "/auth/logout").asFionasWeb(app))
+                refused.status shouldBe Status.FORBIDDEN
+                refused.error() shouldBe ErrorResponse("forbidden", "Logout ends a staff browser session; this request has none")
+                refused.header("Set-Cookie") shouldBe null
+                // Nothing was revoked: the token and every staff session still authenticate.
+                sessions() shouldBe before
+                app.http(Request(Method.GET, "/inquiry-form").asFionasWeb(app)).status shouldBe Status.NOT_FOUND
                 app.adminGet("/auth/me").status shouldBe Status.OK
-                app.database.strings(
-                    "SELECT coalesce(revoked_at::text, 'active') FROM commerce.principal_sessions ORDER BY created_at",
-                ) shouldBe
-                    sessions
+            }
+        }
+
+        test("logout revokes a valid staff session and clears its cookie, and a stale cookie is still cleared") {
+            TestApplication.create().use { app ->
+                val cookie = app.adminCookie
+
+                fun logout(cookieHeader: String) =
+                    app.http(Request(Method.POST, "/auth/logout").header("Origin", TEST_ORIGIN).header("Cookie", cookieHeader))
+
+                fun me(cookieHeader: String) = app.http(Request(Method.GET, "/auth/me").header("Cookie", cookieHeader)).status
+
+                me(cookie) shouldBe Status.OK
+                logout(cookie).let {
+                    it.status shouldBe Status.NO_CONTENT
+                    checkNotNull(it.header("Set-Cookie")) shouldContain "Max-Age=0"
+                }
+                me(cookie) shouldBe Status.UNAUTHORIZED
+                // The same, now revoked, cookie: browser cleanup stays idempotent rather than becoming 401.
+                logout(cookie).let {
+                    it.status shouldBe Status.NO_CONTENT
+                    checkNotNull(it.header("Set-Cookie")) shouldContain "Max-Age=0"
+                }
+                // A session revoked elsewhere (for example by disabling the user) is cleared the same way.
+                val admin = checkNotNull(app.authorization.findUserByUsername("admin"))
+                val stale = app.sessions.create(admin.id).also { app.sessions.revoke(it.token) }
+                logout("__Host-fionas_session=${stale.token.value}").let {
+                    it.status shouldBe Status.NO_CONTENT
+                    checkNotNull(it.header("Set-Cookie")) shouldContain "Max-Age=0"
+                }
+            }
+        }
+
+        test("a session cookie keeps logout under the browser Origin policy, even alongside a service token") {
+            TestApplication.create().use { app ->
+                val cookie = app.adminCookie
+                val withCookie = Request(Method.POST, "/auth/logout").header("Cookie", cookie)
+                app.http(withCookie).status shouldBe Status.FORBIDDEN
+                app.http(withCookie.asFionasWeb(app)).let {
+                    it.status shouldBe Status.FORBIDDEN
+                    it.error().message shouldBe "The browser origin is not trusted"
+                }
+                app.http(withCookie.header("Origin", "https://evil.example").asFionasWeb(app)).status shouldBe Status.FORBIDDEN
+                app.adminGet("/auth/me").status shouldBe Status.OK
+                // With a trusted Origin, the session wins over the token: the session is the one revoked.
+                app.http(withCookie.header("Origin", TEST_ORIGIN).asFionasWeb(app)).status shouldBe Status.NO_CONTENT
+                app.adminGet("/auth/me").status shouldBe Status.UNAUTHORIZED
+                app.http(Request(Method.GET, "/inquiry-form").asFionasWeb(app)).status shouldBe Status.NOT_FOUND
             }
         }
 

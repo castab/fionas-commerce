@@ -7,11 +7,11 @@ import io.github.castab.commerce.runtime.http.authenticatedPrincipal
 import io.github.castab.commerce.runtime.http.errorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.serviceauth.ServiceAuthenticationHttpCapability
-import io.github.castab.commerce.runtime.serviceauth.serviceAccessTokenOpenApiSecurity
 import io.github.castab.commerce.runtime.serviceauth.serviceAuthenticationHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
+import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.User
@@ -91,25 +91,40 @@ val authorizationTag =
     Tag("Authorization", "The principal that authenticated the request, USER or SERVICE, and its effective permissions.")
 
 /**
- * Route metadata for an operation the server-side web frontend calls as a SERVICE principal:
- * the runtime's service bearer scheme (documentation only) and the normal distinction between
- * `401` (no valid authentication) and `403` (an authenticated principal without [permission]).
- * Enforcement is the route's `AccessControl.requirePermission(permission)`, which also accepts
- * a staff session holding the permission; nothing trusts a caller for being a service.
+ * Route metadata for a route behind Fiona's `AccessControl.authenticated()`: either transport
+ * may authenticate it (a staff session or a SERVICE access token, [principalSecurity]), and no
+ * valid authentication is `401`. Documentation only; the route still states its enforcement.
  */
-internal fun RouteMetaDsl.serviceAccess(permission: PermissionKey) {
-    security = serviceAccessTokenOpenApiSecurity
+internal fun RouteMetaDsl.principalAuthentication() {
+    security = principalSecurity
     returningError(
         ErrorCategory.UNAUTHENTICATED,
-        "no valid authentication: the service access token (or staff session) is missing, malformed, unknown, or expired.",
+        "no valid authentication: neither an active staff session nor a valid service access token.",
         "Authentication is required",
     )
+}
+
+/**
+ * Route metadata for a route behind Fiona's `AccessControl.requirePermission(permission)`:
+ * [principalAuthentication], and `403` when the authenticated principal, USER or SERVICE,
+ * does not currently hold [permission]. Which kind of principal holds it does not matter.
+ * [alsoForbidden] adds the route's other `403` causes, such as [UNTRUSTED_ORIGIN].
+ * Documentation only; enforcement stays explicit on the route.
+ */
+internal fun RouteMetaDsl.principalAccess(
+    permission: PermissionKey,
+    alsoForbidden: String? = null,
+) {
+    principalAuthentication()
     returningError(
         ErrorCategory.FORBIDDEN,
-        "the authenticated principal lacks `${permission.value}`.",
+        "the authenticated principal lacks `${permission.value}`" + (alsoForbidden?.let { ", $it" } ?: "") + ".",
         "The authenticated principal is not permitted to perform this request",
     )
 }
+
+/** The `403` an unsafe request carrying the staff session cookie answers without a trusted browser Origin. */
+internal const val UNTRUSTED_ORIGIN = "or the request carries the staff session cookie from an untrusted browser origin"
 
 fun loginRoute(
     login: (String, SecretPassword) -> IssuedSession?,
@@ -141,33 +156,69 @@ fun loginRoute(
             Response(Status.NO_CONTENT).cookie(cookie.issue(issued))
         }
 
+/**
+ * `POST /auth/logout`: ends a Fiona staff browser session. It authenticates with the runtime's
+ * session authentication only, not the general `AccessControl`, because a session is all it
+ * can revoke:
+ *
+ * - an active session is revoked and the cookie cleared (`204`);
+ * - a session cookie the runtime no longer accepts (revoked, expired, unknown) still has its
+ *   cookie cleared (`204`), so browser logout is idempotent;
+ * - a request without a session cookie that authenticates otherwise, a SERVICE access token,
+ *   is `403`: there is no session to end, and access tokens are not revoked here (they expire,
+ *   and disabling the service suspends them);
+ * - a request with neither has nothing to end and is answered `204` with the cookie cleared.
+ *
+ * [origin] (Fiona's browser Origin policy) applies first, so a request carrying the session
+ * cookie needs a trusted Origin whatever else it carries.
+ */
 fun logoutRoute(
     sessions: SessionManager,
     cookie: SessionCookie,
     access: AccessControl,
+    origin: Filter,
 ): ContractRoute {
-    // An already-revoked cookie still receives a clear cookie and a successful logout.
-    val clearOnUnauthenticated =
-        Filter { next ->
-            { request ->
-                val response = next(request)
-                if (response.status == Status.UNAUTHORIZED) Response(Status.NO_CONTENT).cookie(cookie.clear()) else response
-            }
+    val cleared = { Response(Status.NO_CONTENT).cookie(cookie.clear()) }
+    val endSession =
+        sessionAuthentication(sessions, cookie).then { request: Request ->
+            cookie.extract(request)?.let(sessions::revoke)
+            cleared()
+        }
+    // Reached only without a session the runtime accepts: another principal has no session to end.
+    val notASession =
+        access.authenticated().then { _: Request ->
+            errorResponse(ErrorCategory.FORBIDDEN, LOGOUT_NOT_A_SESSION)
         }
     return "/auth/logout" meta {
         operationId = "logout"
-        summary = "Log out of the current browser session"
-        description = "Revokes the runtime session and clears the browser cookie. Repeated logout is safe."
+        summary = "Log out of the current staff browser session"
+        description =
+            "Revokes the staff browser session named by the session cookie and clears the cookie. A cookie whose session " +
+            "is already revoked or expired is still cleared, so repeated logout is safe. Requires a trusted Origin. Only " +
+            "browser sessions are revoked: a SERVICE access token is not revoked by this route (it expires, and disabling " +
+            "the service suspends it), and a request authenticated only by one is answered 403."
         tags += authTag
-        returning(Status.NO_CONTENT to "The browser cookie is cleared.")
-        returningError(ErrorCategory.FORBIDDEN, "the browser origin is not trusted.", "The browser origin is not trusted")
+        security = staffSessionSecurity
+        returning(Status.NO_CONTENT to "The session, if any, is revoked and the browser cookie is cleared.")
+        returningError(
+            ErrorCategory.FORBIDDEN,
+            "the browser origin is not trusted, or the request has no staff session cookie and is authenticated as another " +
+                "principal, such as a SERVICE access token, which logout does not revoke.",
+            LOGOUT_NOT_A_SESSION,
+        )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure.", INTERNAL_FAILURE)
     } bindContract Method.POST to
-        clearOnUnauthenticated.then(access.authenticated()).then { request: Request ->
-            cookie.extract(request)?.let(sessions::revoke)
-            Response(Status.NO_CONTENT).cookie(cookie.clear())
+        origin.then { request: Request ->
+            val ended = endSession(request)
+            when {
+                ended.status != Status.UNAUTHORIZED -> ended
+                cookie.extract(request) != null -> cleared()
+                else -> notASession(request).takeUnless { it.status == Status.UNAUTHORIZED } ?: cleared()
+            }
         }
 }
+
+private const val LOGOUT_NOT_A_SESSION = "Logout ends a staff browser session; this request has none"
 
 /**
  * `GET /auth/me`: who the current Fiona human staff user is, with Fiona's staff profile
@@ -201,10 +252,11 @@ fun currentUserRoute(
                     permissions = listOf("commerce.payment.record"),
                 ),
         )
-        returningError(ErrorCategory.UNAUTHENTICATED, "there is no active session.", "Authentication is required")
+        principalAuthentication()
         returningError(
             ErrorCategory.FORBIDDEN,
-            "the principal is not an active human staff user, for example a SERVICE principal.",
+            "the authenticated principal is not an active human staff user: a SERVICE access token authenticates, " +
+                "but this route describes staff users only (see `GET /authorization/me` for any principal).",
             "The current principal is not an active staff user",
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure.", INTERNAL_FAILURE)
@@ -245,8 +297,7 @@ fun setStaffPasswordRoute(
         receiving(setPasswordBody to SetStaffPasswordRequest("new-password"))
         returning(Status.NO_CONTENT to "The password credential was stored.")
         returningError(ErrorCategory.MALFORMED_REQUEST, "the request or user ID is malformed.", "Malformed request")
-        returningError(ErrorCategory.UNAUTHENTICATED, "authentication is required.", "Authentication is required")
-        returningError(ErrorCategory.FORBIDDEN, "permission or browser origin is missing.", "Forbidden")
+        principalAccess(FionaPermissions.CredentialsManage, UNTRUSTED_ORIGIN)
         returningError(ErrorCategory.NOT_FOUND, "the target user does not exist.", "User does not exist")
         returningError(ErrorCategory.VALIDATION_FAILED, "the password is too short.", "Password must have at least 12 characters")
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure.", INTERNAL_FAILURE)

@@ -8,6 +8,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.openapi.fionaOpenApiDocument
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
@@ -80,26 +81,7 @@ class OpenApiDocumentSpec :
             method: String,
         ) = document.at("paths", path, method).jsonObject
 
-        test(
-            "only the three web frontend routes declare service bearer security, the token endpoint is public, and login documents rate limiting",
-        ) {
-            val scheme = document.at("components", "securitySchemes", "serviceAccessToken")
-            scheme.text("type") shouldBe "http"
-            scheme.text("scheme") shouldBe "bearer"
-            document.at("components", "securitySchemes").jsonObject.keys shouldBe setOf("serviceAccessToken")
-            fionaOpenApiDocument() shouldNotContain "fionasUiApiKey"
-            val protected = setOf("/inquiry-form" to "get", "/estimate-preview" to "post", "/inquiries" to "post")
-            document.at("paths").jsonObject.forEach { (path, methods) ->
-                methods.jsonObject.forEach { (method, endpoint) ->
-                    val security = endpoint.jsonObject["security"] as? JsonArray
-                    val bearer = security?.any { "serviceAccessToken" in it.jsonObject } == true
-                    bearer shouldBe ((path to method) in protected)
-                }
-            }
-            // A credential obtains a token, so the token endpoint cannot require one: it declares no security requirement.
-            val token = operation("/auth/service/token", "post")
-            (token["security"] as? JsonArray)?.forEach { requirement -> requirement.jsonObject.keys shouldBe emptySet() }
-            token.strings("tags") shouldContainExactly listOf("Authentication")
+        test("login documents its rate limit") {
             operation("/auth/login", "post").text("responses", "429", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/ErrorResponse"
             operation("/auth/login", "post").text("responses", "429", "content", "application/json", "example", "code") shouldBe
@@ -359,6 +341,67 @@ class OpenApiDocumentSpec :
                 .map { it.text("url") }
                 .forEach { it shouldStartWith "/" }
             fionaOpenApiDocument().contains("://localhost") shouldBe false
+        }
+
+        /** An operation's security requirements: each object is one alternative (OR), its keys required together (AND). */
+        fun requirements(
+            path: String,
+            method: String,
+        ): List<Set<String>> = (operation(path, method)["security"] as? JsonArray).orEmpty().map { it.jsonObject.keys }
+
+        val eitherTransport = listOf(setOf("staffSession"), setOf("serviceAccessToken"))
+
+        test("declares the two authentication transports: the staff session cookie and the service bearer token") {
+            document.at("components", "securitySchemes").jsonObject.keys shouldBe setOf("staffSession", "serviceAccessToken")
+            val session = document.at("components", "securitySchemes", "staffSession")
+            session.text("type") shouldBe "apiKey"
+            session.text("in") shouldBe "cookie"
+            session.text("name") shouldBe "__Host-fionas_session"
+            val bearer = document.at("components", "securitySchemes", "serviceAccessToken")
+            bearer.text("type") shouldBe "http"
+            bearer.text("scheme") shouldBe "bearer"
+            fionaOpenApiDocument() shouldNotContain "fionasUiApiKey"
+        }
+
+        test("every Fiona route behind the shared AccessControl accepts a staff session OR a service token, never both together") {
+            operations.keys.forEach { (path, method, operationId) ->
+                withClue(operationId) {
+                    requirements(path, method) shouldBe
+                        when (operationId) {
+                            // Public: credentials obtain a session, so none is required.
+                            "login" -> emptyList()
+                            // Logout revokes browser sessions only; a service token is never advertised for it.
+                            "logout" -> listOf(setOf("staffSession"))
+                            else -> eitherTransport
+                        }
+                }
+            }
+            // The customer routes are not service-only: a staff user holding the permission is accepted too.
+            listOf("/inquiry-form" to "get", "/estimate-preview" to "post", "/inquiries" to "post").forEach { (path, method) ->
+                requirements(path, method) shouldBe eitherTransport
+            }
+            // Representative staff routes: permissions decide, whichever principal kind holds them.
+            listOf("/inquiries" to "get", "/payments" to "post", "/admin/users/{userId}/credentials/password" to "put")
+                .forEach { (path, method) -> requirements(path, method) shouldBe eitherTransport }
+            // /auth/me authenticates either transport, then rejects a SERVICE with its documented 403.
+            requirements("/auth/me", "get") shouldBe eitherTransport
+            operation("/auth/me", "get").text("responses", "403", "description") shouldContain "SERVICE"
+        }
+
+        test("public authentication endpoints require neither scheme") {
+            requirements("/auth/login", "post") shouldBe emptyList()
+            // A credential obtains a token, so the token endpoint cannot require one.
+            requirements("/auth/service/token", "post") shouldBe emptyList()
+            operation("/auth/service/token", "post").strings("tags") shouldContainExactly listOf("Authentication")
+        }
+
+        test("runtime capability routes carry no host security metadata yet, an upstream gap rather than a Fiona choice") {
+            // commerce-runtime 0.0.20 lets a host neither add security to its capability routes nor marks its public
+            // Offerings reads NoSecurity, so a contract-wide default would mislabel those reads. Its protected routes
+            // still enforce Fiona's same AccessControl; this pins the gap so a runtime that closes it is noticed.
+            (offeringOperations + adminOperations + principalOperations).forEach { (path, method, operationId) ->
+                withClue(operationId) { requirements(path, method) shouldBe emptyList() }
+            }
         }
 
         test("describes exactly Fiona and bound runtime capability routes, excluding /health and /ready") {

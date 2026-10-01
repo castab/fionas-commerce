@@ -339,14 +339,9 @@ private val exampleList =
         nextCursor = "MjAyNi0wOS0yNlQyMToxOTozOS4zMjEwMTJafGM3NTVmN2NkLTFlMjgtNGM3NS1hODVmLWQwNjZlZGU3Mzg3ZA",
     )
 
-/** The errors every staff-protected inquiry route answers, in addition to its own. */
-private fun RouteMetaDsl.staffErrors() {
-    returningError(ErrorCategory.UNAUTHENTICATED, "there is no active staff session.", "Authentication is required")
-    returningError(
-        ErrorCategory.FORBIDDEN,
-        "the staff user lacks `${FionaPermissions.InquiriesRead.value}`.",
-        "The authenticated principal is not permitted to perform this request",
-    )
+/** The errors every inquiry read answers, in addition to its own: any principal holding `fionas.inquiries.read`. */
+private fun RouteMetaDsl.inquiryReadErrors() {
+    principalAccess(FionaPermissions.InquiriesRead)
     returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
 }
 
@@ -355,7 +350,7 @@ private fun RouteMetaDsl.staffErrors() {
  * `fionas.inquiries.create`, normally held by the web frontend's SERVICE principal. The route only
  * translates between transport and application values; [createInquiry] does the work, and
  * failures reach callers through commerce-runtime's error handling. The response is a
- * receipt of the new inquiry only: a public caller never reads a stored customer back.
+ * receipt of the new inquiry only: the caller never reads a stored customer back.
  */
 fun createInquiryRoute(
     createInquiry: (CreateInquiry.Command) -> Inquiry,
@@ -366,7 +361,7 @@ fun createInquiryRoute(
         headers += submissionKeyHeader
         // The key is read by the handler, after authorization, so an unauthorized caller always gets `401` or `403`.
         preFlightExtraction = PreFlightExtraction.None
-        serviceAccess(FionaPermissions.InquiriesCreate)
+        principalAccess(FionaPermissions.InquiriesCreate, UNTRUSTED_ORIGIN)
         summary = "Record an inquiry"
         description =
             "Records a prospective customer's inquiry. Idempotency-Key is required: a successful same-key/same-intent " +
@@ -507,7 +502,7 @@ fun listInquiriesRoute(
             "`limit` is outside 1 to ${ListInquiries.MAX_LIMIT}.",
             "limit must be between 1 and ${ListInquiries.MAX_LIMIT}",
         )
-        staffErrors()
+        inquiryReadErrors()
     } bindContract Method.GET to
         access.requirePermission(FionaPermissions.InquiriesRead).then { request: Request ->
             val after = cursorQuery(request)?.let(::position)
@@ -535,7 +530,7 @@ fun getInquiryRoute(
             "no inquiry has this id.",
             "Inquiry c755f7cd-1e28-4c75-a85f-d066ede7387d was not found",
         )
-        staffErrors()
+        inquiryReadErrors()
     } bindContract Method.GET to { id: String ->
         access.requirePermission(FionaPermissions.InquiriesRead).then { _: Request ->
             Response(Status.OK).with(inquiryResponse of getInquiry(inquiryId(id)).toResponse())

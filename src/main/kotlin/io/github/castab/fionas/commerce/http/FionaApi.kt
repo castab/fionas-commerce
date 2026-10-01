@@ -121,7 +121,7 @@ fun fionaApiRoutes(
         allocatePaymentRoute(operations.allocatePayment, auth.access),
         recordRefundRoute(operations.recordRefund, auth.access),
         loginRoute(operations.login, auth.cookie, auth.access, auth.origin, auth.loginRateLimit),
-        logoutRoute(auth.sessions, auth.cookie, auth.access),
+        logoutRoute(auth.sessions, auth.cookie, auth.access, auth.origin),
         currentUserRoute(operations.currentUser, operations.currentPermissions, auth.access),
         setStaffPasswordRoute(operations.setStaffPassword, auth.access),
     )

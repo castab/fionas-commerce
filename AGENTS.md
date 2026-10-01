@@ -541,14 +541,34 @@ Also:
   permissions. Never trust a caller for being a service, never forbid a permission because the
   holder is a service, and never assume a principal is human: routes that need a human check it
   explicitly (`GET /auth/me` uses `as? UserId` and answers a service `403`).
+- **USER and SERVICE are first-class principals.** Permission-protected routes never check
+  the principal kind, keep route allow-lists for services, union a session's and a token's
+  grants, or look at role names: whoever holds the permission is authorized. `fionas-web`
+  holds only the three customer-operation permissions, but a SERVICE granted, for example,
+  `fionas.inquiries.read` or a commerce permission may use those routes too.
 - **Customer operations use ordinary permissions.** `GET /inquiry-form` requires
   `fionas.inquiry-form.read`, `POST /estimate-preview` `fionas.estimate-preview.create`, and
   `POST /inquiries` `fionas.inquiries.create`, each through `access.requirePermission(...)`
   outside the handler. `401` means no valid authentication, `403` an authenticated principal
-  without the permission. Their OpenAPI metadata uses the runtime's
-  `serviceAccessTokenOpenApiSecurity` (documentation only) through `serviceAccess(permission)`
-  in `http/AuthRoutes.kt`. Permissions describe capabilities, never callers: no `fionas.ui`,
+  without the permission. Permissions describe capabilities, never callers: no `fionas.ui`,
   `fionas.frontend`, or `fionas.trusted`.
+- **OpenAPI states both transports, separately from enforcement.** `http/OpenApi.kt` declares the
+  `staffSession` scheme (API key in the `__Host-fionas_session` cookie) beside the runtime's
+  `serviceAccessToken` bearer scheme, combined by Fiona's documentation-only `DocumentedSecurity`
+  (one requirement object per alternative: OR). Never use http4k's `OrSecurity` for this: its
+  filter re-runs the route per alternative and replaces a final `401` with a bodiless one.
+  Every Fiona route states its metadata through `principalAuthentication()` (behind
+  `access.authenticated()`) or `principalAccess(permission, …)` (behind
+  `access.requirePermission(permission)`) in `http/AuthRoutes.kt`, while the handler still
+  states its enforcement explicitly; the helpers never enforce anything. Public routes (login,
+  the token endpoint) declare no security; logout declares `staffSession` only.
+- **Logout is session-only.** `POST /auth/logout` applies `BrowserOrigin`, then the runtime's
+  `sessionAuthentication(sessions, cookie)`: a valid session is revoked and the cookie cleared
+  (`204`); a cookie whose session the runtime no longer accepts is still cleared (`204`);
+  without a session cookie, a request that `AccessControl` authenticates (a SERVICE token) is
+  `403`, never a pretend revocation; with neither, `204`. Logout never revokes a service access
+  token (tokens expire; disabling the service suspends them). Never parse cookies beyond
+  `SessionCookie`.
 - **The token endpoint is the runtime's.** `fionaServiceAuthentication(context)` mounts
   `serviceAuthenticationHttpCapability` at `/auth/service/token` in Fiona's one contract. It is
   public (no security) and keeps the runtime's uniform `401`. Fiona builds no token endpoint and
@@ -1227,6 +1247,15 @@ The remaining gaps below have not been re-audited.
   schemas with `http4k-format-jackson` and carries them into its kotlinx-rendered document
   (`OfferingsSchemas`). Upstream fix: a schema hook that works on `CommerceJson`, or
   descriptor-derived Offerings schemas.
+- **Runtime capability routes carry no security metadata.** The Offerings, authorization
+  administration, and current-principal routes enforce Fiona's `AccessControl`, but commerce-runtime
+  0.0.20 gives the host no way to declare their OpenAPI security, and its public Offerings reads
+  are not marked `NoSecurity`, so a contract-wide default `security` would mislabel them as
+  authenticated. Fiona documents its own routes (`staffSession` OR `serviceAccessToken`) and never
+  wraps or clones runtime routes to change their metadata; `OpenApiDocumentSpec` pins the gap.
+  Minimal upstream API: an optional OpenAPI `Security` the host supplies once, for example on
+  `AccessControl` or each capability's binding, that every protected capability route declares,
+  with public routes declaring `NoSecurity` explicitly.
 - **Offerings route metadata is minimal.** Commerce lets Fiona supply the
   `Offerings catalog` tag through its binding, but routes still have no descriptions;
   their error examples all say `Request failed`, and no route documents `500`.
@@ -1304,9 +1333,12 @@ The remaining gaps below have not been re-audited.
   pinning), `ServicePrincipalAuthSpec` (SERVICE principals through the real application:
   credential → `/auth/service/token` → token; `401`/`403`/authorized for each customer route;
   independent, live permissions on one token; the retired UI key authenticates nothing; session
-  precedence; Origin only for cookies; `/auth/me` safe for services; administrator provisioning
-  and rotation through `/admin/access`), `OpenApiDocumentSpec` (the document's paths, operationIds,
-  statuses, security schemes, and schemas), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
+  precedence; Origin only for cookies; `/auth/me` safe for services; session-only logout: a SERVICE
+  token is `403` and stays valid, a valid session is revoked, a stale cookie is still cleared;
+  administrator provisioning and rotation through `/admin/access`), `OpenApiDocumentSpec` (the
+  document's paths, operationIds, statuses, schemas, and security: `staffSession` OR
+  `serviceAccessToken` on every protected Fiona route, `staffSession` only on logout, nothing on
+  login and the token endpoint, and the runtime routes' upstream metadata gap pinned), `OpenApiRoutesSpec` (`/openapi.json` and `/docs` through the
   complete handler, and parity with the generator), `GenerateOpenApiSpec` (the build
   artifact, byte-deterministic), and `ArchitectureSpec`.
 - Run `./gradlew ktlintCheck test build` before considering work complete.

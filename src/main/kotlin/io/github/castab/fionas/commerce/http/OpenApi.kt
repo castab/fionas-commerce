@@ -15,6 +15,7 @@ import io.github.castab.commerce.runtime.offering.OfferingPriceDto
 import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.commerce.runtime.offering.offeringsOpenApiRenderer
+import io.github.castab.commerce.runtime.serviceauth.serviceAccessTokenOpenApiSecurity
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialInfo
@@ -42,13 +43,23 @@ import org.http4k.contract.jsonschema.JsonSchema
 import org.http4k.contract.openapi.ApiInfo
 import org.http4k.contract.openapi.ApiRenderer
 import org.http4k.contract.openapi.OpenApiVersion
+import org.http4k.contract.openapi.Render
+import org.http4k.contract.openapi.RenderModes
+import org.http4k.contract.openapi.SecurityRenderer
+import org.http4k.contract.openapi.rendererFor
 import org.http4k.contract.openapi.v3.Api
 import org.http4k.contract.openapi.v3.OpenApi3
 import org.http4k.contract.openapi.v3.OpenApi3ApiRenderer
+import org.http4k.contract.openapi.v3.OpenApi3SecurityRenderer
+import org.http4k.core.Filter
+import org.http4k.core.NoOp
 import org.http4k.core.Response
 import org.http4k.core.Status
 import org.http4k.format.Jackson
+import org.http4k.lens.Cookies
 import org.http4k.lens.LensFailure
+import org.http4k.security.ApiKeySecurity
+import org.http4k.security.Security
 import java.util.concurrent.ConcurrentHashMap
 
 const val API_TITLE = "Fiona's Commerce API"
@@ -81,9 +92,62 @@ fun fionaOpenApi(version: String): ContractRenderer =
             ),
         json = CommerceJson,
         apiRenderer = KotlinxSchemas(OpenApi3ApiRenderer(CommerceJson), OfferingsSchemas()),
+        securityRenderer = SecurityRenderer(OpenApi3SecurityRenderer, documentedSecurityRenderer),
         errorResponseRenderer = RuntimeErrorHandling,
         version = OpenApiVersion._3_1_0,
     )
+
+/** The name of Fiona's staff browser session cookie (see `SessionCookie`). */
+const val STAFF_SESSION_COOKIE = "__Host-fionas_session"
+
+/**
+ * OpenAPI security that a request satisfies with any one of [alternatives]: each renders as
+ * its own security requirement object, which OpenAPI reads as OR.
+ *
+ * Documentation only: its filter does nothing, and Fiona's `AccessControl` (or, for logout,
+ * the runtime's session authentication) enforces authentication. http4k's `OrSecurity`
+ * renders the same requirements, but its filter runs the route once per alternative and
+ * replaces a final `401` with a bodiless one, which would discard commerce-runtime's
+ * `unauthenticated` error envelope.
+ */
+class DocumentedSecurity internal constructor(
+    internal val alternatives: List<Security>,
+) : Security {
+    override val filter: Filter = Filter.NoOp
+}
+
+/**
+ * The `staffSession` scheme: Fiona's staff browser session cookie, as an OpenAPI API key in
+ * a cookie. It only names the cookie; it is never evaluated (see [DocumentedSecurity]).
+ */
+private val staffSessionScheme: Security =
+    ApiKeySecurity(Cookies.optional(STAFF_SESSION_COOKIE), { true }, name = "staffSession")
+
+/**
+ * The transports Fiona's `AccessControl` accepts: a staff browser session (`staffSession`) or
+ * a SERVICE principal's access token (commerce-runtime's `serviceAccessToken`). Either one;
+ * which principal kind holds a route's permission does not matter.
+ */
+val principalSecurity: Security = DocumentedSecurity(listOf(staffSessionScheme, serviceAccessTokenOpenApiSecurity))
+
+/** A staff browser session only: `POST /auth/logout`, which revokes sessions and nothing else. */
+val staffSessionSecurity: Security = DocumentedSecurity(listOf(staffSessionScheme))
+
+/** Renders [DocumentedSecurity] like an OR of http4k's standard OpenAPI 3 schemes. */
+private val documentedSecurityRenderer =
+    rendererFor<DocumentedSecurity> { security ->
+        object : RenderModes {
+            override fun <NODE> full(): Render<NODE> =
+                {
+                    obj(security.alternatives.mapNotNull { OpenApi3SecurityRenderer.full<NODE>(it) }.flatMap { fields(it(this)) })
+                }
+
+            override fun <NODE> ref(): Render<NODE> =
+                {
+                    array(security.alternatives.mapNotNull { OpenApi3SecurityRenderer.ref<NODE>(it) }.map { it(this) })
+                }
+        }
+    }
 
 /**
  * Leaves every failure the contract detects to commerce-runtime's `CommerceErrorHandling`,

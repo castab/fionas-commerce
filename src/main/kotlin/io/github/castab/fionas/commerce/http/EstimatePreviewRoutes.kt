@@ -174,7 +174,7 @@ fun previewEstimateRoute(
 ): ContractRoute =
     "/estimate-preview" meta {
         operationId = "previewEstimate"
-        serviceAccess(FionaPermissions.EstimatePreviewCreate)
+        principalAccess(FionaPermissions.EstimatePreviewCreate, UNTRUSTED_ORIGIN)
         summary = "Preview an estimate"
         description =
             "Prices a selection from one exact revision of Fiona's Offerings catalog for an event's guest count and " +

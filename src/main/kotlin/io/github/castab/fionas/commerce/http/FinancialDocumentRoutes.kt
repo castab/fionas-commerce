@@ -15,6 +15,7 @@ import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.AllocatedPayment
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
@@ -819,14 +820,16 @@ private val exampleDocumentPayments =
             ),
     )
 
-/** The errors every staff-protected financial route answers, in addition to its own. */
-private fun RouteMetaDsl.staffErrors() {
-    returningError(ErrorCategory.UNAUTHENTICATED, "there is no active staff session.", "Authentication is required")
-    returningError(
-        ErrorCategory.FORBIDDEN,
-        "the staff user lacks the route's permission, or an unsafe request's browser origin is not trusted.",
-        "The authenticated principal is not permitted to perform this request",
-    )
+/**
+ * The errors every financial route answers, in addition to its own: any authenticated principal
+ * holding [permission], and for an [unsafe] method a trusted Origin when it carries the staff
+ * session cookie.
+ */
+private fun RouteMetaDsl.financialErrors(
+    permission: PermissionKey,
+    unsafe: Boolean,
+) {
+    principalAccess(permission, UNTRUSTED_ORIGIN.takeIf { unsafe })
     returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
 }
 
@@ -872,7 +875,7 @@ fun createInquiryEstimateRoute(
             "Offerings catalog revision r20 was not found",
         )
         returningError(ErrorCategory.VALIDATION_FAILED, PRICING_REJECTED, "The selection cannot be estimated: INVALID_GUEST_COUNT (...)")
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
             val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
@@ -921,7 +924,7 @@ fun createInquiryFinancialDocumentRoute(
             "the stage or commercial inputs are invalid. $PRICING_REJECTED",
             "Invalid starting stage",
         )
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
             val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
@@ -966,7 +969,7 @@ fun listInquiryFinancialDocumentsRoute(
         )
         returningError(ErrorCategory.MALFORMED_REQUEST, "`inquiryId` is not a UUID.", "Malformed request: path 'inquiryId'")
         returningError(ErrorCategory.NOT_FOUND, "no inquiry has this id.", "Inquiry $EXAMPLE_INQUIRY was not found")
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentRead, unsafe = false)
     } bindContract Method.GET to { id: String, _: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentRead).then { _: Request ->
             val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
@@ -991,7 +994,7 @@ fun getFinancialDocumentRoute(
         returning(Status.OK, documentResponse to exampleInvoice, "The latest snapshot.")
         returningError(ErrorCategory.MALFORMED_REQUEST, "`documentId` is not a UUID.", "Malformed request: path 'documentId'")
         returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentRead, unsafe = false)
     } bindContract Method.GET to { id: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentRead).then { _: Request ->
             Response(Status.OK).with(documentResponse of getDocument(uuidIn(id, documentIdPath)).toResponse())
@@ -1023,7 +1026,7 @@ fun getFinancialDocumentHistoryRoute(
         )
         returningError(ErrorCategory.MALFORMED_REQUEST, "`documentId` is not a UUID.", "Malformed request: path 'documentId'")
         returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentRead, unsafe = false)
     } bindContract Method.GET to { id: String, _: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentRead).then { _: Request ->
             Response(Status.OK).with(historyResponse of getHistory(uuidIn(id, documentIdPath)).toResponse())
@@ -1090,7 +1093,7 @@ private fun stageTransitionRoute(
         returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
         staleVersion(" A latest version that is not $from answers the same status with code `illegal_transition`.")
         returningError(ErrorCategory.VALIDATION_FAILED, "`expectedVersion` is below 1.", "A version number must be at least 1, but was 0")
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
             val documentId = uuidIn(id, documentIdPath)
@@ -1131,7 +1134,7 @@ fun createChangeOrderRoute(
             "$PRICING_REJECTED Inputs that produce exactly the current lines are rejected as no financial change.",
             "The revised pricing produces no financial change",
         )
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
             val documentId = uuidIn(id, documentIdPath)
@@ -1186,7 +1189,7 @@ fun recordPaymentRoute(
                 "quote or an invoice.",
             "Payment amount must be an exact decimal string, for example 300.00",
         )
-        staffErrors()
+        financialErrors(CommercePermissions.PaymentRecord, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
         access.requirePermission(CommercePermissions.PaymentRecord).then { request: Request ->
             val documentId = uuidIn(id, documentIdPath)
@@ -1234,7 +1237,7 @@ fun listFinancialDocumentPaymentsRoute(
         returning(Status.OK, documentPaymentsResponse to exampleDocumentPayments, "The document's payment histories.")
         returningError(ErrorCategory.MALFORMED_REQUEST, "`documentId` is not a UUID.", "Malformed request: path 'documentId'")
         returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
-        staffErrors()
+        financialErrors(CommercePermissions.FinancialDocumentRead, unsafe = false)
     } bindContract Method.GET to { id: String, _: String ->
         access.requirePermission(CommercePermissions.FinancialDocumentRead).then { _: Request ->
             val documentId = uuidIn(id, documentIdPath)
@@ -1257,7 +1260,7 @@ fun listUnappliedPaymentsRoute(
             "and allocation unwinds. No inquiry or document association is required. Requires `commerce.payment.record`."
         tags += payments
         returning(Status.OK, unappliedPaymentsResponse to UnappliedPaymentsResponse(emptyList()), "The available payment histories.")
-        staffErrors()
+        financialErrors(CommercePermissions.PaymentRecord, unsafe = false)
     } bindContract Method.GET to
         access.requirePermission(CommercePermissions.PaymentRecord).then { _: Request ->
             Response(Status.OK).with(unappliedPaymentsResponse of UnappliedPaymentsResponse(listPayments().map { it.toResponse() }))
@@ -1288,7 +1291,7 @@ fun recordStandalonePaymentRoute(
             "the amount, ISO 4217 currency, method, receivedAt, or external reference is invalid.",
             "Payment amount must be an exact decimal string, for example 300.00",
         )
-        staffErrors()
+        financialErrors(CommercePermissions.PaymentRecord, unsafe = true)
     } bindContract Method.POST to
         access.requirePermission(CommercePermissions.PaymentRecord).then { request: Request ->
             val body = recordStandalonePaymentRequest(request)
@@ -1343,7 +1346,7 @@ fun allocatePaymentRoute(
                 "document is an Estimate (code `invariant_violated`).",
             "Payment amount must be an exact decimal string, for example 300.00",
         )
-        staffErrors()
+        financialErrors(CommercePermissions.PaymentRecord, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
         access.requirePermission(CommercePermissions.PaymentRecord).then { request: Request ->
             val paymentId = uuidIn(id, paymentIdPath)
@@ -1398,7 +1401,7 @@ fun recordRefundRoute(
                 "makes the complete payment history impossible answers the same status with code `invariant_violated`.",
             "Refund amount must be an exact decimal string, for example 50.00",
         )
-        staffErrors()
+        financialErrors(CommercePermissions.RefundRecord, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
         access.requirePermission(CommercePermissions.RefundRecord).then { request: Request ->
             val paymentId = uuidIn(id, paymentIdPath)
