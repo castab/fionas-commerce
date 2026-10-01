@@ -9,7 +9,7 @@ import java.time.Duration
 
 /**
  * Resolves Fiona's arithmetic facts from the same snapshot as the public questions.
- * A configuration mistake fails the entire read, never silently removes an active option.
+ * A configuration mistake fails the entire read, never silently removes a visible option.
  * Detailed diagnostics are logged by the runtime; customers receive its generic internal_failure.
  */
 internal fun inquiryPricingPreview(
@@ -25,7 +25,7 @@ internal fun inquiryPricingPreview(
     }
     val offerings =
         publicCategories.flatMap { category ->
-            val options = snapshot.offeringsIn(category.key)
+            val options = publicInquiryOfferings(snapshot, category.key)
             check(options.size >= category.minimumSelections) {
                 "Inquiry form at ${snapshot.reference}: category ${category.key.value} has fewer options than its minimum selections"
             }

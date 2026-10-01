@@ -2,7 +2,10 @@ package io.github.castab.fionas.commerce.testing
 
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.offering.CategoryDto
+import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
+import io.github.castab.commerce.runtime.offering.OfferingMutationDto
 import io.github.castab.commerce.runtime.offering.OfferingResultDto
+import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import org.http4k.core.Method
 import org.http4k.core.Request
@@ -26,11 +29,39 @@ fun TestApplication.addOffering(
     displayName: String,
     price: String? = null,
     description: String? = null,
+    selectionState: OfferingSelectionStateDto = OfferingSelectionStateDto.ENABLED,
+    availability: OfferingAvailabilityDto = OfferingAvailabilityDto.AVAILABLE,
 ): Int {
     val optional = listOfNotNull(description?.let { ",\"description\":\"$it\"" }, price?.let { ",\"price\":$it" }).joinToString("")
-    val body = """{"expectedRevision":$expectedRevision,"key":"$key","category":"$category","displayName":"$displayName"$optional}"""
+    val body =
+        """{"expectedRevision":$expectedRevision,"key":"$key","category":"$category","displayName":"$displayName",""" +
+            """"selectionState":"$selectionState","availability":"$availability"$optional}"""
     val response = adminPost("/offering-catalog/offerings", body)
     check(response.status == Status.CREATED) { "Adding offering $key failed: ${response.status} ${response.bodyString()}" }
+    return CommerceJson.asA(response.bodyString(), OfferingResultDto.serializer()).revision
+}
+
+/** Changes only the requested state facts through the runtime HTTP contract, preserving other properties. */
+fun TestApplication.setOfferingState(
+    expectedRevision: Int,
+    key: String,
+    selectionState: OfferingSelectionStateDto? = null,
+    availability: OfferingAvailabilityDto? = null,
+): Int {
+    val path = "/offering-catalog/offerings/$key"
+    val original = CommerceJson.asA(adminGet(path).bodyString(), OfferingResultDto.serializer()).offering
+    val mutation =
+        OfferingMutationDto(
+            expectedRevision,
+            original.category,
+            original.displayName,
+            original.description,
+            original.price,
+            selectionState ?: original.selectionState,
+            availability ?: original.availability,
+        )
+    val response = adminRequest(Method.PUT, path, CommerceJson.json.encodeToString(OfferingMutationDto.serializer(), mutation))
+    check(response.status == Status.OK) { "Updating offering state failed: ${response.status} ${response.bodyString()}" }
     return CommerceJson.asA(response.bodyString(), OfferingResultDto.serializer()).revision
 }
 

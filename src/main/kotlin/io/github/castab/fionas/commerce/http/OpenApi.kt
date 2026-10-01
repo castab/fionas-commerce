@@ -9,8 +9,10 @@ import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.ValidationErrorResponse
 import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import io.github.castab.commerce.runtime.http.jsonBody
+import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
 import io.github.castab.commerce.runtime.offering.OfferingDto
 import io.github.castab.commerce.runtime.offering.OfferingPriceDto
+import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.commerce.runtime.offering.offeringsOpenApiRenderer
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -400,6 +402,8 @@ private class OfferingsSchemas {
                     "Vanilla",
                     "Soft serve",
                     OfferingPriceDto("FIXED", "1.00", "USD"),
+                    selectionState = OfferingSelectionStateDto.ENABLED,
+                    availability = OfferingAvailabilityDto.AVAILABLE,
                 ),
                 null,
                 prefix,

@@ -136,8 +136,10 @@ verifying ownership of the address. Decide these explicitly before changing the 
   in the runtime's `ErrorResponse` envelope; future/nonexistent revisions remain `404`.
   No catalog locks, nested transactions, automatic selection migration, or silent repricing.
   A publication after that observation is allowed: price that immutable observed snapshot
-  with `FionasPricing`, exactly once. All active offerings in an exposed category are public;
-  the engine retains membership, retirement, cardinality and policy validation.
+  with `FionasPricing`, exactly once. Public categories are Fiona-owned; enabled offerings
+  in them are advertised while disabled offerings remain in the authoritative catalog.
+  Authoritative pricing receives the full snapshot; the runtime enforces selection state,
+  availability (disabled takes precedence), membership, retirement and cardinality before policy validation.
   Hidden categories produce `422` with `PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`.
   Those exact concrete lines materialize
   Estimate v1 through the transaction-taking `MaterializeInquiryFinancialDocument` core,
@@ -213,11 +215,11 @@ verifying ownership of the address. Decide these explicitly before changing the 
   Missing/retired categories are omitted; restoration restores the configured question.
   Other active categories never become public questions automatically. Catalog categories
   and public question exposure are separate concerns.
-- Offering choices project catalog-owned limits and active options from that single
+- Offering choices project catalog-owned limits and enabled options from that single
   snapshot. HTTP reuses the runtime's `dto()`, `OfferingDto`, and `OfferingPriceDto`;
   never restate offering identity, price forms, or selection validation. Allowed durations
   come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
-- The response exposes `definitionVersion` (5 for the current code-owned definition) and
+- The response exposes `definitionVersion` (6 for the current code-owned definition) and
   `catalogId`/`catalogRevision`. Clients submit the latter revision as
   `pricingInputs.catalogRevision`; inquiry submission requires it still to be current,
   and exact-revision backend pricing remains authoritative.
@@ -244,7 +246,19 @@ verifying ownership of the address. Decide these explicitly before changing the 
   advertised duration, insufficient public options for a minimum, or a required hidden
   category fails with diagnostic server detail and the runtime's generic `500`; never
   silently filter an invalid public offering. Optional hidden offerings need not satisfy
-  public-form pricing constraints. Conditional availability is a separate slice.
+  public-form pricing constraints. Availability schedules/windows remain a separate slice.
+- `publicInquiryOfferings` centralizes Fiona's visible-option rule: `selectionState == ENABLED`.
+  It omits both disabled combinations and retains enabled unavailable options, with their
+  runtime DTO state/availability and full metadata in catalog order. Clients display
+  `UNAVAILABLE` options but prevent selection (check back later); unavailability never means
+  retired or disabled. The form and public pricing-preview facts share this projection.
+  Minimum viability counts enabled visible options, including unavailable ones; insufficient
+  enabled options still fail configuration, but temporary unavailability never does.
+  Never construct a filtered snapshot for authoritative pricing: tampered current submissions
+  and exact-revision previews receive `OFFERING_DISABLED` or `OFFERING_UNAVAILABLE` from the
+  runtime. State changes append revisions, so stale new submissions fail `CATALOG_REVISION_STALE`
+  first. Successful idempotent replay skips later state validation even after retirement.
+  Materialized financial documents remain independent of offering state.
 - Browser amounts are advisory only. Preview, inquiry submission, and persisted documents
   remain authoritative through `FionasOfferingsEngine`. Request DTOs accept pricing inputs,
   never trusted totals or line items; the form introduces no alternate validation path.
@@ -519,10 +533,16 @@ Also:
   shared overflow bucket for new IPs at the bound, never evict depleted identities.
   Restart resets buckets; replicas do not share them. Exhaustion returns 429, Retry-After
   seconds rounded up, no-store, and runtime `ErrorResponse("rate_limited", "Too many requests")`.
-  Runtime 0.0.18 has no rate-limit ErrorCategory; reuse its envelope and document the local
+  Runtime 0.0.19 has no rate-limit ErrorCategory; reuse its envelope and document the local
   status/code on the login ContractRoute. No new error framework or upstream subsystem.
 
 ## Application migrations
+
+- **Commerce 0.0.19's runtime V8 deliberately rejects existing offering rows.** Both
+  independent state columns are required without invented defaults/backfills. Recreate
+  disposable local databases/volumes, then rerun `scripts/setup-local-commerce.mjs`.
+  Fresh databases apply runtime V8 before Fiona's migrations. Never compensate with a
+  Fiona migration touching runtime tables, weaken V8, or continue after migration failure.
 
 - **Commerce 0.0.17's V7 deliberately rejects existing financial snapshots.** PostgreSQL
   assigns each new snapshot's `created_at` with `clock_timestamp()`. Pre-V7 snapshots have
@@ -987,7 +1007,7 @@ Stripe or any payment provider or SDK, payment
 webhooks, service credentials, OAuth/OIDC, self-service password resets, event publishing,
 outbox, NATS, projections, CQRS, bookings and booking conversion, booking lifecycle
 transitions, a generic line-source identity, stored balances or payment statuses, tax,
-travel fees, minimum orders, inventory, availability, catalog seeding or import, deposit
+travel fees, minimum orders, inventory, availability schedules/windows, catalog seeding or import, deposit
 requirements or schedules, customer merge or deduplication, inquiry search, filters, or
 status, and further event details (street address, time, contacts). Do not add placeholders for
 them.
@@ -1016,7 +1036,7 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 
 ### Known upstream gaps (last audited at commerce 0.0.14)
 
-The application consumes commerce-runtime 0.0.18, with matching commerce-domain transitively.
+The application consumes commerce-runtime 0.0.19, with matching commerce-domain transitively.
 The application history schema gap is closed by commerce 0.0.15 (applications declare their
 own migration schema). The payment read gap is closed by commerce 0.0.16:
 `FinancialLedger.paymentHistory` and `paymentHistoriesForLineage` (each with a

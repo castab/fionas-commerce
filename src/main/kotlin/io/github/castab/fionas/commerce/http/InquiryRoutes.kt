@@ -375,7 +375,8 @@ fun createInquiryRoute(
             "replay returns the original 201 receipt and Location without catalog access or pricing, even after publication. " +
             "A successful key reused for changed intent fails with 409 IDEMPOTENCY_KEY_REUSED. Failed attempts do not consume keys. " +
             "For new submissions, pricing inputs must name the current catalog revision observed " +
-            "during validation and use only categories and active offerings exposed by GET /inquiry-form. " +
+            "during validation and use only public categories with enabled, available offerings. Disabled offerings are " +
+            "hidden from GET /inquiry-form; unavailable options stay visible but cannot be selected. " +
             "A stale revision fails with 409 CATALOG_REVISION_STALE and records nothing; fetch a fresh form and ask " +
             "the customer to review updated selections/pricing before resubmission. With accepted pricing inputs, " +
             "prices exactly once and atomically materializes " +
@@ -404,7 +405,8 @@ fun createInquiryRoute(
             ErrorCategory.VALIDATION_FAILED,
             "a value is invalid: a blank name, an email without `@`, a ZIP code without five digits, an invalid event date, " +
                 "or `pricingInputs` cannot " +
-                "be priced: they do not fit the catalog revision (for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) " +
+                "be priced: they do not fit the catalog revision (for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`, " +
+                "`OFFERING_DISABLED`, `OFFERING_UNAVAILABLE`) " +
                 "or Fiona's pricing (for example `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`), or a category is not " +
                 "publicly selectable (`PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`). Optional `violations` " +
                 "expose stable codes; the message is diagnostic.",

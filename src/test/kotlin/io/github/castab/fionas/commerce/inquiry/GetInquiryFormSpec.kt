@@ -2,10 +2,12 @@ package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.QuantityDimension
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
@@ -15,6 +17,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.types.shouldBeSameInstanceAs
 import java.math.BigDecimal
 import java.time.Duration
 import java.util.Currency
@@ -34,6 +37,45 @@ class GetInquiryFormSpec :
                 listOf(OfferingCategory(publicCategory, "Flavors")),
                 listOf(Offering(OfferingKey("flavor"), publicCategory, "Flavor", price = price)),
             )
+
+        test("public projection preserves the exact snapshot and ignores disabled prices while retaining unavailable pricing facts") {
+            val snapshot =
+                OfferingsSnapshot.create(
+                    FIONA_OFFERINGS_CATALOG_ID,
+                    listOf(OfferingCategory(publicCategory, "Flavors", minimumSelections = 2)),
+                    listOf(
+                        Offering(OfferingKey("available"), publicCategory, "Available"),
+                        Offering(
+                            OfferingKey("disabled"),
+                            publicCategory,
+                            "Disabled",
+                            price = OfferingPrice.Fixed(money("1.00", "EUR")),
+                            selectionState = OfferingSelectionState.DISABLED,
+                        ),
+                        Offering(
+                            OfferingKey("temporary"),
+                            publicCategory,
+                            "Temporary",
+                            price = OfferingPrice.PerDuration(money("3.00"), Duration.ofHours(1)),
+                            availability = OfferingAvailability.UNAVAILABLE,
+                        ),
+                        Offering(
+                            OfferingKey("both"),
+                            publicCategory,
+                            "Both",
+                            selectionState = OfferingSelectionState.DISABLED,
+                            availability = OfferingAvailability.UNAVAILABLE,
+                        ),
+                    ),
+                )
+            val form = GetInquiryForm({ snapshot })()
+            form.catalog shouldBeSameInstanceAs snapshot
+            form.catalog.offerings shouldBe snapshot.offerings
+            publicInquiryOfferings(snapshot, publicCategory).map { it.key.value } shouldBe listOf("available", "temporary")
+            form.pricingPreview.durationOptions.forEach {
+                it.offeringContributions.map { contribution -> contribution.offering.value } shouldBe listOf("temporary")
+            }
+        }
 
         test("one read supplies question options, revision and resolved duration contributions together") {
             val first = catalog(OfferingPrice.PerDuration(money("3.00"), Duration.ofHours(1)))

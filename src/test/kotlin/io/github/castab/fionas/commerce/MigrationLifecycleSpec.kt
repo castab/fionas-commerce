@@ -117,7 +117,12 @@ class MigrationLifecycleSpec :
                 database.count("commerce.users") shouldBe 0
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "7"
-                database.history("commerce").last() shouldContain "V7__financial_document_created_at.sql"
+                database.history("commerce").last() shouldContain "V8__offering_selection_and_availability.sql"
+                database.strings(
+                    "SELECT column_name || ' ' || is_nullable || ' ' || COALESCE(column_default, 'no default') " +
+                        "FROM information_schema.columns WHERE table_schema = 'commerce' AND table_name = 'offerings' " +
+                        "AND column_name IN ('selection_state', 'availability') ORDER BY column_name",
+                ) shouldContainExactly listOf("availability NO no default", "selection_state NO no default")
                 database
                     .strings(
                         "SELECT is_nullable || ' ' || data_type FROM information_schema.columns " +

@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.18/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.18/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.19/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.19/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -40,8 +40,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.18`, which brings
-`commerce-domain:0.0.18` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.19`, which brings
+`commerce-domain:0.0.19` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -236,10 +236,13 @@ immutable observed snapshot. No selections are silently reinterpreted or reprice
 
 GET `/inquiry-form` and POST `/inquiries` share `publicOfferingQuestions`, Fiona's ordered
 code-owned category definition. Hidden/internal categories fail `422 validation_failed`
-with violation `PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`, even if catalog-valid. Every active
-offering in an exposed category is currently public; there is no separate per-offering
-visibility flag. The existing offerings engine still checks category membership, retirement,
-selection limits, guest count and duration. Ordinary catalog/pricing failures retain `404`/`422`.
+with violation `PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`, even if catalog-valid. Enabled offerings
+in those categories are advertised; disabled offerings remain in the authoritative catalog
+but are omitted from the public form. `PublicInquiryPricing` still supplies the full immutable
+snapshot to `FionasPricing`. Runtime structural validation rejects tampered current selections
+with `OFFERING_DISABLED` or `OFFERING_UNAVAILABLE` (disabled takes precedence when both apply),
+alongside membership, retirement and selection limits. Fiona checks guest count and duration.
+Ordinary catalog/pricing failures retain `404`/`422`.
 All rejections commit nothing, including any key claim. A new command prices exactly once and uses those exact concrete lines to
 materialize Estimate v1 through the runtime ledger. One READ COMMITTED transaction includes
 idempotency claim, customer lookup/creation, inquiry insert, requested pricing history, ledger snapshot/lines,
@@ -327,7 +330,7 @@ failures and present `message` as diagnostic text; they never parse it for codes
 
 `GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
 resolved against one current Offerings snapshot. The response includes `definitionVersion`
-(currently 5), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
+(currently 6), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
 advisory `pricingPreview` facts.
 Definition version identifies the code-owned questions and bindings; catalog edits change
 the catalog revision independently. Sections are **Contact information**, **Event details**, **Build your
@@ -394,6 +397,25 @@ limits come from that same immutable snapshot. Options use commerce-runtime's ex
 Retired offerings disappear from the current form; no second catalog or form persistence
 is introduced.
 
+`publicInquiryOfferings` centralizes the public visibility rule for form options and
+pricing-preview option facts: include exactly `selectionState == ENABLED`, preserving order.
+Every returned option retains the runtime's required `selectionState` and `availability` fields:
+
+| Selection state | Availability | Public inquiry behavior |
+|---|---|---|
+| `ENABLED` | `AVAILABLE` | Visible and selectable. |
+| `ENABLED` | `UNAVAILABLE` | Visible with its name, description and price; client must render unselectable, with a check-back-later message. |
+| `DISABLED` | Either value | Hidden from the public form and its pricing-preview contributions. |
+
+The two facts are independent. Unavailability is distinct from retirement or deliberate
+disabling. Enabled unavailable offerings retain advisory price metadata and duration
+contributions. Changing either fact advances the catalog revision: old forms become stale,
+so new submissions receive `409 CATALOG_REVISION_STALE` before selection-state validation.
+Exact-revision `POST /estimate-preview` uses the full snapshot and rejects disabled/unavailable
+selections structurally. A successful idempotent inquiry replay returns its original receipt
+without revalidating later availability, disabling or retirement. Financial documents retain
+their materialized lines and have no dependency on later offering state.
+
 `pricingPreview` is a concrete Fiona projection of the same `FIONAS_PRICING_POLICY` and
 snapshot used to resolve the questions. It supplies the currency, guest quantity
 dimension, per-guest amount, topping category/included count/additional rate, and an
@@ -416,8 +438,10 @@ offering has another currency, a non-guest quantity dimension, or an interval th
 price every advertised duration exactly. Diagnostic detail stays on the server. The
 shared pricing-policy checks preserve the engine's finite decimal multipliers: a one-hour
 price supports 90 minutes at 1.5 units, while a 45-minute interval fails for 120 minutes.
-A required category outside the public definition or insufficient active options for a
-public category's minimum also fails rather than publishing an unusable form. Optional
+A required category outside the public definition or insufficient enabled visible options for a
+public category's minimum also fails rather than publishing an unusable form. Enabled options
+count toward that minimum even while unavailable: temporary unavailability alone never causes
+a form `500`, and the optional plain/contact inquiry remains usable. Optional
 hidden catalog offerings are not subjected to public-form compatibility checks.
 
 The service section is optional, matching the existing optional `pricingInputs`.
@@ -464,6 +488,14 @@ with new properties rather than re-add its key. Update and restore take the key 
 path, never an editable body field; their bodies replace all properties, with omitted
 optional properties reset to defaults.
 
+> **Upgrading to commerce 0.0.19.** Offering add/update/restore bodies now require both
+> `selectionState` (`ENABLED`/`DISABLED`) and `availability` (`AVAILABLE`/`UNAVAILABLE`),
+> with no HTTP defaults. Reads expose both fields. All four combinations are valid.
+> Runtime V8 refuses to invent these values for existing offering rows. Recreate the
+> disposable local database/volume (`docker compose down -v`), start a fresh database,
+> restart Fiona, then rerun `scripts/setup-local-commerce.mjs`. Empty databases migrate
+> normally through runtime V8 and Fiona's own stream. Fiona adds no migration or backfill.
+
 > **Upgrading to commerce 0.0.18.** No runtime or Fiona migration is added. The existing
 > binding now exposes runtime-owned update, retire, restore, and retired discovery. Every
 > mutation after creation (including add) requires the caller's observed integer
@@ -490,7 +522,7 @@ curl -i -X POST localhost:8080/offering-catalog/categories -H 'Content-Type: app
 
 ```bash
 curl -i -X POST localhost:8080/offering-catalog/offerings -H 'Content-Type: application/json' \
-  -d '{"expectedRevision":2,"key":"vanilla","category":"soft-serve-flavor","displayName":"Vanilla","description":"Classic vanilla soft serve"}'
+  -d '{"expectedRevision":2,"key":"vanilla","category":"soft-serve-flavor","displayName":"Vanilla","description":"Classic vanilla soft serve","selectionState":"ENABLED","availability":"AVAILABLE"}'
 ```
 
 `GET /offering-catalog` returns the latest revision in one request, offerings grouped under
@@ -508,7 +540,7 @@ their categories in order:
       "minimumSelections": 2,
       "maximumSelections": 2,
       "offerings": [
-        { "key": "vanilla", "category": "soft-serve-flavor", "displayName": "Vanilla", "description": "Classic vanilla soft serve" }
+        { "key": "vanilla", "category": "soft-serve-flavor", "displayName": "Vanilla", "description": "Classic vanilla soft serve", "selectionState": "ENABLED", "availability": "AVAILABLE" }
       ]
     }
   ]
@@ -1077,7 +1109,7 @@ The inquiry form's sealed input serializer produces an explicit `type` discrimin
 a `oneOf` with one component per variant, and required constant discriminator values;
 nested Offering schemas retain the runtime's price union unchanged. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers. Commerce-runtime 0.0.18's Offerings
+contract metadata cannot declare response headers. Commerce-runtime 0.0.19's Offerings
 renderer omits invalid schema-level `"format": null` and preserves arbitrary example data.
 Fiona uses the runtime's `ValidationErrorResponse` and `ValidationViolationResponse`
 schemas for validation failures, with optional `violations`; ordinary errors retain
@@ -1296,6 +1328,11 @@ catalog and stops if one already exists; existing catalogs are managed through r
 mutations. Each add sends `expectedRevision` from the preceding successful response, with
 no intervening GET or automatic retry. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
 for the exact catalog entries and preview request.
+
+Every seeded offering explicitly sends `selectionState=ENABLED` and `availability=AVAILABLE`.
+For an existing catalog, `node scripts/setup-local-commerce.mjs --capitalize-toppings`
+updates topping display names while preserving and verifying description, price, selection
+state and availability. A label edit never enables or makes an offering available.
 
 ### Smoke test Invoice payments and a refund locally
 

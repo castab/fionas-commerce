@@ -41,8 +41,9 @@ class PublicInquiryPricing(
                 CatalogRevisionStale(inputs.catalogRevision, snapshot.revision),
             )
         }
-        // Every active offering in an exposed category is advertised. The existing engine checks
-        // membership, retirement, cardinality and Fiona's pricing rules against this same snapshot.
+        // Enabled offerings in public categories are advertised, including unavailable options.
+        // Keep disabled offerings in this full snapshot so the runtime reports OFFERING_DISABLED,
+        // and let it enforce availability, membership, retirement and cardinality before pricing.
         return pricing.price(snapshot, inputs)
     }
 }

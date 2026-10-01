@@ -352,7 +352,8 @@ class InquiryMaterializationSpec :
                 application.adminRequest(
                     Method.PUT,
                     "/offering-catalog/offerings/horchata",
-                    """{"expectedRevision":$revision,"category":"soft-serve-flavor","displayName":"Renamed premium flavor",""" +
+                    """{"expectedRevision":$revision,"selectionState":"ENABLED","availability":"AVAILABLE",""" +
+                        """"category":"soft-serve-flavor","displayName":"Renamed premium flavor",""" +
                         """"price":${perGuest("9.00")}}""",
                 )
             updated.status shouldBe Status.OK

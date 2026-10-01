@@ -3,6 +3,8 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.offering.CategoryDto
+import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
+import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
@@ -15,6 +17,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.setOfferingState
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
@@ -78,6 +81,115 @@ class InquiryFormRoutesSpec :
         }
         afterSpec { application.close() }
 
+        test("public options retain enabled availability, metadata and order without filtering the authoritative catalog") {
+            TestApplication.create().use { fresh ->
+                var latest = fresh.createAcceptanceCatalog()
+                val originalRevision = latest
+                val durationPrice = """{"kind":"PER_DURATION","amount":"3.00","currency":"USD","interval":"PT1H"}"""
+                latest = fresh.setOfferingState(latest, "chocolate", selectionState = OfferingSelectionStateDto.DISABLED)
+                latest =
+                    fresh.addOffering(
+                        latest,
+                        "temporary",
+                        "soft-serve-flavor",
+                        "Temporary special",
+                        durationPrice,
+                        description = "Check back later",
+                        availability = OfferingAvailabilityDto.UNAVAILABLE,
+                    )
+                latest =
+                    fresh.addOffering(
+                        latest,
+                        "hidden",
+                        "soft-serve-flavor",
+                        "Hidden special",
+                        durationPrice,
+                        selectionState = OfferingSelectionStateDto.DISABLED,
+                    )
+                latest =
+                    fresh.addOffering(
+                        latest,
+                        "secret",
+                        "soft-serve-flavor",
+                        "Secret special",
+                        durationPrice,
+                        selectionState = OfferingSelectionStateDto.DISABLED,
+                        availability = OfferingAvailabilityDto.UNAVAILABLE,
+                    )
+                val before = fresh.adminGet("/offering-catalog").bodyString()
+                val form = fresh.form()
+                form.catalogRevision shouldBe latest
+                val options = form.choices().single { it.category == "soft-serve-flavor" }.options
+                options.map { it.key } shouldContainExactly listOf("vanilla", "horchata", "temporary")
+                options.all { it.selectionState == OfferingSelectionStateDto.ENABLED } shouldBe true
+                options.first().availability shouldBe OfferingAvailabilityDto.AVAILABLE
+                options.last().let {
+                    it.displayName shouldBe "Temporary special"
+                    it.description shouldBe "Check back later"
+                    it.availability shouldBe OfferingAvailabilityDto.UNAVAILABLE
+                    val price = checkNotNull(it.price)
+                    price.kind shouldBe "PER_DURATION"
+                    price.amount shouldBe "3.00"
+                    price.currency shouldBe "USD"
+                    price.interval shouldBe "PT1H"
+                }
+                form.pricingPreview.durationOptions.forEach {
+                    it.offeringContributions.map { contribution -> contribution.offeringKey } shouldBe listOf("temporary")
+                }
+                fresh.adminGet("/offering-catalog").bodyString() shouldBe before
+                fresh.adminGet("/offering-catalog/revisions/$latest").bodyString() shouldBe before
+                val full = CommerceJson.asA(before, OfferingsCatalogDto.serializer())
+                full.categories
+                    .first()
+                    .offerings
+                    .map { it.key } shouldBe
+                    listOf("vanilla", "chocolate", "horchata", "temporary", "hidden", "secret")
+                full.categories
+                    .first()
+                    .offerings
+                    .single { it.key == "secret" }
+                    .selectionState shouldBe OfferingSelectionStateDto.DISABLED
+                CommerceJson
+                    .asA(
+                        fresh.adminGet("/offering-catalog/revisions/$originalRevision").bodyString(),
+                        OfferingsCatalogDto.serializer(),
+                    ).categories
+                    .first()
+                    .offerings
+                    .single { it.key == "chocolate" }
+                    .selectionState shouldBe OfferingSelectionStateDto.ENABLED
+            }
+        }
+
+        test("unavailable enabled options satisfy visible minimum while disabled options cannot") {
+            TestApplication.create().use { fresh ->
+                var latest = fresh.createAcceptanceCatalog()
+                latest = fresh.setOfferingState(latest, "vanilla", availability = OfferingAvailabilityDto.UNAVAILABLE)
+                latest = fresh.setOfferingState(latest, "chocolate", availability = OfferingAvailabilityDto.UNAVAILABLE)
+                latest = fresh.setOfferingState(latest, "horchata", selectionState = OfferingSelectionStateDto.DISABLED)
+                val changed =
+                    fresh.adminRequest(
+                        Method.PUT,
+                        "/offering-catalog/categories/soft-serve-flavor",
+                        """{"expectedRevision":$latest,"displayName":"Flavors","minimumSelections":2,"maximumSelections":2}""",
+                    )
+                changed.status shouldBe Status.OK
+                latest = CommerceJson.asA(changed.bodyString(), CategoryDto.serializer()).revision
+                fresh
+                    .form()
+                    .choices()
+                    .first()
+                    .options
+                    .map { it.availability } shouldBe
+                    listOf(OfferingAvailabilityDto.UNAVAILABLE, OfferingAvailabilityDto.UNAVAILABLE)
+                fresh.setOfferingState(latest, "chocolate", selectionState = OfferingSelectionStateDto.DISABLED)
+                val failed = fresh.http(Request(Method.GET, "/inquiry-form").withUiKey())
+                failed.status shouldBe Status.INTERNAL_SERVER_ERROR
+                failed.header("Cache-Control") shouldBe "no-store"
+                CommerceJson.asA(failed.bodyString(), ErrorResponse.serializer()).code shouldBe "internal_failure"
+            }
+        }
+
         test("a missing catalog returns the runtime not-found envelope; the read initializes nothing") {
             TestApplication.create().use { fresh ->
                 val response = fresh.http(Request(Method.GET, "/inquiry-form").withUiKey())
@@ -90,7 +202,7 @@ class InquiryFormRoutesSpec :
 
         test("public form returns ordered questions, submission bindings, and separate presentation hints") {
             val form = application.form()
-            form.definitionVersion shouldBe 5
+            form.definitionVersion shouldBe 6
             form.catalogRevision shouldBe revision
             form.sections.map { it.key to it.title } shouldContainExactly
                 listOf(

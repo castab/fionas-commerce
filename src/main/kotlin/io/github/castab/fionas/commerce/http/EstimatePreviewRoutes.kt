@@ -196,7 +196,8 @@ fun previewEstimateRoute(
         returningError(
             ErrorCategory.VALIDATION_FAILED,
             "a value is invalid, or the selection cannot be estimated: it does not fit the catalog revision (for " +
-                "example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) or Fiona's pricing (for example " +
+                "example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`, `OFFERING_DISABLED`, `OFFERING_UNAVAILABLE`) " +
+                "or Fiona's pricing (for example " +
                 "`INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`). Optional `violations` expose stable codes; the message is diagnostic.",
             "The selection cannot be estimated: TOO_MANY_SELECTIONS (category topping allows at most 6 selections, got 7)",
             violations = listOf(ValidationViolationResponse("TOO_MANY_SELECTIONS")),

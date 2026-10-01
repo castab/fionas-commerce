@@ -4,12 +4,15 @@ import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.ValidationErrorResponse
 import io.github.castab.commerce.runtime.offering.CategoryDto
+import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
+import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.setOfferingState
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
@@ -224,6 +227,93 @@ class PublicInquirySubmissionSpec :
                     empty.database.count(it) shouldBe
                         if (it in listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_submissions")) 1 else 0
                 }
+            }
+        }
+
+        test("full snapshot rejects tampered state selections, stale forms win, and successful replay survives state changes") {
+            TestApplication.create().use { fresh ->
+                var latest = fresh.createAcceptanceCatalog()
+
+                fun allCounts() = tables.associateWith(fresh.database::count)
+
+                fun request(
+                    inputs: String,
+                    key: String = UUID.randomUUID().toString(),
+                ) = Request(Method.POST, "/inquiries")
+                    .withSubmissionKey(key)
+                    .withUiKey()
+                    .header("Content-Type", "application/json")
+                    .body(
+                        """{"name":"Jane","email":"states@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"OTHER","pricingInputs":$inputs}""",
+                    )
+                val acceptedRequest = request(pricingBody(latest, softServe = listOf("vanilla")))
+                val accepted = fresh.http(acceptedRequest)
+                accepted.status shouldBe Status.CREATED
+                val captured = latest
+                latest = fresh.setOfferingState(latest, "vanilla", availability = OfferingAvailabilityDto.UNAVAILABLE)
+                val before = allCounts()
+                val stale = fresh.http(request(pricingBody(captured, softServe = listOf("vanilla"))))
+                stale.status shouldBe Status.CONFLICT
+                CommerceJson.asA(stale.bodyString(), ErrorResponse.serializer()).code shouldBe "CATALOG_REVISION_STALE"
+                allCounts() shouldBe before
+                latest = fresh.setOfferingState(latest, "vanilla", availability = OfferingAvailabilityDto.AVAILABLE)
+                latest = fresh.setOfferingState(latest, "chocolate", availability = OfferingAvailabilityDto.UNAVAILABLE)
+                latest = fresh.setOfferingState(latest, "horchata", selectionState = OfferingSelectionStateDto.DISABLED)
+                latest =
+                    fresh.addOffering(
+                        latest,
+                        "secret",
+                        "soft-serve-flavor",
+                        "Secret",
+                        selectionState = OfferingSelectionStateDto.DISABLED,
+                        availability = OfferingAvailabilityDto.UNAVAILABLE,
+                    )
+
+                listOf("chocolate" to "OFFERING_UNAVAILABLE", "horchata" to "OFFERING_DISABLED", "secret" to "OFFERING_DISABLED")
+                    .forEach { (key, code) ->
+                        val inputs = pricingBody(latest, softServe = listOf(key))
+                        val submission = request(inputs)
+                        val unchanged = allCounts()
+                        val failed = fresh.http(submission)
+                        failed.status shouldBe Status.UNPROCESSABLE_ENTITY
+                        CommerceJson.asA(failed.bodyString(), ValidationErrorResponse.serializer()).violations!!.map { it.code } shouldBe
+                            listOf(code)
+                        allCounts() shouldBe unchanged
+                        val preview =
+                            fresh.http(
+                                Request(Method.POST, "/estimate-preview")
+                                    .withUiKey()
+                                    .header("Content-Type", "application/json")
+                                    .body(inputs),
+                            )
+                        preview.status shouldBe Status.UNPROCESSABLE_ENTITY
+                        CommerceJson.asA(preview.bodyString(), ValidationErrorResponse.serializer()).violations!!.map { it.code } shouldBe
+                            listOf(code)
+                        allCounts() shouldBe unchanged
+                        // A failed key is released: the corrected current command can use it.
+                        val corrected = submission.body(submission.bodyString().replace("\"$key\"", "\"vanilla\""))
+                        fresh.http(corrected).status shouldBe Status.CREATED
+                        fresh.database.count("fionas.inquiry_submissions") shouldBe unchanged.getValue("fionas.inquiry_submissions") + 1
+                    }
+
+                fun replay() {
+                    val unchanged = allCounts()
+                    val replay = fresh.http(acceptedRequest)
+                    replay.status shouldBe Status.CREATED
+                    replay.bodyString() shouldBe accepted.bodyString()
+                    replay.header("Location") shouldBe accepted.header("Location")
+                    allCounts() shouldBe unchanged
+                }
+                latest = fresh.setOfferingState(latest, "vanilla", availability = OfferingAvailabilityDto.UNAVAILABLE)
+                replay()
+                val beforeDisable = latest
+                latest = fresh.setOfferingState(latest, "vanilla", selectionState = OfferingSelectionStateDto.DISABLED)
+                val staleDisabled = fresh.http(request(pricingBody(beforeDisable, softServe = listOf("vanilla"))))
+                staleDisabled.status shouldBe Status.CONFLICT
+                CommerceJson.asA(staleDisabled.bodyString(), ErrorResponse.serializer()).code shouldBe "CATALOG_REVISION_STALE"
+                replay()
+                fresh.adminRequest(Method.DELETE, "/offering-catalog/offerings/vanilla?expectedRevision=$latest").status shouldBe Status.OK
+                replay()
             }
         }
     })

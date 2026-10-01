@@ -12,7 +12,7 @@ import java.time.Duration
 private val rateLimitBody = jsonBody(ErrorResponse.serializer())
 internal val LOGIN_RATE_LIMIT_ERROR = ErrorResponse("rate_limited", "Too many requests")
 
-/** Runtime 0.0.18 has no rate-limit category; retain its existing ErrorResponse envelope. */
+/** Runtime 0.0.19 has no rate-limit category; retain its existing ErrorResponse envelope. */
 fun RouteMetaDsl.returningLoginRateLimit() {
     returning(
         Status.TOO_MANY_REQUESTS,

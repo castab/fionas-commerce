@@ -16,6 +16,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryForm
 import io.github.castab.fionas.commerce.inquiry.InquiryFormControl
 import io.github.castab.fionas.commerce.inquiry.InquiryFormInput
 import io.github.castab.fionas.commerce.inquiry.inquiryForm
+import io.github.castab.fionas.commerce.inquiry.publicInquiryOfferings
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -205,7 +206,9 @@ sealed interface InquiryFormInputResponse {
         val maxSelections: Int? = null,
         @ApiProperty(
             description =
-                "Active offerings in catalog order, using commerce-runtime's existing offering and price representation. " +
+                "Enabled offerings in catalog order; disabled and retired offerings are omitted. " +
+                    "UNAVAILABLE options remain visible but clients must prevent customer selection (check back later). " +
+                    "Availability is distinct from disabled/retired. Uses commerce-runtime's offering and price representation. " +
                     "Submit selected keys as offerings. Prices are descriptive; estimate-preview calculates the service total.",
         )
         val options: List<OfferingDto>,
@@ -249,8 +252,10 @@ fun getInquiryFormRoute(
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
             "reject stale inquiry submissions with 409 CATALOG_REVISION_STALE; fetch a fresh form and ask the customer " +
             "to review before resubmitting. Choices are never silently repriced. Only configured Fiona categories appear; " +
-            "retired categories and offerings " +
-            "are absent. pricingPreview resolves policy/catalog facts for instant advisory browser arithmetic. " +
+            "disabled offerings and retired categories/offerings are absent. Returned options have selectionState=ENABLED; " +
+            "availability=UNAVAILABLE stays visible but must be rendered unselectable (check back later). " +
+            "Temporary unavailability is distinct from disabled/retired and does not invalidate the form. " +
+            "pricingPreview resolves policy/catalog facts for visible options for instant advisory browser arithmetic. " +
             "Contact details, event date/type, and pricing are validated on submission, independently of this metadata. " +
             "Requires the trusted server-side UI Bearer key. Successful responses have Cache-Control: " +
             "private, max-age=60, must-revalidate; failures have no-store."
@@ -289,7 +294,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
     // Reuse the runtime's conversion, including every price form, without re-modeling its DTOs.
     val categories = catalog.dto().categories.associateBy { it.key }
     return InquiryFormResponse(
-        definitionVersion = 5,
+        definitionVersion = 6,
         catalogId = catalog.catalogId.value.toString(),
         catalogRevision = catalog.revision.number,
         sections =
@@ -319,11 +324,12 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
                                     )
                                 is InquiryFormInput.OfferingChoice -> {
                                     val category = categories.getValue(value.category.key.value)
+                                    val visibleKeys = publicInquiryOfferings(catalog, value.category.key).map { it.key.value }.toSet()
                                     InquiryFormInputResponse.OfferingChoice(
                                         category.key,
                                         category.minimumSelections,
                                         category.maximumSelections,
-                                        category.offerings,
+                                        category.offerings.filter { it.key in visibleKeys },
                                     )
                                 }
                             }

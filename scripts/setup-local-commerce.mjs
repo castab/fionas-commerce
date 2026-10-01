@@ -130,6 +130,7 @@ async function main() {
       const updated = await request("PUT", path, {
         body: {
           expectedRevision: revision, category: category.key, displayName,
+          selectionState: offering.selectionState, availability: offering.availability,
           ...(offering.description == null ? {} : { description: offering.description }),
           ...(offering.price == null ? {} : { price: offering.price }),
         },
@@ -143,7 +144,8 @@ async function main() {
     for (const { offering, displayName } of updates) {
       const current = latestToppings.find(({ key }) => key === offering.key);
       if (!current || current.displayName !== displayName || current.description !== offering.description ||
-          JSON.stringify(current.price) !== JSON.stringify(offering.price)) {
+          JSON.stringify(current.price) !== JSON.stringify(offering.price) ||
+          current.selectionState !== offering.selectionState || current.availability !== offering.availability) {
         throw new Error(`Verification failed for topping ${offering.key}; reload the catalog before continuing`);
       }
     }
@@ -199,7 +201,7 @@ async function main() {
   for (const offering of offerings) {
     const path = "/offering-catalog/offerings";
     const created = await request("POST", path, {
-      body: { expectedRevision: catalogRevision, ...offering }, authenticated: true, expectedStatus: 201,
+      body: { expectedRevision: catalogRevision, ...offering, selectionState: "ENABLED", availability: "AVAILABLE" }, authenticated: true, expectedStatus: 201,
     });
     catalogRevision = revisionFrom(created.data, path);
     console.log(`Added offering ${offering.key}: revision ${catalogRevision}`);

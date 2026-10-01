@@ -5,10 +5,12 @@ import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.offering.CatalogRevisionDto
 import io.github.castab.commerce.runtime.offering.CategoryDto
 import io.github.castab.commerce.runtime.offering.CategoryOfferingsDto
+import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
 import io.github.castab.commerce.runtime.offering.OfferingCategoryDto
 import io.github.castab.commerce.runtime.offering.OfferingDto
 import io.github.castab.commerce.runtime.offering.OfferingPriceDto
 import io.github.castab.commerce.runtime.offering.OfferingResultDto
+import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
 import io.github.castab.commerce.runtime.offering.OfferingsDto
 import io.github.castab.commerce.runtime.offering.RetiredCategoriesDto
@@ -73,8 +75,17 @@ class OfferingsCatalogSpec :
                 category = "soft-serve-flavor",
                 displayName = "Vanilla",
                 description = "Classic vanilla soft serve",
+                selectionState = OfferingSelectionStateDto.ENABLED,
+                availability = OfferingAvailabilityDto.AVAILABLE,
             )
-        val chocolate = OfferingDto(key = "chocolate", category = "soft-serve-flavor", displayName = "Chocolate")
+        val chocolate =
+            OfferingDto(
+                key = "chocolate",
+                category = "soft-serve-flavor",
+                displayName = "Chocolate",
+                selectionState = OfferingSelectionStateDto.ENABLED,
+                availability = OfferingAvailabilityDto.AVAILABLE,
+            )
 
         test("on a fresh database Fiona's catalog does not exist: startup never creates it") {
             get("/offering-catalog").let {
@@ -126,7 +137,7 @@ class OfferingsCatalogSpec :
                 {
                   "expectedRevision": $revision,
                   "key": "vanilla",
-                  "category": "soft-serve-flavor",
+                  "selectionState":"ENABLED","availability":"AVAILABLE","category": "soft-serve-flavor",
                   "displayName": "Vanilla",
                   "description": "Classic vanilla soft serve"
                 }
@@ -139,7 +150,7 @@ class OfferingsCatalogSpec :
 
             post(
                 "/offering-catalog/offerings",
-                """{"expectedRevision":$revision,"key":"chocolate","category":"soft-serve-flavor","displayName":"Chocolate"}""",
+                """{"expectedRevision":$revision,"key":"chocolate","selectionState":"ENABLED","availability":"AVAILABLE","category":"soft-serve-flavor","displayName":"Chocolate"}""",
             ).let {
                 it.status shouldBe Status.CREATED
                 it.body(OfferingResultDto.serializer()) shouldBe OfferingResultDto(4, chocolate)
@@ -202,13 +213,22 @@ class OfferingsCatalogSpec :
                 revision = it.body(CategoryDto.serializer()).revision
             }
             val fixed =
-                OfferingDto("fixed-item", "test-category", "Fixed Item", price = OfferingPriceDto("FIXED", "120.00", "USD"))
+                OfferingDto(
+                    "fixed-item",
+                    "test-category",
+                    "Fixed Item",
+                    price = OfferingPriceDto("FIXED", "120.00", "USD"),
+                    selectionState = OfferingSelectionStateDto.ENABLED,
+                    availability = OfferingAvailabilityDto.AVAILABLE,
+                )
             val perQuantity =
                 OfferingDto(
                     "waffle-cones",
                     "test-category",
                     "Waffle Cones",
                     price = OfferingPriceDto("PER_QUANTITY", "0.75", "USD", dimension = "guest"),
+                    selectionState = OfferingSelectionStateDto.ENABLED,
+                    availability = OfferingAvailabilityDto.AVAILABLE,
                 )
             val perDuration =
                 OfferingDto(
@@ -216,13 +236,15 @@ class OfferingsCatalogSpec :
                     "test-category",
                     "Service Hour",
                     price = OfferingPriceDto("PER_DURATION", "50.00", "USD", interval = "PT1H"),
+                    selectionState = OfferingSelectionStateDto.ENABLED,
+                    availability = OfferingAvailabilityDto.AVAILABLE,
                 )
             listOf(
-                """{"key": "fixed-item", "category": "test-category", "displayName": "Fixed Item",
+                """{"key": "fixed-item", "selectionState":"ENABLED","availability":"AVAILABLE","category": "test-category", "displayName": "Fixed Item",
                    "price": {"kind": "FIXED", "amount": "120.00", "currency": "USD"}}""",
-                """{"key": "waffle-cones", "category": "test-category", "displayName": "Waffle Cones",
+                """{"key": "waffle-cones", "selectionState":"ENABLED","availability":"AVAILABLE","category": "test-category", "displayName": "Waffle Cones",
                    "price": {"kind": "PER_QUANTITY", "amount": "0.75", "currency": "USD", "dimension": "guest"}}""",
-                """{"key": "service-hour", "category": "test-category", "displayName": "Service Hour",
+                """{"key": "service-hour", "selectionState":"ENABLED","availability":"AVAILABLE","category": "test-category", "displayName": "Service Hour",
                    "price": {"kind": "PER_DURATION", "amount": "50.00", "currency": "USD", "interval": "PT1H"}}""",
             ).forEach { body ->
                 post("/offering-catalog/offerings", """{"expectedRevision":$revision,${body.drop(1)}""").let {
@@ -247,7 +269,8 @@ class OfferingsCatalogSpec :
             expectedRevision: Int,
             displayName: String = "Horchata Soft Serve",
             amount: String = "0.75",
-        ) = """{"expectedRevision":$expectedRevision,"category":"soft-serve-flavor","displayName":"$displayName",
+        ) =
+            """{"expectedRevision":$expectedRevision,"selectionState":"ENABLED","availability":"AVAILABLE","category":"soft-serve-flavor","displayName":"$displayName",
             "description":"Premium horchata soft serve",
             "price":{"kind":"PER_QUANTITY","amount":"$amount","currency":"USD","dimension":"guest"}}"""
 
@@ -269,6 +292,8 @@ class OfferingsCatalogSpec :
                         "Horchata Soft Serve",
                         "Premium horchata soft serve",
                         OfferingPriceDto("PER_QUANTITY", "0.75", "USD", dimension = "guest"),
+                        selectionState = OfferingSelectionStateDto.ENABLED,
+                        availability = OfferingAvailabilityDto.AVAILABLE,
                     )
                 read("/offering-catalog")
                     .catalog()
@@ -308,7 +333,7 @@ class OfferingsCatalogSpec :
                 app
                     .adminPost(
                         "/offering-catalog/offerings",
-                        """{"expectedRevision":$retiredRevision,"key":"horchata","category":"soft-serve-flavor","displayName":"Unrelated item"}""",
+                        """{"expectedRevision":$retiredRevision,"key":"horchata","selectionState":"ENABLED","availability":"AVAILABLE","category":"soft-serve-flavor","displayName":"Unrelated item"}""",
                     ).let {
                         it.status shouldBe Status.CONFLICT
                         it.body(ErrorResponse.serializer()).code shouldBe "conflict"
@@ -349,10 +374,15 @@ class OfferingsCatalogSpec :
             TestApplication.create().use { app ->
                 val observed = app.createAcceptanceCatalog()
                 val path = "/offering-catalog/offerings/horchata"
-                app.adminRequest(Method.PUT, path, """{"category":"soft-serve-flavor","displayName":"Without revision"}""").let {
-                    it.status shouldBe Status.BAD_REQUEST
-                    it.body(ErrorResponse.serializer()).code shouldBe "malformed_request"
-                }
+                app
+                    .adminRequest(
+                        Method.PUT,
+                        path,
+                        """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"soft-serve-flavor","displayName":"Without revision"}""",
+                    ).let {
+                        it.status shouldBe Status.BAD_REQUEST
+                        it.body(ErrorResponse.serializer()).code shouldBe "malformed_request"
+                    }
                 val newer = app.adminRequest(Method.PUT, path, offeringMutation(observed, "Newer Horchata", "1.00"))
                 newer.status shouldBe Status.OK
                 val current = newer.body(OfferingResultDto.serializer())

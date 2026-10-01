@@ -563,7 +563,7 @@ class OpenApiDocumentSpec :
         test("documents public selection eligibility and the semantic stale conflict using the runtime envelope") {
             val create = operation("/inquiries", "post")
             create.text("description") shouldContain "current catalog revision observed"
-            create.text("description") shouldContain "categories and active offerings exposed by GET /inquiry-form"
+            create.text("description") shouldContain "public categories with enabled, available offerings"
             create.text("responses", "409", "description") shouldContain "CATALOG_REVISION_STALE"
             create.text("responses", "409", "description") shouldContain "IDEMPOTENCY_KEY_REUSED"
             create.text("responses", "409", "description") shouldContain "never automatically resubmit"
@@ -731,6 +731,28 @@ class OpenApiDocumentSpec :
             }
             schema("InquiryFormPresentation").strings("properties", "control", "enum") shouldContainExactly
                 listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES", "DATE")
+        }
+
+        test("inquiry form v6 reuses required runtime state enums and documents public visibility and structural rejections") {
+            val form = operation("/inquiry-form", "get")
+            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 6
+            val description = form.text("description")
+            description shouldContain "selectionState=ENABLED"
+            description shouldContain "availability=UNAVAILABLE"
+            description shouldContain "unselectable"
+            description shouldContain "disabled"
+            description shouldContain "retired"
+            val offering = schema("OfferingDto")
+            offering.strings("required").containsAll(listOf("selectionState", "availability")) shouldBe true
+            offering.strings("properties", "selectionState", "enum") shouldContainExactly listOf("ENABLED", "DISABLED")
+            offering.strings("properties", "availability", "enum") shouldContainExactly listOf("AVAILABLE", "UNAVAILABLE")
+            schema("OfferingSelectionStateDto").strings("enum") shouldContainExactly listOf("ENABLED", "DISABLED")
+            schema("OfferingAvailabilityDto").strings("enum") shouldContainExactly listOf("AVAILABLE", "UNAVAILABLE")
+            listOf("/inquiries", "/estimate-preview").forEach { path ->
+                val validation = operation(path, "post").text("responses", "422", "description")
+                validation shouldContain "OFFERING_DISABLED"
+                validation shouldContain "OFFERING_UNAVAILABLE"
+            }
         }
 
         test("required event ZIP is constrained text and form text patterns are explicitly documented") {
@@ -1074,7 +1096,7 @@ class OpenApiDocumentSpec :
                 }
         }
 
-        test("resolves every reference, and holds no schema but Fiona's and those its Offerings routes use") {
+        test("resolves every reference, and holds only Fiona's and runtime capability schemas") {
             val schemas = document.at("components", "schemas").jsonObject
             references(document).forEach { schemas shouldContainKey it.removePrefix("#/components/schemas/") }
 
@@ -1086,7 +1108,9 @@ class OpenApiDocumentSpec :
                 reached += frontier
                 frontier = frontier.flatMap { references(schemas.getValue(it)) }.map { it.substringAfterLast('/') }.toSet() - reached
             }
-            schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + reached
+            // Runtime 0.0.19 emits these enum definitions as well as inline enums on offering properties.
+            val offeringStateSchemas = setOf("OfferingSelectionStateDto", "OfferingAvailabilityDto")
+            schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + reached + offeringStateSchemas
         }
 
         test("gives each body an example that satisfies its schema's required properties") {
