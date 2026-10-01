@@ -42,8 +42,9 @@ value class InquiryMessage(
  * Every inquiry is a request for configured ice cream service: it is recorded with the
  * [FionasPricingInputs] the customer configured and its initial Estimate, in one transaction.
  *
- * An inquiry is not a booking and implements no booking lifecycle phase. Relating it to a
- * lifecycle phase, an estimate, or a booking is future application policy.
+ * An inquiry is not a booking and implements no booking lifecycle phase. Its canonical initial
+ * Estimate is created with it; subsequent quote, invoice, booking, and lifecycle relationships
+ * are application policy.
  */
 data class Inquiry(
     val id: InquiryId,
