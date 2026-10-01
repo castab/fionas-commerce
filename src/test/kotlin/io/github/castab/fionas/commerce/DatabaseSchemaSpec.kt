@@ -47,14 +47,9 @@ class DatabaseSchemaSpec :
                     "customers",
                     "inquiries",
                     "inquiry_submissions",
-                    "inquiry_pricing",
-                    "inquiry_pricing_categories",
-                    "inquiry_pricing_selections",
                     "user_credentials",
                     "inquiry_financial_documents",
                     "financial_document_pricing",
-                    "financial_document_pricing_categories",
-                    "financial_document_pricing_selections",
                 )
         }
 
@@ -120,27 +115,59 @@ class DatabaseSchemaSpec :
                 )
         }
 
-        test("an inquiry's requested pricing inputs belong to it alone, in submitted order, and reference no runtime table") {
-            application.database.foreignKeys("inquiry_pricing") shouldContainExactly listOf("inquiry_id → fionas.inquiries(id)")
-            application.database.foreignKeys("inquiry_pricing_categories") shouldContainExactly
-                listOf("inquiry_id → fionas.inquiry_pricing(inquiry_id)")
-            application.database.foreignKeys("inquiry_pricing_selections") shouldContainExactly
-                listOf("inquiry_id, category_position → fionas.inquiry_pricing_categories(inquiry_id, position)")
-            application.database.strings(
-                """
-                SELECT pg_get_constraintdef(oid) FROM pg_constraint
-                WHERE conrelid = 'fionas.inquiry_pricing'::regclass AND contype IN ('p', 'u')
-                """.trimIndent(),
-            ) shouldContainExactly listOf("PRIMARY KEY (inquiry_id)")
+        /** `is_nullable data_type` of each named column of Fiona's [table], in name order. */
+        fun TestDatabase.columns(
+            table: String,
+            vararg names: String,
+        ) = strings(
+            "SELECT column_name || ' ' || is_nullable || ' ' || data_type FROM information_schema.columns " +
+                "WHERE table_schema = 'fionas' AND table_name = '$table' " +
+                "AND column_name IN (${names.joinToString { "'$it'" }}) ORDER BY column_name",
+        )
+
+        /** The definitions of the check constraints of Fiona's [table] that mention [column]. */
+        fun TestDatabase.checks(
+            table: String,
+            column: String,
+        ) = strings(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.$table'::regclass " +
+                "AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%$column%'",
+        )
+
+        val obsoletePricingTables =
+            listOf(
+                "inquiry_pricing",
+                "inquiry_pricing_categories",
+                "inquiry_pricing_selections",
+                "financial_document_pricing_categories",
+                "financial_document_pricing_selections",
+            )
+
+        test("no child table represents part of a pricing-inputs value") {
+            application.database
+                .tables(FIONA_MIGRATION_SCHEMA)
+                .filter { it in obsoletePricingTables }
+                .shouldBeEmpty()
+            obsoletePricingTables.forEach { table ->
+                application.database.strings("SELECT to_regclass('fionas.$table') IS NULL").single() shouldBe "t"
+            }
         }
 
-        test("every inquiry must commit with its requested pricing inputs, checked at commit by a deferred foreign key") {
-            application.database.foreignKeys("inquiries") shouldContainExactlyInAnyOrder
-                listOf("customer_id → fionas.customers(id)", "id → fionas.inquiry_pricing(inquiry_id)")
+        test("an inquiry's requested pricing inputs are a required JSON object in the inquiry row itself") {
+            application.database.columns("inquiries", "pricing_inputs") shouldContainExactly listOf("pricing_inputs NO jsonb")
+            application.database.checks("inquiries", "pricing_inputs") shouldContainExactly
+                listOf("CHECK ((jsonb_typeof(pricing_inputs) = 'object'::text))")
+        }
+
+        test("an inquiry references only its customer; no reverse pricing reference or deferred constraint remains") {
+            application.database.foreignKeys("inquiries") shouldContainExactly listOf("customer_id → fionas.customers(id)")
             application.database.strings(
                 "SELECT conname || ' ' || condeferrable::text || ' ' || condeferred::text FROM pg_constraint " +
                     "WHERE conrelid = 'fionas.inquiries'::regclass AND contype = 'f' ORDER BY conname",
-            ) shouldContainExactly listOf("inquiries_customer_id_fkey false false", "inquiries_pricing_fkey true true")
+            ) shouldContainExactly listOf("inquiries_customer_id_fkey false false")
+            application.database
+                .strings("SELECT conname FROM pg_constraint WHERE conname = 'inquiries_pricing_fkey'")
+                .shouldBeEmpty()
         }
 
         test("the newest-first inquiry list has an index on its exact ordering") {
@@ -174,19 +201,24 @@ class DatabaseSchemaSpec :
             ) shouldContainExactly emptyList()
         }
 
-        test("every pricing source is keyed to commerce-runtime's exact snapshot of a lineage Fiona owns") {
+        test("every pricing source is one row keyed to commerce-runtime's exact snapshot of a lineage Fiona owns") {
             application.database.foreignKeys("financial_document_pricing") shouldContainExactlyInAnyOrder
                 listOf(
                     "document_id → fionas.inquiry_financial_documents(document_id)",
                     "document_id, document_version → commerce.financial_document_snapshots(document_id, version)",
                 )
-            application.database.foreignKeys("financial_document_pricing_categories") shouldContainExactlyInAnyOrder
-                listOf("document_id, document_version → fionas.financial_document_pricing(document_id, document_version)")
-            application.database.foreignKeys("financial_document_pricing_selections") shouldContainExactlyInAnyOrder
-                listOf(
-                    "document_id, document_version, category_position → " +
-                        "fionas.financial_document_pricing_categories(document_id, document_version, position)",
-                )
+            application.database.strings(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint " +
+                    "WHERE conrelid = 'fionas.financial_document_pricing'::regclass AND contype IN ('p', 'u')",
+            ) shouldContainExactly listOf("PRIMARY KEY (document_id, document_version)")
+            // One complete pricing-inputs value per version; the former scalar columns are not duplicated beside it.
+            application.database.strings(
+                "SELECT column_name || ' ' || is_nullable || ' ' || data_type FROM information_schema.columns " +
+                    "WHERE table_schema = 'fionas' AND table_name = 'financial_document_pricing' ORDER BY column_name",
+            ) shouldContainExactly
+                listOf("document_id NO uuid", "document_version NO integer", "pricing_inputs NO jsonb")
+            application.database.checks("financial_document_pricing", "pricing_inputs") shouldContainExactly
+                listOf("CHECK ((jsonb_typeof(pricing_inputs) = 'object'::text))")
         }
 
         test("Fiona duplicates no ledger fact: documents, payments, refunds, and reconciliation stay in commerce") {
@@ -264,7 +296,7 @@ class DatabaseSchemaSpec :
                 ).forEach { it shouldStartWith "commerce." }
         }
 
-        test("inquiries reference their customer and requested pricing, and customer emails are unique") {
+        test("inquiries reference their customer, and customer emails are unique") {
             application.database.strings(
                 """
                 SELECT tc.constraint_type || ' ' || tc.table_name || '(' || kcu.column_name || ')'
@@ -277,7 +309,6 @@ class DatabaseSchemaSpec :
             ) shouldContainExactly
                 listOf(
                     "FOREIGN KEY inquiries(customer_id)",
-                    "FOREIGN KEY inquiries(id)",
                     "PRIMARY KEY customers(id)",
                     "PRIMARY KEY inquiries(id)",
                     "UNIQUE customers(email)",

@@ -36,7 +36,6 @@ import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiryForm
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
@@ -111,7 +110,6 @@ fun fionaApplication(
         routes = { context ->
             val customers = JdbiCustomerRepository()
             val inquiries = JdbiInquiryRepository()
-            val inquiryPricing = JdbiInquiryPricingRepository()
             val credentials = JdbiCredentialRepository()
             val hasher = PasswordHasher()
             BootstrapFirstAdmin(context.transactor, context.authorization, credentials, hasher, clock).invoke(bootstrap)
@@ -120,7 +118,7 @@ fun fionaApplication(
             val access =
                 AccessControl(
                     origin.filter.then(sessionAuthentication(context.sessions, cookie)),
-                    context.authorization.permissionResolver,
+                    context.authorization,
                 )
             val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, uiApiKey, loginRateLimit)
             // Fiona's pricing, over exact catalog revisions read in the caller's transaction.
@@ -148,14 +146,13 @@ fun fionaApplication(
                         context.transactor,
                         customers,
                         inquiries,
-                        inquiryPricing,
                         JdbiInquirySubmissionRepository(),
                         PublicInquiryPricing(pricing, context.offeringsSnapshotRepository::retrieveLatestVersion),
                         clock,
                         materialize,
                     )::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
-                    getInquiry = GetInquiry(context.transactor, customers, inquiries, inquiryPricing)::invoke,
+                    getInquiry = GetInquiry(context.transactor, customers, inquiries)::invoke,
                     getInquiryForm = GetInquiryForm(
                         GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)::invoke,
                     )::invoke,

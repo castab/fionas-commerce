@@ -1,15 +1,14 @@
 package io.github.castab.fionas.commerce.testing
 
-import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.runtime.session.SessionToken
-import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.UiApiKey
+import io.github.castab.fionas.commerce.openapi.renderingOnlyAccess
 import org.http4k.core.Filter
 import org.http4k.core.NoOp
 
@@ -42,7 +41,7 @@ val metadataAuth =
                 ): Unit = error("not called")
             },
         cookie = SessionCookie("__Host-fionas_session"),
-        access = AccessControl(Filter.NoOp, PermissionResolver { emptySet() }),
+        access = renderingOnlyAccess(),
         origin = Filter.NoOp,
         uiApiKey = UiApiKey(TEST_UI_API_KEY),
     )

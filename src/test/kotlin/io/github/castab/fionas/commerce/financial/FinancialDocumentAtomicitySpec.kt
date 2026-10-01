@@ -89,11 +89,10 @@ class FinancialDocumentAtomicitySpec :
             .single()
             .toInt()
 
-        /** The snapshots, their lines, Fiona associations, and Fiona pricing sources stored for [id]. */
+        /** The snapshots (each holding its lines), Fiona associations, and Fiona pricing sources stored for [id]. */
         fun stored(id: UUID) =
             listOf(
                 rows("commerce.financial_document_snapshots", "document_id", id),
-                rows("commerce.financial_document_lines", "document_id", id),
                 rows("fionas.inquiry_financial_documents", "document_id", id),
                 rows("fionas.financial_document_pricing", "document_id", id),
             )
@@ -127,9 +126,9 @@ class FinancialDocumentAtomicitySpec :
             failure.message shouldBe "pricing source failure after the ledger wrote"
 
             // ...and none of it survives the rollback.
-            stored(id) shouldBe listOf(0, 0, 0, 0)
+            stored(id) shouldBe listOf(0, 0, 0)
             createEstimate(documentId = id).latest.document.id shouldBe id
-            stored(id) shouldBe listOf(1, 2, 1, 1)
+            stored(id) shouldBe listOf(1, 1, 1)
         }
 
         test("direct Quote and Invoice creation roll back the first snapshot with Fiona's context") {
@@ -169,7 +168,7 @@ class FinancialDocumentAtomicitySpec :
                         ),
                     )
                 }
-                stored(id) shouldBe listOf(0, 0, 0, 0)
+                stored(id) shouldBe listOf(0, 0, 0)
             }
         }
 
@@ -194,7 +193,7 @@ class FinancialDocumentAtomicitySpec :
             application.context.financialLedger
                 .latest(estimate.id)
                 .version shouldBe Version.INITIAL
-            stored(estimate.id) shouldBe listOf(1, 2, 1, 1)
+            stored(estimate.id) shouldBe listOf(1, 1, 1)
             issueQuote()(estimate.id, Version.INITIAL).latest.document.version shouldBe Version.of(2)
         }
 
@@ -223,7 +222,7 @@ class FinancialDocumentAtomicitySpec :
             application.context.financialLedger
                 .history(estimate.id)
                 .map { it.version } shouldBe listOf(Version.INITIAL)
-            stored(estimate.id) shouldBe listOf(1, 2, 1, 1)
+            stored(estimate.id) shouldBe listOf(1, 1, 1)
         }
 
         test("a payment that fails after the ledger recorded it and its allocation leaves neither") {

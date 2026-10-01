@@ -13,6 +13,10 @@ import java.util.UUID
  *
  * The snapshot's self-contained commercial facts are commerce-runtime's. Inquiry-generated
  * initial estimates do not write this metadata. Records are written once and never changed.
+ *
+ * Each record is one provenance fact holding one complete [FionasPricingInputs]. Reads restore
+ * it strictly and fail with an [IllegalStateException] naming the exact version when the
+ * stored inputs are malformed; nothing is repaired.
  */
 interface FinancialDocumentPricingRepository {
     /**
@@ -31,7 +35,7 @@ interface FinancialDocumentPricingRepository {
         snapshot: FinancialDocumentReference,
     ): FionasPricingInputs?
 
-    /** The pricing source of every recorded version of the lineage [documentId]. */
+    /** The pricing source of every recorded version of the lineage [documentId], in version order. */
     fun findAll(
         transaction: Transaction,
         documentId: UUID,
@@ -40,7 +44,8 @@ interface FinancialDocumentPricingRepository {
     /**
      * Records the pricing source of [from] unchanged as that of [to], a later snapshot of the
      * same lineage. When [from] has no legacy metadata, this is a no-op: financial transitions
-     * depend only on the prior snapshot's concrete lines.
+     * depend only on the prior snapshot's concrete lines. A malformed source fails rather than
+     * being copied.
      */
     fun copy(
         transaction: Transaction,

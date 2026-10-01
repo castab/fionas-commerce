@@ -104,7 +104,7 @@ class MigrationLifecycleSpec :
 
                 // Both streams have a version 1; neither numbers its migrations after the other's.
                 database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
                 database.history(FIONA_MIGRATION_SCHEMA)[0] shouldContain "V1__customers_and_inquiries.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[1] shouldContain "V2__user_credentials.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[2] shouldContain "V3__financial_document_context.sql"
@@ -115,15 +115,14 @@ class MigrationLifecycleSpec :
                 database.history(FIONA_MIGRATION_SCHEMA)[7] shouldContain "V8__initial_estimate_relationship.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[8] shouldContain "V9__inquiry_submissions.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[9] shouldContain "V10__required_inquiry_pricing.sql"
+                database.history(FIONA_MIGRATION_SCHEMA)[10] shouldContain "V11__aggregate_pricing_inputs.sql"
                 database.count("commerce.users") shouldBe 0
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "7"
-                database.history("commerce").last() shouldContain "V8__offering_selection_and_availability.sql"
-                database.strings(
-                    "SELECT column_name || ' ' || is_nullable || ' ' || COALESCE(column_default, 'no default') " +
-                        "FROM information_schema.columns WHERE table_schema = 'commerce' AND table_name = 'offerings' " +
-                        "AND column_name IN ('selection_state', 'availability') ORDER BY column_name",
-                ) shouldContainExactly listOf("availability NO no default", "selection_state NO no default")
+                // Commerce 0.0.20's V9 stores aggregate-owned values in their snapshot rows; Fiona's V11
+                // applies the same principle to its own pricing inputs, after the runtime's stream.
+                database.history("commerce").any { it.contains("V9__aggregate_snapshots.sql") } shouldBe true
+                database.history("commerce").last() shouldContain "V10__service_credentials.sql"
                 database
                     .strings(
                         "SELECT is_nullable || ' ' || data_type FROM information_schema.columns " +

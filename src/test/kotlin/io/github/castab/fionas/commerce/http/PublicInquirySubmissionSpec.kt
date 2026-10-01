@@ -39,15 +39,9 @@ class PublicInquirySubmissionSpec :
                 "fionas.customers",
                 "fionas.inquiry_submissions",
                 "fionas.inquiries",
-                "fionas.inquiry_pricing",
-                "fionas.inquiry_pricing_categories",
-                "fionas.inquiry_pricing_selections",
                 "commerce.financial_document_snapshots",
-                "commerce.financial_document_lines",
                 "fionas.inquiry_financial_documents",
                 "fionas.financial_document_pricing",
-                "fionas.financial_document_pricing_categories",
-                "fionas.financial_document_pricing_selections",
             )
 
         fun counts() = tables.associateWith(app.database::count)
@@ -76,11 +70,9 @@ class PublicInquirySubmissionSpec :
                 "fionas.customers",
                 "fionas.inquiry_submissions",
                 "fionas.inquiries",
-                "fionas.inquiry_pricing",
                 "commerce.financial_document_snapshots",
                 "fionas.inquiry_financial_documents",
             ).forEach { after.getValue(it) shouldBe before.getValue(it) + 1 }
-            after.getValue("fionas.inquiry_pricing_categories") shouldBe before.getValue("fionas.inquiry_pricing_categories") + 3
             after.getValue("fionas.financial_document_pricing") shouldBe before.getValue("fionas.financial_document_pricing")
             val receipt = CommerceJson.asA(response.bodyString(), InquiryReceiptResponse.serializer())
             val ids =
@@ -98,11 +90,12 @@ class PublicInquirySubmissionSpec :
             document.stage shouldBe "ESTIMATE"
             document.version shouldBe 1
             document.total shouldBe "681.25"
-            document.lines.size shouldBe
-                after.getValue("commerce.financial_document_lines") - before.getValue("commerce.financial_document_lines")
             document.pricing shouldBe null
-            app.database.strings("SELECT catalog_revision FROM fionas.inquiry_pricing WHERE inquiry_id = '${receipt.id}'") shouldBe
-                listOf(revision.toString())
+            // The requested inputs are part of the inquiry row itself.
+            app.database.strings(
+                "SELECT pricing_inputs ->> 'catalogRevision' || ' ' || jsonb_array_length(pricing_inputs -> 'selections') " +
+                    "FROM fionas.inquiries WHERE id = '${receipt.id}'",
+            ) shouldBe listOf("$revision 3")
         }
 
         test("stale captured form is a machine-readable conflict with zero writes; refreshed revision succeeds") {

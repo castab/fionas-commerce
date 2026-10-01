@@ -15,7 +15,6 @@ import io.github.castab.fionas.commerce.inquiry.EventType
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
@@ -65,7 +64,7 @@ fun requestedPricing(revision: Int = 1) =
 
 /**
  * Repository-level fixture for persistence specs: writes [inquiry] with the requested pricing inputs
- * the schema requires of every inquiry, in the caller's transaction. It neither prices them nor
+ * its row requires, in the caller's transaction. It neither prices them nor
  * materializes the initial Estimate that `CreateInquiry` always does; specs about accepted inquiries
  * use `CreateInquiry` or [TestApplication.createInquiry] instead.
  */
@@ -74,8 +73,7 @@ fun insertInquiryRecord(
     inquiry: Inquiry,
     inputs: FionasPricingInputs = requestedPricing(),
 ) {
-    JdbiInquiryRepository().insert(transaction, inquiry)
-    JdbiInquiryPricingRepository().insert(transaction, inquiry.id, inputs)
+    JdbiInquiryRepository().insert(transaction, inquiry, inputs)
 }
 
 /** The PostgreSQL SQLSTATE of this failure or one of its causes, if any. */

@@ -206,7 +206,8 @@ class FinancialDocumentRoutesSpec :
                 "SELECT inquiry_id FROM fionas.inquiry_financial_documents WHERE document_id = '$id'",
             ) shouldContainExactly listOf(inquiryId)
             application.database.strings(
-                "SELECT document_version || ' ' || catalog_revision || ' ' || guest_count FROM fionas.financial_document_pricing " +
+                "SELECT document_version || ' ' || (pricing_inputs ->> 'catalogRevision') || ' ' || " +
+                    "(pricing_inputs -> 'context' ->> 'guestCount') FROM fionas.financial_document_pricing " +
                     "WHERE document_id = '$id'",
             ) shouldContainExactly listOf("1 $revision 75")
 

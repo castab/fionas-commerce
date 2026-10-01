@@ -9,6 +9,7 @@ import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.PermissionDefinition
+import io.github.castab.commerce.staff.PermissionGroup
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.RoleDefinition
@@ -59,11 +60,13 @@ object FionaPermissions {
                 CredentialsManage,
                 "Manage staff credentials",
                 "Set or reset password credentials for Fiona's staff users",
+                PermissionGroup("fionas.credentials"),
             ),
             PermissionDefinition(
                 InquiriesRead,
                 "Read inquiries",
                 "List Fiona's inquiries and read each one with its customer's contact details and requested configuration",
+                PermissionGroup("fionas.inquiries"),
             ),
         )
 }

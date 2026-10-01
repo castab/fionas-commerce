@@ -38,7 +38,6 @@ class InquiryOperationsSpec :
         var revision = 0
         val customers = JdbiCustomerRepository()
         val inquiries = JdbiInquiryRepository()
-        val requested = JdbiInquiryPricingRepository()
 
         beforeSpec {
             application = TestApplication.create()
@@ -53,12 +52,10 @@ class InquiryOperationsSpec :
             customerId: CustomerId = CustomerId(UUID.randomUUID()),
             inquiryId: InquiryId = InquiryId(UUID.randomUUID()),
             inquiryRepository: InquiryRepository = inquiries,
-            pricingRepository: InquiryPricingRepository = requested,
         ) = CreateInquiry(
             application.transactor,
             customers,
             inquiryRepository,
-            pricingRepository,
             JdbiInquirySubmissionRepository(),
             PublicInquiryPricing(pricing(), application.context.offeringsSnapshotRepository::retrieveLatestVersion),
             testClock,
@@ -67,7 +64,7 @@ class InquiryOperationsSpec :
             { inquiryId },
         )
 
-        fun getInquiry() = GetInquiry(application.transactor, customers, inquiries, requested)
+        fun getInquiry() = GetInquiry(application.transactor, customers, inquiries)
 
         fun inputs(
             catalogRevision: Int = revision,
@@ -107,7 +104,7 @@ class InquiryOperationsSpec :
         )
 
         fun rows() =
-            listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_pricing", "fionas.inquiry_pricing_selections")
+            listOf("fionas.customers", "fionas.inquiries")
                 .map(application.database::count)
 
         test("a new email creates the customer and the inquiry together") {
@@ -207,6 +204,7 @@ class InquiryOperationsSpec :
                     override fun insert(
                         transaction: Transaction,
                         inquiry: Inquiry,
+                        pricingInputs: FionasPricingInputs,
                     ): Unit = error("inquiry insert failed")
                 }
 
@@ -215,30 +213,6 @@ class InquiryOperationsSpec :
             }
 
             application.transactor.inTransaction { customers.findById(it, customerId) }.shouldBeNull()
-        }
-
-        test("when the requested pricing inputs cannot be recorded, neither the inquiry nor the new customer is") {
-            val customerId = CustomerId(UUID.randomUUID())
-            val inquiryId = InquiryId(UUID.randomUUID())
-            val failingPricing =
-                object : InquiryPricingRepository by requested {
-                    override fun insert(
-                        transaction: Transaction,
-                        inquiryId: InquiryId,
-                        inputs: FionasPricingInputs,
-                    ): Unit = error("pricing insert failed")
-                }
-
-            shouldThrow<IllegalStateException> {
-                createInquiry(customerId, inquiryId, pricingRepository = failingPricing)(
-                    command("atomic-pricing-${UUID.randomUUID()}@example.com"),
-                )
-            }
-
-            application.transactor.inTransaction { transaction ->
-                customers.findById(transaction, customerId).shouldBeNull()
-                inquiries.findById(transaction, inquiryId).shouldBeNull()
-            }
         }
 
         test("reading a missing inquiry is a not-found failure") {

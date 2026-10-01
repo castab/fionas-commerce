@@ -20,11 +20,12 @@ import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokens
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentials
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.runtime.session.SessionToken
-import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
@@ -101,16 +102,6 @@ private val notInvokedSessions =
             principalId: PrincipalId,
         ): Unit = error("Rendering never revokes sessions")
     }
-
-private val renderingAccess = AccessControl(Filter.NoOp, PermissionResolver { emptySet() })
-private val renderingAuth =
-    FionaAuthRoutes(
-        notInvokedSessions,
-        SessionCookie("__Host-fionas_session"),
-        renderingAccess,
-        Filter.NoOp,
-        UiApiKey("rendering-only-not-a-deployment-key"),
-    )
 
 /**
  * A `CommerceRuntimeContext` for rendering only: its transactor opens no connection, its
@@ -207,8 +198,29 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
             FinancialLedger::class.java,
             SessionManager::class.java,
             AuthorizationDirectory::class.java,
-        ).newInstance(configuration, transactor, snapshots, documents, payments, ledger, notInvokedSessions, authorization)
+            ServiceCredentials::class.java,
+            ServiceAccessTokens::class.java,
+        ).newInstance(
+            configuration,
+            transactor,
+            snapshots,
+            documents,
+            payments,
+            ledger,
+            notInvokedSessions,
+            authorization,
+            refusing<ServiceCredentials>("Rendering the OpenAPI document never touches a service credential"),
+            refusing<ServiceAccessTokens>("Rendering the OpenAPI document never issues a service token"),
+        )
 }
+
+/**
+ * An [AccessControl] for rendering only, bound to the rendering-only [context]'s authorization
+ * directory (the runtime binds every `AccessControl` to one directory); it authenticates
+ * nothing, and rendering never invokes it.
+ */
+fun renderingOnlyAccess(context: CommerceRuntimeContext = renderingOnlyContext()): AccessControl =
+    AccessControl(Filter.NoOp, context.authorization)
 
 /** A [T] whose every method fails with [reason]; rendering never calls one. */
 private inline fun <reified T : Any> refusing(reason: String): T =
@@ -221,6 +233,15 @@ private inline fun <reified T : Any> refusing(reason: String): T =
  */
 fun fionaOpenApiDocument(version: String = fionaVersion()): String {
     val context = renderingOnlyContext()
+    val renderingAccess = renderingOnlyAccess(context)
+    val renderingAuth =
+        FionaAuthRoutes(
+            notInvokedSessions,
+            SessionCookie("__Host-fionas_session"),
+            renderingAccess,
+            Filter.NoOp,
+            UiApiKey("rendering-only-not-a-deployment-key"),
+        )
     val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(renderingAccess))
     val authorizationAdmin =
         authorizationAdministrationHttpCapability(context, renderingAccess, "/admin/access", setOf(staffAdministrationTag))

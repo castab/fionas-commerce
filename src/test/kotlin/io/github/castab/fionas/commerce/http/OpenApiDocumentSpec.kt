@@ -208,6 +208,10 @@ class OpenApiDocumentSpec :
                 Triple("/admin/access/services/{serviceId}/roles", "get", "authorizationServiceRoles"),
                 Triple("/admin/access/services/{serviceId}/roles/{roleKey}", "put", "authorizationAssignServiceRole"),
                 Triple("/admin/access/services/{serviceId}/roles/{roleKey}", "delete", "authorizationUnassignServiceRole"),
+                // Commerce 0.0.20 administers service credentials inside the same capability.
+                Triple("/admin/access/services/{serviceId}/credentials", "get", "authorizationServiceCredentials"),
+                Triple("/admin/access/services/{serviceId}/credentials", "post", "authorizationCreateServiceCredential"),
+                Triple("/admin/access/services/{serviceId}/credentials/{credentialId}", "delete", "authorizationRevokeServiceCredential"),
                 Triple("/admin/access/roles", "get", "authorizationListRoles"),
                 Triple("/admin/access/roles", "post", "authorizationCreateRole"),
                 Triple("/admin/access/roles/{roleKey}", "get", "authorizationGetRole"),
@@ -298,6 +302,10 @@ class OpenApiDocumentSpec :
                 "ServicesDto",
                 "ServiceDto",
                 "ServiceWriteDto",
+                "ServiceCredentialsDto",
+                "ServiceCredentialDto",
+                "IssuedServiceCredentialDto",
+                "ServiceCredentialWriteDto",
                 "RolesDto",
                 "RoleDto",
                 "RoleWriteDto",
@@ -1125,7 +1133,7 @@ class OpenApiDocumentSpec :
                 reached += frontier
                 frontier = frontier.flatMap { references(schemas.getValue(it)) }.map { it.substringAfterLast('/') }.toSet() - reached
             }
-            // Runtime 0.0.19 emits these enum definitions as well as inline enums on offering properties.
+            // Runtime 0.0.20 emits these enum definitions as well as inline enums on offering properties.
             val offeringStateSchemas = setOf("OfferingSelectionStateDto", "OfferingAvailabilityDto")
             schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + reached + offeringStateSchemas
         }

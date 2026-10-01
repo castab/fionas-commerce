@@ -12,10 +12,8 @@ import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRe
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
-import io.github.castab.fionas.commerce.inquiry.InquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.InquirySubmissionRepository
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
@@ -106,7 +104,6 @@ class ArchitectureSpec :
             listOf(
                 CustomerRepository::class.java,
                 InquiryRepository::class.java,
-                InquiryPricingRepository::class.java,
                 InquirySubmissionRepository::class.java,
                 CredentialRepository::class.java,
                 InquiryFinancialDocumentRepository::class.java,
@@ -122,7 +119,6 @@ class ArchitectureSpec :
             listOf(
                 JdbiCustomerRepository::class.java,
                 JdbiInquiryRepository::class.java,
-                JdbiInquiryPricingRepository::class.java,
                 JdbiInquirySubmissionRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
@@ -169,9 +165,27 @@ class ArchitectureSpec :
             sources {
                 !it.path.contains("${File.separator}http${File.separator}") &&
                     it.name != "FionaApplication.kt" &&
-                    it.name != "FionaOfferings.kt"
+                    it.name != "FionaOfferings.kt" &&
+                    it.name != "PersistedPricingInputs.kt"
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
+            // The one serialization outside http is Fiona's persisted pricing-inputs JSON: a database
+            // representation, never a wire format. It knows no HTTP and no HTTP code uses it.
+            listOf(File(mainSources, "offering/PersistedPricingInputs.kt"))
+                .containing(listOf("org.http4k", ".http.", "CommerceJson"))
+                .shouldBeEmpty()
+            sources { it.path.contains("${File.separator}http${File.separator}") }
+                .containing(listOf("toPersistedJson", "restorePersistedPricingInputs"))
+                .shouldBeEmpty()
+        }
+
+        test("persisted pricing inputs are encoded and restored only by the repositories whose rows own them") {
+            sources()
+                .filter { file ->
+                    file.name != "PersistedPricingInputs.kt" &&
+                        Regex("""\b(?:toPersistedJson|restorePersistedPricingInputs)\b""").containsMatchIn(file.codeWithoutComments())
+                }.map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactlyInAnyOrder
+                listOf("inquiry/JdbiInquiryRepository.kt", "financial/JdbiFinancialDocumentPricingRepository.kt")
         }
 
         test("Fiona runs no migration lifecycle of its own; commerce-runtime orchestrates both streams") {

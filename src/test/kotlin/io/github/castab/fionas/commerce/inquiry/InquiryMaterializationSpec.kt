@@ -62,7 +62,6 @@ class InquiryMaterializationSpec :
         var revision = 0
         val customers = JdbiCustomerRepository()
         val inquiries = JdbiInquiryRepository()
-        val requested = JdbiInquiryPricingRepository()
         val associations = JdbiInquiryFinancialDocumentRepository()
         val sources = JdbiFinancialDocumentPricingRepository()
 
@@ -117,7 +116,6 @@ class InquiryMaterializationSpec :
             application.transactor,
             customers,
             inquiries,
-            requested,
             JdbiInquirySubmissionRepository(),
             PublicInquiryPricing(price, latest),
             testClock,
@@ -129,15 +127,9 @@ class InquiryMaterializationSpec :
                 "fionas.customers",
                 "fionas.inquiry_submissions",
                 "fionas.inquiries",
-                "fionas.inquiry_pricing",
-                "fionas.inquiry_pricing_categories",
-                "fionas.inquiry_pricing_selections",
                 "commerce.financial_document_snapshots",
-                "commerce.financial_document_lines",
                 "fionas.inquiry_financial_documents",
                 "fionas.financial_document_pricing",
-                "fionas.financial_document_pricing_categories",
-                "fionas.financial_document_pricing_selections",
             )
 
         fun counts() = tables.associateWith(application.database::count)
@@ -180,7 +172,7 @@ class InquiryMaterializationSpec :
             application.transactor.inTransaction { transaction ->
                 inquiries.findById(transaction, inquiry.id) shouldBe inquiry
                 customers.findById(transaction, inquiry.customerId).shouldNotBeNull().name shouldBe CustomerName("Jane Doe")
-                requested.find(transaction, inquiry.id) shouldBe submitted
+                inquiries.findRequested(transaction, inquiry.id)?.pricingInputs shouldBe submitted
                 associations.initialEstimateOf(transaction, inquiry.id) shouldBe id
                 associations.documentsOf(transaction, inquiry.id) shouldBe listOf(id)
                 sources.findAll(transaction, id) shouldBe emptyMap()
@@ -191,11 +183,7 @@ class InquiryMaterializationSpec :
                     "fionas.customers" to 1,
                     "fionas.inquiry_submissions" to 1,
                     "fionas.inquiries" to 1,
-                    "fionas.inquiry_pricing" to 1,
-                    "fionas.inquiry_pricing_categories" to 3,
-                    "fionas.inquiry_pricing_selections" to 9,
                     "commerce.financial_document_snapshots" to 1,
-                    "commerce.financial_document_lines" to expected.size,
                     "fionas.inquiry_financial_documents" to 1,
                 )
             tables.forEach { after.getValue(it) shouldBe before.getValue(it) + additions.getOrDefault(it, 0) }
@@ -228,40 +216,38 @@ class InquiryMaterializationSpec :
                     snapshot
                 })(command(submitted))
             revision shouldBe accepted + 1
-            application.transactor.inTransaction { requested.find(it, inquiry.id) } shouldBe submitted
+            application.transactor.inTransaction { inquiries.findRequested(it, inquiry.id) }?.pricingInputs shouldBe submitted
             application.context.financialLedger
                 .latest(id)
                 .total.amount
                 .compareTo(BigDecimal("681.25")) shouldBe 0
         }
 
-        test("failure inside ledger line persistence rolls back the entire submission across both schemas") {
+        test("failure inside ledger snapshot persistence rolls back the entire submission across both schemas") {
             val id = UUID.randomUUID()
             val before = counts()
-            // A test-only database failure after the ledger inserted the snapshot and its first line.
+            // A test-only database failure after the ledger inserted the snapshot row with its lines.
             application.database.execute(
                 """
-                CREATE FUNCTION fionas.reject_materialized_line() RETURNS trigger LANGUAGE plpgsql AS ${'$'}${'$'}
+                CREATE FUNCTION fionas.reject_materialized_snapshot() RETURNS trigger LANGUAGE plpgsql AS ${'$'}${'$'}
                 BEGIN
-                    IF NEW.document_id = '$id'::uuid AND NEW.position = 1 THEN
-                        IF (SELECT count(*) FROM commerce.financial_document_lines WHERE document_id = NEW.document_id) <> 1 THEN
-                            RAISE EXCEPTION 'expected first line before failure';
-                        END IF;
-                        RAISE EXCEPTION 'injected ledger line failure';
+                    IF NEW.document_id = '$id'::uuid THEN
+                        RAISE EXCEPTION 'injected ledger snapshot failure';
                     END IF;
                     RETURN NEW;
                 END
                 ${'$'}${'$'};
-                CREATE TRIGGER reject_materialized_line BEFORE INSERT ON commerce.financial_document_lines
-                    FOR EACH ROW EXECUTE FUNCTION fionas.reject_materialized_line();
+                CREATE TRIGGER reject_materialized_snapshot AFTER INSERT ON commerce.financial_document_snapshots
+                    FOR EACH ROW EXECUTE FUNCTION fionas.reject_materialized_snapshot();
                 """.trimIndent(),
             )
             try {
-                shouldThrowAny { create(id)(command()) }.message shouldContain "injected ledger line failure"
+                shouldThrowAny { create(id)(command()) }.message shouldContain "injected ledger snapshot failure"
                 counts() shouldBe before
             } finally {
                 application.database.execute(
-                    "DROP TRIGGER reject_materialized_line ON commerce.financial_document_lines; DROP FUNCTION fionas.reject_materialized_line();",
+                    "DROP TRIGGER reject_materialized_snapshot ON commerce.financial_document_snapshots; " +
+                        "DROP FUNCTION fionas.reject_materialized_snapshot();",
                 )
             }
         }
@@ -281,7 +267,7 @@ class InquiryMaterializationSpec :
                             application.context.financialLedger
                                 .latest(transaction, id)
                                 .version shouldBe Version.INITIAL
-                            requested.find(transaction, association.inquiryId).shouldNotBeNull()
+                            inquiries.findRequested(transaction, association.inquiryId).shouldNotBeNull()
                             if (afterAssociation) {
                                 associations.associate(transaction, association)
                                 associations.initialEstimateOf(transaction, association.inquiryId) shouldBe id
@@ -345,8 +331,6 @@ class InquiryMaterializationSpec :
             updated.status shouldBe Status.OK
             // Test-only destruction of catalog data proves the financial lineage has no read or FK
             // dependency on it. Production catalog revisions remain immutable and are never deleted.
-            application.database.execute("DELETE FROM commerce.offerings")
-            application.database.execute("DELETE FROM commerce.offering_categories")
             application.database.execute("DELETE FROM commerce.offerings_snapshots")
             // No pricing or catalog collaborator participates in these financial reads or transitions.
             application.context.financialLedger

@@ -26,7 +26,8 @@ import java.util.UUID
  *
  * Every Fiona inquiry is a request for configured ice cream service, so every command carries
  * pricing inputs. They must use the public form's categories and the current revision observed
- * by [pricing] in this transaction, and are priced exactly once and recorded with the inquiry.
+ * by [pricing] in this transaction, and are priced exactly once and recorded in the inquiry's own
+ * row, so no inquiry can be written without them.
  * Stale, hidden, or otherwise invalid inputs record nothing. Those exact priced lines materialize
  * the canonical initial Estimate v1; the inquiry retains the requested inputs, while the ledger
  * retains self-contained lines. Every write shares this operation's transaction, so the inquiry
@@ -44,7 +45,6 @@ class CreateInquiry(
     private val transactor: Transactor,
     private val customers: CustomerRepository,
     private val inquiries: InquiryRepository,
-    private val pricingInputs: InquiryPricingRepository,
     private val submissions: InquirySubmissionRepository,
     private val pricing: PublicInquiryPricing,
     private val clock: Clock,
@@ -87,8 +87,7 @@ class CreateInquiry(
                     ?: Customer(newCustomerId(), command.name, command.email, now)
                         .also { customers.insert(transaction, it) }
             val inquiry = Inquiry(inquiryId, customer.id, command.message, now, command.zipCode, command.eventDate, command.eventType)
-            inquiries.insert(transaction, inquiry)
-            pricingInputs.insert(transaction, inquiry.id, command.pricingInputs)
+            inquiries.insert(transaction, inquiry, command.pricingInputs)
             materialize.create(
                 transaction,
                 inquiry.id,

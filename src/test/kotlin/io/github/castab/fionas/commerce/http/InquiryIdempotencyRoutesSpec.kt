@@ -31,11 +31,7 @@ class InquiryIdempotencyRoutesSpec :
                 "fionas.customers",
                 "fionas.inquiries",
                 "fionas.inquiry_submissions",
-                "fionas.inquiry_pricing",
-                "fionas.inquiry_pricing_categories",
-                "fionas.inquiry_pricing_selections",
                 "commerce.financial_document_snapshots",
-                "commerce.financial_document_lines",
                 "fionas.inquiry_financial_documents",
             )
 
@@ -78,7 +74,6 @@ class InquiryIdempotencyRoutesSpec :
             listOf(
                 "fionas.inquiries",
                 "fionas.inquiry_submissions",
-                "fionas.inquiry_pricing",
                 "commerce.financial_document_snapshots",
                 "fionas.inquiry_financial_documents",
             ).forEach { committed.getValue(it) shouldBe before.getValue(it) + 1 }

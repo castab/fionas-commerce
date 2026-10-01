@@ -2,22 +2,29 @@ package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerId
+import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.offering.restorePersistedPricingInputs
+import io.github.castab.fionas.commerce.offering.toPersistedJson
 import org.jdbi.v3.core.mapper.RowMapper
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.util.UUID
 
-/** [InquiryRepository] on `fionas.inquiries`, through the caller's transaction. */
+/**
+ * [InquiryRepository] on `fionas.inquiries`, through the caller's transaction. The requested
+ * pricing inputs are the row's `pricing_inputs` jsonb, in Fiona's persisted representation.
+ */
 class JdbiInquiryRepository : InquiryRepository {
     override fun insert(
         transaction: Transaction,
         inquiry: Inquiry,
+        pricingInputs: FionasPricingInputs,
     ) {
         transaction.handle
             .createUpdate(
                 """
-                INSERT INTO fionas.inquiries (id, customer_id, message, created_at, zip_code, event_date, event_type)
-                VALUES (:id, :customerId, :message, :createdAt, :zipCode, :eventDate, :eventType)
+                INSERT INTO fionas.inquiries (id, customer_id, message, created_at, zip_code, event_date, event_type, pricing_inputs)
+                VALUES (:id, :customerId, :message, :createdAt, :zipCode, :eventDate, :eventType, CAST(:pricingInputs AS jsonb))
                 """.trimIndent(),
             ).bind("id", inquiry.id.value)
             .bind("customerId", inquiry.customerId.value)
@@ -26,6 +33,7 @@ class JdbiInquiryRepository : InquiryRepository {
             .bind("zipCode", inquiry.zipCode.value)
             .bind("eventDate", inquiry.eventDate.value)
             .bind("eventType", inquiry.eventType.name)
+            .bind("pricingInputs", pricingInputs.toPersistedJson())
             .execute()
     }
 
@@ -41,6 +49,25 @@ class JdbiInquiryRepository : InquiryRepository {
             ).bind("id", id.value)
             .map(inquiryRow)
             .findOne()
+            .orElse(null)
+
+    override fun findRequested(
+        transaction: Transaction,
+        id: InquiryId,
+    ): RequestedInquiry? =
+        transaction.handle
+            .createQuery(
+                """
+                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type, pricing_inputs
+                FROM fionas.inquiries WHERE id = :id
+                """.trimIndent(),
+            ).bind("id", id.value)
+            .map { row, context ->
+                RequestedInquiry(
+                    inquiryRow.map(row, context),
+                    restorePersistedPricingInputs("inquiry ${id.value}", row.getString("pricing_inputs")),
+                )
+            }.findOne()
             .orElse(null)
 
     // Two statements rather than one with an optional predicate, so each is a plain range scan

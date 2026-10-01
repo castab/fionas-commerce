@@ -1,7 +1,6 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.customer
@@ -21,7 +20,6 @@ class RuntimeTransactionSpec :
         lateinit var application: TestApplication
         val customers = JdbiCustomerRepository()
         val inquiries = JdbiInquiryRepository()
-        val requested = JdbiInquiryPricingRepository()
 
         beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
@@ -34,8 +32,7 @@ class RuntimeTransactionSpec :
                 shouldThrow<IllegalStateException> {
                     application.transactor.inTransaction { transaction ->
                         customers.insert(transaction, customer)
-                        inquiries.insert(transaction, inquiry)
-                        requested.insert(transaction, inquiry.id, requestedPricing())
+                        inquiries.insert(transaction, inquiry, requestedPricing())
                         // Both writes are visible inside the transaction...
                         customers.findById(transaction, customer.id) shouldBe customer
                         inquiries.findById(transaction, inquiry.id) shouldBe inquiry
@@ -48,7 +45,6 @@ class RuntimeTransactionSpec :
             application.transactor.inTransaction { transaction ->
                 customers.findById(transaction, customer.id).shouldBeNull()
                 inquiries.findById(transaction, inquiry.id).shouldBeNull()
-                requested.find(transaction, inquiry.id).shouldBeNull()
             }
         }
 
@@ -60,8 +56,7 @@ class RuntimeTransactionSpec :
 
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry)
-                requested.insert(transaction, inquiry.id, requestedPricing())
+                inquiries.insert(transaction, inquiry, requestedPricing())
                 // A repository that auto-committed or used its own transaction would already
                 // have made these rows visible to another connection.
                 application.database.count("fionas.customers") shouldBe customersBefore

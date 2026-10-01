@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.19/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.19/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.20/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.20/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -40,8 +40,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.19`, which brings
-`commerce-domain:0.0.19` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.20`, which brings
+`commerce-domain:0.0.20` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -75,8 +75,8 @@ commerce-runtime Offerings contract route      bound by Fiona at /offering-catal
 commerce-runtime Offerings operation           one runtime transaction, derives rN+1
    │
    ▼
-OfferingsSnapshotRepository (runtime)  ──────  commerce.offerings_snapshots,
-                                               commerce.offering_categories, commerce.offerings
+OfferingsSnapshotRepository (runtime)  ──────  commerce.offerings_snapshots
+                                               (each row holds its revision's catalog)
 ```
 
 The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
@@ -253,12 +253,12 @@ All rejections commit nothing, including any key claim. A new command prices exa
 materialize Estimate v1 through the runtime ledger. One READ COMMITTED transaction includes
 idempotency claim, customer lookup/creation, inquiry insert, requested pricing history, ledger snapshot/lines,
 and the canonical initial-estimate association. Any failure rolls everything back.
-The inputs are stored only as customer intent (`fionas.inquiry_pricing` and its ordered
-categories and selections), pinned to the submitted revision; amounts are never accepted.
+The inputs are stored only as customer intent (the inquiry row's own `pricing_inputs` jsonb,
+see [Persisted pricing inputs](#persisted-pricing-inputs)), pinned to the submitted revision; amounts are never accepted.
 No catalog/offering provenance is written for the financial snapshot. Every inquiry reads the
-current catalog, so none can be accepted before the catalog is initialized. A deferred
-foreign key (`V10`) makes the requested inputs mandatory: an inquiry row cannot commit
-without them. Public restrictions apply only
+current catalog, so none can be accepted before the catalog is initialized. The column is
+`NOT NULL` (`V11`), so one insert writes the complete inquiry and none can exist without its
+inputs. Public restrictions apply only
 to inquiry submission; staff creation/evolution continues independently of the public form,
 including historical catalog inputs and hidden categories. Offerings are not dependencies
 of a materialized financial document. The UI key requires no staff financial-create permission; staff routes
@@ -498,6 +498,14 @@ with new properties rather than re-add its key. Update and restore take the key 
 path, never an editable body field; their bodies replace all properties, with omitted
 optional properties reset to defaults.
 
+> **Upgrading to commerce 0.0.20 (Fiona `V11`).** Runtime V9 moves financial lines and
+> catalog contents into their snapshot rows, and Fiona's V11 moves each complete set of
+> pricing inputs into its owning row (`inquiries.pricing_inputs`,
+> `financial_document_pricing.pricing_inputs`). Neither converts existing data: both refuse
+> a populated database. Recreate the disposable local database/volume
+> (`docker compose down -v`), restart Fiona, then rerun `scripts/setup-local-commerce.mjs`.
+> Fresh databases migrate normally through runtime V10 and Fiona V11. No API changes.
+
 > **Upgrading to commerce 0.0.19.** Offering add/update/restore bodies now require both
 > `selectionState` (`ENABLED`/`DISABLED`) and `availability` (`AVAILABLE`/`UNAVAILABLE`),
 > with no HTTP defaults. Reads expose both fields. All four combinations are valid.
@@ -656,9 +664,12 @@ require `fionas.inquiries.read`. `/health`, `/ready`, and ordinary Offerings rea
 Offerings mutations and retired discovery require `commerce.offerings.manage`. Every financial-document and payment
 route is staff-only.
 
-Future service credentials will be authenticated by a separate Fiona-specific mechanism
-to a `ServiceId`, then use this same `AccessControl` and `PermissionResolver` path. This
-change does not add service credentials or service login endpoints.
+Commerce 0.0.20's authorization administration capability, mounted at `/admin/access`, also
+administers runtime service credentials (`/admin/access/services/{serviceId}/credentials`:
+list with `commerce.principal.read`, create and revoke with the runtime's service-credential
+management permission, which no Fiona bootstrap grant includes). Fiona mounts no service
+token endpoint and authenticates no service tokens; service authentication is not part of
+this application yet.
 
 ## Estimate preview
 
@@ -823,10 +834,9 @@ Financial reads, changes, quotes, invoices and payments need no originating cata
 inquiry inputs. Later versions evolve from the previous snapshot plus explicit changes;
 current offerings can suggest new lines, and custom lines require no offering identity.
 
-`fionas.financial_document_pricing` and its ordered `…_categories` and
-`…_selections` remain optional legacy staff metadata, recording inputs used to construct
-staff-created/replacement lines: catalog
-revision, guest count, whether the count is a minimum, duration, and the selections in
+`fionas.financial_document_pricing` remains optional legacy staff metadata: one row per
+exact document version, whose `pricing_inputs` jsonb records the complete inputs used to
+construct staff-created/replacement lines: catalog revision, guest count, whether the count is a minimum, duration, and the selections in
 submitted order (an explicitly empty category included). The inquiry-generated initial
 Estimate writes none, and reads/transitions work without it. This example is a staff-created
 lineage with legacy metadata:
@@ -1119,7 +1129,7 @@ The inquiry form's sealed input serializer produces an explicit `type` discrimin
 a `oneOf` with one component per variant, and required constant discriminator values;
 nested Offering schemas retain the runtime's price union unchanged. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers. Commerce-runtime 0.0.19's Offerings
+contract metadata cannot declare response headers. Commerce-runtime 0.0.20's Offerings
 renderer omits invalid schema-level `"format": null` and preserves arbitrary example data.
 Fiona uses the runtime's `ValidationErrorResponse` and `ValidationViolationResponse`
 schemas for validation failures, with optional `violations`; ordinary errors retain
@@ -1221,12 +1231,10 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   `user_credentials.user_id → commerce.users.principal_id`), and, from `V3`,
   `inquiry_financial_documents` (primary key `document_id`, `inquiry_id → inquiries.id`,
   `(document_id, initial_version = 1) → commerce.financial_document_snapshots`, indexed by
-  inquiry) and `financial_document_pricing` with its ordered `…_categories` and
-  `…_selections` (keyed by `(document_id, document_version)`, referencing the association
-  and the exact `commerce.financial_document_snapshots` version), and, from `V4`, the
-  `inquiries_created_at_id_idx` index `(created_at, id)` behind the newest-first inquiry
-  list and `inquiry_pricing` with its ordered `…_categories` and `…_selections` (keyed by
-  `inquiry_id`, referencing only `fionas.inquiries`). `V5` added optional `inquiry_locations`;
+  inquiry) and `financial_document_pricing` (keyed by `(document_id, document_version)`,
+  referencing the association and the exact `commerce.financial_document_snapshots`
+  version), and, from `V4`, the `inquiries_created_at_id_idx` index `(created_at, id)`
+  behind the newest-first inquiry list. `V5` added optional `inquiry_locations`;
   `V6` replaces it with required `inquiries.zip_code` for empty inquiry data, without a
   default, backfill, or data transfer. The already-applied `V5` remains immutable. `V7`
   adds non-null `event_date` (`date`) and `event_type` (checked `text`) without defaults or
@@ -1239,10 +1247,14 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   commits without its requested pricing inputs. It invents no inputs: a disposable
   development database holding an inquiry recorded without them fails `V10` and must be
   recreated.
+  `V11` replaces V4's `inquiry_pricing` tables, V3's pricing child tables, V10's reverse
+  reference, and the pricing source's scalar columns with one `NOT NULL` JSON-object
+  `pricing_inputs` jsonb in `inquiries` and in `financial_document_pricing`. It converts
+  nothing and fails on a populated database, which must be recreated.
   Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
-  Offerings snapshot tables that hold Fiona's catalog and the financial ledger's snapshots,
-  lines, payments, allocations, refunds, and refund allocations. None needs a Fiona copy.
+  Offerings snapshots that hold Fiona's catalog and the financial ledger's snapshots (with
+  their lines), payments, allocations, refunds, and refund allocations. None needs a Fiona copy.
 - Composing the runtime runs the migration phase before anything is served. By default
   (`MIGRATIONS_ON_STARTUP=migrate`) it applies the runtime's pending migrations, then
   Fiona's; re-running against a current database applies nothing. A deployment that
@@ -1293,6 +1305,27 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
 > change fail validation and must be recreated, for example `docker compose down -v`.
 
 The rules for writing migrations are in [`AGENTS.md`](AGENTS.md#application-migrations).
+
+### Persisted pricing inputs
+
+A set of Fiona pricing inputs has no identity of its own, so it is stored in the row that
+owns it rather than in child rows: `fionas.inquiries.pricing_inputs` (what the customer
+requested) and `fionas.financial_document_pricing.pricing_inputs` (what one exact
+staff-priced document version was priced from). Both are `NOT NULL` jsonb objects in Fiona's
+own representation, independent of the HTTP DTOs and of commerce-runtime's snapshot JSON:
+
+```json
+{"catalogRevision": 20,
+ "context": {"guestCount": 75, "guestCountIsMinimum": false, "durationMinutes": 120},
+ "selections": [{"categoryKey": "soft-serve-flavor", "offeringKeys": ["soft-vanilla", "soft-horchata"]},
+                {"categoryKey": "topping", "offeringKeys": []}]}
+```
+
+Every property is required; arrays keep submitted order, and an empty block stays empty.
+Reads are strict: an unknown, missing, `null`, or wrongly typed property, or a value the
+domain rejects, fails loudly with the owning inquiry or document version named, and is never
+repaired. Lines, amounts, and totals are never stored here.
+
 
 ## Running locally
 

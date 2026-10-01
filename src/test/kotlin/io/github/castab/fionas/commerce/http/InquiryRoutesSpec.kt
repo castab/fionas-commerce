@@ -83,10 +83,7 @@ class InquiryRoutesSpec :
                 "fionas.customers",
                 "fionas.inquiry_submissions",
                 "fionas.inquiries",
-                "fionas.inquiry_pricing",
-                "fionas.inquiry_pricing_selections",
                 "commerce.financial_document_snapshots",
-                "commerce.financial_document_lines",
                 "fionas.inquiry_financial_documents",
             ).map(application.database::count)
 

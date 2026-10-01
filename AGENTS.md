@@ -137,9 +137,8 @@ verifying ownership of the address. Decide these explicitly before changing the 
   dedicated slice.
 - **Requested pricing inputs are the customer's request, never amounts.** Every inquiry
   carries the `FionasPricingInputs` the customer configured (catalog revision, selections,
-  guest count, duration), in `fionas.inquiry_pricing` and its ordered categories and
-  selections; Fiona `V10`'s deferred foreign key from `inquiries.id` to `inquiry_pricing`
-  makes them mandatory at commit. New `CreateInquiry` commands use Fiona-local `PublicInquiryPricing` before business writes:
+  guest count, duration), in the inquiry row's own `NOT NULL` `pricing_inputs` jsonb (Fiona
+  `V11`), so one insert writes the complete inquiry and none exists without them. New `CreateInquiry` commands use Fiona-local `PublicInquiryPricing` before business writes:
   categories must belong to the shared `publicOfferingQuestions` definition used by
   `GetInquiryForm`, and the submitted revision must equal the latest observed in the
   same READ COMMITTED transaction. Older revisions produce `409 CATALOG_REVISION_STALE`
@@ -324,8 +323,8 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
 - http4k/Jetty composition (`commerceRuntime(...)`), `CommerceJson`, `jsonBody`;
 - configuration loading (`CommerceRuntimeConfiguration.load()`);
 - `/health` and `/ready`;
-- Offerings persistence (`OfferingsSnapshotRepository`, the `commerce.offerings_snapshots`,
-  `commerce.offering_categories`, and `commerce.offerings` tables), the Offerings
+- Offerings persistence (`OfferingsSnapshotRepository` and the `commerce.offerings_snapshots`
+  table, whose rows hold each revision's categories and offerings since commerce 0.0.20), the Offerings
   operations (`CreateOfferingsCatalog`, `AddOfferingCategory`, `AddOffering`,
   `GetOfferingsCatalog`, `GetOfferingsCatalogRevision`, update/retire/restore and retired
   identity discovery, expected-revision concurrency, lifetime key reservation, and the list
@@ -340,7 +339,7 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
   (`context.authorization`); the authorization administration HTTP capability.
 - the financial ledger: `FinancialLedger` (`context.financialLedger`), the
   `FinancialDocumentRepository` and `PaymentRepository`, their tables
-  (`commerce.financial_document_snapshots`, `commerce.financial_document_lines`,
+  (`commerce.financial_document_snapshots`, whose rows hold their lines since 0.0.20,
   `commerce.payment_records`, `commerce.payment_allocations`, `commerce.refund_records`,
   `commerce.refund_allocations`), financial-document lifecycle
   orchestration (`create`, `changeOrder`, `issueQuote`, `issueInvoice`), payment recording
@@ -411,7 +410,8 @@ Routes translate transport. Operations orchestrate. Repositories persist.
 - No SQL in routes. No HTTP in repositories or operations. No persistence in routes.
 - Transport DTOs are `@Serializable` classes in the `http` package. Never put
   serialization annotations on application types, and never let DTOs leak into
-  operations or repositories.
+  operations or repositories. The only other `@Serializable` types are the private
+  persistence DTOs of [Persisted pricing inputs](#persisted-pricing-inputs), never wire DTOs.
 - Expected failures are `CommerceFailure`s with caller-safe messages. SQL text,
   constraint names, stack traces, and exception details never reach a response.
   Repositories translate a unique violation into `CommerceFailure.Conflict`
@@ -547,10 +547,18 @@ Also:
   shared overflow bucket for new IPs at the bound, never evict depleted identities.
   Restart resets buckets; replicas do not share them. Exhaustion returns 429, Retry-After
   seconds rounded up, no-store, and runtime `ErrorResponse("rate_limited", "Too many requests")`.
-  Runtime 0.0.19 has no rate-limit ErrorCategory; reuse its envelope and document the local
+  Runtime 0.0.20 has no rate-limit ErrorCategory; reuse its envelope and document the local
   status/code on the login ContractRoute. No new error framework or upstream subsystem.
 
 ## Application migrations
+
+- **Commerce 0.0.20's runtime V9 and Fiona's V11 store aggregate-owned values in their
+  owning rows.** Runtime V9 moves financial lines and catalog contents into their snapshot
+  rows; Fiona V11 moves each complete `FionasPricingInputs` into `fionas.inquiries.pricing_inputs`
+  and `fionas.financial_document_pricing.pricing_inputs`. Both refuse populated pre-release
+  data instead of converting it: recreate the disposable database/volume, then rerun
+  `scripts/setup-local-commerce.mjs`. Never add a Fiona workaround, backfill, dual read/write,
+  or nullable transitional column.
 
 - **Commerce 0.0.19's runtime V8 deliberately rejects existing offering rows.** Both
   independent state columns are required without invented defaults/backfills. Recreate
@@ -599,9 +607,8 @@ after runtime-owned migrations.
 - **Reference runtime structures only when they are a published contract.** A foreign key
   to a runtime table is legitimate when commerce-runtime publishes that table for
   applications; never depend on incidental runtime tables, indexes, or Flyway metadata.
-  The runtime publishes the Offerings snapshot tables
-  (`commerce.offerings_snapshots`, `commerce.offering_categories`, `commerce.offerings`),
-  but no Fiona migration references them, and Fiona reaches the catalog only through the
+  The runtime publishes the Offerings snapshot table (`commerce.offerings_snapshots`),
+  but no Fiona migration references it, and Fiona reaches the catalog only through the
   runtime's Offerings operations and snapshot read. Fiona's `V2` references the published
   `commerce.users(principal_id)` for the credential foreign key, and `V3` references the
   published `commerce.financial_document_snapshots(document_id, version)`: the association
@@ -621,6 +628,12 @@ after runtime-owned migrations.
   `V10` adds a deferred foreign key from `inquiries.id` to Fiona's `inquiry_pricing`, so no
   inquiry commits without requested inputs. It invents none: a disposable database holding
   an inquiry recorded without them fails `V10` and must be recreated.
+  `V11` stores each complete `FionasPricingInputs` as one jsonb object in its owner's row:
+  `inquiries.pricing_inputs` and `financial_document_pricing.pricing_inputs`, both `NOT NULL`
+  with a JSON-object check. It drops V10's reverse reference, `inquiry_pricing` and its
+  `…_categories`/`…_selections`, the `financial_document_pricing_…` child tables, and the
+  pricing source's scalar columns, keeping its `(document_id, document_version)` key and both
+  foreign keys. It converts nothing and fails on a populated database, which must be recreated.
   `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
@@ -846,6 +859,34 @@ service duration, per-guest pricing, and the first-four-toppings-included rule.
     remains stateless, and creates no `FinancialDocument`. Priced inquiry submission
     internally materializes an Estimate using the UI key; explicit financial routes remain staff-only.
 
+### Persisted pricing inputs
+
+A `FionasPricingInputs` has no identity of its own, so it is stored in the row that owns it,
+never in child rows: an inquiry's `pricing_inputs` (what the customer requested) and a pricing
+source's `pricing_inputs` (what one exact staff-priced document version was priced from). The
+representation is Fiona's own (`offering/PersistedPricingInputs.kt`), separate from the HTTP
+DTOs and from commerce-runtime's internal snapshot JSON:
+
+```json
+{"catalogRevision": 20,
+ "context": {"guestCount": 75, "guestCountIsMinimum": false, "durationMinutes": 120},
+ "selections": [{"categoryKey": "soft-serve-flavor", "offeringKeys": ["soft-vanilla", "soft-horchata"]},
+                {"categoryKey": "topping", "offeringKeys": []}]}
+```
+
+- Every property is required and non-null; array order is submitted order, and an explicitly
+  empty block is an empty array. The duration is whole minutes, checked before writing
+  (`Duration.ofMinutes(minutes) == duration`), never truncated. No lines, amounts, or totals.
+- Restoring is strict: unknown, missing, or `null` properties, wrong JSON types (`"75"` for an
+  integer), and values the domain types or the stored invariants reject (revision < 1, no
+  guests, non-positive duration, invalid keys, a category twice, an offering twice in a block)
+  fail with an `IllegalStateException` naming the owning inquiry or document version. Nothing
+  is defaulted, coerced, or repaired, and `copy` restores its source before writing it again.
+- Only `JdbiInquiryRepository` and `JdbiFinancialDocumentPricingRepository` encode or restore
+  it (`ArchitectureSpec`). Domain types stay unaware of JSON; never add serialization
+  annotations to them or reuse HTTP DTOs as the database contract. A shape change is a
+  durable-data decision with its own migration.
+
 ## Financial documents and payments
 
 Financial documents (`Estimate`, `Quote`, `Invoice`) and payments are commerce-runtime's
@@ -883,7 +924,8 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    offering, catalog revision or inquiry inputs to display or evolve its financial state.
    Versions evolve from the previous financial snapshot plus explicit changes; newly priced
    offerings may supply new lines, and custom lines need no offering identity.
-   `fionas.financial_document_pricing` and its child tables remain optional legacy staff
+   `fionas.financial_document_pricing` (one row per exact version holding one complete
+   `pricing_inputs` value) remains optional legacy staff
    metadata in this scoped slice. Staff creation/change orders still write it and transitions
    copy it when present; it is never used to reconstruct old lines. Inquiry-generated
    initial estimates write none. Reads and transitions tolerate its absence. The staff HTTP
@@ -1002,7 +1044,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values/repositories; submission key, canonical fingerprint and transaction-bound submission repository; requested pricing inputs/history; `CreateInquiry`, `GetInquiry`, `ListInquiries`, public eligibility/pricing and the customer form's `InquiryForm` values/`GetInquiryForm` adapter |
-| `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
+| `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), the persisted pricing-inputs JSON (`PersistedPricingInputs.kt`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
 | `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
@@ -1053,7 +1095,7 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
 
 ### Known upstream gaps (last audited at commerce 0.0.14)
 
-The application consumes commerce-runtime 0.0.19, with matching commerce-domain transitively.
+The application consumes commerce-runtime 0.0.20, with matching commerce-domain transitively.
 The application history schema gap is closed by commerce 0.0.15 (applications declare their
 own migration schema). The payment read gap is closed by commerce 0.0.16:
 `FinancialLedger.paymentHistory` and `paymentHistoriesForLineage` (each with a
@@ -1063,6 +1105,15 @@ unapplied discovery gap is closed by 0.0.17 (`unappliedPayments`), as are persis
 version creation timestamps, structured validation errors, and invalid Offerings schema
 formats. Commerce 0.0.18 supplies the managed Offerings lifecycle, retired discovery,
 lifetime key reservation, and expected-revision concurrency without a new migration.
+Commerce 0.0.20 stores aggregate-owned snapshot values in their snapshot rows, binds every
+`AccessControl` to one `AuthorizationDirectory` (`AccessControl(authentication,
+context.authorization)`), requires a `PermissionGroup` on each `PermissionDefinition` (Fiona's
+are `fionas.credentials` and `fionas.inquiries`), and adds runtime service credentials. The
+authorization administration capability Fiona mounts at `/admin/access` now includes
+`/services/{serviceId}/credentials` (list with `PrincipalRead`; create and revoke with the
+runtime's `RuntimePermissions.ServiceCredentialManage`, which no Fiona bootstrap grant
+includes). Fiona mounts no service token endpoint and authenticates no service token;
+service authentication remains out of scope.
 The remaining gaps below have not been re-audited.
 
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
