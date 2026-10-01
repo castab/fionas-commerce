@@ -38,6 +38,7 @@ import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiryForm
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.PublicInquiryPricing
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
@@ -148,6 +149,7 @@ fun fionaApplication(
                         customers,
                         inquiries,
                         inquiryPricing,
+                        JdbiInquirySubmissionRepository(),
                         PublicInquiryPricing(pricing, context.offeringsSnapshotRepository::retrieveLatestVersion),
                         clock,
                         materialize,

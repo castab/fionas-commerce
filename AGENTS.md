@@ -129,12 +129,12 @@ verifying ownership of the address. Decide these explicitly before changing the 
 - **Requested pricing inputs are the customer's request, never amounts.** An inquiry may
   carry the `FionasPricingInputs` the customer configured (catalog revision, selections,
   guest count, duration), in `fionas.inquiry_pricing` and its ordered categories and
-  selections. `CreateInquiry` uses Fiona-local `PublicInquiryPricing` before any write:
+  selections. New `CreateInquiry` commands use Fiona-local `PublicInquiryPricing` before business writes:
   categories must belong to the shared `publicOfferingQuestions` definition used by
   `GetInquiryForm`, and the submitted revision must equal the latest observed in the
   same READ COMMITTED transaction. Older revisions produce `409 CATALOG_REVISION_STALE`
   in the runtime's `ErrorResponse` envelope; future/nonexistent revisions remain `404`.
-  No locks, nested transactions, automatic selection migration, or silent repricing.
+  No catalog locks, nested transactions, automatic selection migration, or silent repricing.
   A publication after that observation is allowed: price that immutable observed snapshot
   with `FionasPricing`, exactly once. All active offerings in an exposed category are public;
   the engine retains membership, retirement, cardinality and policy validation.
@@ -142,11 +142,50 @@ verifying ownership of the address. Decide these explicitly before changing the 
   Those exact concrete lines materialize
   Estimate v1 through the transaction-taking `MaterializeInquiryFinancialDocument` core,
   shared with staff creation. Customer, inquiry, requested inputs, ledger snapshot/lines,
-  and the `INITIAL_ESTIMATE` relationship commit or roll back together. All rejections write
-  nothing. Inputs remain pinned inquiry history, never rewritten or copied to the initial
+  and the `INITIAL_ESTIMATE` relationship commit or roll back together. All rejections commit
+  nothing, including their key claim. Inputs remain pinned inquiry history, never rewritten or copied to the initial
   financial snapshot. Financial documents have no dependency on offerings after materialization.
   Public eligibility/current-revision rules must never constrain staff financial operations.
   A plain inquiry skips catalog access/validation and creates no Estimate or association.
+- **Public submission identity is explicit and durable.** Only `POST /inquiries` requires
+  exactly one `Idempotency-Key`: 1–128 ASCII letters/digits/underscore/hyphen, case-sensitive,
+  untrimmed, opaque and non-secret (UUIDs work). Invalid/missing/repeated keys are a
+  `LensFailure` (`400 malformed_request`), after UI authentication and before the command.
+  `CreateInquiry.Command` carries `InquirySubmissionKey`; the transport header never leaks
+  into repositories as an HTTP concept. Other public/staff routes require no key.
+- **Idempotency precedes current business validation.** Canonical command fingerprint →
+  claim/inspect key → replay or mismatch → only for new claims, public selections/current
+  revision/pricing → existing atomic inquiry materialization. A successful replay returns
+  the stored Inquiry, hence the exact original 201 receipt/Location, with no catalog access,
+  public-category check, pricing or ledger write, even after a publication. A changed intent
+  conflicts with `409 IDEMPOTENCY_KEY_REUSED` using runtime `ErrorResponse` and no-store;
+  no previous request, fingerprint or submission state is exposed. Keep this distinguishable
+  from `CATALOG_REVISION_STALE`. Authentication and request-shape failures persist nothing.
+- **The database serializes command identity.** Fiona `V9` owns `inquiry_submissions`.
+  `JdbiInquirySubmissionRepository.claim` uses unique-key `INSERT ... ON CONFLICT DO NOTHING`
+  in the existing READ COMMITTED operation transaction. A contender waits for the owner's
+  commit/rollback; a separate statement then sees its committed result, or the contender
+  becomes claimant after rollback. Never catch a unique SQL exception and continue an
+  aborted transaction. The claim reserves a non-null, unique inquiry id with a deferred
+  FK to `fionas.inquiries`, permitting early claim but preventing incomplete commits.
+  Claim, customer/inquiry/history, Estimate and association are one atomic unit. Any failure
+  rolls back the claim too, including late ledger/association failures; corrected retries
+  may use that key. No independent finalization transaction, Redis, JVM mutex or TTL.
+- **Fingerprint semantic intent, never raw bytes or prices.** `InquiryRequestFingerprint`
+  hashes stable v1 length-prefixed UTF-16 code units/binary canonical values with SHA-256. Include all
+  inquiry values and pricing presence/revision/context/ordered categories/offerings; exclude
+  command key, generated identities, clocks, current catalog and derived financial amounts.
+  Preserve order because it determines materialized line order. Normalized text and optional
+  defaults remain equivalent. Encoding changes require durable replay compatibility decisions.
+  One key plus one semantic request yields one committed result; never claim application code
+  literally executes once. Different keys mean distinct commands, even for the same email/body.
+  Preserve customer-matching concurrency policy; never deduplicate by email or body similarity.
+- **Future SvelteKit responsibility.** Keep one non-secret token per logical visible submission,
+  shared across duplicate browser requests and all backend retries/timeouts. A UUID generated
+  independently inside each backend attempt defeats idempotency. Carry/retain the logical
+  token across attempts. A committed replay remains successful; `IDEMPOTENCY_KEY_REUSED`
+  means changed intent under a used key, while `CATALOG_REVISION_STALE` requires refresh/review
+  of an uncommitted command. No frontend work belongs in this slice.
 - **The event ZIP code is required inquiry-owned location data.** Non-null `zipCode` is
   trimmed five-digit US text (leading zeroes preserved), held in the non-null
   `fionas.inquiries.zip_code` column and read only by staff with the inquiry. Blank is
@@ -313,7 +352,7 @@ no service locator. Keep wiring visible.
   `inTransaction` calls; pass the `Transaction` down instead.
 
 The shared runtime transaction is the seam that lets one Fiona operation atomically write
-Fiona-owned rows and runtime-owned commerce facts. A priced inquiry writes its customer,
+Fiona-owned rows and runtime-owned commerce facts. A priced inquiry claims its submission key and writes its customer,
 inquiry, requested inputs, runtime Estimate and canonical association in one transaction.
 Staff first-snapshot creation also writes optional legacy pricing metadata; a transition
 copies that metadata only when present, and a staff change order records its newly supplied
@@ -542,6 +581,9 @@ after runtime-owned migrations.
   `V8` adds association `purpose` (`INITIAL_ESTIMATE` or `RELATED`) and a partial unique
   index on inquiry id for `INITIAL_ESTIMATE`. Existing associations default to `RELATED`;
   no canonical initial estimate is inferred for older inquiries.
+  `V9` adds Fiona-only `inquiry_submissions`, with unique command key and inquiry id,
+  bounded key/SHA-256 checks and a deferred inquiry FK. It does not modify or reference
+  runtime structures. Existing inquiries receive no invented submission keys.
   `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
@@ -922,7 +964,7 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
-| `...inquiry` | `Inquiry` and its values, `InquiryRepository`, `JdbiInquiryRepository`, the requested pricing inputs' `InquiryPricingRepository` and `JdbiInquiryPricingRepository`, the `CreateInquiry`, `GetInquiry`, and `ListInquiries` operations, and the customer form's `InquiryForm` values and `GetInquiryForm` adapter |
+| `...inquiry` | `Inquiry` and its values/repositories; submission key, canonical fingerprint and transaction-bound submission repository; requested pricing inputs/history; `CreateInquiry`, `GetInquiry`, `ListInquiries`, public eligibility/pricing and the customer form's `InquiryForm` values/`GetInquiryForm` adapter |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
 | `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
@@ -1083,7 +1125,12 @@ The remaining gaps below have not been re-audited.
   retirement, domain failures, plain inquiry without a catalog, and unrestricted staff
   historical/hidden creation), `InquiryMaterializationSpec` (one evaluation, publication
   after validation, cross-schema rollback and financial evolution after test-only catalog
-  removal), HTTP tests through the complete handler, schema tests,
+  removal), `InquiryIdempotencySpec` (forced/observed PostgreSQL same/different key contention,
+  rollback takeover, incomplete-claim commit rejection, lost-response recovery and no replay
+  catalog/pricing), `InquiryIdempotencyRoutesSpec` (full-handler replay, post-publication ordering,
+  mismatch, key/header validation, failed-key reuse and authentication),
+  `InquiryRequestFingerprintSpec` (all intent fields, ordered selections, normalization and
+  opaque key validation), HTTP tests through the complete handler, schema tests,
   `MigrationLifecycleSpec` (consumer-level migration contract only; the runtime's suite owns
   the lifecycle internals), `OfferingsCatalogSpec` (Fiona's catalog through the complete
   handler: initialization, revisions, historical reads, price forms, offering and category

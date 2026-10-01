@@ -46,6 +46,7 @@ class DatabaseSchemaSpec :
                     "flyway_schema_history",
                     "customers",
                     "inquiries",
+                    "inquiry_submissions",
                     "inquiry_pricing",
                     "inquiry_pricing_categories",
                     "inquiry_pricing_selections",
@@ -75,6 +76,24 @@ class DatabaseSchemaSpec :
                 WHERE con.contype = 'f' AND con.conrelid = 'fionas.$table'::regclass
                 """.trimIndent(),
             )
+
+        test("submission identity has non-null results, unique keys/inquiries and a deferred Fiona-only foreign key") {
+            application.database.foreignKeys("inquiry_submissions") shouldContainExactly
+                listOf("inquiry_id → fionas.inquiries(id)")
+            application.database.strings(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_submissions'::regclass " +
+                    "AND contype IN ('p', 'u') ORDER BY contype",
+            ) shouldContainExactly listOf("PRIMARY KEY (idempotency_key)", "UNIQUE (inquiry_id)")
+            application.database.strings(
+                "SELECT condeferrable::text || ' ' || condeferred::text FROM pg_constraint " +
+                    "WHERE conrelid = 'fionas.inquiry_submissions'::regclass AND contype = 'f'",
+            ) shouldContainExactly listOf("true true")
+            application.database
+                .strings(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                        "AND table_name = 'inquiry_submissions' AND is_nullable = 'YES'",
+                ).shouldBeEmpty()
+        }
 
         test("an inquiry owns financial-document lineages, each keyed to commerce-runtime's first snapshot of it") {
             application.database.foreignKeys("inquiry_financial_documents") shouldContainExactlyInAnyOrder

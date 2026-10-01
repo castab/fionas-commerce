@@ -91,6 +91,7 @@ fun TestApplication.createInquiry(email: String = "jane-${UUID.randomUUID()}@exa
     val response =
         http(
             Request(Method.POST, "/inquiries")
+                .withSubmissionKey()
                 .withUiKey()
                 .header("Content-Type", "application/json")
                 .body(

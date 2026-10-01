@@ -87,7 +87,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 
 | Endpoint | Permission | Behavior |
 |---|---|---|
-| `POST /inquiries` | UI Bearer key | Records customer intent and atomically materializes one canonical initial Estimate when pricing inputs are present; a plain inquiry creates no Estimate. `201` with the unchanged receipt (`id`, `createdAt`) and `Location`; never the stored customer. |
+| `POST /inquiries` | UI Bearer key | Requires `Idempotency-Key`. Records customer intent and atomically materializes one canonical initial Estimate when pricing inputs are present; a plain inquiry creates no Estimate. `201` with the receipt (`id`, `createdAt`) and `Location`; identical successful retries return the same receipt. Never exposes the stored customer. |
 | `GET /inquiry-form` | UI Bearer key | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
@@ -227,10 +227,10 @@ confirmation page renders what the customer just submitted.
 `guestCountIsMinimum`, `durationMinutes`, `selections`). The revision describes the form
 the customer used; it is not permission to request historical pricing. `PublicInquiryPricing`
 requires it to equal the latest revision observed in the submission's READ COMMITTED
-transaction, before any write. An older revision fails with HTTP 409 and the runtime
+transaction, before business writes (after the atomic idempotency claim). An older revision fails with HTTP 409 and the runtime
 envelope `{"code":"CATALOG_REVISION_STALE","message":"…"}`; the message is diagnostic,
 and the code tells the frontend to refresh/review. A revision beyond the observed latest
-(or an uninitialized catalog) remains `404 not_found`. There is no locking: a publication
+(or an uninitialized catalog) remains `404 not_found`. There is no catalog locking: a publication
 after that observation does not invalidate an accepted submission, which prices the same
 immutable observed snapshot. No selections are silently reinterpreted or repriced.
 
@@ -240,9 +240,9 @@ with violation `PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`, even if catalog-valid. Eve
 offering in an exposed category is currently public; there is no separate per-offering
 visibility flag. The existing offerings engine still checks category membership, retirement,
 selection limits, guest count and duration. Ordinary catalog/pricing failures retain `404`/`422`.
-All rejections write nothing. The operation prices exactly once and uses those exact concrete lines to
+All rejections commit nothing, including any key claim. A new command prices exactly once and uses those exact concrete lines to
 materialize Estimate v1 through the runtime ledger. One READ COMMITTED transaction includes
-customer lookup/creation, inquiry insert, requested pricing history, ledger snapshot/lines,
+idempotency claim, customer lookup/creation, inquiry insert, requested pricing history, ledger snapshot/lines,
 and the canonical initial-estimate association. Any failure rolls everything back.
 The inputs are stored only as customer intent (`fionas.inquiry_pricing` and its ordered
 categories and selections), pinned to the submitted revision; amounts are never accepted.
@@ -256,6 +256,55 @@ retain their permissions. Staff read requested inputs back as `pricingInputs` on
 `POST /inquiries/{inquiryId}/estimates`. Street address and further event details remain
 customer-authored `message` text; event date and type are stored separately on the inquiry.
 
+`POST /inquiries` requires exactly one `Idempotency-Key` header, an opaque, case-sensitive
+token of 1–128 ASCII letters, digits, underscores or hyphens. UUIDs are supported; no
+trimming or business meaning is assigned. The key is not a credential and need not be
+secret. Missing, blank, repeated, oversized or malformed keys return `400 malformed_request`.
+Authentication and request-shape validation precede the application command and write nothing.
+No staff endpoint or other public endpoint requires this header. This is an intentional
+breaking change for inquiry clients: they must supply a stable logical submission identity.
+
+Fiona's `V9` adds `fionas.inquiry_submissions`: a unique key, SHA-256 request fingerprint,
+unique resulting inquiry id, and creation time. `INSERT ... ON CONFLICT (idempotency_key)
+DO NOTHING` claims the key before business validation, waiting for any competing transaction.
+The resulting inquiry id is reserved immediately. Its non-null, deferred foreign key to
+`fionas.inquiries` allows claim-before-inquiry but prevents an incomplete claim from
+committing. No separate finalization transaction is needed. A rollback removes the claim
+and all inquiry/Estimate state; a waiter either observes the completed owner or claims the
+key after rollback. There is no duplicate-key exception recovery inside an aborted transaction.
+Keys have no expiration or cleanup in this release, and prior inquiries are not backfilled.
+
+The fingerprint is a versioned, deterministic binary encoding of canonical application
+values, hashed with SHA-256: normalized name/email/optional message, ZIP, event date/type,
+pricing presence, revision, guests/minimum flag, exact duration, and all category/offering
+identities in submitted order. Length-prefixed UTF-16 code units, presence bits, fixed-width integers
+and list lengths avoid ambiguous concatenation. Raw JSON, the key, generated ids,
+timestamps, current catalog state and derived prices are excluded. Property order,
+insignificant JSON whitespace, normalized text and omitted default false remain equivalent;
+category/offering order remains meaningful. Changing the encoding requires a deliberate
+compatibility decision because successful keys are durable.
+
+A committed same-key/same-intent replay returns the original `201 Created`, identical
+`id`/`createdAt` body and `Location`. Replay detection precedes public selection validation,
+catalog reads, authoritative pricing and materialization, including after catalog publication.
+Same key with changed canonical intent returns `409 IDEMPOTENCY_KEY_REUSED` in the runtime
+`ErrorResponse` envelope, with `Cache-Control: no-store`; no previous payload or fingerprint
+is exposed. `CATALOG_REVISION_STALE` remains distinct and applies to new, uncommitted
+commands. Failed attempts do not consume keys, so a corrected same-key retry may succeed.
+The guarantee is one key plus one semantic request yields one committed inquiry result;
+it does not promise application code literally executes once. Plain inquiries share these
+semantics and still skip the catalog and ledger. Different keys are distinct commands,
+even with identical payloads/email; the existing concurrent new-email conflict remains unchanged.
+
+The future SvelteKit implementation must create one non-secret submission token per logical
+form submission and preserve it across timeouts, lost responses, retries and double delivery.
+Two browser-to-SvelteKit requests for the same visible submission must resolve to the SAME
+key. Independently generating a server UUID inside each backend attempt is insufficient;
+the UI may carry a token with the rendered form or otherwise retain it across attempts.
+`IDEMPOTENCY_KEY_REUSED` indicates accidental reuse for changed intent. A stale failure
+requires refresh/review of an uncommitted command; afterward its rolled-back key can be
+reused, or the UI may deliberately choose a new one. No frontend changes are included here.
+
 Staff discover inquiries with `GET /inquiries`, newest first by creation time, ties broken
 by id. `limit` bounds a page (1–100, default 25; outside that range is `422`, not an
 integer `400`). When more inquiries follow, the page carries `nextCursor`; pass it back
@@ -268,7 +317,7 @@ Errors use commerce-runtime's contract, `{"code": "...", "message": "..."}`:
 `malformed_request` (400), `unauthenticated` (401), `forbidden` (403), `not_found` (404),
 `conflict` (409), `illegal_transition` (409), `validation_failed` (422),
 `invariant_violated` (422), `internal_failure` (500, never describing the cause).
-Public inquiry submission additionally uses `CATALOG_REVISION_STALE` (409) in that same
+Public inquiry submission additionally uses `CATALOG_REVISION_STALE` and `IDEMPOTENCY_KEY_REUSED` (409) in that same
 envelope, instructing the UI to fetch a fresh form and ask the customer to review it.
 Validation failures may also carry optional `violations`, each with a stable string `code`.
 Ordinary value-validation failures can omit that list. Clients use codes to identify
@@ -1142,6 +1191,8 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   backfill, assuming empty pre-release inquiry data. `V8` adds association `purpose`, with
   existing rows defaulting to `RELATED`, and a partial unique index permitting at most one
   `INITIAL_ESTIMATE` per inquiry. It adds no catalog/offering columns to financial tables.
+  `V9` adds durable `inquiry_submissions` with unique key/inquiry identity, stored fingerprint and
+  a deferred FK to Fiona's inquiry; existing inquiries are not assigned synthetic keys.
   Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   Offerings snapshot tables that hold Fiona's catalog and the financial ledger's snapshots,
@@ -1342,6 +1393,9 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: both writes roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; plain inquiries without catalog access; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
+| `InquiryRequestFingerprintSpec` | Every semantic scalar, optional presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
+| `InquiryIdempotencyRoutesSpec` | Full-handler priced/plain replay with exact receipts and unchanged rows; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |
+| `InquiryIdempotencySpec` | Forced overlapping PostgreSQL same/different requests for priced/plain commands, observed unique-key waits, either winner accepted; failed owner releases key to waiter; late rollback; incomplete claims rejected at commit; application-to-HTTP lost-response recovery and no replay pricing/catalog lookup |
 | `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff with historical revisions; plain inquiry without any catalog |
 | `InquiryFormRoutesSpec` | Explicit public questions and lifecycle, input constraints and submission bindings, runtime prices, incompatible configuration failures, and response-only local totals matching authoritative previews across catalog revisions |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |

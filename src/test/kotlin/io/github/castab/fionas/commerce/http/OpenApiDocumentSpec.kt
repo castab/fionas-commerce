@@ -565,11 +565,34 @@ class OpenApiDocumentSpec :
             create.text("description") shouldContain "current catalog revision observed"
             create.text("description") shouldContain "categories and active offerings exposed by GET /inquiry-form"
             create.text("responses", "409", "description") shouldContain "CATALOG_REVISION_STALE"
+            create.text("responses", "409", "description") shouldContain "IDEMPOTENCY_KEY_REUSED"
             create.text("responses", "409", "description") shouldContain "never automatically resubmit"
             create.text("responses", "409", "content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/ErrorResponse"
             create.text("responses", "409", "content", "application/json", "example", "code") shouldBe "CATALOG_REVISION_STALE"
             schema("InquiryPricingInputs").text("properties", "catalogRevision", "description") shouldContain "latest revision observed"
             operation("/inquiry-form", "get").text("description") shouldContain "private, max-age=60, must-revalidate"
+        }
+
+        test("documents the required bounded Idempotency-Key header and replay before catalog validation") {
+            val create = operation("/inquiries", "post")
+            val key = create.at("parameters").jsonArray.single { it.text("name") == "Idempotency-Key" }
+            key.text("in") shouldBe "header"
+            key.at("required").jsonPrimitive.content shouldBe "true"
+            key.text("schema", "type") shouldBe "string"
+            key.at("schema", "minLength").jsonPrimitive.int shouldBe 1
+            key.at("schema", "maxLength").jsonPrimitive.int shouldBe 128
+            key.text("schema", "pattern") shouldBe "^[A-Za-z0-9_-]{1,128}$"
+            key.text("description") shouldContain "SAME key"
+            create.text("description") shouldContain "without catalog access or pricing"
+            create.text("description") shouldContain "Failed attempts do not consume keys"
+            // Neither staff routes nor other public operations acquire this header.
+            operations.keys.filter { (path, method) -> path != "/inquiries" || method != "post" }.forEach { (path, method) ->
+                operation(path, method)
+                    .jsonObject["parameters"]
+                    ?.jsonArray
+                    .orEmpty()
+                    .none { it.text("name") == "Idempotency-Key" } shouldBe true
+            }
         }
 
         test("describes the public create response as a receipt of the new inquiry, naming no customer") {

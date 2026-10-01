@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.inquiry
 
+import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
@@ -31,12 +32,18 @@ import java.util.UUID
  *
  * The result is the recorded [Inquiry] alone. It never carries the customer's stored record,
  * so a caller who submits someone else's email learns nothing about that customer.
+ *
+ * The command key is claimed in this same transaction before any business validation.
+ * A committed matching command returns its existing Inquiry immediately; different intent
+ * conflicts. The deferred submission-to-inquiry FK prevents an incomplete claim from
+ * committing. Any later failure releases the key with every other write.
  */
 class CreateInquiry(
     private val transactor: Transactor,
     private val customers: CustomerRepository,
     private val inquiries: InquiryRepository,
     private val pricingInputs: InquiryPricingRepository,
+    private val submissions: InquirySubmissionRepository,
     private val pricing: PublicInquiryPricing,
     private val clock: Clock,
     private val materialize: MaterializeInquiryFinancialDocument,
@@ -52,18 +59,32 @@ class CreateInquiry(
         val zipCode: ZipCode,
         val eventDate: EventDate,
         val eventType: EventType,
+        val submissionKey: InquirySubmissionKey,
     )
 
     operator fun invoke(command: Command): Inquiry {
         // PostgreSQL stores microseconds; truncating keeps what is returned equal to what is stored.
         val now = clock.instant().truncatedTo(ChronoUnit.MICROS)
+        val fingerprint = command.fingerprint()
         return transactor.inTransaction { transaction ->
+            val inquiryId = newInquiryId()
+            if (!submissions.claim(transaction, command.submissionKey, fingerprint, inquiryId, now)) {
+                // A separate READ COMMITTED statement sees the committed owner after INSERT waited.
+                val existing = checkNotNull(submissions.find(transaction, command.submissionKey))
+                if (existing.fingerprint != fingerprint) {
+                    throw CommerceFailure.Conflict(
+                        "This key already represents a different successful inquiry submission",
+                        IdempotencyKeyReused(),
+                    )
+                }
+                return@inTransaction checkNotNull(inquiries.findById(transaction, existing.inquiryId))
+            }
             val lines = command.pricingInputs?.let { pricing.price(transaction, it).lineItems }
             val customer =
                 customers.findByEmail(transaction, command.email)
                     ?: Customer(newCustomerId(), command.name, command.email, now)
                         .also { customers.insert(transaction, it) }
-            val inquiry = Inquiry(newInquiryId(), customer.id, command.message, now, command.zipCode, command.eventDate, command.eventType)
+            val inquiry = Inquiry(inquiryId, customer.id, command.message, now, command.zipCode, command.eventDate, command.eventType)
             inquiries.insert(transaction, inquiry)
             command.pricingInputs?.let { pricingInputs.insert(transaction, inquiry.id, it) }
             lines?.let {

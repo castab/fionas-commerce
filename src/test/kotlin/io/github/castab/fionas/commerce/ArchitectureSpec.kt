@@ -14,8 +14,10 @@ import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
 import io.github.castab.fionas.commerce.inquiry.InquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
+import io.github.castab.fionas.commerce.inquiry.InquirySubmissionRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryPricingRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.CredentialRepository
@@ -105,6 +107,7 @@ class ArchitectureSpec :
                 CustomerRepository::class.java,
                 InquiryRepository::class.java,
                 InquiryPricingRepository::class.java,
+                InquirySubmissionRepository::class.java,
                 CredentialRepository::class.java,
                 InquiryFinancialDocumentRepository::class.java,
                 FinancialDocumentPricingRepository::class.java,
@@ -120,6 +123,7 @@ class ArchitectureSpec :
                 JdbiCustomerRepository::class.java,
                 JdbiInquiryRepository::class.java,
                 JdbiInquiryPricingRepository::class.java,
+                JdbiInquirySubmissionRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
                 JdbiFinancialDocumentPricingRepository::class.java,

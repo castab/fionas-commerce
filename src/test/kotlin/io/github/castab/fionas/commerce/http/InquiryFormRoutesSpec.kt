@@ -15,6 +15,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -453,6 +454,7 @@ class InquiryFormRoutesSpec :
                 fresh
                     .http(
                         Request(Method.POST, "/inquiries")
+                            .withSubmissionKey()
                             .withUiKey()
                             .header("Content-Type", "application/json")
                             .body(
@@ -496,6 +498,7 @@ class InquiryFormRoutesSpec :
             fun submit(value: InquiryPricingInputs) =
                 application.http(
                     Request(Method.POST, "/inquiries")
+                        .withSubmissionKey()
                         .withUiKey()
                         .header("Content-Type", "application/json")
                         .body(
@@ -526,6 +529,7 @@ class InquiryFormRoutesSpec :
             val plain =
                 application.http(
                     Request(Method.POST, "/inquiries")
+                        .withSubmissionKey()
                         .withUiKey()
                         .header("Content-Type", "application/json")
                         .body(

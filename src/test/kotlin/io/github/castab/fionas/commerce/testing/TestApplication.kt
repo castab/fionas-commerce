@@ -22,6 +22,7 @@ import org.http4k.core.Status
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.UUID
 
 /** A fixed test time with nanoseconds, which PostgreSQL cannot store. */
 val TEST_INSTANT: Instant = Instant.parse("2026-09-26T18:30:00.123456789Z")
@@ -138,3 +139,6 @@ const val TEST_ORIGIN = "https://fionas.test"
 const val TEST_UI_API_KEY = "deterministic-test-ui-key"
 
 fun Request.withUiKey(): Request = header("Authorization", "Bearer $TEST_UI_API_KEY")
+
+/** A new logical submission by default; replay tests supply and retain an explicit key. */
+fun Request.withSubmissionKey(key: String = UUID.randomUUID().toString()): Request = header("Idempotency-Key", key)

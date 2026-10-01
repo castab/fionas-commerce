@@ -102,6 +102,7 @@ class InquiryMaterializationSpec :
             ZipCode("01234"),
             EventDate.of("2026-12-05"),
             EventType.BIRTHDAY,
+            InquirySubmissionKey(UUID.randomUUID().toString()),
         )
 
         fun create(
@@ -117,6 +118,7 @@ class InquiryMaterializationSpec :
             customers,
             inquiries,
             requested,
+            JdbiInquirySubmissionRepository(),
             PublicInquiryPricing(price, latest),
             testClock,
             MaterializeInquiryFinancialDocument(application.context.financialLedger, ownerRepository, testClock) { documentId },
@@ -125,6 +127,7 @@ class InquiryMaterializationSpec :
         val tables =
             listOf(
                 "fionas.customers",
+                "fionas.inquiry_submissions",
                 "fionas.inquiries",
                 "fionas.inquiry_pricing",
                 "fionas.inquiry_pricing_categories",
@@ -186,6 +189,7 @@ class InquiryMaterializationSpec :
             val additions =
                 mapOf(
                     "fionas.customers" to 1,
+                    "fionas.inquiry_submissions" to 1,
                     "fionas.inquiries" to 1,
                     "fionas.inquiry_pricing" to 1,
                     "fionas.inquiry_pricing_categories" to 3,
@@ -237,7 +241,7 @@ class InquiryMaterializationSpec :
             val after = counts()
             tables.forEach {
                 after.getValue(it) shouldBe
-                    before.getValue(it) + if (it in listOf("fionas.customers", "fionas.inquiries")) 1 else 0
+                    before.getValue(it) + if (it in listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_submissions")) 1 else 0
             }
             application.transactor.inTransaction { transaction ->
                 associations.initialEstimateOf(transaction, inquiry.id).shouldBeNull()

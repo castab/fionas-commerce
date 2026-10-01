@@ -12,12 +12,14 @@ import io.github.castab.fionas.commerce.inquiry.CatalogRevisionStale
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.EventDate
 import io.github.castab.fionas.commerce.inquiry.EventType
+import io.github.castab.fionas.commerce.inquiry.IdempotencyKeyReused
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryListPosition
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.inquiry.InquiryPage
+import io.github.castab.fionas.commerce.inquiry.InquirySubmissionKey
 import io.github.castab.fionas.commerce.inquiry.InquirySummary
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ZipCode
@@ -37,6 +39,7 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import org.http4k.core.then
 import org.http4k.core.with
+import org.http4k.lens.Header
 import org.http4k.lens.Invalid
 import org.http4k.lens.LensFailure
 import org.http4k.lens.Path
@@ -231,6 +234,23 @@ data class InquiryListItem(
 private val createInquiryRequest = jsonBody(CreateInquiryRequest.serializer())
 private val inquiryConflictBody = jsonBody(ErrorResponse.serializer())
 internal const val CATALOG_REVISION_STALE = "CATALOG_REVISION_STALE"
+internal const val IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
+private val submissionKeyHeader =
+    Header.required(
+        "Idempotency-Key",
+        "Opaque submission identity, 1–128 ASCII letters, digits, underscores or hyphens (UUIDs are supported). " +
+            "Use the SAME key for every delivery/retry of one logical submission, including concurrent double delivery. " +
+            "Not a credential. A successful identical replay returns the original receipt before catalog validation; " +
+            "changed intent with that key fails with 409 IDEMPOTENCY_KEY_REUSED. Keys do not expire.",
+        mapOf(
+            "schema" to
+                mapOf(
+                    "minLength" to 1,
+                    "maxLength" to InquirySubmissionKey.MAX_LENGTH,
+                    "pattern" to InquirySubmissionKey.PATTERN,
+                ),
+        ),
+    )
 private val inquiryReceiptResponse = jsonBody(InquiryReceiptResponse.serializer())
 private val inquiryResponse = jsonBody(InquiryResponse.serializer())
 private val inquiryListResponse = jsonBody(InquiryListResponse.serializer())
@@ -341,6 +361,8 @@ fun createInquiryRoute(
 ): ContractRoute =
     "/inquiries" meta {
         operationId = "createInquiry"
+        headers += submissionKeyHeader
+        preFlightExtraction = PreFlightExtraction.None
         security = uiApiKeySecurity(uiApiKey)
         returningError(
             ErrorCategory.UNAUTHENTICATED,
@@ -349,7 +371,10 @@ fun createInquiryRoute(
         )
         summary = "Record an inquiry"
         description =
-            "Records a prospective customer's inquiry. Pricing inputs must name the current catalog revision observed " +
+            "Records a prospective customer's inquiry. Idempotency-Key is required: a successful same-key/same-intent " +
+            "replay returns the original 201 receipt and Location without catalog access or pricing, even after publication. " +
+            "A successful key reused for changed intent fails with 409 IDEMPOTENCY_KEY_REUSED. Failed attempts do not consume keys. " +
+            "For new submissions, pricing inputs must name the current catalog revision observed " +
             "during validation and use only categories and active offerings exposed by GET /inquiry-form. " +
             "A stale revision fails with 409 CATALOG_REVISION_STALE and records nothing; fetch a fresh form and ask " +
             "the customer to review updated selections/pricing before resubmission. With accepted pricing inputs, " +
@@ -365,7 +390,8 @@ fun createInquiryRoute(
         returning(Status.CREATED, inquiryReceiptResponse to exampleReceipt, "The recorded inquiry's receipt. `Location` holds its path.")
         returningError(
             ErrorCategory.MALFORMED_REQUEST,
-            "the body is not JSON, lacks a required name, email, ZIP, event date or type, " +
+            "Idempotency-Key is missing, repeated or invalid, or the body is not JSON, " +
+                "lacks a required name, email, ZIP, event date or type, " +
                 "has an unknown event type, or a field has the wrong type.",
             "Malformed request: body 'body'",
         )
@@ -390,10 +416,13 @@ fun createInquiryRoute(
                 ErrorResponse(CATALOG_REVISION_STALE, "The inquiry form changed; fetch the current form and review before resubmitting"),
             "`CATALOG_REVISION_STALE`: the submitted revision is older than the current revision observed during " +
                 "validation. Refresh GET /inquiry-form and ask the customer to review; never automatically resubmit. " +
+                "`IDEMPOTENCY_KEY_REUSED`: this key already belongs to a different successful inquiry command; use a new " +
+                "key for different intent. Both conflicts have no-store. An identical successful replay returns 201 instead. " +
                 "The same runtime envelope uses `conflict` if a concurrent request created the customer first; retry that request.",
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
     } bindContract Method.POST to { request: Request ->
+        val submissionKey = submissionKey(request)
         val body = createInquiryRequest(request)
         val command =
             validating {
@@ -404,6 +433,7 @@ fun createInquiryRoute(
                     zipCode = ZipCode.of(body.zipCode),
                     eventDate = EventDate.of(body.eventDate),
                     eventType = body.eventType.toDomain(),
+                    submissionKey = submissionKey,
                     pricingInputs =
                         body.pricingInputs?.let {
                             pricingInputs(
@@ -422,12 +452,27 @@ fun createInquiryRoute(
                 .header("Location", "/inquiries/${created.id.value}")
                 .with(inquiryReceiptResponse of InquiryReceiptResponse(created.id.value.toString(), created.createdAt.toString()))
         } catch (failure: CommerceFailure.Conflict) {
-            if (failure.cause !is CatalogRevisionStale) throw failure
+            val code =
+                when (failure.cause) {
+                    is CatalogRevisionStale -> CATALOG_REVISION_STALE
+                    is IdempotencyKeyReused -> IDEMPOTENCY_KEY_REUSED
+                    else -> throw failure
+                }
             Response(Status.CONFLICT)
-                .with(inquiryConflictBody of ErrorResponse(CATALOG_REVISION_STALE, failure.message!!))
+                .with(inquiryConflictBody of ErrorResponse(code, failure.message!!))
                 .header("Cache-Control", "no-store")
         }
     }
+
+private fun submissionKey(request: Request): InquirySubmissionKey {
+    val value = submissionKeyHeader(request)
+    try {
+        require(request.headerValues("Idempotency-Key").size == 1)
+        return InquirySubmissionKey(value)
+    } catch (failure: IllegalArgumentException) {
+        throw LensFailure(Invalid(submissionKeyHeader.meta), cause = failure)
+    }
+}
 
 /**
  * `GET /inquiries`: staff's inquiry inbox, newest first, a page at a time. Requires

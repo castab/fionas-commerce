@@ -14,6 +14,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -55,7 +56,13 @@ class InquiryRoutesSpec :
         afterSpec { application.close() }
 
         fun TestApplication.post(body: String) =
-            http(Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(body))
+            http(
+                Request(Method.POST, "/inquiries")
+                    .withSubmissionKey()
+                    .withUiKey()
+                    .header("Content-Type", "application/json")
+                    .body(body),
+            )
 
         fun post(body: String) = application.post(body)
 
@@ -74,6 +81,7 @@ class InquiryRoutesSpec :
         fun rows() =
             listOf(
                 "fionas.customers",
+                "fionas.inquiry_submissions",
                 "fionas.inquiries",
                 "fionas.inquiry_pricing",
                 "fionas.inquiry_pricing_selections",

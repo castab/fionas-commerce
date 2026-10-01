@@ -10,6 +10,7 @@ import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -33,6 +34,7 @@ class PublicInquirySubmissionSpec :
         val tables =
             listOf(
                 "fionas.customers",
+                "fionas.inquiry_submissions",
                 "fionas.inquiries",
                 "fionas.inquiry_pricing",
                 "fionas.inquiry_pricing_categories",
@@ -55,7 +57,7 @@ class PublicInquirySubmissionSpec :
 
         fun submit(inputs: String) =
             app.http(
-                Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(
+                Request(Method.POST, "/inquiries").withSubmissionKey().withUiKey().header("Content-Type", "application/json").body(
                     """{"name":"Jane Doe","email":"public-${UUID.randomUUID()}@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$inputs}""",
                 ),
             )
@@ -218,7 +220,10 @@ class PublicInquirySubmissionSpec :
         test("plain inquiry works even without a catalog and creates no pricing, financial document or association") {
             TestApplication.create().use { empty ->
                 empty.createInquiry()
-                tables.forEach { empty.database.count(it) shouldBe if (it in listOf("fionas.customers", "fionas.inquiries")) 1 else 0 }
+                tables.forEach {
+                    empty.database.count(it) shouldBe
+                        if (it in listOf("fionas.customers", "fionas.inquiries", "fionas.inquiry_submissions")) 1 else 0
+                }
             }
         }
     })

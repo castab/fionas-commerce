@@ -59,6 +59,7 @@ class InquiryOperationsSpec :
             customers,
             inquiryRepository,
             pricingRepository,
+            JdbiInquirySubmissionRepository(),
             PublicInquiryPricing(pricing(), application.context.offeringsSnapshotRepository::retrieveLatestVersion),
             testClock,
             MaterializeInquiryFinancialDocument(application.context.financialLedger, JdbiInquiryFinancialDocumentRepository(), testClock),
@@ -102,6 +103,7 @@ class InquiryOperationsSpec :
             ZipCode("92626"),
             EventDate.of("2026-12-05"),
             EventType.BIRTHDAY,
+            InquirySubmissionKey(UUID.randomUUID().toString()),
         )
 
         fun rows() =

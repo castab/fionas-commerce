@@ -20,6 +20,7 @@ import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.perGuest
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.github.castab.fionas.commerce.testing.withUiKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -132,7 +133,7 @@ class FinancialDocumentRoutesSpec :
                         ).withUiKey().header("Content-Type", "application/json").body(invalidInputs),
                     ),
                     application.http(
-                        Request(Method.POST, "/inquiries").withUiKey().header("Content-Type", "application/json").body(
+                        Request(Method.POST, "/inquiries").withSubmissionKey().withUiKey().header("Content-Type", "application/json").body(
                             """{"name":"Rejected","email":"rejected@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$invalidInputs}""",
                         ),
                     ),
