@@ -142,6 +142,15 @@ class GetInquiryFormSpec :
             fields.single { it.key == "offering:crunch" }.label shouldBe "Choose your toppings"
         }
 
+        test("the duration question asks in hours with fraction symbols and still submits minutes") {
+            val snapshot = catalog(OfferingPrice.PerDuration(money("3.00"), Duration.ofHours(1)))
+            val field = GetInquiryForm({ snapshot })().sections.flatMap { it.fields }.single { it.key == "durationMinutes" }
+            field.label shouldBe "How long are we scoopin'?"
+            field.description shouldBe null
+            (field.input as InquiryFormInput.IntegerChoice).options.map { it.value to it.label } shouldContainExactly
+                listOf(90 to "1½ hours", 120 to "2 hours", 150 to "2½ hours", 180 to "3 hours")
+        }
+
         listOf(
             "UNSUPPORTED_CURRENCY" to OfferingPrice.Fixed(money("1.00", "EUR")),
             "UNSUPPORTED_QUANTITY_DIMENSION" to OfferingPrice.PerQuantity(money("1.00"), QuantityDimension("vehicle")),

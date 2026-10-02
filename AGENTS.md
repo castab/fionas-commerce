@@ -231,7 +231,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
   snapshot. HTTP reuses the runtime's `dto()`, `OfferingDto`, and `OfferingPriceDto`;
   never restate offering identity, price forms, or selection validation. Allowed durations
   come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
-- The response exposes `definitionVersion` (7 for the current code-owned definition) and
+- The response exposes `definitionVersion` (9 for the current code-owned definition) and
   `catalogId`/`catalogRevision`. Clients submit the latter revision as
   `pricingInputs.catalogRevision`; inquiry submission requires it still to be current,
   and exact-revision backend pricing remains authoritative.

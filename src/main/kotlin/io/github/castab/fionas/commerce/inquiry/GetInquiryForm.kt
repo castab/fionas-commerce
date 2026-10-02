@@ -18,6 +18,24 @@ class GetInquiryForm(
     operator fun invoke(): InquiryForm = inquiryForm(getCatalog(FIONA_OFFERINGS_CATALOG_ID), policy)
 }
 
+/** Hours with a fraction symbol (90 minutes is "1½ hours"); other remainders fall back to minutes. */
+private fun durationLabel(minutes: Int): String {
+    val hours = minutes / 60
+    val fraction =
+        when (minutes % 60) {
+            0 -> ""
+            15 -> "¼"
+            30 -> "½"
+            45 -> "¾"
+            else -> return "$minutes minutes"
+        }
+    return when {
+        hours == 0 -> "$fraction hour"
+        hours == 1 && fraction.isEmpty() -> "1 hour"
+        else -> "$hours$fraction hours"
+    }
+}
+
 /** Code-owned questions, with catalog-owned identities, option text, prices, order, and cardinality. */
 internal fun inquiryForm(
     snapshot: OfferingsSnapshot,
@@ -108,14 +126,14 @@ internal fun inquiryForm(
                     ),
                     InquiryFormField(
                         "durationMinutes",
-                        "How long would you like service?",
-                        "One service duration, in minutes.",
+                        "How long are we scoopin'?",
+                        null,
                         "/pricingInputs/durationMinutes",
                         true,
                         InquiryFormInput.IntegerChoice(
                             policy.allowedDurations.sorted().map {
                                 val minutes = Math.toIntExact(it.toMinutes())
-                                InquiryIntegerOption(minutes, "$minutes minutes")
+                                InquiryIntegerOption(minutes, durationLabel(minutes))
                             },
                         ),
                         InquiryFormControl.SELECT,
@@ -130,8 +148,8 @@ internal fun inquiryForm(
                 listOf(
                     InquiryFormField(
                         "message",
-                        "Tell us about your event",
-                        "Share the event location or anything else we should know.",
+                        "Other notes & questions",
+                        "Anything the form can't capture: off-menu requests, special accommodations, or questions for us.",
                         "/message",
                         false,
                         InquiryFormInput.Text(0, InquiryMessage.MAX_LENGTH),

@@ -361,7 +361,7 @@ failures and present `message` as diagnostic text; they never parse it for codes
 
 `GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
 resolved against one current Offerings snapshot. The response includes `definitionVersion`
-(currently 7), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
+(currently 9), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
 advisory `pricingPreview` facts.
 Definition version identifies the code-owned questions and bindings; catalog edits change
 the catalog revision independently. Sections are **Contact information**, **Event details**, **Build your

@@ -301,7 +301,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
     // Reuse the runtime's conversion, including every price form, without re-modeling its DTOs.
     val categories = catalog.dto().categories.associateBy { it.key }
     return InquiryFormResponse(
-        definitionVersion = 7,
+        definitionVersion = 9,
         catalogId = catalog.catalogId.value.toString(),
         catalogRevision = catalog.revision.number,
         sections =
