@@ -609,6 +609,13 @@ Also:
 
 ## Releases
 
+CI verifies source; a release promotes source that is already verified. `ci.yml` runs on
+`pull_request` to `main` only: no run for a feature-branch push by itself, one run per pull request
+update, and none after the merge into `main`. `main` is expected to be protected (changes arrive
+through pull requests whose required CI check passed); the workflows cannot enforce this and must not
+try to configure it. Never re-add a `push` trigger to `ci.yml`, and never give a pull request
+workflow Docker Hub credentials.
+
 A release is a pushed Git tag `vMAJOR.MINOR.PATCH` (no prerelease or build suffix), handled by
 `.github/workflows/release.yml`, separate from `ci.yml`. The application is released as a Docker
 image and an OpenAPI document; it is never published as a Maven artifact or package, and the fat jar
@@ -619,10 +626,12 @@ is not a release asset.
   `info.version` through the existing `generateOpenApi`), the Dockerfile's `APP_VERSION` argument,
   the image tag and labels, and the release assets. Never infer it from `gradle.properties`, a
   branch, a commit, the date, or Docker metadata, and never add a second version source.
-- **Verify, then publish.** The tag's commit independently passes `ktlintCheck`, `test`, and
-  `build` at the release version, and the workflow asserts the OpenAPI and jar versions, the image's
-  labels and jar version, and that the image holds no package credentials, before Docker Hub login.
-  Nothing is pushed before that gate passes.
+- **Promote, never re-verify.** The release runs no `ktlintCheck`, `test`, or verification build,
+  and never invokes `ci.yml`. It proves only that the tagged commit is reachable from `origin/main`
+  (full-history checkout, `git merge-base --is-ancestor`), that the freshly generated OpenAPI
+  document has `info.version == VERSION`, and that the built image's labels and jar report `VERSION`
+  and hold no package credentials, all before Docker Hub login. Nothing is pushed before that.
+  Compiling to produce the OpenAPI document and the image is artifact production, not verification.
 - **Destinations are configuration**: variable `DOCKERHUB_IMAGE`, secrets `DOCKERHUB_USERNAME` and
   `DOCKERHUB_TOKEN`, and optionally `PACKAGES_READ_TOKEN`. No namespace is written into source.
 - **Published**: `${DOCKERHUB_IMAGE}:<version>` only (no `latest` or moving aliases without a

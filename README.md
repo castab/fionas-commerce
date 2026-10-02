@@ -1208,10 +1208,11 @@ so changing an endpoint changes its documentation in the same place.
   cookie-authenticated methods.
 - **`./gradlew generateOpenApi`** writes the same document, pretty-printed, to
   `build/openapi/fionas-commerce-openapi.json`, without a database, Docker, a server, or
-  network access. `./gradlew build` runs it, and CI keeps the file as the
-  `fionas-commerce-openapi` workflow artifact of every successful build, so other
-  applications can use the contract without a deployed instance. Every release also attaches
-the document, under a versioned name, to its GitHub Release (see [Releasing](#releasing)).
+  network access. `./gradlew build` runs it, and pull request CI keeps the file as the
+  ephemeral `fionas-commerce-openapi` workflow artifact of every successful run, for reviewing
+  a change's contract. The permanent, versioned contract other applications should use without
+  a deployed instance is the asset every release attaches to its GitHub Release (see
+  [Releasing](#releasing)).
 
 The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
@@ -1583,7 +1584,7 @@ the jar, so the token is not in the final image (a release verifies this).
 docker run --rm -p 8080:8080 -e DATABASE_JDBC_URL=... -e DATABASE_USERNAME=... -e DATABASE_PASSWORD=... fionas-commerce
 ```
 
-The image build runs `shadowJar` only; lint and tests stay in CI.
+The image build runs `shadowJar` only; lint and tests belong to pull request CI.
 
 ### Deploying on Railway
 
@@ -1614,11 +1615,31 @@ tested against PostgreSQL 18. It applies its migrations on startup
 
 ## Releasing
 
-A release is a Git tag. Pushing `vMAJOR.MINOR.PATCH` runs
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which verifies that exact commit
-and publishes a Docker image and the OpenAPI document. `ci.yml` is unchanged: it keeps verifying
-`main` and pull requests and uploading the `fionas-commerce-openapi` workflow artifact.
-`fionas-commerce` is an application: no Maven artifact or package is published.
+CI verifies source; a release promotes source that is already verified.
+
+| | Pull request CI ([`ci.yml`](.github/workflows/ci.yml)) | Tag release ([`release.yml`](.github/workflows/release.yml)) |
+|---|---|---|
+| Trigger | `pull_request` to `main` | push of a tag `vMAJOR.MINOR.PATCH` |
+| Question | Is this change safe and consistent enough to merge? | Publish this commit of `main` as version `X.Y.Z` |
+| Does | `ktlintCheck`, `test`, `build` (which generates the OpenAPI document and runs its contract tests) | validates the tag, confirms the commit is in `main`, generates the versioned OpenAPI document, builds and pushes the Docker image, creates the GitHub Release |
+| Does not | publish anything; it has no Docker Hub credentials | lint or test again |
+
+A push to a feature branch runs nothing until it has a pull request; each push to that pull request
+runs CI once (the `pull_request` event only, never an additional `push` run); merging into `main` runs
+no second verification. `fionas-commerce` is an application: no Maven artifact or package is
+published.
+
+### Branch protection
+
+This model rests on `main` being protected; the workflows cannot enforce it, and no workflow
+configures it. Configure the repository ruleset or branch protection for `main` to:
+
+- require a pull request before merging;
+- require the `Build and test (Java 25)` status check (the CI job) to pass;
+- prevent ordinary direct pushes to `main`.
+
+Without that, a commit can reach `main` and then a release without ever being verified. The
+release workflow's only protection against that is the check that the tagged commit is in `main`.
 
 ### Repository configuration
 
@@ -1631,8 +1652,8 @@ Settings → Secrets and variables → Actions:
 | Secret | `DOCKERHUB_TOKEN` | A Docker Hub access token with read and write access to that repository (not the account password) |
 | Secret (optional) | `PACKAGES_READ_TOKEN` | As for CI: a token with `read:packages`, used instead of the workflow's `GITHUB_TOKEN` when the commerce packages have not granted this repository read access |
 
-The workflow fails before running the verification, and long before anything is published, if
-`DOCKERHUB_IMAGE`, `DOCKERHUB_USERNAME`, or `DOCKERHUB_TOKEN` is missing. No Docker Hub namespace is
+Only the release workflow uses the Docker Hub secrets; pull request CI never receives them. The
+release workflow fails early, before building anything, if `DOCKERHUB_IMAGE`, `DOCKERHUB_USERNAME`, or `DOCKERHUB_TOKEN` is missing. No Docker Hub namespace is
 written into the repository. Creating the GitHub Release uses the workflow's own `GITHUB_TOKEN`
 (`contents: write`).
 
@@ -1653,11 +1674,11 @@ For `v0.0.21` the workflow, in order:
 1. Requires the tag to be exactly `vMAJOR.MINOR.PATCH` (numeric, no leading zeros): `v0.0.21`,
    `v1.0.0`, and `v12.4.7` are accepted; `release-0.0.21`, `v0.0`, `v0.0.21-beta.1`, and `foo` are
    rejected. It takes the tag's version, `0.0.21`, once, and uses only that for everything below.
-2. Runs the complete gate on the tagged commit with Java 25: `ktlintCheck`, `test` (against real
-   PostgreSQL, as in CI, with `--no-build-cache`), and `build`, each with `-Pversion=0.0.21`. A green
-   CI run is not assumed.
-3. Checks that the generated `build/openapi/fionas-commerce-openapi.json` has `info.version` `0.0.21`
-   and that the jar's `fionas-commerce.properties` reports `0.0.21`.
+2. Checks out the tagged commit with its full history and requires it to be reachable from
+   `origin/main` (`git merge-base --is-ancestor`). A tag on a commit that never landed in `main`
+   stops the release before anything is built or published.
+3. Generates the OpenAPI document with `./gradlew generateOpenApi -Pversion=0.0.21` and requires its
+   `info.version` to be `0.0.21`.
 4. Builds the Docker image with `APP_VERSION=0.0.21`, loads it locally, and checks its OCI labels, that
    the jar inside reports `0.0.21`, and that the package token appears in neither its configuration,
    its history, nor its layers.
@@ -1705,11 +1726,12 @@ Image details:
 
 ### Failure and reruns
 
-Any failing step (an invalid tag, lint, tests, the build, a version mismatch, the Docker build or
-push, or the GitHub Release) fails the run, and every check before the Docker Hub login fails
-before anything is published. Runs for one tag are serialized and never cancelled mid-publication.
+Any failing step (an invalid tag, a tagged commit outside `main`, a version mismatch, the Docker
+build or push, or the GitHub Release) fails the run, and every check before the Docker Hub login
+fails before anything is published. The release runs no lint or tests: it relies on the pull
+request CI that `main` requires. Runs for one tag are serialized and never cancelled mid-publication.
 
-A rerun of the same tag is safe. Verification repeats; pushing `0.0.21` again from the same commit
+A rerun of the same tag is safe. The ancestry and artifact checks repeat; pushing `0.0.21` again from the same commit
 replaces it with identical content; the GitHub Release is created if it does not exist, and
 otherwise only its two assets are replaced. The tag is never created, moved, or rewritten by the
 workflow. So if the image was pushed but the GitHub Release step failed (for example, a

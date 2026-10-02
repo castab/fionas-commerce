@@ -1,24 +1,28 @@
 name: CI
 
-# Pull requests are verified through the pull_request event; push runs only for
-# main, so a push to a branch with an open pull request does not trigger CI twice.
+# This workflow verifies source, once, on the pull request that proposes a change to main.
+# - A push to a feature branch does not run it; opening the pull request does, and each
+#   further push to the branch re-runs it through the pull_request "synchronize" event, once.
+# - A merge into main does not run it again. main is expected to be protected (changes arrive
+#   only through pull requests whose required checks passed; see "Releasing" in README.md), so
+#   what lands in main has already been verified.
+# - A release (release.yml, on a version tag) promotes such a commit and does not re-verify it.
 on:
-  push:
+  pull_request:
     branches:
       - main
-  pull_request:
 
 # CI reads the repository and, to resolve io.github.castab:commerce-runtime and
 # commerce-domain, GitHub Packages. It never publishes: fionas-commerce is an
-# application, not a library.
+# application, not a library. Docker Hub credentials are used only by release.yml and are
+# never referenced here.
 permissions:
   contents: read
   packages: read
 
-# A newer commit to the same pull request supersedes its in-progress run. Each run
-# on main gets its own group, so every merged commit is verified to completion.
+# A newer commit to the same pull request supersedes its in-progress run.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -72,8 +76,9 @@ jobs:
         run: ./gradlew build --no-build-cache
 
       # The Fiona API's OpenAPI document, rendered from the same contract the application
-      # serves at /openapi.json, so other applications and tooling can use the contract
-      # without a deployed instance. Retained only when the build succeeded.
+      # serves at /openapi.json, for reviewing the pull request's contract. Retained only when
+      # the build succeeded. It is ephemeral CI output at the development version; the permanent,
+      # versioned contract is the GitHub Release asset that release.yml publishes.
       - name: Upload OpenAPI document
         uses: actions/upload-artifact@v7
         with:
