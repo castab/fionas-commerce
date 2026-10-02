@@ -3,14 +3,13 @@
 # fionas-commerce container image. Built for Railway, but nothing here is Railway-specific:
 # any container platform that supplies the DATABASE_* variables and PORT can run it.
 #
-# Build (locally), a development image whose application version is 0.0.0-SNAPSHOT:
+# Build (locally):
 #   docker build --build-arg GITHUB_ACTOR=<user> --build-arg GITHUB_TOKEN=<read:packages token> -t fionas-commerce .
-# Build the way a release does, with an explicit application version (the Gradle project
-# version, which is also the OpenAPI document's info.version):
-#   docker build --build-arg APP_VERSION=0.0.21 --build-arg GITHUB_ACTOR=<user> --build-arg GITHUB_TOKEN=<read:packages token> -t fionas-commerce:0.0.21 .
+# The image carries no version: the same build serves every release tag, which is added to the
+# published image afterwards. A deployment that wants /openapi.json to report a version sets the
+# optional APP_VERSION environment variable on the running container.
 # On Railway, set GITHUB_ACTOR and GITHUB_TOKEN as service variables; Railway passes a
-# variable to a Dockerfile build only because it is declared with ARG below. APP_VERSION
-# is optional there and defaults to the development version.
+# variable to a Dockerfile build only because it is declared with ARG below.
 
 # ---------------------------------------------------------------------------
 # Build stage: Java 25 is a hard requirement (build.gradle.kts pins the toolchain and
@@ -37,17 +36,9 @@ COPY src src
 ARG GITHUB_ACTOR
 ARG GITHUB_TOKEN
 
-# The application version the jar reports (fionas-commerce.properties, hence fionaVersion()
-# and the OpenAPI document's info.version). It overrides the development default in
-# gradle.properties exactly as a release's -Pversion does; a release supplies the version of
-# its Git tag. Declared last so changing it rebuilds only the jar.
-ARG APP_VERSION=0.0.0-SNAPSHOT
-
 # Only the executable jar: not `build`, which also runs the ktlint check and the tests
 # (those need Docker and belong in CI). --no-daemon because the container exits after this.
-# The properties check fails the build, rather than ship an image that reports another
-# version than the one it was built for.
-RUN sh gradlew shadowJar --no-daemon --no-build-cache --console=plain "-Pversion=${APP_VERSION}"     && jar --extract --file build/libs/fionas-commerce-all.jar fionas-commerce.properties     && grep -qxF "version=${APP_VERSION}" fionas-commerce.properties
+RUN sh gradlew shadowJar --no-daemon --no-build-cache --console=plain
 
 # ---------------------------------------------------------------------------
 # Runtime stage: a JRE on a glibc (Debian/Ubuntu) base. Not Alpine: argon2-jvm loads a
@@ -65,7 +56,7 @@ USER fionas
 
 # Configuration is entirely environmental (see application.conf and .env.example):
 # DATABASE_JDBC_URL, DATABASE_USERNAME and DATABASE_PASSWORD are required; PORT is read
-# from the platform (Railway sets it) and defaults to 8080.
+# from the platform (Railway sets it) and defaults to 8080; APP_VERSION is optional.
 EXPOSE 8080
 
 # Size the heap from the container's memory limit, and exit on OutOfMemoryError so the

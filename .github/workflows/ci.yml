@@ -5,7 +5,8 @@ name: CI
 #   further push to the branch re-runs it through the pull_request "synchronize" event, once.
 # - A merge into main does not run it again. main is expected to be protected (changes arrive
 #   only through pull requests whose required checks passed; see "Releasing" in README.md), so
-#   what lands in main has already been verified.
+#   what lands in main has already been verified. (image.yml does build the merged commit's
+#   image, but that is artifact production, not verification.)
 # - A release (release.yml, on a version tag) promotes such a commit and does not re-verify it.
 on:
   pull_request:
@@ -14,8 +15,9 @@ on:
 
 # CI reads the repository and, to resolve io.github.castab:commerce-runtime and
 # commerce-domain, GitHub Packages. It never publishes: fionas-commerce is an
-# application, not a library. Docker Hub credentials are used only by release.yml and are
-# never referenced here.
+# application, not a library. The Docker Hub credentials are referenced only by the `image` job
+# below, which runs after `build` has finished, so no step that executes the pull request's tests
+# can see them.
 permissions:
   contents: read
   packages: read
@@ -88,18 +90,40 @@ jobs:
 
       # Dry run of the release's OpenAPI step: the same script release.yml runs, with a
       # throwaway version, writing to the runner's temp directory and publishing nothing. It
-      # regenerates the document with a -Pversion override, checks that info.version carries it,
+      # regenerates the document with an APP_VERSION override, checks that info.version carries it,
       # and produces the versioned file and checksum, so a failure of the release path appears
       # here, on the pull request, before a tag exists. Placed after the upload above because it
       # replaces build/openapi/fionas-commerce-openapi.json with the throwaway-version document.
       - name: Dry run the OpenAPI release assets
         run: bash scripts/package-openapi.sh 0.0.0-dry-run "$RUNNER_TEMP/openapi-dry-run"
 
-      # Dry run of the release's image build: the Dockerfile exactly as release.yml builds it, with
-      # a throwaway APP_VERSION, built and discarded (no push, no tag, no Docker Hub login). It
-      # fails here, on the pull request, if the Dockerfile, its shadowJar step, or the check that
-      # the jar reports APP_VERSION breaks. The credentials are passed by name, so their values
-      # come from the job environment and never appear on the command line; they exist only in
-      # the Dockerfile's build stage.
-      - name: Dry run the release image build
-        run: docker build --build-arg APP_VERSION=0.0.0-dry-run --build-arg GITHUB_ACTOR --build-arg GITHUB_TOKEN --tag fionas-commerce:dry-run .
+  # Builds the pull request's image and, for a pull request from this repository, publishes it as
+  # <image>:sha-<head commit>, so the change can be pulled and tried before it merges. Runs only
+  # after `build` passed, and in its own job: the Docker Hub secrets are read here and nowhere near
+  # the steps that run the tests. A pull request from a fork (or Dependabot) gets no secrets, so it
+  # builds and checks the image without pushing it, and so does any run while DOCKERHUB_IMAGE is
+  # unset. The image is built from the pull request's head commit, which is what its tag names;
+  # `build` verified the merge of that commit into main.
+  image:
+    name: Build and publish image
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the pull request's head commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Build the image, and publish it when this run may
+        uses: ./.github/actions/build-image
+        with:
+          sha: ${{ github.event.pull_request.head.sha }}
+          push: ${{ vars.DOCKERHUB_IMAGE != '' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]' }}
+          image: ${{ vars.DOCKERHUB_IMAGE }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          package-actor: ${{ github.actor }}
+          package-token: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}

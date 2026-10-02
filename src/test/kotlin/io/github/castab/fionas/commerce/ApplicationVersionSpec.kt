@@ -8,28 +8,32 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * The application version is the Gradle project version and nothing else: a release build
- * (`-Pversion=<version>`) reaches the jar's `fionas-commerce.properties`, `fionaVersion()`, and
- * the OpenAPI document's `info.version`. The expected value comes from the build itself, so the
- * spec holds for the development default and for any release version it is run with.
+ * The build embeds no version: the version the application reports as the OpenAPI document's
+ * `info.version` is the optional `APP_VERSION` environment variable, else a fixed placeholder,
+ * so one image serves every release tag.
  */
 class ApplicationVersionSpec :
     FunSpec({
-        val buildVersion =
-            requireNotNull(System.getProperty("fionas.build.version")) { "The build passes the project version to the tests" }
-
-        test("the application reports the version the build was given") {
-            fionaVersion() shouldBe buildVersion
+        test("without APP_VERSION the application reports the placeholder") {
+            fionaVersion(emptyMap()) shouldBe UNVERSIONED
         }
 
-        test("the generated OpenAPI document carries that version") {
+        test("a blank APP_VERSION is ignored") {
+            fionaVersion(mapOf("APP_VERSION" to "  ")) shouldBe UNVERSIONED
+        }
+
+        test("APP_VERSION is reported, trimmed") {
+            fionaVersion(mapOf("APP_VERSION" to " 0.0.21 ")) shouldBe "0.0.21"
+        }
+
+        test("the OpenAPI document carries the version it is rendered for") {
             val info =
                 Json
-                    .parseToJsonElement(fionaOpenApiDocument())
+                    .parseToJsonElement(fionaOpenApiDocument("0.0.21"))
                     .jsonObject
                     .getValue("info")
                     .jsonObject
 
-            info.getValue("version").jsonPrimitive.content shouldBe buildVersion
+            info.getValue("version").jsonPrimitive.content shouldBe "0.0.21"
         }
     })

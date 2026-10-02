@@ -15,10 +15,9 @@ plugins {
 
 group = "io.github.castab"
 
-// The application's version is the Gradle project version: `version` in gradle.properties,
-// a development default, overridden by a release build with -Pversion=<version>. The build
-// writes it into fionas-commerce.properties, where the application (and the OpenAPI
-// document's info.version) reads it.
+// The build carries no application version, so one build (and one Docker image) serves every
+// release. The version the application reports as the OpenAPI document's info.version is the
+// optional APP_VERSION environment variable (fionaVersion()).
 
 // ---------------------------------------------------------------------------
 // Java 25 is a hard requirement, as it is for commerce-runtime.
@@ -82,12 +81,6 @@ application {
     mainClass = "io.github.castab.fionas.commerce.MainKt"
 }
 
-tasks.processResources {
-    val version = project.version.toString()
-    inputs.property("version", version)
-    filesMatching("fionas-commerce.properties") { expand("version" to version) }
-}
-
 // The deployable artifact: one executable jar holding the application, its dependencies,
 // application.conf, logback.xml, and the Fiona migrations. build/libs/fionas-commerce-all.jar
 tasks.shadowJar {
@@ -129,6 +122,9 @@ val generateOpenApi by tasks.registering(JavaExec::class) {
     mainClass = "io.github.castab.fionas.commerce.openapi.GenerateOpenApiKt"
     javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(requiredJavaVersion) }
     outputs.file(document)
+    // The document's info.version is APP_VERSION when set (fionaVersion()); the generator inherits
+    // it from this build's environment, so it is an input: a different value regenerates the file.
+    inputs.property("appVersion", providers.environmentVariable("APP_VERSION").orElse(""))
     argumentProviders.add(CommandLineArgumentProvider { listOf(document.get().asFile.absolutePath) })
 }
 
@@ -293,7 +289,4 @@ val postgresTestDatabase =
 tasks.test {
     usesService(postgresTestDatabase)
     jvmArgumentProviders.add(TestDatabaseArguments(postgresTestDatabase))
-    // The Gradle project version, so ApplicationVersionSpec can check that what the application
-    // reports is the version this build was given (-Pversion=<version> in a release).
-    systemProperty("fionas.build.version", project.version.toString())
 }
