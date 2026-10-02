@@ -869,7 +869,7 @@ class OpenApiDocumentSpec :
 
         test("inquiry form v7 reuses required runtime state enums and documents public visibility and structural rejections") {
             val form = operation("/inquiry-form", "get")
-            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 7
+            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 9
             form
                 .at("responses", "200", "content", "application/json", "example", "sections")
                 .jsonArray
