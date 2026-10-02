@@ -68,9 +68,21 @@ USER fionas
 # from the platform (Railway sets it) and defaults to 8080.
 EXPOSE 8080
 
-# Size the heap from the container's memory limit, and exit on OutOfMemoryError so the
-# platform restarts the process rather than leaving a half-alive JVM serving. Exec form,
-# so the JVM is PID 1 and receives SIGTERM, which triggers the application's shutdown hook.
+# Memory is billed by usage, so the JVM is tuned to hand memory back when idle rather than
+# keep what a burst grew it to:
+#   - G1PeriodicGCInterval: after 60s with no GC, G1 runs a collection that uncommits free
+#     heap. ExplicitGCInvokesConcurrent keeps that collection concurrent instead of a full
+#     stop-the-world GC. Min/MaxHeapFreeRatio let G1 shrink the heap more aggressively.
+#   - TrimNativeHeapInterval: every 60s returns freed native memory to the OS. Each Argon2
+#     hash allocates ~64 MB outside the heap, which glibc otherwise keeps.
+#   - MALLOC_ARENA_MAX: stops glibc creating a malloc arena per thread, each holding memory.
+#   - UseCompactObjectHeaders: smaller object headers, a permanent saving.
+# G1 is selected explicitly: the JVM would otherwise pick Serial GC on a 1-CPU container,
+# and Serial never shrinks the heap while idle. Size the heap from the container's memory
+# limit, and exit on OutOfMemoryError so the platform restarts the process rather than
+# leaving a half-alive JVM serving. Exec form, so the JVM is PID 1 and receives SIGTERM,
+# which triggers the application's shutdown hook.
 # --enable-native-access is required by the JNA-loaded Argon2 library; Java 25 warns without
 # it and a future release will block it.
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-XX:+ExitOnOutOfMemoryError", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/fionas-commerce.jar"]
+ENV MALLOC_ARENA_MAX=2
+ENTRYPOINT ["java", "-XX:+UseG1GC", "-XX:MaxRAMPercentage=75", "-XX:G1PeriodicGCInterval=60000", "-XX:+ExplicitGCInvokesConcurrent", "-XX:MinHeapFreeRatio=10", "-XX:MaxHeapFreeRatio=30", "-XX:TrimNativeHeapInterval=60000", "-XX:+UseCompactObjectHeaders", "-XX:+ExitOnOutOfMemoryError", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/fionas-commerce.jar"]
