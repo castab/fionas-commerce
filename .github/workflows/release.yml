@@ -1,0 +1,275 @@
+name: Release
+
+# The Git tag is the release command: pushing vMAJOR.MINOR.PATCH promotes an existing commit
+# of main into release artifacts. It builds the Docker image and the OpenAPI document at that
+# version, publishes the image to Docker Hub, and creates the GitHub Release carrying the
+# OpenAPI document. See "Releasing" in README.md.
+#
+# This is delivery, not verification. Source is verified once, by ci.yml, on the pull request
+# that brought the commit into main (main is expected to require that check). A release
+# therefore runs no lint and no tests; it only proves the tag names a commit that is in main
+# and that the artifacts it produces carry the release version. fionas-commerce is an
+# application: nothing here publishes a Maven artifact or package.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# contents: write creates the GitHub Release and uploads its assets. packages: read resolves
+# io.github.castab:commerce-runtime and commerce-domain from GitHub Packages. Docker Hub is
+# reached with its own secrets, not with a GitHub permission.
+permissions:
+  contents: write
+  packages: read
+
+# One run per tag. A second run for the same tag (a rerun, or a pushed duplicate) waits for
+# the first rather than cancelling it: a publication already in progress is never abandoned.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # As in ci.yml: GitHub Packages requires a token with read:packages even for public
+    # packages. This is the same token that is handed to the Docker build below, which keeps it
+    # in its build stage only. Only steps that need the workflow's own token (the GitHub
+    # Release) set GH_TOKEN explicitly, because PACKAGES_READ_TOKEN may not be allowed to
+    # write releases.
+    env:
+      GITHUB_ACTOR: ${{ github.actor }}
+      GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      # The version is derived here, once, from the tag alone. Every later step uses
+      # $VERSION: the Gradle -Pversion (and with it the jar, fionaVersion() and the OpenAPI
+      # info.version), the Docker APP_VERSION build argument and tag, and the release assets.
+      # Nothing reads gradle.properties, a branch, a commit message, or the date.
+      - name: Validate the tag and derive the version
+        env:
+          TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::The release workflow runs only for a pushed tag, not a $REF_TYPE."
+            exit 1
+          fi
+          # Exactly vMAJOR.MINOR.PATCH: numeric components without leading zeros, and no
+          # prerelease or build suffix (this repository has no convention for either).
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Tag '$TAG' is not a release version. Release tags are exactly vMAJOR.MINOR.PATCH, for example v0.0.21."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Releasing $TAG as version $VERSION"
+
+      # Fail before any build, and before anything is published, when the release destination
+      # is not configured. Values are never printed.
+      - name: Check the release configuration
+        env:
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          missing=0
+          if [ -z "$DOCKERHUB_IMAGE" ]; then
+            echo "::error::Repository variable DOCKERHUB_IMAGE is not set (for example castab/fionas-commerce)."
+            missing=1
+          elif ! [[ "$DOCKERHUB_IMAGE" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "::error::Repository variable DOCKERHUB_IMAGE must be a Docker Hub repository of the form <namespace>/<repository>, in lowercase."
+            missing=1
+          fi
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "::error::Repository secret DOCKERHUB_USERNAME is not set."
+            missing=1
+          fi
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Repository secret DOCKERHUB_TOKEN is not set (a Docker Hub access token, not a password)."
+            missing=1
+          fi
+          exit "$missing"
+
+      # A tag push checks out the tagged commit. The full history (fetch-depth: 0) is fetched,
+      # not a shallow clone, so the ancestry check below cannot be fooled by missing history.
+      - name: Check out the tagged commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm the checkout is the tagged commit
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "::error::Checked-out commit $(git rev-parse HEAD) is not the tagged commit $GITHUB_SHA."
+            exit 1
+          }
+
+      # Only commits that have landed in main may be released. No test run follows, so this is
+      # the guard against tagging an unmerged branch commit that CI never promoted. The checkout
+      # above fetched every branch with its full history (fetch-depth: 0), including
+      # refs/remotes/origin/main, so no further, credentialed fetch is needed. A missing main
+      # ref is an error, never a pass. `merge-base --is-ancestor` exits 1 for "not an ancestor"
+      # and another code on a real error; both stop the release.
+      - name: Confirm the tagged commit is in main
+        run: |
+          git rev-parse --verify --quiet refs/remotes/origin/main > /dev/null || {
+            echo "::error::origin/main was not fetched; cannot prove the tagged commit is in main."
+            exit 1
+          }
+          status=0
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || status=$?
+          case "$status" in
+            0) echo "Tagged commit $GITHUB_SHA is reachable from origin/main" ;;
+            1) echo "::error::Tagged commit $GITHUB_SHA is not reachable from origin/main. Only commits merged into main may be released."; exit 1 ;;
+            *) echo "::error::Could not determine whether $GITHUB_SHA is in main (git exited $status)."; exit 1 ;;
+          esac
+
+      # Java 25 is a hard requirement; the Gradle toolchain resolves to this JDK
+      # (auto-download is disabled).
+      - name: Set up Java 25
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      # Caches Gradle state and validates the checked-in Gradle Wrapper.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Show Gradle and JVM versions
+        run: ./gradlew --version
+
+      # Produce the release contract with scripts/package-openapi.sh: the existing generateOpenApi
+      # task (the repository's only generator) at the release version, a check that its
+      # info.version is that version (failing here stops the release before anything is
+      # published), and the permanent assets under their immutable, versioned names:
+      # release-assets/fionas-commerce-openapi-<version>.json and its .sha256 (`sha256sum`
+      # format, verifiable with `sha256sum --check`). This is artifact production, not
+      # verification; it needs no database or Docker. Pull request CI dry-runs this same script.
+      - name: Generate the OpenAPI release assets
+        run: bash scripts/package-openapi.sh "$VERSION" release-assets
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Tags and OCI labels for the image. The only tag is the bare version: no `latest` and no
+      # moving major/minor alias, and no `v`-prefixed duplicate. The version label is set from
+      # $VERSION explicitly rather than inferred by the action.
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ vars.DOCKERHUB_IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.title=fionas-commerce
+            org.opencontainers.image.description=Commerce backend of Fiona's Ice Cream and its catering business
+            org.opencontainers.image.version=${{ env.VERSION }}
+
+      # Build the image (the Dockerfile compiles the one jar it ships), load it into the local
+      # Docker daemon, and inspect that artifact before anything is pushed. No Docker Hub login yet. The credentials are build arguments that exist only in
+      # the Dockerfile's build stage; APP_VERSION is the release version and has no fallback
+      # here, so a release can never silently build 0.0.0-SNAPSHOT.
+      #
+      # provenance is false for a loaded image (the local daemon cannot hold attestations).
+      - name: Build the image for verification
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ env.VERSION }}
+            GITHUB_ACTOR=${{ env.GITHUB_ACTOR }}
+            GITHUB_TOKEN=${{ env.GITHUB_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the image version and labels
+        env:
+          IMAGE: ${{ vars.DOCKERHUB_IMAGE }}:${{ env.VERSION }}
+        run: |
+          label() { docker image inspect --format "{{ index .Config.Labels \"$1\" }}" "$IMAGE"; }
+          test "$(label org.opencontainers.image.version)" = "$VERSION" || { echo "::error::Image label org.opencontainers.image.version is not $VERSION."; exit 1; }
+          test "$(label org.opencontainers.image.revision)" = "$GITHUB_SHA" || { echo "::error::Image label org.opencontainers.image.revision is not $GITHUB_SHA."; exit 1; }
+          test "$(label org.opencontainers.image.title)" = "fionas-commerce" || { echo "::error::Image label org.opencontainers.image.title is not fionas-commerce."; exit 1; }
+          test "$(label org.opencontainers.image.source)" = "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" || { echo "::error::Image label org.opencontainers.image.source is not $GITHUB_SERVER_URL/$GITHUB_REPOSITORY."; exit 1; }
+
+          # The application inside the image reports the release version. The container is
+          # created, never started, so no database is needed.
+          container="$(docker create "$IMAGE")"
+          docker cp "$container:/app/fionas-commerce.jar" "$RUNNER_TEMP/fionas-commerce-image.jar"
+          docker rm "$container" > /dev/null
+          image_jar_version="$(unzip -p "$RUNNER_TEMP/fionas-commerce-image.jar" fionas-commerce.properties | sed -n 's/^version=//p')"
+          test "$image_jar_version" = "$VERSION" || { echo "::error::The jar in the image reports version '$image_jar_version', expected '$VERSION'."; exit 1; }
+          echo "Image labels and the jar inside the image report $VERSION at $GITHUB_SHA"
+
+      # The package token is a build argument of a discarded build stage. Prove it is in neither
+      # the final image's configuration, its history, nor any of its layers.
+      - name: Verify the image holds no package credentials
+        env:
+          IMAGE: ${{ vars.DOCKERHUB_IMAGE }}:${{ env.VERSION }}
+        run: |
+          test -n "$GITHUB_TOKEN"
+          if docker image inspect "$IMAGE" | grep -qaF -- "$GITHUB_TOKEN" \
+            || docker history --no-trunc "$IMAGE" | grep -qaF -- "$GITHUB_TOKEN" \
+            || docker save "$IMAGE" | grep -qaF -- "$GITHUB_TOKEN"; then
+            echo "::error::The package token was found in the image."
+            exit 1
+          fi
+          echo "No package credentials in the image configuration, history, or layers"
+
+      # The first step that touches Docker Hub, after the tag, ancestry, and version checks and
+      # the image checks.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The same inputs as the verified build, so every layer comes from the build cache and the
+      # pushed image is the one verified above. Provenance is pinned to mode=min: mode=max would
+      # record the build arguments, and with them the package token, in the attestation.
+      - name: Build and push the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          provenance: mode=min
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ env.VERSION }}
+            GITHUB_ACTOR=${{ env.GITHUB_ACTOR }}
+            GITHUB_TOKEN=${{ env.GITHUB_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Create the release for the tag that already exists (--verify-tag aborts rather than
+      # create one; this workflow never creates, moves, or rewrites a tag), or, when an earlier
+      # attempt already created it, only (re)upload the assets. GH_TOKEN is the workflow's own
+      # token: the job-level GITHUB_TOKEN may be the read-only packages token.
+      - name: Create the GitHub Release and attach the OpenAPI document
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          assets=("release-assets/fionas-commerce-openapi-$VERSION.json" "release-assets/fionas-commerce-openapi-$VERSION.json.sha256")
+          if existing="$(gh release view "$TAG" --json tagName --jq .tagName 2> /dev/null)"; then
+            test "$existing" = "$TAG" || { echo "::error::Existing release is for tag '$existing', not '$TAG'."; exit 1; }
+            echo "Release $TAG already exists; uploading the assets to it"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --verify-tag --title "$TAG" --generate-notes
+          fi

@@ -1,24 +1,28 @@
 name: CI
 
-# Pull requests are verified through the pull_request event; push runs only for
-# main, so a push to a branch with an open pull request does not trigger CI twice.
+# This workflow verifies source, once, on the pull request that proposes a change to main.
+# - A push to a feature branch does not run it; opening the pull request does, and each
+#   further push to the branch re-runs it through the pull_request "synchronize" event, once.
+# - A merge into main does not run it again. main is expected to be protected (changes arrive
+#   only through pull requests whose required checks passed; see "Releasing" in README.md), so
+#   what lands in main has already been verified.
+# - A release (release.yml, on a version tag) promotes such a commit and does not re-verify it.
 on:
-  push:
+  pull_request:
     branches:
       - main
-  pull_request:
 
 # CI reads the repository and, to resolve io.github.castab:commerce-runtime and
 # commerce-domain, GitHub Packages. It never publishes: fionas-commerce is an
-# application, not a library.
+# application, not a library. Docker Hub credentials are used only by release.yml and are
+# never referenced here.
 permissions:
   contents: read
   packages: read
 
-# A newer commit to the same pull request supersedes its in-progress run. Each run
-# on main gets its own group, so every merged commit is verified to completion.
+# A newer commit to the same pull request supersedes its in-progress run.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -72,11 +76,30 @@ jobs:
         run: ./gradlew build --no-build-cache
 
       # The Fiona API's OpenAPI document, rendered from the same contract the application
-      # serves at /openapi.json, so other applications and tooling can use the contract
-      # without a deployed instance. Retained only when the build succeeded.
+      # serves at /openapi.json, for reviewing the pull request's contract. Retained only when
+      # the build succeeded. It is ephemeral CI output at the development version; the permanent,
+      # versioned contract is the GitHub Release asset that release.yml publishes.
       - name: Upload OpenAPI document
         uses: actions/upload-artifact@v7
         with:
           name: fionas-commerce-openapi
           path: build/openapi/fionas-commerce-openapi.json
           if-no-files-found: error
+
+      # Dry run of the release's OpenAPI step: the same script release.yml runs, with a
+      # throwaway version, writing to the runner's temp directory and publishing nothing. It
+      # regenerates the document with a -Pversion override, checks that info.version carries it,
+      # and produces the versioned file and checksum, so a failure of the release path appears
+      # here, on the pull request, before a tag exists. Placed after the upload above because it
+      # replaces build/openapi/fionas-commerce-openapi.json with the throwaway-version document.
+      - name: Dry run the OpenAPI release assets
+        run: bash scripts/package-openapi.sh 0.0.0-dry-run "$RUNNER_TEMP/openapi-dry-run"
+
+      # Dry run of the release's image build: the Dockerfile exactly as release.yml builds it, with
+      # a throwaway APP_VERSION, built and discarded (no push, no tag, no Docker Hub login). It
+      # fails here, on the pull request, if the Dockerfile, its shadowJar step, or the check that
+      # the jar reports APP_VERSION breaks. The credentials are passed by name, so their values
+      # come from the job environment and never appear on the command line; they exist only in
+      # the Dockerfile's build stage.
+      - name: Dry run the release image build
+        run: docker build --build-arg APP_VERSION=0.0.0-dry-run --build-arg GITHUB_ACTOR --build-arg GITHUB_TOKEN --tag fionas-commerce:dry-run .

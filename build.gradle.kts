@@ -293,4 +293,7 @@ val postgresTestDatabase =
 tasks.test {
     usesService(postgresTestDatabase)
     jvmArgumentProviders.add(TestDatabaseArguments(postgresTestDatabase))
+    // The Gradle project version, so ApplicationVersionSpec can check that what the application
+    // reports is the version this build was given (-Pversion=<version> in a release).
+    systemProperty("fionas.build.version", project.version.toString())
 }

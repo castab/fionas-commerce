@@ -1208,9 +1208,11 @@ so changing an endpoint changes its documentation in the same place.
   cookie-authenticated methods.
 - **`./gradlew generateOpenApi`** writes the same document, pretty-printed, to
   `build/openapi/fionas-commerce-openapi.json`, without a database, Docker, a server, or
-  network access. `./gradlew build` runs it, and CI keeps the file as the
-  `fionas-commerce-openapi` workflow artifact of every successful build, so other
-  applications can use the contract without a deployed instance.
+  network access. `./gradlew build` runs it, and pull request CI keeps the file as the
+  ephemeral `fionas-commerce-openapi` workflow artifact of every successful run, for reviewing
+  a change's contract. The permanent, versioned contract other applications should use without
+  a deployed instance is the asset every release attaches to its GitHub Release (see
+  [Releasing](#releasing)).
 
 The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
@@ -1565,17 +1567,33 @@ build stage, never in the final image:
 docker build --build-arg GITHUB_ACTOR=<user> --build-arg GITHUB_TOKEN=<read:packages token> -t fionas-commerce .
 ```
 
+That is a development image: the jar inside reports the version in `gradle.properties`,
+`0.0.0-SNAPSHOT`. The optional `APP_VERSION` build argument sets the application version
+instead (it is passed to Gradle as `-Pversion`, so it is also the OpenAPI document's
+`info.version`), which is how a release builds. To build the way a release does:
+
+```bash
+docker build --build-arg APP_VERSION=0.0.21 --build-arg GITHUB_ACTOR=<user> --build-arg GITHUB_TOKEN=<read:packages token> -t fionas-commerce:0.0.21 .
+```
+
+The build fails if the jar does not report `APP_VERSION`. `GITHUB_ACTOR` and `GITHUB_TOKEN` are
+declared in the build stage only, just before Gradle runs; the runtime stage copies nothing but
+the jar, so the token is not in the final image (a release verifies this).
+
 ```bash
 docker run --rm -p 8080:8080 -e DATABASE_JDBC_URL=... -e DATABASE_USERNAME=... -e DATABASE_PASSWORD=... fionas-commerce
 ```
 
-The image build runs `shadowJar` only; lint and tests stay in CI.
+The image build runs `shadowJar` only; lint and tests belong to pull request CI.
 
 ### Deploying on Railway
 
 Railway builds the root `Dockerfile` when it detects one. In the service settings, set the
 healthcheck path to `/ready` (`/health` is liveness only). Railway passes service variables to a Dockerfile build only when the Dockerfile declares
-them with `ARG`, which is why `GITHUB_ACTOR` and `GITHUB_TOKEN` are declared there. Set
+them with `ARG`, which is why `GITHUB_ACTOR` and `GITHUB_TOKEN` are declared there. `APP_VERSION`
+is optional on Railway and defaults to `0.0.0-SNAPSHOT`; to deploy a release instead of
+building from source, point the service at the published Docker Hub image
+(`<DOCKERHUB_IMAGE>:<version>`), which already contains the application at that version. Set
 these variables on the service (Railway also injects `PORT`):
 
 | Variable | Value |
@@ -1594,6 +1612,133 @@ fionas-web (see [Service authentication](#service-authentication)). Replace `Pos
 name of your Railway PostgreSQL service. The application is
 tested against PostgreSQL 18. It applies its migrations on startup
 (`MIGRATIONS_ON_STARTUP=migrate`, the default).
+
+## Releasing
+
+CI verifies source; a release promotes source that is already verified.
+
+| | Pull request CI ([`ci.yml`](.github/workflows/ci.yml)) | Tag release ([`release.yml`](.github/workflows/release.yml)) |
+|---|---|---|
+| Trigger | `pull_request` to `main` | push of a tag `vMAJOR.MINOR.PATCH` |
+| Question | Is this change safe and consistent enough to merge? | Publish this commit of `main` as version `X.Y.Z` |
+| Does | `ktlintCheck`, `test`, `build` (which generates the OpenAPI document and runs its contract tests), and dry runs of the release's two artifact steps with a throwaway version, publishing nothing: the OpenAPI packaging (`scripts/package-openapi.sh`) and a `docker build` of the release image | validates the tag, confirms the commit is in `main`, generates the versioned OpenAPI document, builds and pushes the Docker image, creates the GitHub Release |
+| Does not | publish anything; it has no Docker Hub credentials | lint or test again |
+
+A push to a feature branch runs nothing until it has a pull request; each push to that pull request
+runs CI once (the `pull_request` event only, never an additional `push` run); merging into `main` runs
+no second verification. `fionas-commerce` is an application: no Maven artifact or package is
+published.
+
+### Branch protection
+
+This model rests on `main` being protected; the workflows cannot enforce it, and no workflow
+configures it. Configure the repository ruleset or branch protection for `main` to:
+
+- require a pull request before merging;
+- require the `Build and test (Java 25)` status check (the CI job) to pass;
+- prevent ordinary direct pushes to `main`.
+
+Without that, a commit can reach `main` and then a release without ever being verified. The
+release workflow's only protection against that is the check that the tagged commit is in `main`.
+
+### Repository configuration
+
+Settings → Secrets and variables → Actions:
+
+| Kind | Name | Value |
+|---|---|---|
+| Variable | `DOCKERHUB_IMAGE` | The Docker Hub repository to publish to, lowercase `<namespace>/<repository>`, for example `castab/fionas-commerce` |
+| Secret | `DOCKERHUB_USERNAME` | The Docker Hub user that owns the access token |
+| Secret | `DOCKERHUB_TOKEN` | A Docker Hub access token with read and write access to that repository (not the account password) |
+| Secret (optional) | `PACKAGES_READ_TOKEN` | As for CI: a token with `read:packages`, used instead of the workflow's `GITHUB_TOKEN` when the commerce packages have not granted this repository read access |
+
+Only the release workflow uses the Docker Hub secrets; pull request CI never receives them. The
+release workflow fails early, before building anything, if `DOCKERHUB_IMAGE`, `DOCKERHUB_USERNAME`, or `DOCKERHUB_TOKEN` is missing. No Docker Hub namespace is
+written into the repository. Creating the GitHub Release uses the workflow's own `GITHUB_TOKEN`
+(`contents: write`).
+
+### How to release
+
+```bash
+git tag v0.0.21
+git push origin v0.0.21
+```
+
+Push that one tag by name, never `git push --tags`: every pushed tag matching `v*` starts a release.
+Do not edit `gradle.properties`, which stays at the development default `0.0.0-SNAPSHOT`.
+
+### What a release does
+
+For `v0.0.21` the workflow, in order:
+
+1. Requires the tag to be exactly `vMAJOR.MINOR.PATCH` (numeric, no leading zeros): `v0.0.21`,
+   `v1.0.0`, and `v12.4.7` are accepted; `release-0.0.21`, `v0.0`, `v0.0.21-beta.1`, and `foo` are
+   rejected. It takes the tag's version, `0.0.21`, once, and uses only that for everything below.
+2. Checks out the tagged commit with its full history and requires it to be reachable from
+   `origin/main` (`git merge-base --is-ancestor`). A tag on a commit that never landed in `main`
+   stops the release before anything is built or published.
+3. Runs `scripts/package-openapi.sh 0.0.21 release-assets`: `./gradlew generateOpenApi -Pversion=0.0.21`,
+   a requirement that the document's `info.version` is `0.0.21`, and the two release assets. Pull
+   request CI dry-runs the same script with a throwaway version, so generation failures surface
+   before a tag.
+4. Builds the Docker image with `APP_VERSION=0.0.21` (pull request CI dry-runs the same Dockerfile
+   build with a throwaway version, without checking labels or pushing), loads it locally, and checks its OCI labels, that
+   the jar inside reports `0.0.21`, and that the package token appears in neither its configuration,
+   its history, nor its layers.
+5. Only then logs in to Docker Hub and pushes `${DOCKERHUB_IMAGE}:0.0.21`.
+6. Creates the GitHub Release `v0.0.21` (title `v0.0.21`, generated notes) on the existing tag and
+   attaches the OpenAPI document.
+
+The result:
+
+```text
+Docker Hub:
+  ${DOCKERHUB_IMAGE}:0.0.21
+
+GitHub Release:
+  v0.0.21
+  ├── fionas-commerce-openapi-0.0.21.json
+  └── fionas-commerce-openapi-0.0.21.json.sha256
+```
+
+The application inside the container and the OpenAPI `info.version` both report `0.0.21`: the one
+version, `-Pversion=0.0.21`, becomes `fionas-commerce.properties`, `fionaVersion()`, and the
+document's `info.version`, and reaches the image through `APP_VERSION`. The OpenAPI document is
+rendered from the application's contract by the existing `generateOpenApi` task; no running backend
+is involved, and "the exact Fiona API contract for v0.0.21" is that release asset. Its `.sha256`
+file is in `sha256sum` format:
+
+```bash
+sha256sum --check fionas-commerce-openapi-0.0.21.json.sha256
+```
+
+Image details:
+
+- **One tag, `0.0.21`.** There is no `latest`, no moving major or major.minor alias, and no
+  `v0.0.21` duplicate; moving aliases are a later, deliberate release policy.
+- **OCI labels** `org.opencontainers.image.title` (`fionas-commerce`), `.version` (`0.0.21`),
+  `.revision` (the tagged commit's SHA), and `.source` (this repository), plus the metadata
+  action's other defaults.
+- **One tag, one commit.** A tag push checks out exactly the tagged commit, and the workflow asserts it.
+  Never move or reuse a release tag; to correct a bad release, publish the next version. A tag
+  ruleset on `v*` that blocks updates and deletion enforces this.
+- **Provenance** is attached in its minimal form. The maximal form would record the build
+  arguments, which include the package token.
+- The Docker layer cache (GitHub Actions cache) only speeds the build up; the release never
+  depends on it.
+
+### Failure and reruns
+
+Any failing step (an invalid tag, a tagged commit outside `main`, a version mismatch, the Docker
+build or push, or the GitHub Release) fails the run, and every check before the Docker Hub login
+fails before anything is published. The release runs no lint or tests: it relies on the pull
+request CI that `main` requires. Runs for one tag are serialized and never cancelled mid-publication.
+
+A rerun of the same tag is safe. The ancestry and artifact checks repeat; pushing `0.0.21` again from the same commit
+replaces it with identical content; the GitHub Release is created if it does not exist, and
+otherwise only its two assets are replaced. The tag is never created, moved, or rewritten by the
+workflow. So if the image was pushed but the GitHub Release step failed (for example, a
+transient API error), rerun the failed workflow run from the Actions tab.
 
 ## Testing
 
@@ -1638,6 +1783,7 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (the inquiry receipt, list, and pricing inputs, financial documents, standalone receipts, allocations, and document payment histories with their linked fact schemas included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |
+| `ApplicationVersionSpec` | The version the application reports, and the OpenAPI document's `info.version`, is the Gradle project version the build was given (`-Pversion` in a release) |
 | `FionaApplicationSpec` | `application.conf` loads, `/health` and `/ready`, a real server on a port |
 | `ArchitectureSpec` | Repositories take a `Transaction` and build no transaction infrastructure; no SQL in routes; no HTTP in persistence; every endpoint is a contract route with an `operationId`; no hand-written OpenAPI file; one http4k version; the stable catalog id and binding; no Fiona Offerings types, repositories, or SQL; pricing depends only on commerce-domain and names no offering; previews record nothing; financial documents and payments only through the runtime's ledger, every call with the operation's `Transaction`, and no Fiona table restating a ledger fact; only published runtime keys referenced; explicit financial grants; Jackson only for the Offerings schemas |
 
