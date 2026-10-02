@@ -94,3 +94,12 @@ jobs:
       # replaces build/openapi/fionas-commerce-openapi.json with the throwaway-version document.
       - name: Dry run the OpenAPI release assets
         run: bash scripts/package-openapi.sh 0.0.0-dry-run "$RUNNER_TEMP/openapi-dry-run"
+
+      # Dry run of the release's image build: the Dockerfile exactly as release.yml builds it, with
+      # a throwaway APP_VERSION, built and discarded (no push, no tag, no Docker Hub login). It
+      # fails here, on the pull request, if the Dockerfile, its shadowJar step, or the check that
+      # the jar reports APP_VERSION breaks. The credentials are passed by name, so their values
+      # come from the job environment and never appear on the command line; they exist only in
+      # the Dockerfile's build stage.
+      - name: Dry run the release image build
+        run: docker build --build-arg APP_VERSION=0.0.0-dry-run --build-arg GITHUB_ACTOR --build-arg GITHUB_TOKEN --tag fionas-commerce:dry-run .

@@ -1621,7 +1621,7 @@ CI verifies source; a release promotes source that is already verified.
 |---|---|---|
 | Trigger | `pull_request` to `main` | push of a tag `vMAJOR.MINOR.PATCH` |
 | Question | Is this change safe and consistent enough to merge? | Publish this commit of `main` as version `X.Y.Z` |
-| Does | `ktlintCheck`, `test`, `build` (which generates the OpenAPI document and runs its contract tests), and a dry run of the release's OpenAPI step (`scripts/package-openapi.sh` with a throwaway version, publishing nothing) | validates the tag, confirms the commit is in `main`, generates the versioned OpenAPI document, builds and pushes the Docker image, creates the GitHub Release |
+| Does | `ktlintCheck`, `test`, `build` (which generates the OpenAPI document and runs its contract tests), and dry runs of the release's two artifact steps with a throwaway version, publishing nothing: the OpenAPI packaging (`scripts/package-openapi.sh`) and a `docker build` of the release image | validates the tag, confirms the commit is in `main`, generates the versioned OpenAPI document, builds and pushes the Docker image, creates the GitHub Release |
 | Does not | publish anything; it has no Docker Hub credentials | lint or test again |
 
 A push to a feature branch runs nothing until it has a pull request; each push to that pull request
@@ -1681,7 +1681,8 @@ For `v0.0.21` the workflow, in order:
    a requirement that the document's `info.version` is `0.0.21`, and the two release assets. Pull
    request CI dry-runs the same script with a throwaway version, so generation failures surface
    before a tag.
-4. Builds the Docker image with `APP_VERSION=0.0.21`, loads it locally, and checks its OCI labels, that
+4. Builds the Docker image with `APP_VERSION=0.0.21` (pull request CI dry-runs the same Dockerfile
+   build with a throwaway version, without checking labels or pushing), loads it locally, and checks its OCI labels, that
    the jar inside reports `0.0.21`, and that the package token appears in neither its configuration,
    its history, nor its layers.
 5. Only then logs in to Docker Hub and pushes `${DOCKERHUB_IMAGE}:0.0.21`.

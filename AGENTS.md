@@ -636,7 +636,9 @@ is not a release asset.
   (generate with `-Pversion`, assert `info.version`, write the versioned file and `.sha256`) is
   the only place that logic lives. `release.yml` runs it with the tag's version; `ci.yml` runs it
   with a throwaway version and publishes nothing, so release-path generation failures appear on
-  the pull request. Do not duplicate its steps inline in a workflow.
+  the pull request. Do not duplicate its steps inline in a workflow. Likewise `ci.yml` dry-runs the
+  Dockerfile build (`docker build` with a throwaway `APP_VERSION`, discarded): it never logs in to
+  or pushes to Docker Hub, and receives no Docker Hub credentials.
 - **Destinations are configuration**: variable `DOCKERHUB_IMAGE`, secrets `DOCKERHUB_USERNAME` and
   `DOCKERHUB_TOKEN`, and optionally `PACKAGES_READ_TOKEN`. No namespace is written into source.
 - **Published**: `${DOCKERHUB_IMAGE}:<version>` only (no `latest` or moving aliases without a
