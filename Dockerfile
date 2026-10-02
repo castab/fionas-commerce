@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# check=skip=SecretsUsedInArgOrEnv
 
 # fionas-commerce container image. Built for Railway, but nothing here is Railway-specific:
 # any container platform that supplies the DATABASE_* variables and PORT can run it.
@@ -34,6 +35,10 @@ COPY src src
 # and only after the layers that do not need them, so the token neither reaches a cached
 # earlier layer nor the final image: that is built from the runtime stage below, which
 # copies nothing but the jar.
+# The SecretsUsedInArgOrEnv build check is skipped (first lines of this file) on purpose:
+# Railway builds this Dockerfile and passes a service variable to it as an ARG, and its
+# builds and logs stay inside the private project. The token is a read-only read:packages
+# one, and it stays out of the pushed image (release.yml scans the image for it).
 ARG GITHUB_ACTOR
 ARG GITHUB_TOKEN
 
