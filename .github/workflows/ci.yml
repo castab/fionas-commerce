@@ -1,0 +1,82 @@
+name: CI
+
+# Pull requests are verified through the pull_request event; push runs only for
+# main, so a push to a branch with an open pull request does not trigger CI twice.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# CI reads the repository and, to resolve io.github.castab:commerce-runtime and
+# commerce-domain, GitHub Packages. It never publishes: fionas-commerce is an
+# application, not a library.
+permissions:
+  contents: read
+  packages: read
+
+# A newer commit to the same pull request supersedes its in-progress run. Each run
+# on main gets its own group, so every merged commit is verified to completion.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (Java 25)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # GitHub Packages requires a token with read:packages even for public packages.
+    # The workflow's GITHUB_TOKEN works once the commerce packages grant this repository
+    # read access (package settings -> Manage Actions access). Otherwise add a repository
+    # secret PACKAGES_READ_TOKEN holding a token with read:packages; it takes precedence.
+    env:
+      GITHUB_ACTOR: ${{ github.actor }}
+      GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Java 25 is a hard requirement; the Gradle toolchain resolves to this JDK
+      # (auto-download is disabled).
+      - name: Set up Java 25
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      # Caches Gradle state and validates the checked-in Gradle Wrapper.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Show Gradle and JVM versions
+        run: ./gradlew --version
+
+      - name: Lint (ktlint)
+        run: ./gradlew ktlintCheck
+
+      # The database specs run against a real PostgreSQL that Gradle starts through the
+      # runner's Docker CLI and removes afterwards; no service container is declared here.
+      # --no-build-cache ensures the tests actually execute.
+      - name: Tests
+        run: ./gradlew test --no-build-cache
+
+      # Everything else in `build`, including the executable jar
+      # (build/libs/fionas-commerce-all.jar) and the OpenAPI document (generateOpenApi).
+      # Tests that already ran above are up to date.
+      - name: Full build
+        run: ./gradlew build --no-build-cache
+
+      # The Fiona API's OpenAPI document, rendered from the same contract the application
+      # serves at /openapi.json, so other applications and tooling can use the contract
+      # without a deployed instance. Retained only when the build succeeded.
+      - name: Upload OpenAPI document
+        uses: actions/upload-artifact@v7
+        with:
+          name: fionas-commerce-openapi
+          path: build/openapi/fionas-commerce-openapi.json
+          if-no-files-found: error

@@ -1,0 +1,39 @@
+[versions]
+# The commerce artifacts this application is built on. commerce-runtime exposes the
+# matching commerce-domain version transitively, so the domain is not declared separately.
+commerce = "0.0.20"
+
+# http4k arrives with commerce-runtime; the contract/OpenAPI modules Fiona adds on top must
+# be exactly the version commerce-runtime 0.0.20 is built against, never a newer one (Gradle
+# would silently upgrade the runtime's http4k-core to match). Change it only together with
+# the commerce version. ArchitectureSpec fails if two http4k versions meet on the classpath.
+http4k = "6.58.0.0"
+
+# Build and test tooling, matching the commerce repository's conventions.
+kotlin = "2.4.20"
+kotest = "6.2.5"
+ktlint-gradle = "14.2.0"
+shadow = "9.6.1"
+
+# Application-owned logging: the SLF4J provider (commerce-runtime selects none) and the
+# facade commerce-runtime itself logs through.
+logback = "1.6.3"
+kotlin-logging = "8.0.4"
+argon2 = "2.12"
+
+[libraries]
+commerce-runtime = { module = "io.github.castab:commerce-runtime", version.ref = "commerce" }
+http4k-api-openapi = { module = "org.http4k:http4k-api-openapi", version.ref = "http4k" }
+http4k-api-ui-swagger = { module = "org.http4k:http4k-api-ui-swagger", version.ref = "http4k" }
+http4k-format-jackson = { module = "org.http4k:http4k-format-jackson", version.ref = "http4k" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+kotlin-logging-jvm = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = "kotlin-logging" }
+argon2-jvm = { module = "de.mkammerer:argon2-jvm", version.ref = "argon2" }
+kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-gradle" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
