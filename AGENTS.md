@@ -632,6 +632,11 @@ is not a release asset.
   document has `info.version == VERSION`, and that the built image's labels and jar report `VERSION`
   and hold no package credentials, all before Docker Hub login. Nothing is pushed before that.
   Compiling to produce the OpenAPI document and the image is artifact production, not verification.
+- **One OpenAPI packaging script, dry-run in CI.** `scripts/package-openapi.sh <version> <dir>`
+  (generate with `-Pversion`, assert `info.version`, write the versioned file and `.sha256`) is
+  the only place that logic lives. `release.yml` runs it with the tag's version; `ci.yml` runs it
+  with a throwaway version and publishes nothing, so release-path generation failures appear on
+  the pull request. Do not duplicate its steps inline in a workflow.
 - **Destinations are configuration**: variable `DOCKERHUB_IMAGE`, secrets `DOCKERHUB_USERNAME` and
   `DOCKERHUB_TOKEN`, and optionally `PACKAGES_READ_TOKEN`. No namespace is written into source.
 - **Published**: `${DOCKERHUB_IMAGE}:<version>` only (no `latest` or moving aliases without a

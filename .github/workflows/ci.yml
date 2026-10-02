@@ -85,3 +85,12 @@ jobs:
           name: fionas-commerce-openapi
           path: build/openapi/fionas-commerce-openapi.json
           if-no-files-found: error
+
+      # Dry run of the release's OpenAPI step: the same script release.yml runs, with a
+      # throwaway version, writing to the runner's temp directory and publishing nothing. It
+      # regenerates the document with a -Pversion override, checks that info.version carries it,
+      # and produces the versioned file and checksum, so a failure of the release path appears
+      # here, on the pull request, before a tag exists. Placed after the upload above because it
+      # replaces build/openapi/fionas-commerce-openapi.json with the throwaway-version document.
+      - name: Dry run the OpenAPI release assets
+        run: bash scripts/package-openapi.sh 0.0.0-dry-run "$RUNNER_TEMP/openapi-dry-run"

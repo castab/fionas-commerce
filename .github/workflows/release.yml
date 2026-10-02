@@ -144,30 +144,15 @@ jobs:
       - name: Show Gradle and JVM versions
         run: ./gradlew --version
 
-      # Produce the versioned contract: the existing generateOpenApi task (the repository's only
-      # generator), at the release version, to build/openapi/fionas-commerce-openapi.json. This
-      # is artifact production, not verification; it needs no database or Docker.
-      - name: Generate the OpenAPI document
-        run: ./gradlew generateOpenApi "-Pversion=$VERSION"
-
-      # Stop before any publication if the contract does not carry the release version.
-      - name: Verify the OpenAPI document's version
-        run: |
-          openapi_version="$(jq -r '.info.version' build/openapi/fionas-commerce-openapi.json)"
-          if [ "$openapi_version" != "$VERSION" ]; then
-            echo "::error::OpenAPI info.version is '$openapi_version', expected '$VERSION'."
-            exit 1
-          fi
-          echo "OpenAPI info.version is $VERSION"
-
-      # The permanent release assets: the build output under its immutable, versioned name, and
-      # its checksum. The checksum file is in `sha256sum` format, so a consumer can verify the
-      # download with `sha256sum -c fionas-commerce-openapi-<version>.json.sha256`.
-      - name: Prepare the release assets
-        run: |
-          mkdir release-assets
-          cp build/openapi/fionas-commerce-openapi.json "release-assets/fionas-commerce-openapi-$VERSION.json"
-          (cd release-assets && sha256sum "fionas-commerce-openapi-$VERSION.json" > "fionas-commerce-openapi-$VERSION.json.sha256" && sha256sum --check "fionas-commerce-openapi-$VERSION.json.sha256")
+      # Produce the release contract with scripts/package-openapi.sh: the existing generateOpenApi
+      # task (the repository's only generator) at the release version, a check that its
+      # info.version is that version (failing here stops the release before anything is
+      # published), and the permanent assets under their immutable, versioned names:
+      # release-assets/fionas-commerce-openapi-<version>.json and its .sha256 (`sha256sum`
+      # format, verifiable with `sha256sum --check`). This is artifact production, not
+      # verification; it needs no database or Docker. Pull request CI dry-runs this same script.
+      - name: Generate the OpenAPI release assets
+        run: bash scripts/package-openapi.sh "$VERSION" release-assets
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
