@@ -1,14 +1,15 @@
 name: Release
 
 # The Git tag is the release command: pushing vMAJOR.MINOR.PATCH promotes an existing commit
-# of main into release artifacts. It builds the Docker image and the OpenAPI document at that
-# version, publishes the image to Docker Hub, and creates the GitHub Release carrying the
-# OpenAPI document. See "Releasing" in README.md.
+# of main into release artifacts. It adds the version tag to the Docker image already built and
+# published for that commit, generates the OpenAPI document at that version, and creates the
+# GitHub Release carrying it. See "Releasing" in README.md.
 #
-# This is delivery, not verification. Source is verified once, by ci.yml, on the pull request
-# that brought the commit into main (main is expected to require that check). A release
-# therefore runs no lint and no tests; it only proves the tag names a commit that is in main
-# and that the artifacts it produces carry the release version. fionas-commerce is an
+# This is delivery, not verification, and not a rebuild. Source is verified once, by ci.yml, on
+# the pull request that brought the commit into main (main is expected to require that check);
+# the image is built once per commit, by image.yml on the push to main (ci.yml builds it for
+# the pull request). A release runs no lint and no tests and builds no image; it proves the tag
+# names a commit that is in main and that has a published image. fionas-commerce is an
 # application: nothing here publishes a Maven artifact or package.
 on:
   push:
@@ -44,10 +45,9 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
-      # The version is derived here, once, from the tag alone. Every later step uses
-      # $VERSION: the Gradle -Pversion (and with it the jar, fionaVersion() and the OpenAPI
-      # info.version), the Docker APP_VERSION build argument and tag, and the release assets.
-      # Nothing reads gradle.properties, a branch, a commit message, or the date.
+      # The version is derived here, once, from the tag alone. Every later step uses $VERSION:
+      # the OpenAPI document's info.version (APP_VERSION), the Docker version tag, and the release
+      # assets. Nothing reads a branch, a commit message, or the date, and the build embeds none.
       - name: Validate the tag and derive the version
         env:
           TAG: ${{ github.ref_name }}
@@ -157,104 +157,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Tags and OCI labels for the image. The only tag is the bare version: no `latest` and no
-      # moving major/minor alias, and no `v`-prefixed duplicate. The version label is set from
-      # $VERSION explicitly rather than inferred by the action.
-      - name: Compute image tags and labels
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ vars.DOCKERHUB_IMAGE }}
-          flavor: |
-            latest=false
-          tags: |
-            type=raw,value=${{ env.VERSION }}
-          labels: |
-            org.opencontainers.image.title=fionas-commerce
-            org.opencontainers.image.description=Commerce backend of Fiona's Ice Cream and its catering business
-            org.opencontainers.image.version=${{ env.VERSION }}
-
-      # Build the image (the Dockerfile compiles the one jar it ships), load it into the local
-      # Docker daemon, and inspect that artifact before anything is pushed. No Docker Hub login yet. The credentials are build arguments that exist only in
-      # the Dockerfile's build stage; APP_VERSION is the release version and has no fallback
-      # here, so a release can never silently build 0.0.0-SNAPSHOT.
-      #
-      # provenance is false for a loaded image (the local daemon cannot hold attestations).
-      - name: Build the image for verification
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: false
-          load: true
-          provenance: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            APP_VERSION=${{ env.VERSION }}
-            GITHUB_ACTOR=${{ env.GITHUB_ACTOR }}
-            GITHUB_TOKEN=${{ env.GITHUB_TOKEN }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Verify the image version and labels
-        env:
-          IMAGE: ${{ vars.DOCKERHUB_IMAGE }}:${{ env.VERSION }}
-        run: |
-          label() { docker image inspect --format "{{ index .Config.Labels \"$1\" }}" "$IMAGE"; }
-          test "$(label org.opencontainers.image.version)" = "$VERSION" || { echo "::error::Image label org.opencontainers.image.version is not $VERSION."; exit 1; }
-          test "$(label org.opencontainers.image.revision)" = "$GITHUB_SHA" || { echo "::error::Image label org.opencontainers.image.revision is not $GITHUB_SHA."; exit 1; }
-          test "$(label org.opencontainers.image.title)" = "fionas-commerce" || { echo "::error::Image label org.opencontainers.image.title is not fionas-commerce."; exit 1; }
-          test "$(label org.opencontainers.image.source)" = "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" || { echo "::error::Image label org.opencontainers.image.source is not $GITHUB_SERVER_URL/$GITHUB_REPOSITORY."; exit 1; }
-
-          # The application inside the image reports the release version. The container is
-          # created, never started, so no database is needed.
-          container="$(docker create "$IMAGE")"
-          docker cp "$container:/app/fionas-commerce.jar" "$RUNNER_TEMP/fionas-commerce-image.jar"
-          docker rm "$container" > /dev/null
-          image_jar_version="$(unzip -p "$RUNNER_TEMP/fionas-commerce-image.jar" fionas-commerce.properties | sed -n 's/^version=//p')"
-          test "$image_jar_version" = "$VERSION" || { echo "::error::The jar in the image reports version '$image_jar_version', expected '$VERSION'."; exit 1; }
-          echo "Image labels and the jar inside the image report $VERSION at $GITHUB_SHA"
-
-      # The package token is a build argument of a discarded build stage. Prove it is in neither
-      # the final image's configuration, its history, nor any of its layers.
-      - name: Verify the image holds no package credentials
-        env:
-          IMAGE: ${{ vars.DOCKERHUB_IMAGE }}:${{ env.VERSION }}
-        run: |
-          test -n "$GITHUB_TOKEN"
-          if docker image inspect "$IMAGE" | grep -qaF -- "$GITHUB_TOKEN" \
-            || docker history --no-trunc "$IMAGE" | grep -qaF -- "$GITHUB_TOKEN" \
-            || docker save "$IMAGE" | grep -qaF -- "$GITHUB_TOKEN"; then
-            echo "::error::The package token was found in the image."
-            exit 1
-          fi
-          echo "No package credentials in the image configuration, history, or layers"
-
-      # The first step that touches Docker Hub, after the tag, ancestry, and version checks and
-      # the image checks.
+      # The first step that touches Docker Hub, after the tag, ancestry, and OpenAPI checks.
       - name: Log in to Docker Hub
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # The same inputs as the verified build, so every layer comes from the build cache and the
-      # pushed image is the one verified above. Provenance is pinned to mode=min: mode=max would
-      # record the build arguments, and with them the package token, in the attestation.
-      - name: Build and push the image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          provenance: mode=min
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            APP_VERSION=${{ env.VERSION }}
-            GITHUB_ACTOR=${{ env.GITHUB_ACTOR }}
-            GITHUB_TOKEN=${{ env.GITHUB_TOKEN }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Adds ${DOCKERHUB_IMAGE}:<version> to the image already published for the tagged commit
+      # (${DOCKERHUB_IMAGE}:sha-<commit>): the same manifest and digest, nothing rebuilt. Waits
+      # for that image if the push to main that builds it is still running, fails if it never
+      # appears, and refuses to re-point a version tag that already names a different image.
+      # The only tag added is the bare version: no `latest`, no moving major/minor alias, and no
+      # `v`-prefixed duplicate. Rerunning converges on the same tag.
+      - name: Tag the commit's image with the release version
+        env:
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+        run: bash scripts/promote-image.sh "$DOCKERHUB_IMAGE" "$GITHUB_SHA" "$VERSION"
 
       # Create the release for the tag that already exists (--verify-tag aborts rather than
       # create one; this workflow never creates, moves, or rewrites a tag), or, when an earlier

@@ -1,0 +1,47 @@
+name: Image
+
+# Builds and publishes the image of each commit that lands in main, as <image>:sha-<commit>.
+# This is artifact production, not verification: no lint and no tests run, because the commit
+# came through a pull request whose CI (ci.yml) already verified it. A release (release.yml)
+# does not rebuild; it adds the version tag to the image this workflow published for the
+# tagged commit. A merge, rebase, or squash gives main a commit that no pull request built, so
+# this is the build that makes the image exist for exactly that commit.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: read
+
+# One build per commit; a build already pushing is never cancelled by a later merge.
+concurrency:
+  group: image-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build and publish image
+    # Publishing is configured by the DOCKERHUB_IMAGE repository variable (see "Releasing" in
+    # README.md); without it there is nowhere to publish and nothing to do.
+    if: vars.DOCKERHUB_IMAGE != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build and publish the image
+        uses: ./.github/actions/build-image
+        with:
+          sha: ${{ github.sha }}
+          push: 'true'
+          image: ${{ vars.DOCKERHUB_IMAGE }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          package-actor: ${{ github.actor }}
+          package-token: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}

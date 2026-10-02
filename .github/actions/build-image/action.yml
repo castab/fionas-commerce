@@ -1,0 +1,116 @@
+name: Build the fionas-commerce image
+description: >-
+  Builds the Docker image of the checked-out commit, checks it, and optionally pushes it to
+  Docker Hub as <image>:sha-<commit>. Shared by pull request CI and the push-to-main image
+  workflow so the two cannot drift apart. The image carries no version: a release only adds a
+  version tag to it afterwards (scripts/promote-image.sh).
+
+inputs:
+  sha:
+    description: The commit the checkout holds. It names the image tag (sha-<sha>) and its revision label.
+    required: true
+  push:
+    description: "'true' to log in to Docker Hub and push; anything else builds and checks only."
+    required: true
+  image:
+    description: The Docker Hub repository, <namespace>/<repository>. Needed only when pushing.
+    default: ''
+  username:
+    description: Docker Hub user. Needed only when pushing.
+    default: ''
+  password:
+    description: Docker Hub access token. Needed only when pushing.
+    default: ''
+  package-actor:
+    description: GitHub user for reading commerce-runtime from GitHub Packages (build argument GITHUB_ACTOR).
+    required: true
+  package-token:
+    description: Token with read:packages (build argument GITHUB_TOKEN). It exists only in the Dockerfile's build stage.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    # The only tag is sha-<commit>. There is no `latest` and no version here: the release adds
+    # the version tag to this image. The version label names the build (the base image's own
+    # label would otherwise leak through); the release identity is the Docker tag.
+    - name: Compute image tag and labels
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: ${{ inputs.image != '' && inputs.image || 'fionas-commerce' }}
+        flavor: |
+          latest=false
+        tags: |
+          type=raw,value=sha-${{ inputs.sha }}
+        labels: |
+          org.opencontainers.image.title=fionas-commerce
+          org.opencontainers.image.description=Commerce backend of Fiona's Ice Cream and its catering business
+          org.opencontainers.image.revision=${{ inputs.sha }}
+          org.opencontainers.image.version=sha-${{ inputs.sha }}
+
+    # Built and loaded into the local daemon first (no login), so it can be inspected before
+    # anything is pushed. The credentials are build arguments that exist only in the Dockerfile's
+    # build stage. A loaded image cannot hold provenance attestations.
+    - name: Build the image
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        push: false
+        load: true
+        provenance: false
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: |
+          GITHUB_ACTOR=${{ inputs.package-actor }}
+          GITHUB_TOKEN=${{ inputs.package-token }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Check the image
+      shell: bash
+      env:
+        IMAGE: ${{ steps.meta.outputs.tags }}
+        SHA: ${{ inputs.sha }}
+        PACKAGE_TOKEN: ${{ inputs.package-token }}
+      run: |
+        revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")"
+        test "$revision" = "$SHA" || { echo "::error::Image revision label is '$revision', expected $SHA."; exit 1; }
+        # The package token is a build argument of a discarded build stage. Prove it is in neither
+        # the final image's configuration, its history, nor any of its layers.
+        test -n "$PACKAGE_TOKEN"
+        if docker image inspect "$IMAGE" | grep -qaF -- "$PACKAGE_TOKEN" \
+          || docker history --no-trunc "$IMAGE" | grep -qaF -- "$PACKAGE_TOKEN" \
+          || docker save "$IMAGE" | grep -qaF -- "$PACKAGE_TOKEN"; then
+          echo "::error::The package token was found in the image."
+          exit 1
+        fi
+        echo "Image $IMAGE is at $SHA and holds no package credentials"
+
+    - name: Log in to Docker Hub
+      if: inputs.push == 'true'
+      uses: docker/login-action@v4
+      with:
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    # The same inputs as the checked build, so every layer comes from the build cache and the
+    # pushed image is the one checked above. Provenance is pinned to mode=min: mode=max would
+    # record the build arguments, and with them the package token, in the attestation.
+    - name: Push the image
+      if: inputs.push == 'true'
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        push: true
+        provenance: mode=min
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: |
+          GITHUB_ACTOR=${{ inputs.package-actor }}
+          GITHUB_TOKEN=${{ inputs.package-token }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max

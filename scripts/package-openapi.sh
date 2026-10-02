@@ -4,7 +4,8 @@
 #   scripts/package-openapi.sh <version> <output-directory>
 #
 # 1. generates the document with the repository's one generator, `./gradlew generateOpenApi`,
-#    at <version> (the same -Pversion a release gives Gradle);
+#    with APP_VERSION=<version>, the environment variable the application reads for its
+#    info.version (the build itself embeds no version);
 # 2. requires its info.version to be exactly <version>;
 # 3. writes <output-directory>/fionas-commerce-openapi-<version>.json and its
 #    .sha256 (sha256sum format, verifiable with `sha256sum --check`).
@@ -24,7 +25,7 @@ output="$2"
 
 cd "$(dirname "$0")/.."
 
-./gradlew generateOpenApi "-Pversion=$version"
+APP_VERSION="$version" ./gradlew generateOpenApi
 
 document="build/openapi/fionas-commerce-openapi.json"
 actual="$(jq -r '.info.version' "$document")"

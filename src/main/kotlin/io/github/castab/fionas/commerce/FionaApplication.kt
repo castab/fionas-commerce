@@ -60,7 +60,6 @@ import io.github.castab.fionas.commerce.staff.SetStaffPassword
 import io.github.castab.fionas.commerce.staff.StaffPasswordAuthenticator
 import org.http4k.core.then
 import java.time.Clock
-import java.util.Properties
 
 /**
  * The schema Fiona owns: commerce-runtime's migration phase creates it when missing, makes it the
@@ -222,16 +221,14 @@ fun fionaApplication(
         },
     )
 
-private const val BUILD_INFO = "/fionas-commerce.properties"
+/** The OpenAPI document's `info.version` when no version is configured. */
+const val UNVERSIONED = "0.0.0"
 
 /**
- * The version of this build of fionas-commerce: the Gradle project version, which the
- * build writes into `fionas-commerce.properties`. It is the OpenAPI document's
- * `info.version`.
+ * The version this process reports as the OpenAPI document's `info.version`: the optional
+ * `APP_VERSION` environment variable (trimmed), else [UNVERSIONED]. The build embeds no
+ * version, so one image serves every release tag; a deployment (or the release's OpenAPI
+ * generation) that wants to report a version sets `APP_VERSION`.
  */
-fun fionaVersion(): String {
-    val version =
-        object {}.javaClass.getResourceAsStream(BUILD_INFO)?.use { Properties().apply { load(it) }.getProperty("version") }
-    check(version != null && !version.contains("\${")) { "$BUILD_INFO has no version; it is written by the Gradle build" }
-    return version
-}
+fun fionaVersion(environment: Map<String, String> = System.getenv()): String =
+    environment["APP_VERSION"]?.trim()?.takeIf { it.isNotEmpty() } ?: UNVERSIONED
