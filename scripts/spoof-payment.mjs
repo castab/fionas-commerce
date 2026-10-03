@@ -132,7 +132,7 @@ async function main() {
     catalog = (await request("GET", "/offering-catalog", { expectedStatus: 200 })).data;
   } catch (error) {
     if (error instanceof HttpFailure && error.status === 404) {
-      throw new Error("No Fiona Offerings catalog exists. Run node scripts/setup-local-commerce.mjs first.");
+      throw new Error("No Fiona Offerings catalog exists. Run node scripts/replace-catalog.mjs against this endpoint first.");
     }
     throw error;
   }

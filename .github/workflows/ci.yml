@@ -57,7 +57,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # The bootstrap smoke spec runs the real local setup script against the test runtime.
+      # The catalog/payment smoke spec runs the real scripts against the test runtime.
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:

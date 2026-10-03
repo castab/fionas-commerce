@@ -69,24 +69,28 @@ Start the upgraded application with the existing local database, bootstrap, Orig
 service-token configuration. Check `/ready`, then run:
 
 ```powershell
-node scripts/setup-local-commerce.mjs
+node scripts/replace-catalog.mjs
 ```
 
-Supply the existing `FIONAS_ADMIN_PASSWORD` environment variable; the script also accepts
-`FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and `FIONAS_ADMIN_USERNAME`. It logs in as the bootstrap
+Enter the base URL, administrator username, and administrator password at the prompts.
+A blank URL uses `http://localhost:8080`; the other two values are required and password
+entry is hidden in an interactive terminal. The script uses the entered URL's origin,
+which must be in the application's `FIONAS_TRUSTED_ORIGINS`. It logs in as the bootstrap
 administrator, initializes revision 1, adds four categories, and adds all 19 offerings
-in one batch at revision 6. It refuses an existing catalog. The acceptance preview selects
-the first four available hand-scooped flavors and the original six toppings, totaling $681.25.
+in one batch at revision 6 on a fresh database. Subsequent runs replace all active catalog
+contents from the script's definitions, restoring known keys and adding new ones in order.
+Omitted entries stay retired and omitted optional properties are cleared. The script manages
+catalog definitions only, with no estimate preview or price calculation.
 New offerings have no catalog surcharge; option text does not change availability automatically.
 Runtime V11/V12 reject populated legacy catalog storage; V12 replaces
 `commerce.offerings_snapshots` with `commerce.offerings_catalogs`. Fiona's migrations remain
 unchanged through V11. Empty databases migrate normally through runtime V12.
 
-For label-only upkeep, run `node scripts/setup-local-commerce.mjs --capitalize-toppings`.
-It updates changed labels in one batch and verifies description, price, state, availability,
-and all three text fields. Already-correct labels cause no update/revision.
-All seven configured toppings must exist; missing options abort before mutation. Label-only
-upkeep does not upgrade an older catalog with the new entries; enter them through revisioned APIs.
+For label edits, change the script's display names under the same keys and rerun the same
+command; it accepts no command-line options. Replacement preserves catalog identity and
+reserved keys, advances revisions, and verifies the resulting catalog. Each API mutation
+commits separately, so a failed run can leave partial contents; resolve the failure and rerun
+to rebuild from that state. Revision conflicts stop the script without automatic retries.
 
 ## Deployed stop-and-recreate cutover
 
@@ -97,7 +101,7 @@ Apply this sequence separately to each environment:
 3. Recreate the explicitly selected disposable database and connect only the upgraded backend. Old/new backend versions must not share the new catalog schema.
 4. Verify migration success (runtime V12, Fiona V11), backend version, health, and readiness.
 5. Bootstrap the administrator and re-provision roles, service identities, credentials, and service-token configuration. A database reset removes prior identities and sessions too.
-6. Enter the production catalog through its API; preserve observed revisions between mutations. The local acceptance script is only for fresh local/disposable setup.
+6. Enter the production catalog through its API; preserve observed revisions between mutations. Alternatively, edit `scripts/replace-catalog.mjs` with the complete desired catalog, then run it with the deployed base URL and that endpoint's administrator credentials. Its request Origin must be trusted by the deployment.
 7. Verify the compatible frontend and backend together: all five CHIPS questions, cardinality, option text and availability, batch administration, and stale-input review/retry handling.
 8. Resume traffic only after the smoke checks pass.
 
@@ -105,8 +109,9 @@ Smoke checks: add multiple offerings in one batch and confirm one revision and o
 form and verify all five CHIPS hints/event SELECT and optional text; preview current inputs;
 publish an update; confirm stale preview and new inquiry conflict with no-store and no partial
 writes; refresh/review and succeed; replay the successful inquiry with its original key after
-another publication; read/transition its recorded financial document. Exercise label updates
-with notes and disabled/unavailable state and verify preservation and the no-op repeat.
+another publication; read/transition its recorded financial document. Edit script labels under
+the same keys, replace the catalog, and verify the complete configured properties and ordering
+on a repeated run.
 
 Recovery is a stopped cutover too: stop traffic and all instances, select the backend version,
 and provision a database compatible with that version before restarting it. Do not point the
