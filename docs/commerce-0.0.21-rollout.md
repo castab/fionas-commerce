@@ -8,10 +8,16 @@ scheduled. All existing databases are disposable; no conversion migration is pro
 ## Compatibility prerequisites
 
 Regenerate affected clients from the generated executable OpenAPI contract. The form's
-`definitionVersion` is 10. Implement `CHIPS` for duration, soft serve flavors, toppings, and
-cones/cups. Duration selects one `INTEGER_CHOICE` value; offering chips select one or several
+`definitionVersion` is 11. Implement `CHIPS` for duration, soft serve flavors, hand-scooped
+flavors, toppings, and cones/cups. Duration selects one `INTEGER_CHOICE` value; offering chips select one or several
 keys as catalog `minSelections`/`maxSelections` require. Event type remains `SELECT`.
 Preserve question order, keys, bindings, and requiredness.
+Hand-scooped flavors follow soft serve in the existing service section and use
+`offering:hand-scooped-flavor`, bound to `/pricingInputs/selections`. The local category
+requires exactly four hand-scooped flavors alongside soft serve. Five of its seven flavors
+are available; Butter Pecan and New York Cheesecake stay visible and unavailable, with their
+nut/returning text. Toppings offer seven choices, including Chopped Peanuts, with limits
+still four to six. Category constraints remain authoritative for each environment's catalog.
 
 Render optional `badge`, `statusNote`, and `infoNote` for CHIPS. Catalog offering text passes
 through the runtime offering payload unchanged. Fiona's code-owned duration and event-type
@@ -67,8 +73,11 @@ node scripts/setup-local-commerce.mjs
 ```
 
 Supply the existing `FIONAS_ADMIN_PASSWORD` environment variable; the script also accepts
-`FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and `FIONAS_ADMIN_USERNAME`. It logs in as the bootstrap administrator, initializes revision 1, adds three categories, and adds all eleven offerings
-in one batch at revision 5. It refuses an existing catalog. The acceptance preview is $681.25.
+`FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and `FIONAS_ADMIN_USERNAME`. It logs in as the bootstrap
+administrator, initializes revision 1, adds four categories, and adds all 19 offerings
+in one batch at revision 6. It refuses an existing catalog. The acceptance preview selects
+the first four available hand-scooped flavors and the original six toppings, totaling $681.25.
+New offerings have no catalog surcharge; option text does not change availability automatically.
 Runtime V11/V12 reject populated legacy catalog storage; V12 replaces
 `commerce.offerings_snapshots` with `commerce.offerings_catalogs`. Fiona's migrations remain
 unchanged through V11. Empty databases migrate normally through runtime V12.
@@ -76,6 +85,8 @@ unchanged through V11. Empty databases migrate normally through runtime V12.
 For label-only upkeep, run `node scripts/setup-local-commerce.mjs --capitalize-toppings`.
 It updates changed labels in one batch and verifies description, price, state, availability,
 and all three text fields. Already-correct labels cause no update/revision.
+All seven configured toppings must exist; missing options abort before mutation. Label-only
+upkeep does not upgrade an older catalog with the new entries; enter them through revisioned APIs.
 
 ## Deployed stop-and-recreate cutover
 
@@ -87,11 +98,11 @@ Apply this sequence separately to each environment:
 4. Verify migration success (runtime V12, Fiona V11), backend version, health, and readiness.
 5. Bootstrap the administrator and re-provision roles, service identities, credentials, and service-token configuration. A database reset removes prior identities and sessions too.
 6. Enter the production catalog through its API; preserve observed revisions between mutations. The local acceptance script is only for fresh local/disposable setup.
-7. Verify the compatible frontend and backend together: all four CHIPS questions, cardinality, option text and availability, batch administration, and stale-input review/retry handling.
+7. Verify the compatible frontend and backend together: all five CHIPS questions, cardinality, option text and availability, batch administration, and stale-input review/retry handling.
 8. Resume traffic only after the smoke checks pass.
 
 Smoke checks: add multiple offerings in one batch and confirm one revision and order; read the
-form and verify all four CHIPS hints/event SELECT and optional text; preview current inputs;
+form and verify all five CHIPS hints/event SELECT and optional text; preview current inputs;
 publish an update; confirm stale preview and new inquiry conflict with no-store and no partial
 writes; refresh/review and succeed; replay the successful inquiry with its original key after
 another publication; read/transition its recorded financial document. Exercise label updates

@@ -38,7 +38,7 @@ import org.http4k.core.with
 
 @Serializable
 data class InquiryFormResponse(
-    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions.")
+    @ApiProperty(description = "Version of Fiona's code-owned question definition, currently 11, independent of catalog revisions.")
     val definitionVersion: Int,
     @ApiProperty(description = "Fiona's stable catalog identity.", format = "uuid")
     val catalogId: String,
@@ -258,7 +258,15 @@ private val exampleInquiryForm =
     inquiryForm(
         OfferingsSnapshot.create(
             FIONA_OFFERINGS_CATALOG_ID,
-            listOf(OfferingCategory(OfferingCategoryKey("soft-serve-flavor"), "Soft serve", minimumSelections = 1, maximumSelections = 2)),
+            listOf(
+                OfferingCategory(OfferingCategoryKey("soft-serve-flavor"), "Soft serve", minimumSelections = 1, maximumSelections = 2),
+                OfferingCategory(
+                    OfferingCategoryKey("hand-scooped-flavor"),
+                    "Hand-Scooped flavors",
+                    minimumSelections = 4,
+                    maximumSelections = 4,
+                ),
+            ),
             listOf(
                 Offering(
                     OfferingKey("vanilla"),
@@ -267,7 +275,47 @@ private val exampleInquiryForm =
                     selectionState = OfferingSelectionState.ENABLED,
                     availability = OfferingAvailability.AVAILABLE,
                 ),
-            ),
+            ) +
+                listOf(
+                    "chocolate-chip" to "Chocolate Chip",
+                    "chocolate" to "Chocolate",
+                    "vanilla-bean" to "Vanilla Bean",
+                    "strawberry" to "Strawberry",
+                ).map { (key, label) ->
+                    Offering(
+                        OfferingKey("hand-scooped-$key"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        label,
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    )
+                } +
+                listOf(
+                    Offering(
+                        OfferingKey("hand-scooped-butter-pecan"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        "Butter Pecan",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.UNAVAILABLE,
+                        infoNote = "Contains tree nuts",
+                    ),
+                    Offering(
+                        OfferingKey("hand-scooped-mint-chip"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        "Mint Chip",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                    Offering(
+                        OfferingKey("hand-scooped-new-york-cheesecake"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        "New York Cheesecake",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.UNAVAILABLE,
+                        badge = "Returning soon",
+                        statusNote = "Back on the menu this fall!",
+                    ),
+                ),
         ),
     ).toResponse()
 
@@ -279,7 +327,9 @@ fun getInquiryFormRoute(
         operationId = "getInquiryForm"
         summary = "Read the customer inquiry form"
         description = "Ordered customer-facing questions for POST /inquiries. Input semantics and presentation hints are separate. " +
-            "Duration, soft serve flavors, toppings, and cones/cups use CHIPS; offering limits determine single or multiple selection. " +
+            "Definition 11 uses CHIPS for duration, soft serve flavors, hand-scooped flavors, toppings, and cones/cups; " +
+            "offering limits determine single or multiple selection. The local hand-scooped category requires exactly four " +
+            "selections alongside soft serve, in the same service section. " +
             "Catalog option badge, statusNote, and infoNote pass through to CHIPS for the UI. " +
             "Code-owned duration and event-type option text defaults to null, omitted from JSON, with no editing API. " +
             "statusNote never overrides availability; UNAVAILABLE options remain unselectable. " +
@@ -335,7 +385,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
     // Reuse the runtime's conversion, including every price form, without re-modeling its DTOs.
     val categories = catalog.dto().categories.associateBy { it.key }
     return InquiryFormResponse(
-        definitionVersion = 10,
+        definitionVersion = 11,
         catalogId = catalog.catalogId.value.toString(),
         catalogRevision = catalog.revision.number,
         sections =

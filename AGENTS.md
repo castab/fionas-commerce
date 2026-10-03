@@ -222,7 +222,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
 - Fiona owns the ordered sections, stable question keys, labels, submission bindings, and
   small rendering hints. Semantic inputs are distinct from hints: TEXT, EMAIL, INTEGER,
   BOOLEAN, INTEGER_CHOICE, DATE, STRING_CHOICE, and OFFERING_CHOICE. No frontend component names.
-- Public offering questions explicitly reference stable category keys (soft serve,
+- Public offering questions explicitly reference stable category keys (soft serve, hand-scooped,
   toppings from the pricing policy, cones/cups), ordered by Fiona's question definition.
   Missing/retired categories are omitted; restoration restores the configured question.
   Other active categories never become public questions automatically. Catalog categories
@@ -231,15 +231,27 @@ verifying ownership of the address. Decide these explicitly before changing the 
   snapshot. HTTP reuses the runtime's `dto()`, `OfferingDto`, and `OfferingPriceDto`;
   never restate offering identity, price forms, or selection validation. Allowed durations
   come from `FionasPricingPolicy`; text limits come from Fiona's value-object constants.
-- The response exposes `definitionVersion` (10 for the current code-owned definition) and
+- The response exposes `definitionVersion` (11 for the current code-owned definition) and
   `catalogId`/`catalogRevision`. Clients submit the latter revision as
   `pricingInputs.catalogRevision`; inquiry submission requires it still to be current,
   and current-revision backend pricing remains authoritative.
   Change the definition version deliberately when code-owned questions/bindings change.
-- Definition 10 uses `CHIPS` for duration and the three public offering questions (soft serve
-  flavors, toppings, cones/cups). Duration remains `INTEGER_CHOICE` with one allowed integer;
+- Definition 11 uses `CHIPS` for duration and the four public offering questions (soft serve
+  flavors, hand-scooped flavors, toppings, cones/cups). Hand-scooped follows soft serve in
+  the existing required service section, bound to `/pricingInputs/selections`, with stable
+  field key `offering:hand-scooped-flavor`. The local catalog requires exactly four hand-scooped
+  selections alongside soft serve. Duration remains `INTEGER_CHOICE` with one allowed integer;
   offerings remain `OFFERING_CHOICE`, with catalog-owned minimum/maximum and single or multiple
   selection. Event type remains `STRING_CHOICE` with `SELECT`. Hints never change semantics.
+- The fresh local setup script adds four categories and one batch of 19 offerings, reaching
+  revision 6. `hand-scooped-flavor` has minimum/maximum four; all its keys use `hand-scooped-`
+  prefixes to avoid collisions with soft serve. Butter Pecan and New York Cheesecake are
+  ENABLED/UNAVAILABLE and retain their nut/returning notes; other offerings are ENABLED/AVAILABLE.
+  Chopped Peanuts adds a seventh topping with `infoNote: Contains peanuts`; topping limits
+  remain four to six. New offerings have no catalog prices. The $681.25 preview selects the
+  first four available hand-scooped flavors and the original six toppings; baseline fixtures
+  remain unchanged. Label maintenance requires all seven toppings, updates changed labels
+  in one batch, and preserves all other properties. Notes never schedule availability changes.
 - Integer/string options have default-null `badge`, `statusNote`, and `infoNote`, mapped to
   response DTOs and omitted from JSON when absent. Each supplied domain value is nonblank,
   without trimming. Fiona currently consumes this text only for CHIPS rendering. Runtime
@@ -630,6 +642,9 @@ update, and none after the merge into `main`. `main` is expected to be protected
 through pull requests whose required CI check passed); the workflows cannot enforce this and must not
 try to configure it. Never re-add a `push` trigger to `ci.yml`, and never give a pull request
 workflow Docker Hub credentials.
+Pull request CI provisions Java 25 and Node.js 24 for the actual setup/payment script
+smoke tests against throwaway PostgreSQL, without npm dependencies or caching. Release
+artifact production does not run these tests or require Node.js.
 
 A release is a pushed Git tag `vMAJOR.MINOR.PATCH` (no prerelease or build suffix), handled by
 `.github/workflows/release.yml`, separate from `ci.yml`. The application is released as a Docker
@@ -1432,6 +1447,11 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
   OpenAPI `info.version` are the Gradle project version the build was given, so a release's
   `-Pversion` is proven to reach both), and `ArchitectureSpec`.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
+- Node.js 20 or newer must be on PATH for `SetupLocalCommerceSpec`, which runs the actual
+  setup/payment scripts against a started test runtime and throwaway PostgreSQL. CI provisions
+  Node.js 24 without npm packages or caching. This spec covers the expanded catalog, five
+  CHIPS questions, exact-four validation, unavailable choices, zero-write rejections, and
+  metadata-preserving label maintenance; baseline acceptance fixtures remain independent.
 
 ## Documentation synchronization
 

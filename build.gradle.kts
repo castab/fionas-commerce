@@ -156,6 +156,7 @@ tasks.named("ktlintMainSourceSetFormat") {
 
 tasks.test {
     useJUnitPlatform()
+    inputs.files("scripts/setup-local-commerce.mjs", "scripts/spoof-payment.mjs")
     testLogging {
         events("passed", "skipped", "failed")
     }

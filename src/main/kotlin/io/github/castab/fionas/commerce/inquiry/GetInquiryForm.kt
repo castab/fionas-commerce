@@ -166,6 +166,7 @@ internal fun inquiryForm(
 internal fun publicOfferingQuestions(policy: FionasPricingPolicy = FIONAS_PRICING_POLICY) =
     listOf(
         OfferingQuestion(OfferingCategoryKey("soft-serve-flavor"), "Choose your soft serve flavors", InquiryFormControl.CHIPS),
+        OfferingQuestion(OfferingCategoryKey("hand-scooped-flavor"), "Choose your hand-scooped flavors", InquiryFormControl.CHIPS),
         OfferingQuestion(policy.toppingCategory, "Choose your toppings", InquiryFormControl.CHIPS),
         OfferingQuestion(OfferingCategoryKey("cone-option"), "Choose your cones or cups", InquiryFormControl.CHIPS),
     )

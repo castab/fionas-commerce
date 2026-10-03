@@ -10,6 +10,24 @@ const TOPPING_OPTIONS = [
   { key: "brownies", displayName: "Brownies" },
   { key: "gummy-bears", displayName: "Gummy Bears" },
   { key: "cookie-dough", displayName: "Cookie Dough" },
+  { key: "chopped-peanuts", displayName: "Chopped Peanuts", infoNote: "Contains peanuts" },
+];
+const HAND_SCOOPED_OPTIONS = [
+  { key: "hand-scooped-chocolate-chip", displayName: "Chocolate Chip" },
+  { key: "hand-scooped-chocolate", displayName: "Chocolate" },
+  { key: "hand-scooped-vanilla-bean", displayName: "Vanilla Bean" },
+  { key: "hand-scooped-strawberry", displayName: "Strawberry" },
+  { key: "hand-scooped-butter-pecan", displayName: "Butter Pecan", availability: "UNAVAILABLE", infoNote: "Contains tree nuts" },
+  { key: "hand-scooped-mint-chip", displayName: "Mint Chip" },
+  {
+    key: "hand-scooped-new-york-cheesecake", displayName: "New York Cheesecake", availability: "UNAVAILABLE",
+    statusNote: "Back on the menu this fall!", badge: "Returning soon",
+  },
+];
+// The example selects six toppings, even though the catalog offers seven.
+const PREVIEW_TOPPINGS = ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"];
+const PREVIEW_HAND_SCOOPED = [
+  "hand-scooped-chocolate-chip", "hand-scooped-chocolate", "hand-scooped-vanilla-bean", "hand-scooped-strawberry",
 ];
 
 const baseUrl = process.env.FIONAS_BASE_URL ?? "http://localhost:8080";
@@ -170,6 +188,7 @@ async function main() {
 
   const categories = [
     { key: "soft-serve-flavor", displayName: "Soft Serve", minimumSelections: 1, maximumSelections: 2 },
+    { key: "hand-scooped-flavor", displayName: "Hand-Scooped flavors", minimumSelections: 4, maximumSelections: 4 },
     { key: "topping", displayName: "Toppings", minimumSelections: 4, maximumSelections: 6 },
     { key: "cone-option", displayName: "Cones", minimumSelections: 1, maximumSelections: 1 },
   ];
@@ -182,7 +201,6 @@ async function main() {
     console.log(`Added category ${category.key}: revision ${catalogRevision}`);
   }
 
-  const toppings = TOPPING_OPTIONS.map(({ key }) => key);
   const offerings = [
     { key: "vanilla", category: "soft-serve-flavor", displayName: "Vanilla" },
     { key: "chocolate", category: "soft-serve-flavor", displayName: "Chocolate" },
@@ -190,6 +208,7 @@ async function main() {
       key: "horchata", category: "soft-serve-flavor", displayName: "Horchata", description: "Premium soft serve",
       price: { kind: "PER_QUANTITY", amount: "0.50", currency: "USD", dimension: "guest" },
     },
+    ...HAND_SCOOPED_OPTIONS.map((flavor) => ({ ...flavor, category: "hand-scooped-flavor" })),
     ...TOPPING_OPTIONS.map((topping) => ({ ...topping, category: "topping" })),
     { key: "cup", category: "cone-option", displayName: "Cups" },
     {
@@ -201,7 +220,7 @@ async function main() {
   const createdOfferings = await request("POST", path, {
     body: {
       expectedRevision: catalogRevision,
-      offerings: offerings.map((offering) => ({ ...offering, selectionState: "ENABLED", availability: "AVAILABLE" })),
+      offerings: offerings.map((offering) => ({ selectionState: "ENABLED", availability: "AVAILABLE", ...offering })),
     },
     authenticated: true, expectedStatus: 201,
   });
@@ -221,7 +240,8 @@ async function main() {
     durationMinutes: 120,
     selections: [
       { category: "soft-serve-flavor", offerings: ["vanilla", "horchata"] },
-      { category: "topping", offerings: toppings },
+      { category: "hand-scooped-flavor", offerings: PREVIEW_HAND_SCOOPED },
+      { category: "topping", offerings: PREVIEW_TOPPINGS },
       { category: "cone-option", offerings: ["waffle-cone"] },
     ],
   };

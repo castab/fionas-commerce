@@ -208,7 +208,7 @@ class InquiryFormRoutesSpec :
 
         test("public form returns ordered questions, submission bindings, and separate presentation hints") {
             val form = application.form()
-            form.definitionVersion shouldBe 10
+            form.definitionVersion shouldBe 11
             form.catalogRevision shouldBe revision
             form.sections.map { it.key to it.title } shouldContainExactly
                 listOf(

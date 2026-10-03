@@ -923,15 +923,33 @@ class OpenApiDocumentSpec :
                 listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES", "DATE", "CHIPS")
         }
 
-        test("inquiry form v10 reuses required runtime state enums and documents public visibility and structural rejections") {
+        test("inquiry form v11 reuses required runtime state enums and documents public visibility and structural rejections") {
             val form = operation("/inquiry-form", "get")
-            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 10
+            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 11
             form
                 .at("responses", "200", "content", "application/json", "example", "sections")
                 .jsonArray
                 .single { it.text("key") == "service" }
                 .at("optional") shouldBe JsonPrimitive(false)
             val description = form.text("description")
+            description shouldContain "hand-scooped flavors"
+            val hand =
+                form
+                    .at("responses", "200", "content", "application/json", "example", "sections")
+                    .jsonArray
+                    .single { it.text("key") == "service" }
+                    .at("fields")
+                    .jsonArray
+                    .single { it.text("key") == "offering:hand-scooped-flavor" }
+            hand.text("submissionPointer") shouldBe "/pricingInputs/selections"
+            hand.text("presentation", "control") shouldBe "CHIPS"
+            hand.at("required") shouldBe JsonPrimitive(true)
+            hand.at("input", "minSelections") shouldBe JsonPrimitive(4)
+            hand.at("input", "maxSelections") shouldBe JsonPrimitive(4)
+            val returning = hand.at("input", "options").jsonArray.single { it.text("key") == "hand-scooped-new-york-cheesecake" }
+            returning.text("availability") shouldBe "UNAVAILABLE"
+            returning.text("badge") shouldBe "Returning soon"
+            returning.text("statusNote") shouldBe "Back on the menu this fall!"
             description shouldContain "Service configuration is required"
             description shouldNotContain "optional"
             description shouldContain "selectionState=ENABLED"

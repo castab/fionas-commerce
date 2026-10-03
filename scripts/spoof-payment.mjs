@@ -148,6 +148,10 @@ async function main() {
     durationMinutes: 120,
     selections: [
       { category: "soft-serve-flavor", offerings: ["vanilla", "horchata"] },
+      ...(catalog.categories.some(({ key }) => key === "hand-scooped-flavor") ? [{
+        category: "hand-scooped-flavor",
+        offerings: ["hand-scooped-chocolate-chip", "hand-scooped-chocolate", "hand-scooped-vanilla-bean", "hand-scooped-strawberry"],
+      }] : []),
       { category: "topping", offerings: ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"] },
       { category: "cone-option", offerings: ["waffle-cone"] },
     ],

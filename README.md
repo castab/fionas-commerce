@@ -361,7 +361,7 @@ failures and present `message` as diagnostic text; they never parse it for codes
 
 `GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
 resolved against one current Offerings snapshot. The response includes `definitionVersion`
-(currently 10), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
+(currently 11), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
 advisory `pricingPreview` facts.
 Definition version identifies the code-owned questions and bindings; catalog edits change
 the catalog revision independently. Sections are **Contact information**, **Event details**, **Build your
@@ -387,11 +387,14 @@ Hints are `TEXT`, `TEXTAREA`, `NUMBER`, `CHECKBOX`, `SELECT`, `CARDS`, `DATE`,
 accessibility, styling, and layout. Multiline notes are a string with a textarea hint.
 No Svelte component names appear in the contract.
 
-Definition version 10 advertises `CHIPS` for duration, soft serve flavors, toppings, and
-cones or cups. Duration retains `INTEGER_CHOICE` semantics and selects one allowed integer.
-The three offering questions retain `OFFERING_CHOICE` semantics: clients must support single
+Definition version 11 advertises `CHIPS` for duration, soft serve flavors, hand-scooped flavors,
+toppings, and cones or cups. Duration retains `INTEGER_CHOICE` semantics and selects one allowed integer.
+The four offering questions retain `OFFERING_CHOICE` semantics: clients must support single
 or multiple selection according to catalog `minSelections`/`maxSelections`. Event type remains
-`STRING_CHOICE` with `SELECT`. Keys, order, bindings, and requiredness are unchanged.
+`STRING_CHOICE` with `SELECT`. Hand-scooped flavors follow soft serve in the existing service
+section, with key `offering:hand-scooped-flavor` and binding `/pricingInputs/selections`.
+The local catalog requires exactly four hand-scooped flavors alongside soft serve; limits
+remain catalog-owned. Missing/retired categories omit their configured question.
 
 Integer, string, and offering options may carry `badge` (short text beside an option),
 `statusNote` (its current situation), and `infoNote` (a lasting fact displayed on demand).
@@ -1550,17 +1553,29 @@ The script also accepts `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
 `FIONAS_ADMIN_USERNAME`; each defaults to the local port 8080 setup and username `admin`.
 It does not load `.env` files or install npm packages. It intentionally seeds only a fresh
 catalog and stops if one already exists; existing catalogs are managed through revisioned
-mutations. Three category additions followed by one offering batch produce revision 5.
+mutations. Four category additions followed by one batch of 19 offerings produce revision 6.
 Each mutation sends `expectedRevision` from the preceding successful response, with
 no intervening GET or automatic retry. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
 for the exact catalog entries and preview request.
 
-Every seeded offering explicitly sends `selectionState=ENABLED` and `availability=AVAILABLE`.
+Every seeded offering explicitly sends `selectionState=ENABLED`. Butter Pecan and New York
+Cheesecake are `UNAVAILABLE`, so they remain visible but cannot be selected; all other options
+are `AVAILABLE`. Hand-scooped flavors are Chocolate Chip, Chocolate, Vanilla Bean, Strawberry,
+Butter Pecan, Mint Chip, and New York Cheesecake, in that order, with unique `hand-scooped-`
+offering keys. Butter Pecan has `infoNote: Contains tree nuts`; New York Cheesecake has
+`badge: Returning soon` and `statusNote: Back on the menu this fall!`. These are literal notes;
+returning a flavor to availability requires a catalog mutation.
+
+Toppings now include Chopped Peanuts (`chopped-peanuts`, `infoNote: Contains peanuts`),
+with the existing four-to-six selection limits. New entries have no catalog surcharge.
+The canonical preview selects the first four hand-scooped flavors and the original six
+toppings, keeping its $681.25 total. Existing baseline test fixtures retain their smaller catalog.
 For an existing catalog, `node scripts/setup-local-commerce.mjs --capitalize-toppings`
 updates topping display names while preserving and verifying description, price, selection
 state, availability, `badge`, `statusNote`, and `infoNote`. Changed labels are updated in
 one complete-replacement batch; no request is sent when every label is already correct.
-A label edit never enables or makes an offering available.
+A label edit never enables or makes an offering available. All seven configured toppings
+must exist; a missing topping aborts before any label update. This mode does not add missing options.
 
 ### Smoke test Invoice payments and a refund locally
 
@@ -1660,6 +1675,9 @@ tested against PostgreSQL 18. It applies its migrations on startup
 ## Releasing
 
 CI verifies source; a release promotes source that is already verified.
+Pull request CI provisions Java 25 and Node.js 24. Its PostgreSQL-backed tests run the
+actual local setup and payment scripts; no npm packages are installed. Release builds
+continue compiling the backend without running those smoke tests.
 
 | | Pull request CI ([`ci.yml`](.github/workflows/ci.yml)) | Tag release ([`release.yml`](.github/workflows/release.yml)) |
 |---|---|---|
@@ -1795,6 +1813,9 @@ the Docker CLI and removes it when the build ends. To use an existing server ins
 `TEST_DATABASE_JDBC_URL`, `TEST_DATABASE_USERNAME`, and `TEST_DATABASE_PASSWORD` (the user
 must be allowed to `CREATE DATABASE`). Each spec creates and drops its own database, and
 commerce-runtime applies the real migrations. There is no H2 and no test schema.
+Node.js 20 or newer must also be on PATH: the bootstrap smoke spec runs the actual setup
+and payment scripts against a started test runtime. CI provisions Node.js 24 without npm
+dependencies or caching; Gradle tracks both scripts as test inputs.
 
 | Spec | Proves |
 |---|---|
@@ -1809,7 +1830,8 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `InquiryIdempotencyRoutesSpec` | Full-handler replay with exact receipts, no second inquiry/Estimate/association; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |
 | `InquiryIdempotencySpec` | Forced overlapping PostgreSQL same/different commands, observed unique-key waits, either winner accepted; failed owner releases key to waiter; late rollback; incomplete claims rejected at commit; application-to-HTTP lost-response recovery and no replay pricing/catalog lookup |
 | `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff at current revision; missing/null `pricingInputs` malformed with zero writes; no inquiry before catalog initialization |
-| `InquiryFormRoutesSpec` | Explicit public questions and lifecycle (service section required, unconfigured submissions malformed), input constraints and submission bindings, runtime prices, incompatible configuration failures, and definition 10, all four CHIPS hints, cardinality, option-text/availability projection, local totals matching authoritative current previews, and captured stale forms rejected |
+| `InquiryFormRoutesSpec` | Explicit public questions and lifecycle (service section required, unconfigured submissions malformed), input constraints and submission bindings, runtime prices, incompatible configuration failures, and definition 11, CHIPS hints for configured categories, cardinality, option-text/availability projection, local totals matching authoritative current previews, and captured stale forms rejected |
+| `SetupLocalCommerceSpec` | Actual Node setup/payment scripts against the running backend and throwaway PostgreSQL: four categories and 19 offerings at revision 6, five CHIPS questions with notes/availability, exact-four hand-scooped selections alongside soft serve, $681.25 pricing, zero-write rejections, lifecycle projection, fresh-only refusal, and seven-label batch maintenance preserving all properties with an unchanged-repeat no-op |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
