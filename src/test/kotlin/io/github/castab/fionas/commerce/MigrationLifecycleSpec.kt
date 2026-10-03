@@ -124,7 +124,10 @@ class MigrationLifecycleSpec :
                 database.history("commerce").any { it.contains("V9__aggregate_snapshots.sql") } shouldBe true
                 database.history("commerce").any { it.contains("V10__service_credentials.sql") } shouldBe true
                 database.history("commerce").any { it.contains("V11__offering_badge_and_status_note.sql") } shouldBe true
-                database.history("commerce").last() shouldContain "V12__offerings_current_catalogs.sql"
+                database.history("commerce").any { it.contains("V12__offerings_current_catalogs.sql") } shouldBe true
+                database.history("commerce").last() shouldContain "V13__deposit_requirements.sql"
+                database.strings("SELECT to_regclass('commerce.deposit_requirement_revisions') IS NOT NULL").single() shouldBe "t"
+                database.strings("SELECT to_regclass('fionas.deposit_requirement_revisions') IS NULL").single() shouldBe "t"
                 database
                     .strings(
                         "SELECT is_nullable || ' ' || data_type FROM information_schema.columns " +

@@ -63,6 +63,20 @@ class JdbiInquiryFinancialDocumentRepository : InquiryFinancialDocumentRepositor
         documentId: UUID,
     ): InquiryId? = inquiryOf(transaction, documentId, " FOR UPDATE")
 
+    override fun inquiriesOf(
+        transaction: Transaction,
+        documentIds: Collection<UUID>,
+    ): Map<UUID, InquiryId> {
+        if (documentIds.isEmpty()) return emptyMap()
+        return transaction.handle
+            .createQuery(
+                "SELECT document_id, inquiry_id FROM fionas.inquiry_financial_documents WHERE document_id IN (<documentIds>)",
+            ).bindList("documentIds", documentIds)
+            .map { row, _ -> row.getObject("document_id", UUID::class.java) to InquiryId(row.getObject("inquiry_id", UUID::class.java)) }
+            .list()
+            .toMap()
+    }
+
     private fun inquiryOf(
         transaction: Transaction,
         documentId: UUID,

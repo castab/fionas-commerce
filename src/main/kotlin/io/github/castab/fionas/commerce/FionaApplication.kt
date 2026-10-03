@@ -15,6 +15,8 @@ import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.CreateChangeOrder
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
+import io.github.castab.fionas.commerce.financial.GetDepositRequirement
+import io.github.castab.fionas.commerce.financial.GetDepositRequirementHistory
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.IssueInvoice
@@ -24,9 +26,12 @@ import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRe
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
+import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
+import io.github.castab.fionas.commerce.financial.SetDepositRequirement
+import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
@@ -188,6 +193,11 @@ fun fionaApplication(
                     getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     getFinancialDocumentHistory =
                         GetFinancialDocumentHistory(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    getDepositRequirement = GetDepositRequirement(context.transactor, ledger, documentOwners)::invoke,
+                    getDepositRequirementHistory = GetDepositRequirementHistory(context.transactor, ledger, documentOwners)::invoke,
+                    setDepositRequirement = SetDepositRequirement(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    withdrawDepositRequirement = WithdrawDepositRequirement(context.transactor, ledger, documentOwners)::invoke,
+                    queryFinancialLineages = QueryFinancialLineages(context.transactor, ledger, documentOwners)::invoke,
                     issueQuote = IssueQuote(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     createChangeOrder = CreateChangeOrder(context.transactor, ledger, documentOwners, pricingSources, pricing)::invoke,
@@ -211,7 +221,7 @@ fun fionaApplication(
                 authorizationAdministrationHttpCapability(context, access, "/admin/access", setOf(staffAdministrationTag))
             // The request's principal, USER or SERVICE, resolved through the same AccessControl and catalog.
             // The permission catalog is served once, by the administration capability: commerce-runtime
-            // 0.0.21's standalone catalog route has the same fixed operationId, so it is not also mounted.
+            // 0.0.22's standalone catalog route has the same fixed operationId, so it is not also mounted.
             val currentPrincipal = currentPrincipalHttpCapability(access, "/authorization/me", setOf(authorizationTag))
             val serviceAuthentication = fionaServiceAuthentication(context)
             listOf(

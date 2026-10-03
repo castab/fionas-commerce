@@ -131,6 +131,10 @@ class ArchitectureSpec :
         }
 
         test("only operations open runtime transactions, and nothing builds its own transaction infrastructure") {
+            // Approval and its multi-query response must not gain an inner transaction or a second projection.
+            val approval = File(mainSources, "financial/SetDepositRequirement.kt").codeWithoutComments()
+            Regex("inTransaction").findAll(approval).count() shouldBe 1
+            Regex("financialLineages").findAll(approval).count() shouldBe 1
             sources()
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(
@@ -138,6 +142,11 @@ class ArchitectureSpec :
                     "inquiry/GetInquiry.kt: inTransaction",
                     "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
+                    "financial/GetDepositRequirement.kt: inTransaction",
+                    "financial/GetDepositRequirementHistory.kt: inTransaction",
+                    "financial/SetDepositRequirement.kt: inTransaction",
+                    "financial/WithdrawDepositRequirement.kt: inTransaction",
+                    "financial/QueryFinancialLineages.kt: inTransaction",
                     "financial/CreateInquiryFinancialDocument.kt: inTransaction",
                     "financial/CreateChangeOrder.kt: inTransaction",
                     "financial/IssueQuote.kt: inTransaction",
@@ -223,6 +232,11 @@ class ArchitectureSpec :
                         listInquiryFinancialDocuments = { error("not called") },
                         getFinancialDocument = { error("not called") },
                         getFinancialDocumentHistory = { error("not called") },
+                        getDepositRequirement = { error("not called while rendering") },
+                        getDepositRequirementHistory = { error("not called while rendering") },
+                        setDepositRequirement = { error("not called while rendering") },
+                        withdrawDepositRequirement = { error("not called while rendering") },
+                        queryFinancialLineages = { error("not called while rendering") },
                         issueQuote = { _, _ -> error("not called") },
                         issueInvoice = { _, _ -> error("not called") },
                         createChangeOrder = { _, _, _ -> error("not called") },
@@ -255,6 +269,17 @@ class ArchitectureSpec :
                 .filter { it.isFile && Regex("""(openapi|swagger).*\.(json|ya?ml)""", RegexOption.IGNORE_CASE).matches(it.name) }
                 .toList()
                 .shouldBeEmpty()
+        }
+
+        test("commerce runtime and transitive domain resolve at the adopted 0.0.22 release") {
+            listOf(
+                io.github.castab.commerce.runtime.financial.FinancialLedger::class.java to "commerce-runtime",
+                io.github.castab.commerce.financial.Money::class.java to "commerce-domain",
+            ).forEach { (type, artifact) ->
+                type.protectionDomain.codeSource.location.path
+                    .substringAfterLast('/') shouldBe "$artifact-0.0.22.jar"
+            }
+            File("gradle/libs.versions.toml").readText().contains("http4k = \"6.58.0.0\"") shouldBe true
         }
 
         test("every http4k module is the one version commerce-runtime is built against") {

@@ -7,9 +7,11 @@ import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.openapi.fionaOpenApiDocument
+import io.github.castab.fionas.commerce.testing.metadataAuth
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldBeUnique
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.collections.shouldNotContain
@@ -107,6 +109,20 @@ class OpenApiDocumentSpec :
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/financial-documents/{documentId}/history", "get", "getFinancialDocumentHistory") to
                     listOf("200", "400", "401", "403", "404", "500"),
+                Triple("/financial-documents/{documentId}/deposit-requirement", "get", "getFinancialDocumentDepositRequirement") to
+                    listOf("200", "400", "401", "403", "404", "500"),
+                Triple(
+                    "/financial-documents/{documentId}/deposit-requirement/history",
+                    "get",
+                    "getFinancialDocumentDepositRequirementHistory",
+                ) to
+                    listOf("200", "400", "401", "403", "404", "500"),
+                Triple("/financial-documents/{documentId}/deposit-requirement", "put", "setFinancialDocumentDepositRequirement") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/financial-documents/{documentId}/deposit-requirement", "delete", "withdrawFinancialDocumentDepositRequirement") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/financial-documents/query", "post", "queryFinancialDocumentLineages") to
+                    listOf("200", "400", "401", "403", "404", "422", "500"),
                 Triple("/financial-documents/{documentId}/quote", "post", "issueQuote") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/financial-documents/{documentId}/invoice", "post", "issueInvoice") to
@@ -143,6 +159,11 @@ class OpenApiDocumentSpec :
                 "listInquiryFinancialDocuments" to "Financial documents",
                 "getFinancialDocument" to "Financial documents",
                 "getFinancialDocumentHistory" to "Financial documents",
+                "getFinancialDocumentDepositRequirement" to "Deposit requirements",
+                "getFinancialDocumentDepositRequirementHistory" to "Deposit requirements",
+                "setFinancialDocumentDepositRequirement" to "Deposit requirements",
+                "withdrawFinancialDocumentDepositRequirement" to "Deposit requirements",
+                "queryFinancialDocumentLineages" to "Deposit requirements",
                 "issueQuote" to "Financial documents",
                 "issueInvoice" to "Financial documents",
                 "createChangeOrder" to "Financial documents",
@@ -221,6 +242,25 @@ class OpenApiDocumentSpec :
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
+                "CurrentDepositRequirementResponse",
+                "CurrentDepositRequirementResponse_NONE",
+                "CurrentDepositRequirementResponse_ACTIVE",
+                "CurrentDepositRequirementResponse_WITHDRAWN",
+                "DepositTermsRequest",
+                "DepositTermsRequest_FIXED",
+                "DepositTermsRequest_PERCENTAGE",
+                "DepositMoneyResponse",
+                "DepositRequirementHistoryResponse",
+                "HistoricalDepositRequirementResponse",
+                "HistoricalDepositRequirementResponse_ACTIVE",
+                "HistoricalDepositRequirementResponse_WITHDRAWN",
+                "SetDepositRequirementRequest",
+                "WithdrawDepositRequirementRequest",
+                "QueryFinancialLineagesRequest",
+                "FinancialLineagesResponse",
+                "FinancialLineageResponse",
+                "FinancialLineageReconciliationResponse",
+                "FinancialLineageActivityResponse",
                 "InquiryFormResponse",
                 "InquiryFormSectionResponse",
                 "InquiryFormFieldResponse",
@@ -326,6 +366,7 @@ class OpenApiDocumentSpec :
                     "Inquiries",
                     "Estimates",
                     "Financial documents",
+                    "Deposit requirements",
                     "Payments",
                     "Authentication",
                     "Staff administration",
@@ -404,7 +445,7 @@ class OpenApiDocumentSpec :
         }
 
         test("runtime capability routes carry no host security metadata yet, an upstream gap rather than a Fiona choice") {
-            // commerce-runtime 0.0.21 lets a host neither add security to its capability routes nor marks its public
+            // commerce-runtime 0.0.22 lets a host neither add security to its capability routes nor marks its public
             // Offerings reads NoSecurity, so a contract-wide default would mislabel those reads. Its protected routes
             // still enforce Fiona's same AccessControl; this pins the gap so a runtime that closes it is noticed.
             (offeringOperations + adminOperations + principalOperations).forEach { (path, method, operationId) ->
@@ -468,7 +509,7 @@ class OpenApiDocumentSpec :
         }
 
         test("mounts one permission catalog route, so every operationId is unique") {
-            // commerce-runtime 0.0.21's standalone catalog capability reuses the administration route's
+            // commerce-runtime 0.0.22's standalone catalog capability reuses the administration route's
             // fixed authorizationListPermissions operationId, so only the administration route is mounted.
             document
                 .at("paths")
@@ -886,12 +927,105 @@ class OpenApiDocumentSpec :
         }
 
         test("gives every property of Fiona's schemas a type or a reference") {
-            fionaSchemas.filterNot { it == "InquiryFormInputResponse" }.forEach { name ->
+            fionaSchemas.filterNot { "oneOf" in schema(it) }.forEach { name ->
                 schema(name)
                     .at("properties")
                     .jsonObject.values
                     .forEach { (it.jsonObject.keys intersect setOf("type", "\$ref")).size shouldBe 1 }
             }
+        }
+
+        test("deposit error descriptions enumerate only reachable codes with one response per status") {
+            val path = "/financial-documents/{documentId}/deposit-requirement"
+            val put = operation(path, "put")
+            put.text("responses", "409", "description") shouldContain "`conflict`"
+            put.text("responses", "409", "description") shouldNotContain "illegal_transition"
+            put.text("responses", "422", "description").let {
+                it shouldContain "`validation_failed`"
+                it shouldContain "`invariant_violated`"
+            }
+            val delete = operation(path, "delete")
+            delete.text("responses", "409", "description").let {
+                it shouldContain "`conflict`"
+                it shouldContain "`illegal_transition`"
+            }
+            delete.text("responses", "422", "description").let {
+                it shouldContain "`validation_failed`"
+                it shouldContain "expectedRequirementRevision"
+                it shouldNotContain "invariant_violated"
+            }
+            operation("/financial-documents/query", "post").let {
+                it.at("responses").jsonObject.containsKey("409") shouldBe false
+                it.text("responses", "422", "description") shouldContain "`validation_failed`"
+                it.text("responses", "422", "description") shouldNotContain "invariant_violated"
+            }
+            listOf(path, "$path/history").forEach {
+                operation(it, "get").at("responses").jsonObject.keys shouldContainExactlyInAnyOrder
+                    listOf("200", "400", "401", "403", "404", "500")
+            }
+            // Inspect executable metadata before rendering can collapse duplicate status entries.
+            val access = metadataAuth.access
+            listOf(
+                getDepositRequirementRoute({ error("not called") }, access),
+                getDepositRequirementHistoryRoute({ error("not called") }, access),
+                setDepositRequirementRoute({ error("not called") }, access),
+                withdrawDepositRequirementRoute({ error("not called") }, access),
+                queryFinancialLineagesRoute({ error("not called") }, access),
+            ).forEach { route ->
+                route.meta.responses
+                    .map { it.message.status }
+                    .shouldBeUnique()
+            }
+        }
+
+        test("deposit terms and current/history states describe distinct discriminated shapes") {
+            mapOf(
+                "DepositTermsRequest" to ("type" to listOf("FIXED", "PERCENTAGE")),
+                "CurrentDepositRequirementResponse" to ("state" to listOf("ACTIVE", "NONE", "WITHDRAWN")),
+                "HistoricalDepositRequirementResponse" to ("state" to listOf("ACTIVE", "WITHDRAWN")),
+            ).forEach { (name, union) ->
+                val (discriminator, tags) = union
+                schema(name).text("discriminator", "propertyName") shouldBe discriminator
+                schema(name).at("discriminator", "mapping").jsonObject.keys shouldContainExactlyInAnyOrder tags
+                schema(name).at("oneOf").jsonArray.size shouldBe tags.size
+                tags.forEach { tag ->
+                    val variant = schema("${name}_$tag")
+                    variant.text("properties", discriminator, "const") shouldBe tag
+                    variant.strings("required").contains(discriminator) shouldBe true
+                }
+            }
+            schema("DepositTermsRequest_FIXED").strings("required") shouldContainExactlyInAnyOrder listOf("type", "amount", "currency")
+            schema("DepositTermsRequest_PERCENTAGE").strings("required") shouldContainExactlyInAnyOrder listOf("type", "percentage")
+            schema("DepositTermsRequest_FIXED").text("properties", "amount", "type") shouldBe "string"
+            schema("DepositTermsRequest_FIXED").at("additionalProperties") shouldBe JsonPrimitive(false)
+            schema("DepositTermsRequest_PERCENTAGE").at("additionalProperties") shouldBe JsonPrimitive(false)
+            schema("DepositTermsRequest_PERCENTAGE").text("properties", "percentage", "type") shouldBe "string"
+            schema("CurrentDepositRequirementResponse_NONE").at("properties").jsonObject.keys shouldContainExactlyInAnyOrder
+                listOf("documentId", "state")
+            schema("CurrentDepositRequirementResponse_WITHDRAWN").at("properties").jsonObject.keys shouldContainExactlyInAnyOrder
+                listOf("documentId", "revision", "previousRevision", "createdAt", "state")
+            schema("HistoricalDepositRequirementResponse_ACTIVE")
+                .at("properties")
+                .jsonObject.keys
+                .contains("satisfied") shouldBe false
+            schema("CurrentDepositRequirementResponse_ACTIVE").strings("required").contains("satisfied") shouldBe true
+            schema(
+                "SetDepositRequirementRequest",
+            ).strings("properties", "expectedRequirementRevision", "type") shouldContainExactlyInAnyOrder
+                listOf("integer", "null")
+            schema("SetDepositRequirementRequest").text("properties", "expectedRequirementRevision", "description") shouldContain
+                "expects no requirement history"
+            schema("WithdrawDepositRequirementRequest").at("properties").jsonObject.keys shouldBe setOf("expectedRequirementRevision")
+            listOf("get", "put", "delete").forEach { method ->
+                operation(
+                    "/financial-documents/{documentId}/deposit-requirement",
+                    method,
+                ).text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                    "#/components/schemas/CurrentDepositRequirementResponse"
+                operation("/financial-documents/{documentId}/deposit-requirement", method).text("description") shouldContain
+                    if (method == "get") "commerce.financial-document.read" else "commerce.deposit-requirement.manage"
+            }
+            operation("/financial-documents/query", "post").text("description") shouldContain "preserved request order"
         }
 
         test("inquiry form inputs have an explicit type union with distinct required discriminator values") {
@@ -1300,7 +1434,7 @@ class OpenApiDocumentSpec :
         test("describes every financial-document path identifier as a required UUID path parameter") {
             operations.keys
                 .filter { (path) ->
-                    path.startsWith("/financial-documents") ||
+                    path.startsWith("/financial-documents/{documentId}") ||
                         path.startsWith("/inquiries/{inquiryId}/") ||
                         path.startsWith("/payments/{paymentId}/")
                 }.forEach { (path, method) ->
@@ -1338,7 +1472,13 @@ class OpenApiDocumentSpec :
                             .jsonObject.values
                             .mapNotNull { it.jsonObject["content"]?.jsonObject?.get("application/json") }
                 contents.forEach { content ->
-                    val required = schema(content.text("schema", "\$ref").substringAfterLast('/')).strings("required")
+                    var model = schema(content.text("schema", "\$ref").substringAfterLast('/'))
+                    if ("oneOf" in model) {
+                        val discriminator = model.text("discriminator", "propertyName")
+                        val tag = content.text("example", discriminator)
+                        model = schema(model.text("discriminator", "mapping", tag).substringAfterLast('/'))
+                    }
+                    val required = model.strings("required")
                     content
                         .at("example")
                         .jsonObject.keys

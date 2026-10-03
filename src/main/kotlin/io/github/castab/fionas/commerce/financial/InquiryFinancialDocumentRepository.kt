@@ -33,6 +33,12 @@ interface InquiryFinancialDocumentRepository {
         documentId: UUID,
     ): InquiryId?
 
+    /** Set-based ownership lookup, without row locks. Missing ids are absent from the map. */
+    fun inquiriesOf(
+        transaction: Transaction,
+        documentIds: Collection<UUID>,
+    ): Map<UUID, InquiryId>
+
     /** [inquiryOf], locking the association until the caller's transaction ends. */
     fun lockInquiryOf(
         transaction: Transaction,
