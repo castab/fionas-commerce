@@ -207,7 +207,13 @@ annotation class ApiProperty(
     val minLength: Int = -1,
     val maxLength: Int = -1,
     val pattern: String = "",
+    val nullable: Boolean = false,
 )
+
+/** A transport variant whose request serializer rejects every field outside its declared shape. */
+@SerialInfo
+@Target(AnnotationTarget.CLASS)
+annotation class ApiClosedObject
 
 /**
  * JSON Schemas for `@Serializable` bodies, derived from their kotlinx.serialization
@@ -250,7 +256,7 @@ private class KotlinxSchemas(
             }
         }
         val descriptor =
-            serializerOf(obj)?.descriptor?.takeIf { it.kind == StructureKind.CLASS }
+            serializerOf(obj)?.descriptor?.takeIf { it.kind == StructureKind.CLASS || it.kind == PolymorphicKind.SEALED }
                 ?: return fallback.toSchema(obj, overrideDefinitionId, refModelNamePrefix)
         val name = refModelNamePrefix.orEmpty() + (overrideDefinitionId ?: descriptor.serialName.substringAfterLast('.'))
         val components = linkedMapOf<String, JsonElement>()
@@ -324,7 +330,12 @@ private class KotlinxSchemas(
             null
         } else {
             try {
-                CommerceJson.json.serializersModule.serializer(obj.javaClass)
+                val inherited =
+                    (obj.javaClass.interfaces.toList() + listOfNotNull(obj.javaClass.superclass))
+                        .mapNotNull { parent ->
+                            runCatching { CommerceJson.json.serializersModule.serializer(parent) }.getOrNull()
+                        }.firstOrNull { it.descriptor.kind == PolymorphicKind.SEALED }
+                inherited ?: CommerceJson.json.serializersModule.serializer(obj.javaClass)
             } catch (_: SerializationException) {
                 null
             }
@@ -338,6 +349,7 @@ private class KotlinxSchemas(
     ): JsonObject =
         buildJsonObject {
             put("type", "object")
+            if (descriptor.annotations.any { it is ApiClosedObject }) put("additionalProperties", false)
             putJsonObject("properties") {
                 discriminator?.let { (property, tag) ->
                     check((0 until descriptor.elementsCount).none { descriptor.getElementName(it) == property }) {
@@ -382,6 +394,13 @@ private class KotlinxSchemas(
             facts?.minLength?.takeIf { it >= 0 }?.let { put("minLength", it) }
             facts?.maxLength?.takeIf { it >= 0 }?.let { put("maxLength", it) }
             facts?.pattern?.takeIf { it.isNotEmpty() }?.let { put("pattern", it) }
+            if (facts?.nullable == true) {
+                check(value.isNullable) { "$property documents null but its serializer rejects null" }
+                putJsonArray("type") {
+                    add(valueSchema(value, property, prefix, components).getValue("type"))
+                    add("null")
+                }
+            }
         }
     }
 

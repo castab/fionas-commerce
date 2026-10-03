@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.21/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.21/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.22/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.22/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -40,8 +40,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.21`, which brings
-`commerce-domain:0.0.21` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.22`, which brings
+`commerce-domain:0.0.22` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -144,7 +144,7 @@ capability (see [Offerings catalog](#offerings-catalog)):
 
 **Financial documents and payments API**, implemented by Fiona on commerce-runtime's
 financial ledger (see [Financial documents and payments](#financial-documents-and-payments)).
-Every route needs a staff session:
+Every route accepts a staff session or SERVICE access token with the required permission:
 
 | Endpoint | Permission | Behavior |
 |---|---|---|
@@ -162,6 +162,89 @@ Every route needs a staff session:
 | `GET /payments/unapplied` | `commerce.payment.record` | Complete payment histories with positive derived `reconciliation.unallocated`, including standalone receipts; ordered by `receivedAt`, then `paymentId`. |
 | `POST /payments/{paymentId}/allocations` | `commerce.payment.record` | Allocates some or all of an existing payment to an exact, currently latest Quote or Invoice version. `201` with the allocation and reconciliation. |
 | `POST /payments/{paymentId}/refunds` | `commerce.refund.record` | Refunds part or all of a payment, unwinding the allocations the request names. `201` with the refund, its unwinds, and the payment's reconciliation. |
+
+**Deposit requirements and bulk financial reads**, implemented by Fiona on the runtime ledger:
+
+| Endpoint | OperationId | Permission | Response |
+|---|---|---|---|
+| `GET /financial-documents/{documentId}/deposit-requirement` | `getFinancialDocumentDepositRequirement` | `commerce.financial-document.read` | `200` current `NONE`, `ACTIVE`, or `WITHDRAWN`. |
+| `GET /financial-documents/{documentId}/deposit-requirement/history` | `getFinancialDocumentDepositRequirementHistory` | `commerce.financial-document.read` | `200 {revisions: [...]}`, oldest first. |
+| `PUT /financial-documents/{documentId}/deposit-requirement` | `setFinancialDocumentDepositRequirement` | `commerce.deposit-requirement.manage` | `200` new `ACTIVE` state: activation, replacement, or reactivation. |
+| `DELETE /financial-documents/{documentId}/deposit-requirement` | `withdrawFinancialDocumentDepositRequirement` | `commerce.deposit-requirement.manage` | `200` new immutable `WITHDRAWN` revision. |
+| `POST /financial-documents/query` | `queryFinancialDocumentLineages` | `commerce.financial-document.read` | `200 {lineages: [...]}`, in request order. |
+
+All requested documents must belong to Fiona through `fionas.inquiry_financial_documents`;
+missing and unowned runtime lineages both return `404`. These routes use the same `AccessControl`:
+USER session or SERVICE token, with trusted Origin on cookie-bearing PUT/DELETE/POST, including
+the query POST. Token-only calls need no browser Origin. Deposit management does not require
+`commerce.financial-document.create`.
+
+PUT takes `expectedDocumentVersion`, nullable `expectedRequirementRevision`, and a strict terms
+union. For example:
+
+```json
+{
+  "expectedDocumentVersion": 2,
+  "expectedRequirementRevision": null,
+  "terms": {"type": "FIXED", "amount": "100.00", "currency": "USD"}
+}
+```
+
+The exact latest Quote/Invoice must match the expected version; Estimates reject activation
+with `422 invariant_violated`. Null (or absent) requirement revision expects no history at all,
+including no withdrawal history. A non-null revision must equal the latest requirement revision;
+it is never a don't-care token. Replacement and reactivation use this same PUT.
+
+Terms accept exactly `FIXED` amount/currency or `PERCENTAGE` percentage, for example
+`{"type":"PERCENTAGE","percentage":"25.125"}`. Unknown discriminators and mixed/missing fields
+fail with `400 malformed_request`. All monetary values and percentages are exact decimal strings.
+Fixed money requires an explicit matching ISO currency, Fiona's currency minor-unit precision,
+and a positive amount no greater than the approval total. Percentages stay exact in `(0,100]`;
+the runtime resolves them against the exact approval snapshot with HALF_UP currency rounding.
+A zero resolved amount fails; nothing is clamped or converted. Original terms and the resolved
+amount are frozen at approval; later document versions never reprice them.
+
+Current state is a discriminated `state` union: `NONE` carries only `documentId`; `ACTIVE` carries
+documentId, revision, optional previousRevision, persisted createdAt, approvalDocumentVersion,
+original terms, requiredAmount (`amount`, `currency`) and `satisfied`; `WITHDRAWN` carries only
+documentId, revision, previousRevision and createdAt. Satisfaction is the runtime's current
+financial comparison `netApplied >= requiredAmount`; refund unwinds can make it false again.
+History returns only `ACTIVE`/`WITHDRAWN`, oldest first, preserving timestamps, approval references,
+original terms and frozen amounts. It has no historical satisfaction or synthetic `NONE` entry.
+
+DELETE takes only `{"expectedRequirementRevision":2}`. It intentionally has no expected document
+version and remains allowed after document stage/version changes. It appends history without
+copying prior terms. Missing history is `404`; stale tokens and runtime contention are
+`409 conflict`; already withdrawn is the existing `409 illegal_transition`. Other invalid
+terms/revisions are `422`. Each mutation locks Fiona's association row before checking/calling
+the runtime in one transaction. Runtime NOWAIT conflicts roll back the whole operation; callers
+reload/retry at their boundary. Fiona retries nothing and opens no nested transaction.
+
+Query with POST body `{"documentIds":["<uuid>","<uuid>"]}`. Empty input returns an empty list;
+duplicates fail `422`, and any unowned/missing id fails the whole request with `404`. One set-based
+Fiona ownership query and one transaction-taking runtime `financialLineages(ids)` call run in an
+unlocked REPEATABLE READ snapshot, retaining request order. No per-lineage pricing queries are
+added. Each entry carries inquiryId, documentId, latest version/stage/total/currency, reconciliation
+(grossAllocated, refundAllocations, netApplied, balance, currency), the same current deposit union,
+and objective activity: latestDocumentVersionAt, optional latestDepositRequirementAt,
+latestPaymentAllocationAt, latestRefundAllocationAt, and latestFinancialActivityAt. Activity maps
+the runtime's persisted document/deposit creation and allocation/unwind `allocatedAt` times,
+never payment `receivedAt` or unrelated standalone refund time. It carries no dashboard labels,
+age, customer details or workflow state.
+
+**Upgrading to commerce-runtime 0.0.22:** http4k stays at 6.58.0.0. Runtime V13 owns deposit
+structures and lineage concurrency references and runs before Fiona's stream, which still ends
+at V11. No Fiona V12 or duplicate deposit table is added. New bootstrap Administrator roles
+receive `commerce.deposit-requirement.manage`; startup never modifies an existing role. For an
+existing Administrator, read `GET /admin/access/roles/commerce.administrator`, retain its current
+permissions and add that key, then PUT the complete set to
+`/admin/access/roles/commerce.administrator/permissions`. That endpoint replaces all grants.
+The permission appears in the runtime-backed `/admin/access/permissions` catalog automatically.
+
+Commerce domain/runtime owns deposit vocabulary, invariants, persistence, frozen resolution,
+reconciliation and bulk facts. Fiona owns lineage ownership, Quote/Invoice eligibility,
+authorization exposure and HTTP contracts. Satisfaction has no booking, invoice issuance,
+inquiry-status or other workflow consequence in this slice.
 
 **Staff authentication API**, implemented by Fiona (see [Staff authentication](#staff-authentication)):
 
@@ -194,7 +277,7 @@ permissions, never the browser user's: there is no delegation. A client can comp
 `permissionCatalogRevision` with the catalog's `revision` to detect a changed vocabulary.
 Effective permissions only guide what a UI shows; every operation still enforces its own.
 
-`/admin/access/permissions` is Fiona's only catalog route. Commerce-runtime 0.0.21's
+`/admin/access/permissions` is Fiona's only catalog route. Commerce-runtime 0.0.22's
 standalone `permissionCatalogHttpCapability` reuses the administration route's fixed
 `authorizationListPermissions` operationId, so only one of the two can be mounted in a
 single OpenAPI document; Fiona keeps the administration one.
@@ -747,7 +830,7 @@ route is staff-only.
 ## Service authentication
 
 Software callers, such as the server-side web frontend, authenticate as SERVICE principals
-through commerce-runtime 0.0.21's service authentication. Fiona composes it; it implements
+through commerce-runtime 0.0.22's service authentication. Fiona composes it; it implements
 none of it. Three different things are involved, and they are never interchangeable:
 
 | Thing | Who holds it | Purpose |
@@ -1288,7 +1371,7 @@ The inquiry form's sealed input serializer produces an explicit `type` discrimin
 a `oneOf` with one component per variant, and required constant discriminator values;
 nested Offering schemas retain the runtime's price union unchanged. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers. Commerce-runtime 0.0.21's Offerings
+contract metadata cannot declare response headers. Commerce-runtime 0.0.22's Offerings
 renderer omits invalid schema-level `"format": null` and preserves arbitrary example data.
 Fiona uses the runtime's `ValidationErrorResponse` and `ValidationViolationResponse`
 schemas for validation failures, with optional `violations`; ordinary errors retain
@@ -1311,9 +1394,9 @@ because service tokens are not logout sessions. `POST /auth/login` and `POST /au
 schemes are documentation only: enforcement stays each route's `AccessControl`. **Known gap:**
 the runtime capability routes (`/offering-catalog`, `/admin/access`, `/authorization/me`)
 enforce the same `AccessControl` but carry no security metadata, because commerce-runtime
-0.0.21 offers the host no way to add it and does not mark its public Offerings reads as public,
+0.0.22 offers the host no way to add it and does not mark its public Offerings reads as public,
 so a contract-wide default would mislabel them. Fiona does not wrap or clone runtime routes to
-change their metadata; see [`AGENTS.md`](AGENTS.md#known-upstream-gaps-last-audited-at-commerce-0021).
+change their metadata; see [`AGENTS.md`](AGENTS.md#known-upstream-gaps-last-audited-at-commerce-0022).
 Every Fiona endpoint must be part of the
 contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
 
@@ -1845,6 +1928,7 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `InquiryIdempotencySpec` | Forced overlapping PostgreSQL same/different commands, observed unique-key waits, either winner accepted; failed owner releases key to waiter; late rollback; incomplete claims rejected at commit; application-to-HTTP lost-response recovery and no replay pricing/catalog lookup |
 | `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff at current revision; missing/null `pricingInputs` malformed with zero writes; no inquiry before catalog initialization |
 | `InquiryFormRoutesSpec` | Explicit public questions and lifecycle (service section required, unconfigured submissions malformed), input constraints and submission bindings, runtime prices, incompatible configuration failures, and definition 11, CHIPS hints for configured categories, cardinality, option-text/availability projection, local totals matching authoritative current previews, and captured stale forms rejected |
+| `DepositRequirementRoutesSpec` / `DepositRequirementOperationsSpec` | Deposit unions/history/frozen amounts, payment/refund satisfaction, ownership, independent USER/SERVICE permissions, bulk facts/order/activity, one ownership SQL and runtime call for 20 lineages, REPEATABLE READ coherence and NOWAIT rollback |
 | `ReplaceCatalogSpec` | Actual Node catalog replacement/payment scripts against the running backend and throwaway PostgreSQL: prompted credentials and input failures, four categories and 19 offerings at revision 6, five CHIPS questions with notes/availability, exact-four hand-scooped selections alongside soft serve, $681.25 pricing, zero-write rejections, lifecycle projection, repeatable replacement with catalog permissions alone, edited definitions and mixed new/restored ordering, omitted-entry retirement, property clearing, and partial-write recovery |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |

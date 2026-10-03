@@ -4,6 +4,8 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.authorization.AuthorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.authorization.CurrentPrincipalHttpCapability
+import io.github.castab.commerce.runtime.financial.DepositRequirementVersion
+import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
@@ -19,11 +21,15 @@ import io.github.castab.fionas.commerce.financial.AllocatedPayment
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
+import io.github.castab.fionas.commerce.financial.InquiryFinancialLineage
+import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
 import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.RecordedPayment
+import io.github.castab.fionas.commerce.financial.SetDepositRequirement
+import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
@@ -69,6 +75,11 @@ class FionaOperations(
     val listInquiryFinancialDocuments: (InquiryId) -> List<InquiryFinancialDocument>,
     val getFinancialDocument: (UUID) -> InquiryFinancialDocument,
     val getFinancialDocumentHistory: (UUID) -> InquiryFinancialDocumentHistory,
+    val getDepositRequirement: (UUID) -> FinancialLineageView,
+    val getDepositRequirementHistory: (UUID) -> List<DepositRequirementVersion>,
+    val setDepositRequirement: (SetDepositRequirement.Command) -> FinancialLineageView,
+    val withdrawDepositRequirement: (WithdrawDepositRequirement.Command) -> DepositRequirementVersion,
+    val queryFinancialLineages: (QueryFinancialLineages.Command) -> List<InquiryFinancialLineage>,
     val issueQuote: (UUID, Version) -> InquiryFinancialDocument,
     val issueInvoice: (UUID, Version) -> InquiryFinancialDocument,
     val createChangeOrder: (UUID, Version, FionasPricingInputs) -> InquiryFinancialDocument,
@@ -111,6 +122,11 @@ fun fionaApiRoutes(
         listInquiryFinancialDocumentsRoute(operations.listInquiryFinancialDocuments, auth.access),
         getFinancialDocumentRoute(operations.getFinancialDocument, auth.access),
         getFinancialDocumentHistoryRoute(operations.getFinancialDocumentHistory, auth.access),
+        getDepositRequirementRoute(operations.getDepositRequirement, auth.access),
+        getDepositRequirementHistoryRoute(operations.getDepositRequirementHistory, auth.access),
+        setDepositRequirementRoute(operations.setDepositRequirement, auth.access),
+        withdrawDepositRequirementRoute(operations.withdrawDepositRequirement, auth.access),
+        queryFinancialLineagesRoute(operations.queryFinancialLineages, auth.access),
         issueQuoteRoute(operations.issueQuote, auth.access),
         issueInvoiceRoute(operations.issueInvoice, auth.access),
         createChangeOrderRoute(operations.createChangeOrder, auth.access),

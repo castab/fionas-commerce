@@ -90,6 +90,7 @@ class AuthRoutesSpec :
                         CommercePermissions.OfferingsManage,
                         CommercePermissions.FinancialDocumentRead,
                         CommercePermissions.FinancialDocumentCreate,
+                        CommercePermissions.DepositRequirementManage,
                         CommercePermissions.PaymentRecord,
                         CommercePermissions.RefundRecord,
                         CommercePermissions.PrincipalRead,
@@ -118,10 +119,12 @@ class AuthRoutesSpec :
             }
         }
 
-        test("later bootstrap does not add the refund or inquiry-read permission to an existing Administrator role") {
+        test("later bootstrap does not add deposit, refund, or inquiry-read permissions to an existing Administrator role") {
             TestApplication.create().use { app ->
                 val role = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator))
-                val previous = role.permissions - CommercePermissions.RefundRecord - FionaPermissions.InquiriesRead
+                val previous =
+                    role.permissions - CommercePermissions.DepositRequirementManage - CommercePermissions.RefundRecord -
+                        FionaPermissions.InquiriesRead
                 app.authorization.replaceRolePermissions(CommerceRoles.Administrator, previous)
                 BootstrapFirstAdmin(app.transactor, app.authorization, JdbiCredentialRepository(), PasswordHasher(), testClock).invoke(
                     BootstrapAdmin("other", "Other", null, null, SecretPassword.of("another-test-password")),
