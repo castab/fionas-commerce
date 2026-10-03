@@ -4,7 +4,7 @@ import io.github.castab.commerce.offering.OfferingSelections
 import io.github.castab.commerce.offering.OfferingsRevision
 
 /**
- * Everything Fiona's prices an event from: the exact revision of Fiona's catalog the choices
+ * Everything Fiona's prices an event from: the observed current revision of Fiona's catalog the choices
  * were made from, the choices in submitted order, and the event facts.
  *
  * The same inputs price an estimate preview, a persisted estimate, and a change order, and
@@ -12,7 +12,7 @@ import io.github.castab.commerce.offering.OfferingsRevision
  * history can say why each snapshot charged what it did. Commercial amounts are never an
  * input: the server derives them from these values with [FionasOfferingsEngine].
  *
- * @property catalogRevision The catalog revision to price from. Never replaced by a later one.
+ * @property catalogRevision A staleness token for new pricing; the observed revision remains recorded in history.
  * @property selections The chosen offerings, one block per category, in submitted order;
  *   an explicitly empty block is kept as submitted.
  * @property context The event facts the price depends on.

@@ -132,7 +132,7 @@ async function main() {
     catalog = (await request("GET", "/offering-catalog", { expectedStatus: 200 })).data;
   } catch (error) {
     if (error instanceof HttpFailure && error.status === 404) {
-      throw new Error("No Fiona Offerings catalog exists. Run node scripts/setup-local-commerce.mjs first.");
+      throw new Error("No Fiona Offerings catalog exists. Run node scripts/replace-catalog.mjs against this endpoint first.");
     }
     throw error;
   }
@@ -148,6 +148,10 @@ async function main() {
     durationMinutes: 120,
     selections: [
       { category: "soft-serve-flavor", offerings: ["vanilla", "horchata"] },
+      ...(catalog.categories.some(({ key }) => key === "hand-scooped-flavor") ? [{
+        category: "hand-scooped-flavor",
+        offerings: ["hand-scooped-chocolate-chip", "hand-scooped-chocolate", "hand-scooped-vanilla-bean", "hand-scooped-strawberry"],
+      }] : []),
       { category: "topping", offerings: ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"] },
       { category: "cone-option", offerings: ["waffle-cone"] },
     ],

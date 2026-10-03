@@ -49,7 +49,7 @@ class EstimatePreviewRoutesSpec :
         val toppings = listOf("sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough")
 
         fun request(
-            revision: Int = acceptanceRevision,
+            revision: Int = catalogRevision,
             guests: Int = 75,
             minimum: Boolean? = null,
             minutes: Int = 120,
@@ -161,22 +161,20 @@ class EstimatePreviewRoutesSpec :
             response.total shouldBe "650.00"
         }
 
-        test("a selection is priced from the revision it was made from, never a later one") {
+        test("a stale selection conflicts and a refreshed selection prices current") {
             // An administrator adds a premium flavor after the page was rendered from acceptanceRevision.
             val later = application.addOffering(catalogRevision, "mango", "soft-serve-flavor", "Mango", perGuest("1.00"))
             catalogRevision = later
             later shouldBe acceptanceRevision + 1
 
-            // The old revision has no mango: choosing it there is rejected, not silently repriced.
-            preview(request(revision = acceptanceRevision, softServe = listOf("mango"))).let {
-                it.status shouldBe Status.UNPROCESSABLE_ENTITY
-                it.error().code shouldBe "validation_failed"
-                it.error().message shouldContain "UNKNOWN_OFFERING"
-            }
-            // The old revision still prices what it had.
-            preview(request(revision = acceptanceRevision)).preview().let {
-                it.catalogRevision shouldBe acceptanceRevision
-                it.total shouldBe "681.25"
+            listOf(request(revision = acceptanceRevision), request(revision = acceptanceRevision, softServe = listOf("mango"))).forEach {
+                preview(it).let { response ->
+                    response.status shouldBe Status.CONFLICT
+                    response.error().code shouldBe CATALOG_REVISION_STALE
+                    response.error().message shouldBe
+                        "The offerings catalog changed; reload it and review the selections before pricing again"
+                    response.header("Cache-Control") shouldBe "no-store"
+                }
             }
             // The new flavor works as soon as the catalog has it, with no code or deployment.
             preview(request(revision = later, softServe = listOf("mango"), chosenToppings = toppings.take(4))).preview().let {

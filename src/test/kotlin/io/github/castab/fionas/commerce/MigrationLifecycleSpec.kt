@@ -122,7 +122,9 @@ class MigrationLifecycleSpec :
                 // Commerce 0.0.20's V9 stores aggregate-owned values in their snapshot rows; Fiona's V11
                 // applies the same principle to its own pricing inputs, after the runtime's stream.
                 database.history("commerce").any { it.contains("V9__aggregate_snapshots.sql") } shouldBe true
-                database.history("commerce").last() shouldContain "V10__service_credentials.sql"
+                database.history("commerce").any { it.contains("V10__service_credentials.sql") } shouldBe true
+                database.history("commerce").any { it.contains("V11__offering_badge_and_status_note.sql") } shouldBe true
+                database.history("commerce").last() shouldContain "V12__offerings_current_catalogs.sql"
                 database
                     .strings(
                         "SELECT is_nullable || ' ' || data_type FROM information_schema.columns " +

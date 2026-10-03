@@ -6,7 +6,6 @@ import io.github.castab.commerce.runtime.authorization.currentPrincipalHttpCapab
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.authentication
 import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
-import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
 import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
@@ -84,8 +83,8 @@ const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
  * commerce-runtime's Offerings capability bound to Fiona's catalog; its contract routes join
  * the same API contract as Fiona's own, as do the runtime's authorization administration
  * (which serves the permission catalog) and current-principal capabilities, all bound to one
- * `AccessControl` over `context.authorization`. Estimate previews read exact catalog revisions
- * through the runtime's own `GetOfferingsCatalogRevision` and price them with Fiona's
+ * `AccessControl` over `context.authorization`. Estimate previews read the current catalog
+ * through the runtime's own `GetOfferingsCatalog`, reject stale inputs, and price it with Fiona's
  * [FionasOfferingsEngine]. Persisted financial documents are commerce-runtime's
  * `FinancialLedger`, called with the caller's transaction; Fiona's own repositories store
  * only which inquiry owns each lineage and the pricing inputs of each snapshot, and the
@@ -137,9 +136,9 @@ fun fionaApplication(
                 )
             val access = AccessControl(origin.filter.then(authenticate), context.authorization)
             val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, loginRateLimit)
-            // Fiona's pricing, over exact catalog revisions read in the caller's transaction.
+            // Fiona's pricing, over the current catalog read in the caller's transaction.
             val pricing =
-                FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), context.offeringsSnapshotRepository::retrieveVersion)
+                FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), context.offeringsSnapshotRepository::retrieveLatestVersion)
             // Generic financial persistence is commerce-runtime's ledger; Fiona stores only its context.
             val ledger = context.financialLedger
             val documentOwners = JdbiInquiryFinancialDocumentRepository()
@@ -163,7 +162,7 @@ fun fionaApplication(
                         customers,
                         inquiries,
                         JdbiInquirySubmissionRepository(),
-                        PublicInquiryPricing(pricing, context.offeringsSnapshotRepository::retrieveLatestVersion),
+                        PublicInquiryPricing(pricing),
                         clock,
                         materialize,
                     )::invoke,
@@ -174,7 +173,7 @@ fun fionaApplication(
                     )::invoke,
                     previewEstimate =
                         PreviewEstimate(
-                            getRevision = GetOfferingsCatalogRevision(context.transactor, context.offeringsSnapshotRepository)::invoke,
+                            getCatalog = GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)::invoke,
                             pricing = pricing,
                         )::invoke,
                     createInquiryEstimate =
@@ -212,7 +211,7 @@ fun fionaApplication(
                 authorizationAdministrationHttpCapability(context, access, "/admin/access", setOf(staffAdministrationTag))
             // The request's principal, USER or SERVICE, resolved through the same AccessControl and catalog.
             // The permission catalog is served once, by the administration capability: commerce-runtime
-            // 0.0.20's standalone catalog route has the same fixed operationId, so it is not also mounted.
+            // 0.0.21's standalone catalog route has the same fixed operationId, so it is not also mounted.
             val currentPrincipal = currentPrincipalHttpCapability(access, "/authorization/me", setOf(authorizationTag))
             val serviceAuthentication = fionaServiceAuthentication(context)
             listOf(

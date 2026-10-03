@@ -3,9 +3,11 @@
 package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
@@ -36,7 +38,7 @@ import org.http4k.core.with
 
 @Serializable
 data class InquiryFormResponse(
-    @ApiProperty(description = "Version of Fiona's code-owned question definition, independent of catalog revisions.")
+    @ApiProperty(description = "Version of Fiona's code-owned question definition, currently 11, independent of catalog revisions.")
     val definitionVersion: Int,
     @ApiProperty(description = "Fiona's stable catalog identity.", format = "uuid")
     val catalogId: String,
@@ -221,12 +223,32 @@ sealed interface InquiryFormInputResponse {
 data class InquiryFormIntegerOption(
     val value: Int,
     val label: String,
+    @ApiProperty(description = "Optional CHIPS label; absent or nonblank. Fiona's code-owned options currently leave it null.")
+    val badge: String? = null,
+    @ApiProperty(
+        description = "Optional CHIPS situation text; never overrides availability. Fiona's code-owned options currently leave it null.",
+    )
+    val statusNote: String? = null,
+    @ApiProperty(
+        description = "Optional CHIPS fact shown on demand; absent or nonblank. Fiona's code-owned options currently leave it null.",
+    )
+    val infoNote: String? = null,
 )
 
 @Serializable
 data class InquiryFormStringOption(
     val value: String,
     val label: String,
+    @ApiProperty(description = "Optional CHIPS label; absent or nonblank. Fiona's code-owned options currently leave it null.")
+    val badge: String? = null,
+    @ApiProperty(
+        description = "Optional CHIPS situation text; never overrides availability. Fiona's code-owned options currently leave it null.",
+    )
+    val statusNote: String? = null,
+    @ApiProperty(
+        description = "Optional CHIPS fact shown on demand; absent or nonblank. Fiona's code-owned options currently leave it null.",
+    )
+    val infoNote: String? = null,
 )
 
 private val inquiryFormBody = jsonBody(InquiryFormResponse.serializer())
@@ -236,8 +258,64 @@ private val exampleInquiryForm =
     inquiryForm(
         OfferingsSnapshot.create(
             FIONA_OFFERINGS_CATALOG_ID,
-            listOf(OfferingCategory(OfferingCategoryKey("soft-serve-flavor"), "Soft serve", minimumSelections = 1, maximumSelections = 2)),
-            listOf(Offering(OfferingKey("vanilla"), OfferingCategoryKey("soft-serve-flavor"), "Vanilla")),
+            listOf(
+                OfferingCategory(OfferingCategoryKey("soft-serve-flavor"), "Soft serve", minimumSelections = 1, maximumSelections = 2),
+                OfferingCategory(
+                    OfferingCategoryKey("hand-scooped-flavor"),
+                    "Hand-Scooped flavors",
+                    minimumSelections = 4,
+                    maximumSelections = 4,
+                ),
+            ),
+            listOf(
+                Offering(
+                    OfferingKey("vanilla"),
+                    OfferingCategoryKey("soft-serve-flavor"),
+                    "Vanilla",
+                    selectionState = OfferingSelectionState.ENABLED,
+                    availability = OfferingAvailability.AVAILABLE,
+                ),
+            ) +
+                listOf(
+                    "chocolate-chip" to "Chocolate Chip",
+                    "chocolate" to "Chocolate",
+                    "vanilla-bean" to "Vanilla Bean",
+                    "strawberry" to "Strawberry",
+                ).map { (key, label) ->
+                    Offering(
+                        OfferingKey("hand-scooped-$key"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        label,
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    )
+                } +
+                listOf(
+                    Offering(
+                        OfferingKey("hand-scooped-butter-pecan"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        "Butter Pecan",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.UNAVAILABLE,
+                        infoNote = "Contains tree nuts",
+                    ),
+                    Offering(
+                        OfferingKey("hand-scooped-mint-chip"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        "Mint Chip",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                    Offering(
+                        OfferingKey("hand-scooped-new-york-cheesecake"),
+                        OfferingCategoryKey("hand-scooped-flavor"),
+                        "New York Cheesecake",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.UNAVAILABLE,
+                        badge = "Returning soon",
+                        statusNote = "Back on the menu this fall!",
+                    ),
+                ),
         ),
     ).toResponse()
 
@@ -249,10 +327,16 @@ fun getInquiryFormRoute(
         operationId = "getInquiryForm"
         summary = "Read the customer inquiry form"
         description = "Ordered customer-facing questions for POST /inquiries. Input semantics and presentation hints are separate. " +
+            "Definition 11 uses CHIPS for duration, soft serve flavors, hand-scooped flavors, toppings, and cones/cups; " +
+            "offering limits determine single or multiple selection. The local hand-scooped category requires exactly four " +
+            "selections alongside soft serve, in the same service section. " +
+            "Catalog option badge, statusNote, and infoNote pass through to CHIPS for the UI. " +
+            "Code-owned duration and event-type option text defaults to null, omitted from JSON, with no editing API. " +
+            "statusNote never overrides availability; UNAVAILABLE options remain unselectable. " +
             "Service configuration is required: every inquiry is a request for configured ice cream service, priced on " +
             "submission into an initial Estimate. Required fields and category limits apply. Copy catalogRevision " +
             "to pricingInputs.catalogRevision for both estimate-preview and inquiry submission. Later catalog changes " +
-            "reject stale inquiry submissions with 409 CATALOG_REVISION_STALE; fetch a fresh form and ask the customer " +
+            "reject stale previews and inquiry submissions with 409 CATALOG_REVISION_STALE; fetch a fresh form and ask the customer " +
             "to review before resubmitting. Choices are never silently repriced. Only configured Fiona categories appear; " +
             "disabled offerings and retired categories/offerings are absent. Returned options have selectionState=ENABLED; " +
             "availability=UNAVAILABLE stays visible but must be rendered unselectable (check back later). " +
@@ -301,7 +385,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
     // Reuse the runtime's conversion, including every price form, without re-modeling its DTOs.
     val categories = catalog.dto().categories.associateBy { it.key }
     return InquiryFormResponse(
-        definitionVersion = 9,
+        definitionVersion = 11,
         catalogId = catalog.catalogId.value.toString(),
         catalogRevision = catalog.revision.number,
         sections =
@@ -317,7 +401,15 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
                                 InquiryFormInput.Date -> InquiryFormInputResponse.Date("date")
                                 is InquiryFormInput.StringChoice ->
                                     InquiryFormInputResponse.StringChoice(
-                                        value.options.map { InquiryFormStringOption(it.value, it.label) },
+                                        value.options.map {
+                                            InquiryFormStringOption(
+                                                it.value,
+                                                it.label,
+                                                it.badge,
+                                                it.statusNote,
+                                                it.infoNote,
+                                            )
+                                        },
                                     )
                                 is InquiryFormInput.Text -> InquiryFormInputResponse.Text(value.minLength, value.maxLength, value.pattern)
                                 is InquiryFormInput.Email -> InquiryFormInputResponse.Email(value.maxLength)
@@ -326,7 +418,7 @@ private fun InquiryForm.toResponse(): InquiryFormResponse {
                                 is InquiryFormInput.IntegerChoice ->
                                     InquiryFormInputResponse.IntegerChoice(
                                         value.options.map {
-                                            InquiryFormIntegerOption(it.value, it.label)
+                                            InquiryFormIntegerOption(it.value, it.label, it.badge, it.statusNote, it.infoNote)
                                         },
                                     )
                                 is InquiryFormInput.OfferingChoice -> {

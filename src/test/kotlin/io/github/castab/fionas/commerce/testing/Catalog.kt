@@ -3,10 +3,13 @@ package io.github.castab.fionas.commerce.testing
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.offering.CategoryDto
 import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
-import io.github.castab.commerce.runtime.offering.OfferingMutationDto
+import io.github.castab.commerce.runtime.offering.OfferingDto
+import io.github.castab.commerce.runtime.offering.OfferingPriceDto
 import io.github.castab.commerce.runtime.offering.OfferingResultDto
 import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
+import io.github.castab.commerce.runtime.offering.OfferingsBatchDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
+import io.github.castab.commerce.runtime.offering.OfferingsDto
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
@@ -31,38 +34,65 @@ fun TestApplication.addOffering(
     description: String? = null,
     selectionState: OfferingSelectionStateDto = OfferingSelectionStateDto.ENABLED,
     availability: OfferingAvailabilityDto = OfferingAvailabilityDto.AVAILABLE,
+    badge: String? = null,
+    statusNote: String? = null,
+    infoNote: String? = null,
+): Int =
+    addOfferings(
+        expectedRevision,
+        listOf(
+            OfferingDto(
+                key,
+                category,
+                displayName,
+                description,
+                price?.let { CommerceJson.asA(it, OfferingPriceDto.serializer()) },
+                selectionState,
+                availability,
+                badge,
+                statusNote,
+                infoNote,
+            ),
+        ),
+    )
+
+/** A complete batch uses the caller's revision and advances it once. */
+fun TestApplication.addOfferings(
+    expectedRevision: Int,
+    offerings: List<OfferingDto>,
 ): Int {
-    val optional = listOfNotNull(description?.let { ",\"description\":\"$it\"" }, price?.let { ",\"price\":$it" }).joinToString("")
-    val body =
-        """{"expectedRevision":$expectedRevision,"key":"$key","category":"$category","displayName":"$displayName",""" +
-            """"selectionState":"$selectionState","availability":"$availability"$optional}"""
+    val body = CommerceJson.json.encodeToString(OfferingsBatchDto.serializer(), OfferingsBatchDto(expectedRevision, offerings))
     val response = adminPost("/offering-catalog/offerings", body)
-    check(response.status == Status.CREATED) { "Adding offering $key failed: ${response.status} ${response.bodyString()}" }
-    return CommerceJson.asA(response.bodyString(), OfferingResultDto.serializer()).revision
+    check(response.status == Status.CREATED) { "Adding offerings failed: ${response.status} ${response.bodyString()}" }
+    return CommerceJson.asA(response.bodyString(), OfferingsDto.serializer()).revision
 }
 
-/** Changes only the requested state facts through the runtime HTTP contract, preserving other properties. */
+/** Changes only state facts through a one-item batch, preserving all other properties. */
 fun TestApplication.setOfferingState(
     expectedRevision: Int,
     key: String,
     selectionState: OfferingSelectionStateDto? = null,
     availability: OfferingAvailabilityDto? = null,
 ): Int {
-    val path = "/offering-catalog/offerings/$key"
-    val original = CommerceJson.asA(adminGet(path).bodyString(), OfferingResultDto.serializer()).offering
+    val original = CommerceJson.asA(adminGet("/offering-catalog/offerings/$key").bodyString(), OfferingResultDto.serializer()).offering
     val mutation =
-        OfferingMutationDto(
+        OfferingsBatchDto(
             expectedRevision,
-            original.category,
-            original.displayName,
-            original.description,
-            original.price,
-            selectionState ?: original.selectionState,
-            availability ?: original.availability,
+            listOf(
+                original.copy(
+                    selectionState = selectionState ?: original.selectionState,
+                    availability = availability ?: original.availability,
+                ),
+            ),
         )
-    val response = adminRequest(Method.PUT, path, CommerceJson.json.encodeToString(OfferingMutationDto.serializer(), mutation))
+    val response =
+        adminRequest(
+            Method.PUT,
+            "/offering-catalog/offerings",
+            CommerceJson.json.encodeToString(OfferingsBatchDto.serializer(), mutation),
+        )
     check(response.status == Status.OK) { "Updating offering state failed: ${response.status} ${response.bodyString()}" }
-    return CommerceJson.asA(response.bodyString(), OfferingResultDto.serializer()).revision
+    return CommerceJson.asA(response.bodyString(), OfferingsDto.serializer()).revision
 }
 
 /**
@@ -83,14 +113,36 @@ fun TestApplication.createAcceptanceCatalog(): Int {
         check(response.status == Status.CREATED) { "Adding category failed: ${response.status} ${response.bodyString()}" }
         revision = CommerceJson.asA(response.bodyString(), CategoryDto.serializer()).revision
     }
-    revision = addOffering(revision, "vanilla", "soft-serve-flavor", "Vanilla")
-    revision = addOffering(revision, "chocolate", "soft-serve-flavor", "Chocolate")
-    revision = addOffering(revision, "horchata", "soft-serve-flavor", "Horchata", perGuest("0.50"), description = "Premium soft serve")
-    TOPPINGS.zip(listOf("Sprinkles", "Oreos", "Strawberries", "Brownies", "Gummy Bears", "Cookie Dough")).forEach { (key, name) ->
-        revision = addOffering(revision, key, "topping", name)
-    }
-    revision = addOffering(revision, "cup", "cone-option", "Cups")
-    return addOffering(revision, "waffle-cone", "cone-option", "Waffle cones", perGuest("0.75"))
+
+    fun item(
+        key: String,
+        category: String,
+        name: String,
+        price: String? = null,
+        description: String? = null,
+    ) = OfferingDto(
+        key,
+        category,
+        name,
+        description,
+        price?.let { CommerceJson.asA(it, OfferingPriceDto.serializer()) },
+        OfferingSelectionStateDto.ENABLED,
+        OfferingAvailabilityDto.AVAILABLE,
+    )
+    val offerings =
+        listOf(
+            item("vanilla", "soft-serve-flavor", "Vanilla"),
+            item("chocolate", "soft-serve-flavor", "Chocolate"),
+            item("horchata", "soft-serve-flavor", "Horchata", perGuest("0.50"), "Premium soft serve"),
+        ) +
+            TOPPINGS.zip(listOf("Sprinkles", "Oreos", "Strawberries", "Brownies", "Gummy Bears", "Cookie Dough")).map { (key, name) ->
+                item(key, "topping", name)
+            } +
+            listOf(
+                item("cup", "cone-option", "Cups"),
+                item("waffle-cone", "cone-option", "Waffle cones", perGuest("0.75")),
+            )
+    return addOfferings(revision, offerings)
 }
 
 /**

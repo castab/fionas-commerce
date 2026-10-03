@@ -4,7 +4,6 @@ import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsSnapshot
-import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
 import io.github.castab.commerce.runtime.authorization.PermissionCatalog
@@ -154,41 +153,36 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
     val transactor = Transactor(Jdbi.create { error("Rendering the OpenAPI document never opens a connection") })
     val snapshots =
         object : OfferingsSnapshotRepository {
-            override fun insert(
+            override fun save(
                 transaction: Transaction,
                 snapshot: OfferingsSnapshot,
             ) = error("Rendering the OpenAPI document never writes a catalog")
-
-            override fun retrieveVersion(
-                transaction: Transaction,
-                reference: OfferingsSnapshotReference,
-            ) = error("Rendering the OpenAPI document never reads a catalog")
 
             override fun retrieveLatestVersion(
                 transaction: Transaction,
                 catalogId: OfferingsCatalogId,
             ) = error("Rendering the OpenAPI document never reads a catalog")
 
-            override fun offeringKeyExistsInHistory(
+            override fun offeringKeyReserved(
                 transaction: Transaction,
                 catalogId: OfferingsCatalogId,
                 key: OfferingKey,
-            ) = error("Rendering the OpenAPI document never checks offering history")
+            ) = error("Rendering the OpenAPI document never checks offering reservation")
 
-            override fun categoryKeyExistsInHistory(
+            override fun categoryKeyReserved(
                 transaction: Transaction,
                 catalogId: OfferingsCatalogId,
                 key: OfferingCategoryKey,
-            ) = error("Rendering the OpenAPI document never checks category history")
+            ) = error("Rendering the OpenAPI document never checks category reservation")
 
             override fun retrieveRetiredOfferings(
                 transaction: Transaction,
-                reference: OfferingsSnapshotReference,
+                catalogId: OfferingsCatalogId,
             ) = error("Rendering the OpenAPI document never discovers retired offerings")
 
             override fun retrieveRetiredCategories(
                 transaction: Transaction,
-                reference: OfferingsSnapshotReference,
+                catalogId: OfferingsCatalogId,
             ) = error("Rendering the OpenAPI document never discovers retired categories")
         }
     val documents = refusing<FinancialDocumentRepository>("Rendering the OpenAPI document never touches a financial document")

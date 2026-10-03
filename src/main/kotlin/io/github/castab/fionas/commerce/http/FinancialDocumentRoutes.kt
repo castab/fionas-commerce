@@ -58,7 +58,7 @@ data class CreateInquiryEstimateRequest(
     @ApiProperty(
         description =
             "The revision of Fiona's Offerings catalog to price from, as `GET /offering-catalog` returned it. The " +
-                "estimate uses exactly this revision, never a later one. At least 1.",
+                "revision must be current; stale inputs fail with 409 CATALOG_REVISION_STALE. At least 1.",
     )
     val catalogRevision: Int,
     @ApiProperty(description = "The guests to price the event for. At least 1.")
@@ -78,7 +78,9 @@ data class CreateInquiryEstimateRequest(
 data class CreateInquiryFinancialDocumentRequest(
     @ApiProperty(description = "The first snapshot's stage: `ESTIMATE`, `QUOTE`, or `INVOICE`.")
     val stage: String,
-    @ApiProperty(description = "The exact Offerings catalog revision to price from. At least 1.")
+    @ApiProperty(
+        description = "Current catalog revision; older revisions fail with 409 CATALOG_REVISION_STALE. At least 1.",
+    )
     val catalogRevision: Int,
     @ApiProperty(description = "The guests to price the event for. At least 1.")
     val guestCount: Int,
@@ -101,8 +103,8 @@ data class ChangeOrderRequest(
     val expectedVersion: Int,
     @ApiProperty(
         description =
-            "The catalog revision to reprice from, chosen deliberately: the one the document was priced from keeps " +
-                "its price book, a later one adopts the later prices. It is never replaced by another. At least 1.",
+            "The current catalog revision to reprice from. Older revisions fail with 409 CATALOG_REVISION_STALE; " +
+                "reload and review the selections before repricing. Historical document lines remain unchanged.",
     )
     val catalogRevision: Int,
     @ApiProperty(description = "The revised number of guests. At least 1.")
@@ -860,7 +862,7 @@ fun createInquiryEstimateRoute(
         operationId = "createInquiryEstimate"
         summary = "Persist an estimate for an inquiry"
         description =
-            "Prices the commercial inputs from exactly the catalog revision they name, with the same Fiona pricing as " +
+            "Prices the commercial inputs from the current catalog revision, rejecting stale inputs, with the same Fiona pricing as " +
             "`POST /estimate-preview`, and records the lines as version 1 of a new financial-document lineage owned by " +
             "the inquiry, together with the inputs it was priced from. Lines, amounts, and totals are never accepted " +
             "from the caller. The `Location` response header holds the document's path, " +
@@ -868,6 +870,7 @@ fun createInquiryEstimateRoute(
         tags += financialDocuments
         receiving(createEstimateRequest to exampleCreateEstimate)
         returning(Status.CREATED, documentResponse to exampleEstimate, "The persisted estimate. `Location` holds its path.")
+        catalogRevisionConflict()
         malformed("`inquiryId`")
         returningError(
             ErrorCategory.NOT_FOUND,
@@ -877,7 +880,7 @@ fun createInquiryEstimateRoute(
         returningError(ErrorCategory.VALIDATION_FAILED, PRICING_REJECTED, "The selection cannot be estimated: INVALID_GUEST_COUNT (...)")
         financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
+        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then(catalogRevisionStaleResponses).then { request: Request ->
             val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
             val body = createEstimateRequest(request)
             val created =
@@ -906,7 +909,7 @@ fun createInquiryFinancialDocumentRoute(
         operationId = "createInquiryFinancialDocument"
         summary = "Create an inquiry's financial document"
         description =
-            "Prices commercial inputs from their exact catalog revision and creates version 1 of a new inquiry-owned " +
+            "Prices inputs from the current catalog revision, rejecting stale inputs, and creates version 1 of a new inquiry-owned " +
             "Estimate, Quote, or Invoice lineage. A direct Quote or Invoice has no predecessor; no intermediate " +
             "snapshots are invented. The caller cannot supply lines or totals. `Location` contains " +
             "`/financial-documents/{documentId}`. Requires `commerce.financial-document.create`."
@@ -917,6 +920,7 @@ fun createInquiryFinancialDocumentRoute(
             documentResponse to exampleDocument(1, "QUOTE", 75, unpaid("681.25")),
             "The first snapshot and exact-reference reconciliation; `Location` holds its path.",
         )
+        catalogRevisionConflict()
         malformed("`inquiryId`")
         returningError(ErrorCategory.NOT_FOUND, "the inquiry or catalog revision does not exist.", "Inquiry $EXAMPLE_INQUIRY was not found")
         returningError(
@@ -926,7 +930,7 @@ fun createInquiryFinancialDocumentRoute(
         )
         financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
+        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then(catalogRevisionStaleResponses).then { request: Request ->
             val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
             val body = createFinancialDocumentRequest(request)
             val stage =
@@ -1114,7 +1118,7 @@ fun createChangeOrderRoute(
         operationId = "createChangeOrder"
         summary = "Reprice a financial document"
         description =
-            "Fiona's change order: prices the revised commercial inputs from exactly the catalog revision they name " +
+            "Fiona's change order: prices revised inputs from the current catalog revision, rejecting stale inputs, " +
             "and appends the result as a new version in the same stage, whether estimate, quote, or invoice, with the " +
             "revised inputs as its pricing source. The new lines replace the current ones; lines, amounts, and totals " +
             "are never accepted from the caller. Inputs that price exactly as the current version does are no " +
@@ -1128,7 +1132,7 @@ fun createChangeOrderRoute(
             "no inquiry owns a document with this id, or the catalog revision does not exist.",
             NOT_FOUND_DOCUMENT,
         )
-        staleVersion("")
+        catalogRevisionConflict(" `conflict`: expectedVersion is no longer latest; reload the document and retry.")
         returningError(
             ErrorCategory.VALIDATION_FAILED,
             "$PRICING_REJECTED Inputs that produce exactly the current lines are rejected as no financial change.",
@@ -1136,7 +1140,7 @@ fun createChangeOrderRoute(
         )
         financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
     } bindContract Method.POST to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
+        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then(catalogRevisionStaleResponses).then { request: Request ->
             val documentId = uuidIn(id, documentIdPath)
             val body = changeOrderRequest(request)
             val expected = validating { Version.of(body.expectedVersion) }

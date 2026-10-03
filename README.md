@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.20/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.20/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.21/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.21/domain)
 artifacts.
 
 > **Status: early slices.** The application implements inquiries (a prospective customer
@@ -27,7 +27,7 @@ commerce-domain       reusable commerce vocabulary and invariants
       ▼
 commerce-runtime      reusable runtime: PostgreSQL/HikariCP, JDBI, Flyway, Transactor,
       │                http4k on Jetty, configuration, error contract, /health, /ready,
-      │                Offerings snapshots (commerce.offering*) and the Offerings
+      │                current Offerings catalogs (commerce.offerings_catalogs) and the Offerings
       │                catalog capability: operations, HTTP contract routes, DTOs, schemas;
       │                the financial ledger: document snapshots, payments, allocations,
       │                reconciliation (commerce.financial_document*, commerce.payment*)
@@ -40,8 +40,8 @@ fionas-commerce       Fiona's application: customers, inquiries, Fiona's HTTP AP
                        application.conf, Logback, main(), deployable jar
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.20`, which brings
-`commerce-domain:0.0.20` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.21`, which brings
+`commerce-domain:0.0.21` with it. It contributes its migration schema and locations, permissions, and routes to the runtime
 through `ApplicationContributions`, and every write goes through the runtime's shared
 `Transactor`:
 
@@ -75,8 +75,8 @@ commerce-runtime Offerings contract route      bound by Fiona at /offering-catal
 commerce-runtime Offerings operation           one runtime transaction, derives rN+1
    │
    ▼
-OfferingsSnapshotRepository (runtime)  ──────  commerce.offerings_snapshots
-                                               (each row holds its revision's catalog)
+OfferingsSnapshotRepository (runtime)  ──────  commerce.offerings_catalogs
+                                               (one current catalog row; reserved/retired identities)
 ```
 
 The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
@@ -120,7 +120,6 @@ capability (see [Offerings catalog](#offerings-catalog)):
 |---|---|
 | `GET /offering-catalog` | The latest revision of the whole catalog: categories in order, each with its offerings in order. |
 | `POST /offering-catalog` | Initializes the empty catalog as revision 1. `409` if it exists. |
-| `GET /offering-catalog/revisions/{revision}` | Exactly the catalog as that revision recorded it. |
 | `GET /offering-catalog/categories` | The latest revision's categories, in order. |
 | `POST /offering-catalog/categories` | Adds a category in a successor revision; requires body `expectedRevision`. |
 | `GET /offering-catalog/categories/{categoryKey}` | One category of the latest revision. |
@@ -129,11 +128,11 @@ capability (see [Offerings catalog](#offerings-catalog)):
 | `POST /offering-catalog/categories/{categoryKey}/restore` | Restores the same category identity with supplied properties; requires body `expectedRevision`. |
 | `GET /offering-catalog/categories/{categoryKey}/offerings` | That category and its offerings, in order. |
 | `GET /offering-catalog/offerings` | The latest revision's offerings, in order. |
-| `POST /offering-catalog/offerings` | Adds an offering to an active category in a successor revision; requires body `expectedRevision`. |
+| `POST /offering-catalog/offerings` | Adds a nonempty batch; body `{expectedRevision, offerings: [...]}`, `201` with `{revision, offerings: [...]}`. |
 | `GET /offering-catalog/offerings/{offeringKey}` | One offering of the latest revision. |
-| `PUT /offering-catalog/offerings/{offeringKey}` | Replaces offering properties in a successor revision; requires body `expectedRevision`. |
-| `DELETE /offering-catalog/offerings/{offeringKey}` | Retires an offering; requires query `expectedRevision`, returns the successor revision. |
-| `POST /offering-catalog/offerings/{offeringKey}/restore` | Restores the same offering identity with supplied properties; requires body `expectedRevision`. |
+| `PUT /offering-catalog/offerings` | Replaces a nonempty batch completely; body `{expectedRevision, offerings: [...]}`, `200` with `{revision, offerings: [...]}`. |
+| `POST /offering-catalog/offerings/retire` | Retires a nonempty batch; body `{expectedRevision, keys: [...]}`, `200` with `{revision}`. |
+| `POST /offering-catalog/offerings/restore` | Restores reserved identities with complete replacements; body `{expectedRevision, offerings: [...]}`, `200` with `{revision, offerings: [...]}`. |
 | `GET /offering-catalog/retired/offerings` | Administrative discovery: current revision and each retired offering's last representation and `lastSeenRevision`. |
 | `GET /offering-catalog/retired/categories` | Administrative discovery: current revision and each retired category's last representation and `lastSeenRevision`. |
 
@@ -141,7 +140,7 @@ capability (see [Offerings catalog](#offerings-catalog)):
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /estimate-preview` | Requires `fionas.estimate-preview.create`. Prices a selection from an exact catalog revision for a guest count and service duration. `200` with the lines and totals; records nothing. |
+| `POST /estimate-preview` | Requires `fionas.estimate-preview.create`. Prices a selection from the current catalog revision for a guest count and service duration. `200` with the lines and totals; records nothing. |
 
 **Financial documents and payments API**, implemented by Fiona on commerce-runtime's
 financial ledger (see [Financial documents and payments](#financial-documents-and-payments)).
@@ -195,7 +194,7 @@ permissions, never the browser user's: there is no delegation. A client can comp
 `permissionCatalogRevision` with the catalog's `revision` to detect a changed vocabulary.
 Effective permissions only guide what a UI shows; every operation still enforces its own.
 
-`/admin/access/permissions` is Fiona's only catalog route. Commerce-runtime 0.0.20's
+`/admin/access/permissions` is Fiona's only catalog route. Commerce-runtime 0.0.21's
 standalone `permissionCatalogHttpCapability` reuses the administration route's fixed
 `authorizationListPermissions` operationId, so only one of the two can be mounted in a
 single OpenAPI document; Fiona keeps the administration one.
@@ -267,8 +266,8 @@ GET `/inquiry-form` and POST `/inquiries` share `publicOfferingQuestions`, Fiona
 code-owned category definition. Hidden/internal categories fail `422 validation_failed`
 with violation `PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`, even if catalog-valid. Enabled offerings
 in those categories are advertised; disabled offerings remain in the authoritative catalog
-but are omitted from the public form. `PublicInquiryPricing` still supplies the full immutable
-snapshot to `FionasPricing`. Runtime structural validation rejects tampered current selections
+but are omitted from the public form. `PublicInquiryPricing` checks public categories first,
+then delegates to transaction-bound `FionasPricing`, which reads the full current snapshot once. Runtime structural validation rejects tampered current selections
 with `OFFERING_DISABLED` or `OFFERING_UNAVAILABLE` (disabled takes precedence when both apply),
 alongside membership, retirement and selection limits. Fiona checks guest count and duration.
 Ordinary catalog/pricing failures retain `404`/`422`.
@@ -283,11 +282,12 @@ current catalog, so none can be accepted before the catalog is initialized. The 
 `NOT NULL` (`V11`), so one insert writes the complete inquiry and none can exist without its
 inputs. Public restrictions apply only
 to inquiry submission; staff creation/evolution continues independently of the public form,
-including historical catalog inputs and hidden categories. Offerings are not dependencies
+including valid hidden categories at the current catalog revision. Offerings are not dependencies
 of a materialized financial document. Submission requires `fionas.inquiries.create`, never a staff
 financial-create permission; staff routes retain their permissions. Staff read requested inputs back as `pricingInputs` on
-`GET /inquiries/{inquiryId}` and can submit that object unchanged to
-`POST /inquiries/{inquiryId}/estimates`. Street address and further event details remain
+`GET /inquiries/{inquiryId}`; they can reuse those inputs for
+`POST /inquiries/{inquiryId}/estimates` while the revision is current. Older inquiry inputs
+require a current catalog refresh and staff review before new pricing. Street address and further event details remain
 customer-authored `message` text; event date and type are stored separately on the inquiry.
 
 `POST /inquiries` requires exactly one `Idempotency-Key` header, an opaque, case-sensitive
@@ -361,7 +361,7 @@ failures and present `message` as diagnostic text; they never parse it for codes
 
 `GET /inquiry-form` (`getInquiryForm`) returns Fiona's code-owned question definition
 resolved against one current Offerings snapshot. The response includes `definitionVersion`
-(currently 9), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
+(currently 11), Fiona's stable `catalogId`, `catalogRevision`, ordered `sections`, and
 advisory `pricingPreview` facts.
 Definition version identifies the code-owned questions and bindings; catalog edits change
 the catalog revision independently. Sections are **Contact information**, **Event details**, **Build your
@@ -382,10 +382,31 @@ The input is discriminated by `type`:
 | `STRING_CHOICE` | One string `value` from the labeled `options`; used for event type. |
 | `OFFERING_CHOICE` | Selected offering keys from `options`; category-owned `minSelections` and optional `maxSelections` (absent means unbounded). |
 
-Hints are `TEXT`, `TEXTAREA`, `NUMBER`, `CHECKBOX`, `SELECT`, `CARDS`, `DATE`, and
-`CHECKBOXES`. They express preferences; clients retain control of components,
+Hints are `TEXT`, `TEXTAREA`, `NUMBER`, `CHECKBOX`, `SELECT`, `CARDS`, `DATE`,
+`CHECKBOXES`, and `CHIPS`. They express preferences; clients retain control of components,
 accessibility, styling, and layout. Multiline notes are a string with a textarea hint.
 No Svelte component names appear in the contract.
+
+Definition version 11 advertises `CHIPS` for duration, soft serve flavors, hand-scooped flavors,
+toppings, and cones or cups. Duration retains `INTEGER_CHOICE` semantics and selects one allowed integer.
+The four offering questions retain `OFFERING_CHOICE` semantics: clients must support single
+or multiple selection according to catalog `minSelections`/`maxSelections`. Event type remains
+`STRING_CHOICE` with `SELECT`. Hand-scooped flavors follow soft serve in the existing service
+section, with key `offering:hand-scooped-flavor` and binding `/pricingInputs/selections`.
+The local catalog requires exactly four hand-scooped flavors alongside soft serve; limits
+remain catalog-owned. Missing/retired categories omit their configured question.
+
+Integer, string, and offering options may carry `badge` (short text beside an option),
+`statusNote` (its current situation), and `infoNote` (a lasting fact displayed on demand).
+Absent fields are omitted from JSON; supplied values must be nonblank and are preserved
+without trimming. Fiona currently uses this text only when rendering CHIPS. Catalog offering
+text passes through the runtime's `OfferingDto` to the offering CHIPS. Fiona's code-owned
+duration and event-type options use fixed null defaults; non-CHIPS options supply no text,
+and there is no endpoint/API for editing code-owned option text. Supporting more controls or
+editable Fiona option text is a future feature. The option fields and wire format remain
+shared; no separate CHIPS metadata model is introduced. `statusNote` never overrides
+availability: enabled unavailable offerings remain visible and unselectable, and disabled
+offerings remain hidden.
 
 Contact information includes a required event **ZIP code**, bound to `/zipCode`.
 It accepts five ASCII digits after trimming and preserves leading zeroes. Missing, null,
@@ -442,7 +463,7 @@ The two facts are independent. Unavailability is distinct from retirement or del
 disabling. Enabled unavailable offerings retain advisory price metadata and duration
 contributions. Changing either fact advances the catalog revision: old forms become stale,
 so new submissions receive `409 CATALOG_REVISION_STALE` before selection-state validation.
-Exact-revision `POST /estimate-preview` uses the full snapshot and rejects disabled/unavailable
+Current-revision `POST /estimate-preview` uses the full snapshot and rejects disabled/unavailable
 selections structurally. A successful idempotent inquiry replay returns its original receipt
 without revalidating later availability, disabling or retirement. Financial documents retain
 their materialized lines and have no dependency on later offering state.
@@ -461,8 +482,8 @@ adjustment applies in addition to any selected offering's catalog price.
 This local total is advisory. `POST /estimate-preview`, inquiry validation, and persisted
 documents still use `FionasOfferingsEngine` as their authority; the browser submits only
 pricing inputs, never trusted amounts or lines. All preview facts and options belong to
-the response's single catalog revision. Captured facts remain usable for that revision
-after later catalog edits.
+the response's single catalog revision. Captured facts remain advisory history after catalog edits; new preview/submission requests
+receive `409 CATALOG_REVISION_STALE` and require refresh and review.
 
 Form resolution fails with the runtime's generic `500 internal_failure` if a public
 offering has another currency, a non-guest quantity dimension, or an interval that cannot
@@ -484,7 +505,8 @@ field `required` applies when its section is used. The browser need not call
 `{"category": input.category, "offerings": selectedKeys}` to
 `/pricingInputs/selections`, including empty selections for optional categories.
 Copy the response's `catalogRevision` to `pricingInputs.catalogRevision`.
-Preview and submit the same inputs; later catalog edits do not replace this revision.
+Preview and submit the same reviewed inputs while the revision is current. After a catalog
+edit, refresh the form and review choices/prices before making a new pricing request.
 Submit answers only, never the definition, presentation hints, or prices.
 
 The form introduces no submission validation path: name, email, ZIP, event date/type, and message value
@@ -509,24 +531,39 @@ Offerings catalog. The split is deliberate:
   own database, so each uses this same id. `fionaOfferingsBinding(accessControl)` mounts the catalog at
   `/offering-catalog` with the operationId prefix `fionasOfferings` and `ReadWrite(accessControl)` access.
 - **commerce-runtime implements the catalog machinery**: the operations, the contract routes
-  and their DTOs and schemas, validation, and the append-only snapshot tables in its
+  and their DTOs and schemas, validation, and current-catalog storage in its
   `commerce` schema. Fiona has no Offerings tables, repositories, DTOs, or SQL of its own.
 
-Catalog persistence/history is **append-only and immutable**; management mutations create
-complete successor revisions (`r1`, `r2`, …). Editing replaces properties in the successor;
-deleting retires the identity from that successor. Any earlier revision can be read back
-exactly with `GET /offering-catalog/revisions/{revision}` and remains a valid pricing source.
-Retired natural keys remain reserved for the catalog's lifetime: restore the same identity
-with new properties rather than re-add its key. Update and restore take the key from the
-path, never an editable body field; their bodies replace all properties, with omitted
-optional properties reset to defaults.
+Commerce 0.0.21 stores only the current catalog in `commerce.offerings_catalogs`, together
+with reserved keys and retired identities' last representations. Each successful mutation
+advances its revision once. Historical catalog revision reads and single-offering mutations
+are removed; financial-document history remains independent of catalog storage.
+Offering add/update/restore use nonempty ordered batches, with each item's key and explicit
+`selectionState`/`availability`. Empty, duplicate, invalid, or stale batches save nothing.
+Update/restore replace all properties; omitting optional description, price, or option text
+clears it. Category update/restore retain path-owned keys; category DELETE still takes its
+`expectedRevision` query parameter. Retired keys remain reserved for the catalog's lifetime:
+restore the identity rather than re-add its key. Discovery exposes `lastSeenRevision` and the
+last representation, never an old complete catalog.
+
+Batch operation IDs are `fionasOfferingsAddOfferings`, `fionasOfferingsUpdateOfferings`,
+`fionasOfferingsRetireOfferings`, and `fionasOfferingsRestoreOfferings`. Regenerate clients
+from the executable contract's generated OpenAPI artifact.
+
+> **Upgrading to commerce 0.0.21.** Runtime V11/V12 reject populated legacy catalog storage;
+> V12 replaces `commerce.offerings_snapshots` with `commerce.offerings_catalogs`. Fiona adds
+> no migration and changes no existing migration. Databases are disposable: stop Fiona,
+> recreate the local Compose database volume, start PostgreSQL, start the upgraded backend,
+> then run `scripts/replace-catalog.mjs`. Fresh databases apply runtime V12 and Fiona V11.
+> Follow [the rollout guide](docs/commerce-0.0.21-rollout.md) for the separately scheduled
+> frontend and deployed stop-and-recreate cutover. Old/new backends cannot share this schema.
 
 > **Upgrading to commerce 0.0.20 (Fiona `V11`).** Runtime V9 moves financial lines and
 > catalog contents into their snapshot rows, and Fiona's V11 moves each complete set of
 > pricing inputs into its owning row (`inquiries.pricing_inputs`,
 > `financial_document_pricing.pricing_inputs`). Neither converts existing data: both refuse
 > a populated database. Recreate the disposable local database/volume
-> (`docker compose down -v`), restart Fiona, then rerun `scripts/setup-local-commerce.mjs`.
+> (`docker compose down -v`), restart Fiona, then rerun `scripts/replace-catalog.mjs`.
 > Fresh databases migrate normally through runtime V10 and Fiona V11. No API changes.
 
 > **Upgrading to commerce 0.0.19.** Offering add/update/restore bodies now require both
@@ -534,7 +571,7 @@ optional properties reset to defaults.
 > with no HTTP defaults. Reads expose both fields. All four combinations are valid.
 > Runtime V8 refuses to invent these values for existing offering rows. Recreate the
 > disposable local database/volume (`docker compose down -v`), start a fresh database,
-> restart Fiona, then rerun `scripts/setup-local-commerce.mjs`. Empty databases migrate
+> restart Fiona, then rerun `scripts/replace-catalog.mjs`. Empty databases migrate
 > normally through runtime V8 and Fiona's own stream. Fiona adds no migration or backfill.
 
 > **Upgrading to commerce 0.0.18.** No runtime or Fiona migration is added. The existing
@@ -554,7 +591,7 @@ curl -i -X POST localhost:8080/offering-catalog
 ```
 
 That creates the empty revision 1 (a second initialization is `409 conflict`). Categories
-and offerings are then appended, each in its own new revision:
+and offerings are then added; each category mutation or offering batch advances one revision:
 
 ```bash
 curl -i -X POST localhost:8080/offering-catalog/categories -H 'Content-Type: application/json' \
@@ -563,7 +600,7 @@ curl -i -X POST localhost:8080/offering-catalog/categories -H 'Content-Type: app
 
 ```bash
 curl -i -X POST localhost:8080/offering-catalog/offerings -H 'Content-Type: application/json' \
-  -d '{"expectedRevision":2,"key":"vanilla","category":"soft-serve-flavor","displayName":"Vanilla","description":"Classic vanilla soft serve","selectionState":"ENABLED","availability":"AVAILABLE"}'
+  -d '{"expectedRevision":2,"offerings":[{"key":"vanilla","category":"soft-serve-flavor","displayName":"Vanilla","description":"Classic vanilla soft serve","selectionState":"ENABLED","availability":"AVAILABLE"}]}'
 ```
 
 `GET /offering-catalog` returns the latest revision in one request, offerings grouped under
@@ -607,7 +644,7 @@ from Swagger UI at `/docs`) after deployment. Neither startup nor a migration se
 
 Every catalog mutation and dedicated retired-discovery read requires an active staff session with
 `commerce.offerings.manage`. The runtime enforces this through Fiona's `AccessControl`;
-ordinary active and exact historical catalog reads remain public under the existing policy.
+ordinary current catalog reads remain public under the existing policy.
 
 ## Staff authentication
 
@@ -710,7 +747,7 @@ route is staff-only.
 ## Service authentication
 
 Software callers, such as the server-side web frontend, authenticate as SERVICE principals
-through commerce-runtime 0.0.20's service authentication. Fiona composes it; it implements
+through commerce-runtime 0.0.21's service authentication. Fiona composes it; it implements
 none of it. Three different things are involved, and they are never interchangeable:
 
 | Thing | Who holds it | Purpose |
@@ -787,14 +824,14 @@ which only a principal trusted to act as any service should hold.
 
 `POST /estimate-preview` prices a selection the way Fiona's booking page does, with the
 server as the authority. It is **not a quote, is never recorded, and creates no financial
-document**: it creates no customer, inquiry, or anything else, and the same request prices
-the same every time.
+document**: it creates no customer, inquiry, or anything else. The same inputs price the
+same while their catalog revision remains current.
 
 ```text
 catalog revision + guest count + duration + selections
         │
         ▼
-commerce-runtime: that exact catalog revision (GetOfferingsCatalogRevision)
+commerce-runtime: current catalog (GetOfferingsCatalog) → validate requested revision
         │
         ▼
 commerce-domain OfferingsEngine: is the selection structurally valid for that revision?
@@ -841,10 +878,14 @@ different facts, and both apply.
 Lines come in a stable order: base service, ice cream service, priced selections in the
 order submitted, extra toppings. Totals are the sums of the lines.
 
-**The catalog revision is required and exact.** A page renders its choices from one revision
-(`GET /offering-catalog` returns it) and submits that revision; the preview is priced from
-it even after the catalog has changed, and a selection naming something the revision lacks
-is rejected. A preview is never silently repriced from a later revision.
+**The catalog revision is required and must be current.** Preview, public inquiry, staff
+first-snapshot creation, and change orders share the same rule: missing catalog or a future
+revision returns `404 not_found`; an older revision returns `409 CATALOG_REVISION_STALE`
+with `Cache-Control: no-store`; equality prices the observed immutable snapshot. Staff and
+preview conflicts say: “The offerings catalog changed; reload it and review the selections
+before pricing again”. Public inquiry preserves its customer-facing conflict message.
+No request silently adopts a new revision. A publication after the transaction observes
+current does not invalidate that captured snapshot. Preview records nothing.
 
 For example, with a catalog at revision 15 holding soft-serve flavors (Vanilla, Chocolate,
 Horchata at `$0.50` per guest), six toppings, and cones (Cups, Waffle cones at `$0.75` per
@@ -877,7 +918,8 @@ priced from. Every amount and quantity is an exact decimal string, never a JSON 
 stated count, and the response echoes the flag so the page can say "from $X".
 
 Errors use commerce-runtime's contract: `400 malformed_request` for a body that cannot be
-read, `404 not_found` for a catalog revision that does not exist, and `422 validation_failed`
+read, `404 not_found` for a missing catalog or future revision, `409 CATALOG_REVISION_STALE`
+for old inputs (with no-store), and `422 validation_failed`
 for a selection that does not fit the revision or Fiona's pricing. The optional `violations`
 list exposes stable codes, for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`,
 `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`, `UNSUPPORTED_CURRENCY`,
@@ -966,8 +1008,8 @@ the same commercial inputs as `POST /estimate-preview` (`catalogRevision`, `gues
 `guestCountIsMinimum`, `durationMinutes`, `selections`) and price them with the same
 `FionasOfferingsEngine`. Lines, amounts, and totals are never accepted; any such property
 in a request is ignored. The catalog revision is the one the request names, never silently
-the latest: staff may deliberately keep an old price book or adopt a newer one, and the
-pricing source records which.
+the latest: it must equal the observed current revision, and the pricing source records
+which revision was used. Staff pricing from an old inquiry requires refreshed, reviewed inputs.
 
 The new creation route adds only a `stage` (`ESTIMATE`, `QUOTE`, or `INVOICE`) to those
 commercial inputs. It cannot accept client-authored lines, totals, currency, document
@@ -1179,7 +1221,7 @@ it to every ledger call (`context.financialLedger.create(transaction, …)`,
 `recordPaymentAgainstDocument(transaction, …)`, `recordRefund(transaction, …)`,
 `reconcilePayment(transaction, …)`, `reconcile(transaction, exactReference)`,
 `paymentHistoriesForLineage(transaction, …)`) and to
-Fiona's repositories, and prices from the exact catalog revision read in that same
+Fiona's repositories, and prices from the current catalog snapshot observed in that same
 transaction. If any step fails, the commerce snapshot, payment, or allocation rolls back
 with Fiona's association and pricing source.
 
@@ -1223,10 +1265,12 @@ environment. The stable `operationId`s are `createInquiry`, `listInquiries`, `ge
 `createChangeOrder`, `recordPayment`, `recordStandalonePayment`, `allocatePayment`, `login`, `logout`, `getCurrentUser`, and
 `setStaffPassword`, and for the catalog
 `fionasOfferingsGetCatalog`, `fionasOfferingsCreateCatalog`,
-`fionasOfferingsGetCatalogRevision`, `fionasOfferingsListCategories`,
-`fionasOfferingsAddCategory`, `fionasOfferingsGetCategory`,
+`fionasOfferingsListCategories`, `fionasOfferingsAddCategory`, `fionasOfferingsGetCategory`,
+`fionasOfferingsUpdateCategory`, `fionasOfferingsRetireCategory`, `fionasOfferingsRestoreCategory`,
 `fionasOfferingsListCategoryOfferings`, `fionasOfferingsListOfferings`,
-`fionasOfferingsAddOffering`, and `fionasOfferingsGetOffering`, and for the request's
+`fionasOfferingsAddOfferings`, `fionasOfferingsUpdateOfferings`, `fionasOfferingsRetireOfferings`,
+`fionasOfferingsRestoreOfferings`, `fionasOfferingsGetOffering`, `fionasOfferingsListRetiredOfferings`,
+and `fionasOfferingsListRetiredCategories`, and for the request's
 principal the runtime's `authorizationCurrentPrincipal`. Every operationId is unique.
 
 The Offerings routes are commerce-runtime's own contract routes, mounted in the same
@@ -1244,7 +1288,7 @@ The inquiry form's sealed input serializer produces an explicit `type` discrimin
 a `oneOf` with one component per variant, and required constant discriminator values;
 nested Offering schemas retain the runtime's price union unchanged. Known
 gaps: the `Location` header of `201` is described in prose only, because http4k 6.58's
-contract metadata cannot declare response headers. Commerce-runtime 0.0.20's Offerings
+contract metadata cannot declare response headers. Commerce-runtime 0.0.21's Offerings
 renderer omits invalid schema-level `"format": null` and preserves arbitrary example data.
 Fiona uses the runtime's `ValidationErrorResponse` and `ValidationViolationResponse`
 schemas for validation failures, with optional `violations`; ordinary errors retain
@@ -1267,9 +1311,9 @@ because service tokens are not logout sessions. `POST /auth/login` and `POST /au
 schemes are documentation only: enforcement stays each route's `AccessControl`. **Known gap:**
 the runtime capability routes (`/offering-catalog`, `/admin/access`, `/authorization/me`)
 enforce the same `AccessControl` but carry no security metadata, because commerce-runtime
-0.0.20 offers the host no way to add it and does not mark its public Offerings reads as public,
+0.0.21 offers the host no way to add it and does not mark its public Offerings reads as public,
 so a contract-wide default would mislabel them. Fiona does not wrap or clone runtime routes to
-change their metadata; see [`AGENTS.md`](AGENTS.md#known-upstream-gaps-last-audited-at-commerce-0014).
+change their metadata; see [`AGENTS.md`](AGENTS.md#known-upstream-gaps-last-audited-at-commerce-0021).
 Every Fiona endpoint must be part of the
 contract; the rules are in [`AGENTS.md`](AGENTS.md#api-contract-and-openapi).
 
@@ -1390,7 +1434,7 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   nothing and fails on a populated database, which must be recreated.
   Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
-  Offerings snapshots that hold Fiona's catalog and the financial ledger's snapshots (with
+  current Offerings catalog storage and the financial ledger's snapshots (with
   their lines), payments, allocations, refunds, and refund allocations. None needs a Fiona copy.
 - Composing the runtime runs the migration phase before anything is served. By default
   (`MIGRATIONS_ON_STARTUP=migrate`) it applies the runtime's pending migrations, then
@@ -1493,35 +1537,64 @@ On Windows use `.\gradlew.bat` and set the variables with `$env:NAME = "value"`.
 The process runs until it receives SIGTERM or SIGINT; its shutdown hook stops the server
 and closes the connection pool.
 
-### Seed a fresh local catalog and preview an estimate
+### Replace a catalog from the script
 
-With Fiona running against a fresh, disposable local database, bootstrap the `admin` user
-and set `FIONAS_TRUSTED_ORIGINS=http://localhost:8080` for the application. Use Node.js 20
-or newer to enter the acceptance catalog through Fiona's API and preview its canonical
-`$681.25` estimate. The script acts as the bootstrap administrator, whose session holds the
-customer-operation permissions (a real frontend uses a service access token instead):
+Use Node.js 20 or newer to replace a local or remote endpoint's active catalog through
+Fiona's API. Supply an administrator account on that endpoint with
+`commerce.offerings.manage`. For the default local URL, set
+`FIONAS_TRUSTED_ORIGINS=http://localhost:8080` on the application:
 
 ```bash
-FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/setup-local-commerce.mjs
+node scripts/replace-catalog.mjs
 ```
 
-The script also accepts `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
-`FIONAS_ADMIN_USERNAME`; each defaults to the local port 8080 setup and username `admin`.
-It does not load `.env` files or install npm packages. It intentionally seeds only a fresh
-catalog and stops if one already exists; existing catalogs are managed through revisioned
-mutations. Each add sends `expectedRevision` from the preceding successful response, with
-no intervening GET or automatic retry. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
-for the exact catalog entries and preview request.
+The script prompts for the base URL, administrator username, and administrator password.
+Press Enter at the base URL prompt to use `http://localhost:8080`; username and password
+are required. Password entry is hidden in an interactive terminal and preserves spaces.
+The request `Origin` is derived from the entered base URL, so include that origin in the
+application's `FIONAS_TRUSTED_ORIGINS` when using a different host or port. The script reads
+connection details from the prompts rather than environment variables. It also supports
+stdin input as three lines in that order. It does not load `.env` files or install npm
+packages. To target a remote deployment, enter its base URL (for example,
+`https://commerce.example.com`) and that deployment's administrator credentials.
+Edit the category and offering definitions in [replace-catalog.mjs](scripts/replace-catalog.mjs), then rerun the
+same command to replace the entire active catalog, including entries added through other
+tools. All active offerings are retired first, then their categories. Categories and offerings
+are rebuilt in the script's order: previously used keys are restored with complete new
+definitions, new keys are added, and omitted entries remain retired. Omitted optional
+properties are cleared. The catalog ID and reserved keys are retained; revisions keep increasing.
+Read-back verification checks the complete catalog, including ordering and configured properties.
+The script performs no estimate preview, price calculation, or expected-total check; offering
+prices are ordinary catalog properties it writes and verifies.
 
-Every seeded offering explicitly sends `selectionState=ENABLED` and `availability=AVAILABLE`.
-For an existing catalog, `node scripts/setup-local-commerce.mjs --capitalize-toppings`
-updates topping display names while preserving and verifying description, price, selection
-state and availability. A label edit never enables or makes an offering available.
+A fresh catalog still reaches revision 6 after four category additions and one batch of
+19 offerings. Existing catalogs use separate add/restore batches for consecutive new/known
+offering keys to preserve order. Each mutation sends `expectedRevision` from the preceding
+successful response, with no automatic retry. Replacement is a sequence of committed API
+calls, not one atomic operation: readers can see an empty or partially rebuilt catalog, and
+a failure leaves completed mutations in place. After resolving the failure, rerun the script
+to rebuild from that state. Concurrent revision changes stop the run rather than being overwritten.
+
+Every seeded offering explicitly sends `selectionState=ENABLED`. Butter Pecan and New York
+Cheesecake are `UNAVAILABLE`, so they remain visible but cannot be selected; all other options
+are `AVAILABLE`. Hand-scooped flavors are Chocolate Chip, Chocolate, Vanilla Bean, Strawberry,
+Butter Pecan, Mint Chip, and New York Cheesecake, in that order, with unique `hand-scooped-`
+offering keys. Butter Pecan has `infoNote: Contains tree nuts`; New York Cheesecake has
+`badge: Returning soon` and `statusNote: Back on the menu this fall!`. These are literal notes;
+returning a flavor to availability requires a catalog mutation.
+
+Toppings now include Chopped Peanuts (`chopped-peanuts`, `infoNote: Contains peanuts`),
+with the existing four-to-six selection limits. New entries have no catalog surcharge.
+Existing baseline test fixtures retain their smaller catalog; pricing behavior is verified
+separately by the application tests.
+To change capitalization or other labels, edit the `displayName` values under the same
+offering keys and rerun the script. All edits use this single catalog replacement workflow;
+the script accepts no command-line options.
 
 ### Smoke test Invoice payments and a refund locally
 
 With Fiona running locally and its Offerings catalog already initialized by
-`setup-local-commerce.mjs`, use Node.js 20 or newer to exercise the separate payment
+`replace-catalog.mjs`, use Node.js 20 or newer to exercise the separate payment
 recording, allocation, and refund routes. The local Administrator needs
 `commerce.refund.record` (fresh bootstrap grants it; update older roles using the
 [replacement flow above](#staff-authentication)):
@@ -1530,9 +1603,9 @@ recording, allocation, and refund routes. The local Administrator needs
 FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/spoof-payment.mjs
 ```
 
-The script accepts the same `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
-`FIONAS_ADMIN_USERNAME` defaults as the catalog setup script; `FIONAS_ADMIN_PASSWORD` is
-required. It creates a real local inquiry, configured with the same service it then invoices (so the
+The payment script uses `FIONAS_BASE_URL` and `FIONAS_ORIGIN` (both default to
+`http://localhost:8080`), `FIONAS_ADMIN_USERNAME` (default `admin`), and the required
+`FIONAS_ADMIN_PASSWORD`. It creates a real local inquiry, configured with the same service it then invoices (so the
 inquiry also has its initial Estimate), and a direct Invoice v1, records and allocates
 `$200.00` and `$150.00`, refunds `$50.00` from the second payment's allocation, then pays
 the server-returned reopened balance. Each standalone receipt is rediscovered through
@@ -1616,6 +1689,9 @@ tested against PostgreSQL 18. It applies its migrations on startup
 ## Releasing
 
 CI verifies source; a release promotes source that is already verified.
+Pull request CI provisions Java 25 and Node.js 24. Its PostgreSQL-backed tests run the
+actual local setup and payment scripts; no npm packages are installed. Release builds
+continue compiling the backend without running those smoke tests.
 
 | | Pull request CI ([`ci.yml`](.github/workflows/ci.yml)) | Tag release ([`release.yml`](.github/workflows/release.yml)) |
 |---|---|---|
@@ -1751,6 +1827,9 @@ the Docker CLI and removes it when the build ends. To use an existing server ins
 `TEST_DATABASE_JDBC_URL`, `TEST_DATABASE_USERNAME`, and `TEST_DATABASE_PASSWORD` (the user
 must be allowed to `CREATE DATABASE`). Each spec creates and drops its own database, and
 commerce-runtime applies the real migrations. There is no H2 and no test schema.
+Node.js 20 or newer must also be on PATH: the catalog smoke spec runs the actual replacement
+and payment scripts against a started test runtime. CI provisions Node.js 24 without npm
+dependencies or caching; Gradle tracks both scripts as test inputs.
 
 | Spec | Proves |
 |---|---|
@@ -1764,13 +1843,14 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
 | `InquiryIdempotencyRoutesSpec` | Full-handler replay with exact receipts, no second inquiry/Estimate/association; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |
 | `InquiryIdempotencySpec` | Forced overlapping PostgreSQL same/different commands, observed unique-key waits, either winner accepted; failed owner releases key to waiter; late rollback; incomplete claims rejected at commit; application-to-HTTP lost-response recovery and no replay pricing/catalog lookup |
-| `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff with historical revisions; missing/null `pricingInputs` malformed with zero writes; no inquiry before catalog initialization |
-| `InquiryFormRoutesSpec` | Explicit public questions and lifecycle (service section required, unconfigured submissions malformed), input constraints and submission bindings, runtime prices, incompatible configuration failures, and response-only local totals matching authoritative previews across catalog revisions |
+| `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff at current revision; missing/null `pricingInputs` malformed with zero writes; no inquiry before catalog initialization |
+| `InquiryFormRoutesSpec` | Explicit public questions and lifecycle (service section required, unconfigured submissions malformed), input constraints and submission bindings, runtime prices, incompatible configuration failures, and definition 11, CHIPS hints for configured categories, cardinality, option-text/availability projection, local totals matching authoritative current previews, and captured stale forms rejected |
+| `ReplaceCatalogSpec` | Actual Node catalog replacement/payment scripts against the running backend and throwaway PostgreSQL: prompted credentials and input failures, four categories and 19 offerings at revision 6, five CHIPS questions with notes/availability, exact-four hand-scooped selections alongside soft serve, $681.25 pricing, zero-write rejections, lifecycle projection, repeatable replacement with catalog permissions alone, edited definitions and mixed new/restored ordering, omitted-entry retirement, property clearing, and partial-write recovery |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `UnappliedPaymentsSpec` | Standalone receipt discovery with no inquiry, runtime ordering including ties, partial/full allocation, unapplied refunds and unavailable payment exclusion, payment-record authorization, and malformed allocation `documentId` body metadata |
-| `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; explicit old and new catalog revisions; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
+| `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; stale catalog rejection and refreshed success; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
 | `FinancialDocumentPaymentsSpec` | `GET /financial-documents/{documentId}/payments` through the complete handler: `[]` without payments; `404` for a lineage only the runtime ledger holds; `401`/`403` unless `commerce.financial-document.read` (payment and refund writes do not grant it); a payment, its allocation, a refund, and its unwind rediscovered after their responses are gone and reused for a second refund; a fully unwound allocation still listed; a split payment whole from either document with whole-payment reconciliation; unapplied payments not listed; commerce-runtime's ordering kept, ids breaking only timestamp ties |
 | `FinancialDocumentAtomicitySpec` | Fiona's cross-boundary writes roll back together: first-snapshot Estimate, Quote, and Invoice creation, change orders, combined payments, and standalone allocations do not leave partial ledger or Fiona facts on failure |
 | `FinancialLedgerExpansionSpec` | Direct first-snapshot stages and transitions; standalone receipt validation and persistence; partial, repeated, and split allocations; runtime limits and Fiona stage/version policy; concurrent allocations against one payment |
@@ -1778,8 +1858,8 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 | `FinancialDocumentReadConsistencySpec` | Current-document, history, and inquiry-list reads pause between queries; a payment or quote commits while each reader is open, each reader retains its old snapshot, and a later read sees the committed state; ownership lookups fail immediately if they take the mutation-only lock |
 | `RepricingSpec` | Change-order derivation: remove every current line, add every repriced line in order; identical charges are no financial change |
 | `FionasOfferingsEngineSpec` | Fiona's pricing, purely: the `$681.25` estimate, base and duration, per-guest service, each catalog price form, included and extra toppings, premium toppings, every policy violation, minimum guest counts, line order and injected ids, zero tax, exact totals, and structural validation left to commerce-domain |
-| `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded (no financial document either), minimum guest counts, pricing from the requested revision rather than a later one, and the `400`/`404`/`422` error contract |
-| `OfferingsCatalogSpec` | Fiona's runtime catalog through the complete handler: initialization, ordered and historical reads, price forms; offering and empty-category update/retire/discover/restore; lifetime key reservation; required/stale revision rejection with no successor; historical pricing remains $681.25 |
+| `EstimatePreviewRoutesSpec` | `POST /estimate-preview` through the complete handler over a catalog built with the Offerings API: the `$681.25` estimate, nothing recorded (no financial document either), minimum guest counts, current pricing, stale rejection and refreshed success, and the `400`/`404`/`409`/`422` error contract |
+| `OfferingsCatalogSpec` | Fiona's runtime catalog through the complete handler: initialization, ordered current reads, price forms and option text; atomic ordered offering batches and empty-category lifecycle; lifetime key reservation, retired last representations, text clearing, and required/stale revision rejection |
 | `OpenApiDocumentSpec` | The OpenAPI document: Fiona routes (the inquiry receipt, list, and pricing inputs, financial documents, standalone receipts, allocations, and document payment histories with their linked fact schemas included), runtime Offerings and administration routes, operationIds, statuses, schemas, and no host; document creation takes commercial inputs without client-authored totals; the runtime's strict `OfferingPrice` `oneOf` |
 | `OpenApiRoutesSpec` | `/openapi.json` and `/docs` through the complete handler; the served document equals the generated one; Swagger UI reads `/openapi.json`, which offers the Offerings operations, and loads nothing external |
 | `GenerateOpenApiSpec` | `generateOpenApi` writes that document as UTF-8 JSON, byte-identical on every run |

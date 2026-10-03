@@ -1,17 +1,24 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.authentication
 import io.github.castab.commerce.runtime.offering.CategoryDto
+import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
 import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
 import io.github.castab.commerce.runtime.offering.OfferingSelectionStateDto
 import io.github.castab.commerce.runtime.offering.OfferingsCatalogDto
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
+import io.github.castab.fionas.commerce.inquiry.GetInquiryForm
 import io.github.castab.fionas.commerce.inquiry.InquiryFormControl
+import io.github.castab.fionas.commerce.inquiry.InquiryFormInput
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
+import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
@@ -26,6 +33,7 @@ import io.kotest.matchers.shouldBe
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.http4k.contract.contract
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
@@ -96,6 +104,9 @@ class InquiryFormRoutesSpec :
                         durationPrice,
                         description = "Check back later",
                         availability = OfferingAvailabilityDto.UNAVAILABLE,
+                        badge = "Seasonal",
+                        statusNote = "Looks available",
+                        infoNote = "Made in small batches",
                     )
                 latest =
                     fresh.addOffering(
@@ -127,6 +138,9 @@ class InquiryFormRoutesSpec :
                     it.displayName shouldBe "Temporary special"
                     it.description shouldBe "Check back later"
                     it.availability shouldBe OfferingAvailabilityDto.UNAVAILABLE
+                    it.badge shouldBe "Seasonal"
+                    it.statusNote shouldBe "Looks available"
+                    it.infoNote shouldBe "Made in small batches"
                     val price = checkNotNull(it.price)
                     price.kind shouldBe "PER_DURATION"
                     price.amount shouldBe "3.00"
@@ -137,7 +151,7 @@ class InquiryFormRoutesSpec :
                     it.offeringContributions.map { contribution -> contribution.offeringKey } shouldBe listOf("temporary")
                 }
                 fresh.adminGet("/offering-catalog").bodyString() shouldBe before
-                fresh.adminGet("/offering-catalog/revisions/$latest").bodyString() shouldBe before
+                fresh.adminGet("/offering-catalog/revisions/$latest").status shouldBe Status.NOT_FOUND
                 val full = CommerceJson.asA(before, OfferingsCatalogDto.serializer())
                 full.categories
                     .first()
@@ -149,15 +163,7 @@ class InquiryFormRoutesSpec :
                     .offerings
                     .single { it.key == "secret" }
                     .selectionState shouldBe OfferingSelectionStateDto.DISABLED
-                CommerceJson
-                    .asA(
-                        fresh.adminGet("/offering-catalog/revisions/$originalRevision").bodyString(),
-                        OfferingsCatalogDto.serializer(),
-                    ).categories
-                    .first()
-                    .offerings
-                    .single { it.key == "chocolate" }
-                    .selectionState shouldBe OfferingSelectionStateDto.ENABLED
+                fresh.adminGet("/offering-catalog/revisions/$originalRevision").status shouldBe Status.NOT_FOUND
             }
         }
 
@@ -196,13 +202,13 @@ class InquiryFormRoutesSpec :
                 response.status shouldBe Status.NOT_FOUND
                 response.header("Cache-Control") shouldBe "no-store"
                 CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()).code shouldBe "not_found"
-                fresh.database.count("commerce.offerings_snapshots") shouldBe 0
+                fresh.database.count("commerce.offerings_catalogs") shouldBe 0
             }
         }
 
         test("public form returns ordered questions, submission bindings, and separate presentation hints") {
             val form = application.form()
-            form.definitionVersion shouldBe 9
+            form.definitionVersion shouldBe 11
             form.catalogRevision shouldBe revision
             form.sections.map { it.key to it.title } shouldContainExactly
                 listOf(
@@ -245,7 +251,7 @@ class InquiryFormRoutesSpec :
                 )
             form.fields().single { it.key == "offering:soft-serve-flavor" }.let {
                 it.label shouldBe "Choose your soft serve flavors"
-                it.presentation.control shouldBe InquiryFormControl.CARDS
+                it.presentation.control shouldBe InquiryFormControl.CHIPS
                 it.required shouldBe true
             }
             application.http(Request(Method.POST, "/inquiry-form")).status shouldBe Status.METHOD_NOT_ALLOWED
@@ -288,9 +294,73 @@ class InquiryFormRoutesSpec :
                 restored.choices().map { it.category } shouldContainExactly listOf("soft-serve-flavor", "cone-option")
                 restored.fields().single { it.key == "offering:soft-serve-flavor" }.let {
                     it.label shouldBe "Choose your soft serve flavors"
-                    it.presentation.control shouldBe InquiryFormControl.CARDS
+                    it.presentation.control shouldBe InquiryFormControl.CHIPS
                 }
             }
+        }
+
+        test("CHIPS option text maps to JSON while SELECT options retain null defaults") {
+            val catalog =
+                GetOfferingsCatalog(application.transactor, application.context.offeringsSnapshotRepository)(FIONA_OFFERINGS_CATALOG_ID)
+            val original = GetInquiryForm({ catalog })()
+            val customized =
+                original.copy(
+                    sections =
+                        original.sections.map { section ->
+                            section.copy(
+                                fields =
+                                    section.fields.map { field ->
+                                        when (val input = field.input) {
+                                            is InquiryFormInput.IntegerChoice ->
+                                                field.copy(
+                                                    control = InquiryFormControl.CHIPS,
+                                                    input =
+                                                        input.copy(
+                                                            options =
+                                                                input.options.map {
+                                                                    it.copy(
+                                                                        badge = " Popular ",
+                                                                        statusNote = "Today",
+                                                                        infoNote = "Duration details",
+                                                                    )
+                                                                },
+                                                        ),
+                                                )
+                                            else -> field
+                                        }
+                                    },
+                            )
+                        },
+                )
+            val access =
+                AccessControl(
+                    authentication(ServiceAccessTokenAuthenticator(application.context.serviceAccessTokens)),
+                    application.context.authorization,
+                )
+            val handler =
+                contract {
+                    renderer = fionaOpenApi("test")
+                    routes += getInquiryFormRoute({ customized }, access)
+                }
+            val response = handler(Request(Method.GET, "/inquiry-form").asFionasWeb(application))
+            response.status shouldBe Status.OK
+            val fields = CommerceJson.asA(response.bodyString(), InquiryFormResponse.serializer()).fields()
+            (fields.single { it.key == "durationMinutes" }.input as InquiryFormInputResponse.IntegerChoice).options.first().let {
+                it.badge shouldBe " Popular "
+                it.statusNote shouldBe "Today"
+                it.infoNote shouldBe "Duration details"
+            }
+            fields.single { it.key == "durationMinutes" }.presentation.control shouldBe InquiryFormControl.CHIPS
+            fields.single { it.key == "eventType" }.let { event ->
+                event.presentation.control shouldBe InquiryFormControl.SELECT
+                (event.input as InquiryFormInputResponse.StringChoice).options.forEach {
+                    it.badge shouldBe null
+                    it.statusNote shouldBe null
+                    it.infoNote shouldBe null
+                }
+            }
+            val defaultJson = application.http(Request(Method.GET, "/inquiry-form").asFionasWeb(application)).bodyString()
+            listOf("badge", "statusNote", "infoNote").forEach { defaultJson.contains("\"$it\"") shouldBe false }
         }
 
         test("ordinary semantics mirror normalization, domain lengths, integers, and policy-owned duration choices") {
@@ -325,6 +395,7 @@ class InquiryFormRoutesSpec :
                 options.map { option -> InquiryEventType.valueOf(option.value).toDomain().name } shouldContainExactly
                     InquiryEventType.entries.map { type -> type.name }
             }
+            fields.getValue("durationMinutes").presentation.control shouldBe InquiryFormControl.CHIPS
             (
                 fields
                     .getValue(
@@ -465,13 +536,15 @@ class InquiryFormRoutesSpec :
                         .compareTo(form.browserTotal(inputs)) shouldBe 0
                 }
                 fresh
-                    .adminRequest(Method.DELETE, "/offering-catalog/offerings/hourly-flavor?expectedRevision=$withDuration")
-                    .status shouldBe Status.OK
+                    .adminPost(
+                        "/offering-catalog/offerings/retire",
+                        """{"expectedRevision":$withDuration,"keys":["hourly-flavor"]}""",
+                    ).status shouldBe Status.OK
                 val latest = fresh.form()
                 latest.catalogRevision shouldBe withDuration + 1
                 latest.pricingPreview.durationOptions.flatMap { it.offeringContributions } shouldBe emptyList()
                 latest.choices().flatMap { it.options }.any { it.key == "hourly-flavor" } shouldBe false
-                // The browser's captured contribution and the backend's historical pricing both remain valid.
+                // Captured browser facts remain advisory; a new backend request must refresh its revision.
                 val historical =
                     InquiryPricingInputs(
                         form.catalogRevision,
@@ -491,9 +564,9 @@ class InquiryFormRoutesSpec :
                             .header("Content-Type", "application/json")
                             .body(CommerceJson.json.encodeToString(InquiryPricingInputs.serializer(), historical)),
                     )
-                response.status shouldBe Status.OK
-                BigDecimal(CommerceJson.asA(response.bodyString(), EstimatePreviewResponse.serializer()).total)
-                    .compareTo(form.browserTotal(historical)) shouldBe 0
+                response.status shouldBe Status.CONFLICT
+                CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()).code shouldBe CATALOG_REVISION_STALE
+                response.header("Cache-Control") shouldBe "no-store"
             }
         }
 
@@ -546,7 +619,7 @@ class InquiryFormRoutesSpec :
             }
         }
 
-        test("historical previews remain priced exactly but inquiry submissions reject the captured stale form") {
+        test("previews and inquiry submissions both reject a captured stale form") {
             TestApplication.create().use { fresh ->
                 val initial = fresh.createAcceptanceCatalog()
                 fresh
@@ -560,8 +633,10 @@ class InquiryFormRoutesSpec :
                 edited.choices().first().minSelections shouldBe 2
                 edited.choices().first().maxSelections shouldBe 2
                 fresh
-                    .adminRequest(Method.DELETE, "/offering-catalog/offerings/horchata?expectedRevision=${edited.catalogRevision}")
-                    .status shouldBe Status.OK
+                    .adminPost(
+                        "/offering-catalog/offerings/retire",
+                        """{"expectedRevision":${edited.catalogRevision},"keys":["horchata"]}""",
+                    ).status shouldBe Status.OK
                 val current = fresh.form()
                 current.catalogRevision shouldBe initial + 2
                 current
@@ -576,7 +651,7 @@ class InquiryFormRoutesSpec :
                             Method.POST,
                             "/estimate-preview",
                         ).asFionasWeb(fresh).header("Content-Type", "application/json").body(inputs),
-                    ).status shouldBe Status.OK
+                    ).status shouldBe Status.CONFLICT
                 fresh
                     .http(
                         Request(Method.POST, "/inquiries")

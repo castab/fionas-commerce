@@ -87,8 +87,10 @@ class InquiryMaterializationSpec :
                 FionasOfferingsContext(75, true, Duration.ofMinutes(120)),
             )
 
-        fun pricing() =
-            FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), application.context.offeringsSnapshotRepository::retrieveVersion)
+        fun pricing(
+            latest: (Transaction, OfferingsCatalogId) -> OfferingsSnapshot? =
+                application.context.offeringsSnapshotRepository::retrieveLatestVersion,
+        ) = FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), latest)
 
         fun command(
             input: FionasPricingInputs = inputs(),
@@ -107,17 +109,15 @@ class InquiryMaterializationSpec :
         fun create(
             documentId: UUID = UUID.randomUUID(),
             ownerRepository: InquiryFinancialDocumentRepository = associations,
-            price: FionasPricing = pricing(),
-            latest: (
-                Transaction,
-                OfferingsCatalogId,
-            ) -> OfferingsSnapshot? = application.context.offeringsSnapshotRepository::retrieveLatestVersion,
+            latest: (Transaction, OfferingsCatalogId) -> OfferingsSnapshot? =
+                application.context.offeringsSnapshotRepository::retrieveLatestVersion,
+            price: FionasPricing = pricing(latest),
         ) = CreateInquiry(
             application.transactor,
             customers,
             inquiries,
             JdbiInquirySubmissionRepository(),
-            PublicInquiryPricing(price, latest),
+            PublicInquiryPricing(price),
             testClock,
             MaterializeInquiryFinancialDocument(application.context.financialLedger, ownerRepository, testClock) { documentId },
         )
@@ -143,14 +143,11 @@ class InquiryMaterializationSpec :
             val singlePricing =
                 FionasPricing(
                     FionasOfferingsEngine(FIONAS_PRICING_POLICY) { UUID.randomUUID().also(generatedIds::add) },
-                ) { transaction, reference ->
-                    error("Public pricing must use the already validated current snapshot: $reference in $transaction")
-                }
-            val inquiry =
-                create(id, price = singlePricing, latest = { transaction, catalogId ->
+                ) { transaction, catalogId ->
                     catalogReads++
                     application.context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, catalogId)
-                })(command(submitted))
+                }
+            val inquiry = create(id, price = singlePricing)(command(submitted))
             catalogReads shouldBe 1
             val restored = application.context.financialLedger.latest(id)
             (restored is FinancialDocument.Estimate) shouldBe true
@@ -163,7 +160,7 @@ class InquiryMaterializationSpec :
                 application.transactor.inTransaction { transaction ->
                     FionasPricing(
                         FionasOfferingsEngine(FIONAS_PRICING_POLICY) { ids.next() },
-                        application.context.offeringsSnapshotRepository::retrieveVersion,
+                        application.context.offeringsSnapshotRepository::retrieveLatestVersion,
                     ).price(transaction, submitted).lineItems
                 }
             restored.lineItems shouldBe expected
@@ -323,15 +320,16 @@ class InquiryMaterializationSpec :
             val updated =
                 application.adminRequest(
                     Method.PUT,
-                    "/offering-catalog/offerings/horchata",
-                    """{"expectedRevision":$revision,"selectionState":"ENABLED","availability":"AVAILABLE",""" +
+                    "/offering-catalog/offerings",
+                    """{"expectedRevision":$revision,"offerings":[{"key":"horchata",""" +
+                        """"selectionState":"ENABLED","availability":"AVAILABLE",""" +
                         """"category":"soft-serve-flavor","displayName":"Renamed premium flavor",""" +
-                        """"price":${perGuest("9.00")}}""",
+                        """"price":${perGuest("9.00")}}]}""",
                 )
             updated.status shouldBe Status.OK
             // Test-only destruction of catalog data proves the financial lineage has no read or FK
-            // dependency on it. Production catalog revisions remain immutable and are never deleted.
-            application.database.execute("DELETE FROM commerce.offerings_snapshots")
+            // dependency on it. Production current catalogs are runtime-owned; captured snapshots are immutable.
+            application.database.execute("DELETE FROM commerce.offerings_catalogs")
             // No pricing or catalog collaborator participates in these financial reads or transitions.
             application.context.financialLedger
                 .latest(id)

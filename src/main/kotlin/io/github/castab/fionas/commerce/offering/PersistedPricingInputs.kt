@@ -31,6 +31,7 @@ import java.time.Duration
  *                 {"categoryKey": "topping", "offeringKeys": []}]}
  * ```
  *
+ * catalogRevision records the revision used for pricing; catalogs retain only current state.
  * It is durable historical state, owned by Fiona and separate from both the HTTP DTOs and
  * commerce-runtime's own (internal) snapshot JSON, so none constrains the others. Domain types
  * stay unaware of it: only Fiona's repositories encode and restore through these functions.

@@ -136,7 +136,7 @@ internal fun inquiryForm(
                                 InquiryIntegerOption(minutes, durationLabel(minutes))
                             },
                         ),
-                        InquiryFormControl.SELECT,
+                        InquiryFormControl.CHIPS,
                     ),
                 ) + offeringFields,
             ),
@@ -165,9 +165,10 @@ internal fun inquiryForm(
 /** The single Fiona-owned public category definition, shared by form rendering and submission. */
 internal fun publicOfferingQuestions(policy: FionasPricingPolicy = FIONAS_PRICING_POLICY) =
     listOf(
-        OfferingQuestion(OfferingCategoryKey("soft-serve-flavor"), "Choose your soft serve flavors", InquiryFormControl.CARDS),
-        OfferingQuestion(policy.toppingCategory, "Choose your toppings", InquiryFormControl.CHECKBOXES),
-        OfferingQuestion(OfferingCategoryKey("cone-option"), "Choose your cones or cups", InquiryFormControl.CARDS),
+        OfferingQuestion(OfferingCategoryKey("soft-serve-flavor"), "Choose your soft serve flavors", InquiryFormControl.CHIPS),
+        OfferingQuestion(OfferingCategoryKey("hand-scooped-flavor"), "Choose your hand-scooped flavors", InquiryFormControl.CHIPS),
+        OfferingQuestion(policy.toppingCategory, "Choose your toppings", InquiryFormControl.CHIPS),
+        OfferingQuestion(OfferingCategoryKey("cone-option"), "Choose your cones or cups", InquiryFormControl.CHIPS),
     )
 
 internal data class OfferingQuestion(

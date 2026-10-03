@@ -34,7 +34,7 @@ data class EstimatePreviewRequest(
     @ApiProperty(
         description =
             "The revision of Fiona's Offerings catalog the choices were made from, as `GET /offering-catalog` " +
-                "returned it. The estimate uses exactly this revision, never a later one. At least 1.",
+                "returned it. It must match the current revision; older inputs fail with 409 CATALOG_REVISION_STALE. At least 1.",
     )
     val catalogRevision: Int,
     @ApiProperty(description = "The guests to price the event for. At least 1.")
@@ -118,7 +118,7 @@ private val estimatePreviewResponse = jsonBody(EstimatePreviewResponse.serialize
 private val estimates =
     Tag(
         "Estimates",
-        "Fiona's pricing of a selection from an exact catalog revision. A preview is not a quote and is never recorded.",
+        "Fiona's pricing of a selection from the current catalog revision. A preview is not a quote and is never recorded.",
     )
 
 private val exampleRequest =
@@ -164,9 +164,9 @@ private fun exampleLine(
 ) = EstimatePreviewLine(description, subDescription, quantity, unitPrice, subtotal, "0.00", subtotal, "USD")
 
 /**
- * `POST /estimate-preview`: prices a selection from an exact catalog revision, recording
+ * `POST /estimate-preview`: prices a selection from the current catalog revision, recording
  * nothing. The route only translates between transport and application values;
- * [previewEstimate] loads the revision and evaluates it with Fiona's pricing.
+ * [previewEstimate] loads current and checks the revision and evaluates it with Fiona's pricing.
  */
 fun previewEstimateRoute(
     previewEstimate: (FionasPricingInputs) -> EstimatePreview,
@@ -177,11 +177,10 @@ fun previewEstimateRoute(
         principalAccess(FionaPermissions.EstimatePreviewCreate, UNTRUSTED_ORIGIN)
         summary = "Preview an estimate"
         description =
-            "Prices a selection from one exact revision of Fiona's Offerings catalog for an event's guest count and " +
+            "Prices a selection from the current revision of Fiona's Offerings catalog for an event's guest count and " +
             "service duration: the base service, the ice cream service, catalog prices of the chosen offerings, and " +
-            "extra toppings. Nothing is recorded, and the result is not a quote. The catalog revision is never " +
-            "replaced by a later one, so a selection made from an old revision is priced, or rejected, as that " +
-            "revision stands. Requires `${FionaPermissions.EstimatePreviewCreate.value}`."
+            "extra toppings. Nothing is recorded, and the result is not a quote. Older input revisions fail with " +
+            "409 CATALOG_REVISION_STALE; reload and review before pricing again. Future revisions are 404. Requires `${FionaPermissions.EstimatePreviewCreate.value}`."
         tags += estimates
         receiving(estimatePreviewRequest to exampleRequest)
         returning(Status.OK, estimatePreviewResponse to exampleResponse, "The estimate's lines and totals.")
@@ -190,7 +189,12 @@ fun previewEstimateRoute(
             "the body is not JSON, lacks a required property, or a property has the wrong type.",
             "Malformed request: body 'body'",
         )
-        returningError(ErrorCategory.NOT_FOUND, "the catalog revision does not exist.", "Offerings catalog revision r12 was not found")
+        catalogRevisionConflict()
+        returningError(
+            ErrorCategory.NOT_FOUND,
+            "the catalog is missing or the requested revision is in the future.",
+            "Offerings catalog revision r12 was not found",
+        )
         returningError(
             ErrorCategory.VALIDATION_FAILED,
             "a value is invalid, or the selection cannot be estimated: it does not fit the catalog revision (for " +
@@ -202,7 +206,7 @@ fun previewEstimateRoute(
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
     } bindContract Method.POST to
-        access.requirePermission(FionaPermissions.EstimatePreviewCreate).then { request: Request ->
+        access.requirePermission(FionaPermissions.EstimatePreviewCreate).then(catalogRevisionStaleResponses).then { request: Request ->
             val body = estimatePreviewRequest(request)
             val inputs =
                 pricingInputs(

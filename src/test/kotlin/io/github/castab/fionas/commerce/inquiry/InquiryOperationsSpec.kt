@@ -13,6 +13,7 @@ import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
+import io.github.castab.fionas.commerce.offering.CatalogRevisionStale
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
@@ -46,7 +47,10 @@ class InquiryOperationsSpec :
         afterSpec { application.close() }
 
         fun pricing() =
-            FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), application.context.offeringsSnapshotRepository::retrieveVersion)
+            FionasPricing(
+                FionasOfferingsEngine(FIONAS_PRICING_POLICY),
+                application.context.offeringsSnapshotRepository::retrieveLatestVersion,
+            )
 
         fun createInquiry(
             customerId: CustomerId = CustomerId(UUID.randomUUID()),
@@ -57,7 +61,7 @@ class InquiryOperationsSpec :
             customers,
             inquiryRepository,
             JdbiInquirySubmissionRepository(),
-            PublicInquiryPricing(pricing(), application.context.offeringsSnapshotRepository::retrieveLatestVersion),
+            PublicInquiryPricing(pricing()),
             testClock,
             MaterializeInquiryFinancialDocument(application.context.financialLedger, JdbiInquiryFinancialDocumentRepository(), testClock),
             { customerId },

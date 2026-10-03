@@ -162,7 +162,7 @@ class PublicInquirySubmissionSpec :
             }
         }
 
-        test("active hidden category and its offering are forbidden publicly but remain usable by staff, including historical revisions") {
+        test("active hidden category and its offering are forbidden publicly but remain usable by staff, at the current revision") {
             val category =
                 app.adminPost(
                     "/offering-catalog/categories",
@@ -202,14 +202,22 @@ class PublicInquirySubmissionSpec :
             revision = app.addOffering(revision, "espresso", "soft-serve-flavor", "Espresso")
             val inquiryId = app.createInquiry()
             val staff = app.adminPost("/inquiries/$inquiryId/estimates", hidden)
-            staff.status shouldBe Status.CREATED
-            val document = CommerceJson.asA(staff.bodyString(), FinancialDocumentResponse.serializer())
+            staff.status shouldBe Status.CONFLICT
+            CommerceJson.asA(staff.bodyString(), ErrorResponse.serializer()).code shouldBe CATALOG_REVISION_STALE
+            val refreshed = hidden.replace("\"catalogRevision\":$historical", "\"catalogRevision\":$revision")
+            val accepted = app.adminPost("/inquiries/$inquiryId/estimates", refreshed)
+            accepted.status shouldBe Status.CREATED
+            val document = CommerceJson.asA(accepted.bodyString(), FinancialDocumentResponse.serializer())
             document.total shouldBe "706.25"
-            document.pricing!!.catalogRevision shouldBe historical
+            document.pricing!!.catalogRevision shouldBe revision
         }
 
         test("retired public offerings and categories are absent from form and rejected at the accepted current revision") {
-            app.adminRequest(Method.DELETE, "/offering-catalog/offerings/horchata?expectedRevision=$revision").status shouldBe Status.OK
+            app
+                .adminPost(
+                    "/offering-catalog/offerings/retire",
+                    """{"expectedRevision":$revision,"keys":["horchata"]}""",
+                ).status shouldBe Status.OK
             revision++
             val before = counts()
             submit(pricingBody(revision)).status shouldBe Status.UNPROCESSABLE_ENTITY
@@ -221,7 +229,11 @@ class PublicInquirySubmissionSpec :
                 .flatMap { it.options }
                 .any { it.key == "horchata" } shouldBe false
             listOf("cup", "waffle-cone").forEach { key ->
-                app.adminRequest(Method.DELETE, "/offering-catalog/offerings/$key?expectedRevision=$revision").status shouldBe Status.OK
+                app
+                    .adminPost(
+                        "/offering-catalog/offerings/retire",
+                        """{"expectedRevision":$revision,"keys":["$key"]}""",
+                    ).status shouldBe Status.OK
                 revision++
             }
             app.adminRequest(Method.DELETE, "/offering-catalog/categories/cone-option?expectedRevision=$revision").status shouldBe Status.OK
@@ -350,7 +362,11 @@ class PublicInquirySubmissionSpec :
                 staleDisabled.status shouldBe Status.CONFLICT
                 CommerceJson.asA(staleDisabled.bodyString(), ErrorResponse.serializer()).code shouldBe "CATALOG_REVISION_STALE"
                 replay()
-                fresh.adminRequest(Method.DELETE, "/offering-catalog/offerings/vanilla?expectedRevision=$latest").status shouldBe Status.OK
+                fresh
+                    .adminPost(
+                        "/offering-catalog/offerings/retire",
+                        """{"expectedRevision":$latest,"keys":["vanilla"]}""",
+                    ).status shouldBe Status.OK
                 replay()
             }
         }

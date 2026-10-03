@@ -105,8 +105,10 @@ class InquiryIdempotencySpec :
             owners: InquiryFinancialDocumentRepository = associations,
             price: PublicInquiryPricing =
                 PublicInquiryPricing(
-                    FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), app.context.offeringsSnapshotRepository::retrieveVersion),
-                    app.context.offeringsSnapshotRepository::retrieveLatestVersion,
+                    FionasPricing(
+                        FionasOfferingsEngine(FIONAS_PRICING_POLICY),
+                        app.context.offeringsSnapshotRepository::retrieveLatestVersion,
+                    ),
                 ),
         ) = CreateInquiry(
             app.transactor,
@@ -192,11 +194,11 @@ class InquiryIdempotencySpec :
                             lineIds.incrementAndGet()
                             UUID.randomUUID()
                         },
-                    ) { _, _ -> error("Public creation must use the observed snapshot") },
-                ) { transaction, catalog ->
-                    check(latestReads.incrementAndGet() == 1) { "Replay must not read the catalog" }
-                    app.context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, catalog)
-                }
+                    ) { transaction, catalog ->
+                        check(latestReads.incrementAndGet() == 1) { "Replay must not read the catalog" }
+                        app.context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, catalog)
+                    },
+                )
             val create = operation(price = price)
             val inquiry = create(input) // Committed result, as if its transport response was lost.
             val committed = counts()

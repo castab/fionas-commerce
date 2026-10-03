@@ -1,10 +1,9 @@
 package io.github.castab.fionas.commerce.offering
 
+import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsEvaluation
 import io.github.castab.commerce.offering.OfferingsEvaluationResult
-import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
-import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.offering.OfferingsViolation
 import io.github.castab.commerce.offering.StructuralOfferingsViolation
 import io.github.castab.commerce.runtime.offering.offeringsValidationFailed
@@ -16,31 +15,27 @@ import io.github.castab.commerce.runtime.persistence.Transaction
  * persisted estimates, and change orders, so every one of them prices the same inputs the
  * same way.
  *
- * [retrieveRevision] is commerce-runtime's `OfferingsSnapshotRepository.retrieveVersion`,
- * handed over by the composition root: it reads an exact catalog revision inside the
- * caller's transaction, so an operation that persists what it priced reads the catalog in
- * the same transaction as its writes. Fiona never reads the catalog tables itself.
+ * [retrieveLatest] is commerce-runtime's transaction-bound latest catalog read, handed over
+ * by the composition root. The submitted revision is a staleness token: only the observed
+ * current snapshot can be priced. The read shares the transaction that writes its result.
  *
  * A selection the [engine] rejects, structurally or by Fiona's policy, fails with
  * [CommerceFailure.ValidationFailed] naming each violation's stable code.
  */
 class FionasPricing(
     private val engine: FionasOfferingsEngine,
-    private val retrieveRevision: (Transaction, OfferingsSnapshotReference) -> OfferingsSnapshot?,
+    private val retrieveLatest: (Transaction, OfferingsCatalogId) -> OfferingsSnapshot?,
 ) {
-    /**
-     * Prices [inputs] from the catalog revision they name, read in [transaction]. Fails with
-     * [CommerceFailure.NotFound] when Fiona's catalog has no such revision, exactly as
-     * commerce-runtime's `GetOfferingsCatalogRevision` does for a preview.
-     */
+    /** Reads current once in [transaction], rejects stale inputs, then prices that observed value. */
     fun price(
         transaction: Transaction,
         inputs: FionasPricingInputs,
+        conflictMessage: String = STAFF_CATALOG_REVISION_STALE_MESSAGE,
     ): OfferingsEvaluation {
-        val reference = fionaCatalogRevision(inputs.catalogRevision)
         val snapshot =
-            retrieveRevision(transaction, reference)
-                ?: throw CommerceFailure.NotFound("Offerings catalog revision ${reference.revision} was not found")
+            retrieveLatest(transaction, FIONA_OFFERINGS_CATALOG_ID)
+                ?: throw CommerceFailure.NotFound("Fiona's Offerings catalog was not found")
+        requireCurrentCatalogRevision(inputs.catalogRevision, snapshot, conflictMessage)
         return price(snapshot, inputs)
     }
 
@@ -49,7 +44,7 @@ class FionasPricing(
         snapshot: OfferingsSnapshot,
         inputs: FionasPricingInputs,
     ): OfferingsEvaluation {
-        check(snapshot.reference == fionaCatalogRevision(inputs.catalogRevision)) {
+        check(snapshot.catalogId == FIONA_OFFERINGS_CATALOG_ID && snapshot.revision == inputs.catalogRevision) {
             "Pricing inputs for ${inputs.catalogRevision} were given catalog snapshot ${snapshot.reference}"
         }
         return when (val result = engine.evaluate(snapshot, inputs.selections, inputs.context)) {
@@ -63,9 +58,6 @@ class FionasPricing(
         }
     }
 }
-
-/** The reference of [revision] of Fiona's catalog. */
-fun fionaCatalogRevision(revision: OfferingsRevision) = OfferingsSnapshotReference(FIONA_OFFERINGS_CATALOG_ID, revision)
 
 private fun OfferingsViolation.explanation(): String =
     when (this) {

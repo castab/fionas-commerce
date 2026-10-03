@@ -8,7 +8,6 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
-import io.github.castab.fionas.commerce.inquiry.CatalogRevisionStale
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.EventDate
 import io.github.castab.fionas.commerce.inquiry.EventType
@@ -23,6 +22,7 @@ import io.github.castab.fionas.commerce.inquiry.InquirySubmissionKey
 import io.github.castab.fionas.commerce.inquiry.InquirySummary
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ZipCode
+import io.github.castab.fionas.commerce.offering.CatalogRevisionStale
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.Serializable

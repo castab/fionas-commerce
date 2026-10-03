@@ -13,6 +13,9 @@ import java.util.Currency
 import java.util.UUID
 
 /**
+ * Repricing uses the current catalog only; inputs from an older revision fail with a conflict.
+ * Existing document lines are immutable facts and are never reconstructed from old catalog inputs.
+ *
  * Fiona's existing staff replacement action: materializes new lines from explicitly supplied
  * commercial inputs and replaces the prior snapshot's concrete line set. It never reads old
  * pricing inputs to reconstruct old lines. Appends a same-stage successor, whether an estimate, a

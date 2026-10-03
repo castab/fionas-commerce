@@ -1,11 +1,10 @@
 package io.github.castab.fionas.commerce.offering
 
 import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsEvaluation
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
-import io.github.castab.commerce.offering.OfferingsSnapshotReference
-import io.github.castab.commerce.runtime.operation.CommerceFailure
 import java.util.Currency
 
 /**
@@ -31,23 +30,17 @@ class EstimatePreview(
 }
 
 /**
- * Prices a selection from one exact revision of Fiona's catalog, without recording anything.
- *
- * The revision is the one the caller rendered its choices from, never the latest: a
- * selection made from revision 12 is evaluated against revision 12 even after the catalog
- * has moved on, and one that names an offering revision 12 lacks is rejected.
- *
- * [getRevision] is commerce-runtime's `GetOfferingsCatalogRevision`, which reads the
- * snapshot in its own transaction and fails with [CommerceFailure.NotFound] for a revision
- * that does not exist. [pricing] is the same Fiona pricing that persisted financial
- * documents use; a selection it rejects fails with [CommerceFailure.ValidationFailed].
+ * Prices the current catalog without recording anything. [getCatalog] is the runtime's
+ * GetOfferingsCatalog read in its own transaction; the caller's revision must still match.
+ * A publication after observation does not change this captured immutable value.
  */
 class PreviewEstimate(
-    private val getRevision: (OfferingsSnapshotReference) -> OfferingsSnapshot,
+    private val getCatalog: (OfferingsCatalogId) -> OfferingsSnapshot,
     private val pricing: FionasPricing,
 ) {
     operator fun invoke(inputs: FionasPricingInputs): EstimatePreview {
-        val snapshot = getRevision(fionaCatalogRevision(inputs.catalogRevision))
+        val snapshot = getCatalog(FIONA_OFFERINGS_CATALOG_ID)
+        requireCurrentCatalogRevision(inputs.catalogRevision, snapshot)
         return EstimatePreview(pricing.price(snapshot, inputs), inputs.context.guestCountIsMinimum)
     }
 }
