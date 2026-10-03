@@ -6,6 +6,46 @@ introducing a new concept. [`README.md`](README.md) explains how to build, run, 
 configure the application; this file explains the rules and why seemingly reasonable
 changes can be architecturally wrong.
 
+## Architectural authority
+
+[`ARCHITECTURE.md`](ARCHITECTURE.md) is the repository-wide high-level architectural
+constitution for Fiona's application layer. This `AGENTS.md` is the detailed contributor
+and implementation contract. Use them together: `ARCHITECTURE.md` defines Fiona's
+responsibilities, its relationship to the shared commerce platform, and the principles for
+deciding whether a concept belongs here or upstream; this file defines the concrete
+repository invariants, contracts, workflows, and implementation rules that make those
+principles specific.
+
+Read `ARCHITECTURE.md` before making a change that affects any of the following:
+
+- ownership between `fionas-commerce`, `commerce-runtime`, and `commerce-domain`;
+- a new Fiona business concept, relationship, workflow state, or reusable abstraction;
+- persistence structure, aggregate boundaries, duplicated/derived state, or schema ownership;
+- inquiry, pricing, financial-document, payment, refund, allocation, deposit, offering, or
+  reconciliation semantics;
+- authentication, authorization, principals, roles, permissions, sessions, service identities,
+  or credential ownership;
+- transaction boundaries, isolation, locking, consistency, or cross-schema atomicity;
+- reusable runtime capabilities, Fiona-specific HTTP behavior, API exposure boundaries, or
+  OpenAPI contracts.
+
+Treat `ARCHITECTURE.md` as an architectural constraint, not optional background reading.
+The more specific rules in this file continue to apply simultaneously.
+
+If a requested change appears to conflict with `ARCHITECTURE.md`, if these documents appear
+to disagree, or if ownership between Fiona and the shared commerce platform is unclear,
+surface the conflict explicitly before implementation. Do not silently resolve architectural
+ambiguity by choosing the smallest local implementation.
+
+In particular, if the needed capability is reusable commerce persistence, orchestration,
+domain semantics, or another shared runtime concern, follow the
+[Commerce-runtime gap rule](#commerce-runtime-gap-rule): identify the missing upstream seam,
+add and release it upstream when appropriate, then consume the released capability here.
+Never introduce a Fiona-local substitute merely to keep the work inside this repository.
+
+Small implementation changes that preserve existing architectural boundaries do not require
+rereading `ARCHITECTURE.md`.
+
 These rules are non-negotiable without an explicit decision from the maintainer.
 
 ## Application identity
@@ -1075,9 +1115,9 @@ DTOs and from commerce-runtime's internal snapshot JSON:
 
 ```json
 {"catalogRevision": 20,
- "context": {"guestCount": 75, "guestCountIsMinimum": false, "durationMinutes": 120},
- "selections": [{"categoryKey": "soft-serve-flavor", "offeringKeys": ["soft-vanilla", "soft-horchata"]},
-                {"categoryKey": "topping", "offeringKeys": []}]}
+  "context": {"guestCount": 75, "guestCountIsMinimum": false, "durationMinutes": 120},
+  "selections": [{"categoryKey": "soft-serve-flavor", "offeringKeys": ["soft-vanilla", "soft-horchata"]},
+    {"categoryKey": "topping", "offeringKeys": []}]}
 ```
 
 - Every property is required and non-null; array order is submitted order, and an explicitly
@@ -1192,10 +1232,10 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    grants; it does not add one permission. Allocation reversals remain unsupported by runtime
    persistence.
 10. **Settlement is derived.** Only the latest view carries reconciliation (`grossAllocated`,
-   `netApplied`, `balance`); history shows historical facts and pricing sources, never a
-   reconciliation of an older snapshot. Unapplied amount is net received minus net
-   allocated value after refunds and refund unwinds, never mutable state. Payment status is presentation, derived by
-   clients. Allocation responses reconcile the exact reference they changed.
+    `netApplied`, `balance`); history shows historical facts and pricing sources, never a
+    reconciliation of an older snapshot. Unapplied amount is net received minus net
+    allocated value after refunds and refund unwinds, never mutable state. Payment status is presentation, derived by
+    clients. Allocation responses reconcile the exact reference they changed.
 11. **Payment facts are read back from the ledger, document-first.**
     `GET /financial-documents/{documentId}/payments` (`ListFinancialDocumentPaymentHistories`)
     proves Fiona owns the lineage (`inquiryOf`) and calls
