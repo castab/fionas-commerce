@@ -150,6 +150,7 @@ class TestApplication private constructor(
             bootstrap: BootstrapAdmin? =
                 BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
             loginRateLimit: LoginRateLimit = LoginRateLimit(),
+            trustedOrigins: Set<String> = setOf(TEST_ORIGIN),
         ): TestApplication {
             val database = TestDatabase.create()
             try {
@@ -157,7 +158,7 @@ class TestApplication private constructor(
                     fionaApplication(
                         clock,
                         bootstrap,
-                        setOf(TEST_ORIGIN),
+                        trustedOrigins,
                         loginRateLimit = loginRateLimit,
                     )
                 var context: CommerceRuntimeContext? = null

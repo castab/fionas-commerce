@@ -554,7 +554,7 @@ from the executable contract's generated OpenAPI artifact.
 > V12 replaces `commerce.offerings_snapshots` with `commerce.offerings_catalogs`. Fiona adds
 > no migration and changes no existing migration. Databases are disposable: stop Fiona,
 > recreate the local Compose database volume, start PostgreSQL, start the upgraded backend,
-> then run the updated setup script. Fresh databases apply runtime V12 and Fiona V11.
+> then run `scripts/replace-catalog.mjs`. Fresh databases apply runtime V12 and Fiona V11.
 > Follow [the rollout guide](docs/commerce-0.0.21-rollout.md) for the separately scheduled
 > frontend and deployed stop-and-recreate cutover. Old/new backends cannot share this schema.
 
@@ -563,7 +563,7 @@ from the executable contract's generated OpenAPI artifact.
 > pricing inputs into its owning row (`inquiries.pricing_inputs`,
 > `financial_document_pricing.pricing_inputs`). Neither converts existing data: both refuse
 > a populated database. Recreate the disposable local database/volume
-> (`docker compose down -v`), restart Fiona, then rerun `scripts/setup-local-commerce.mjs`.
+> (`docker compose down -v`), restart Fiona, then rerun `scripts/replace-catalog.mjs`.
 > Fresh databases migrate normally through runtime V10 and Fiona V11. No API changes.
 
 > **Upgrading to commerce 0.0.19.** Offering add/update/restore bodies now require both
@@ -571,7 +571,7 @@ from the executable contract's generated OpenAPI artifact.
 > with no HTTP defaults. Reads expose both fields. All four combinations are valid.
 > Runtime V8 refuses to invent these values for existing offering rows. Recreate the
 > disposable local database/volume (`docker compose down -v`), start a fresh database,
-> restart Fiona, then rerun `scripts/setup-local-commerce.mjs`. Empty databases migrate
+> restart Fiona, then rerun `scripts/replace-catalog.mjs`. Empty databases migrate
 > normally through runtime V8 and Fiona's own stream. Fiona adds no migration or backfill.
 
 > **Upgrading to commerce 0.0.18.** No runtime or Fiona migration is added. The existing
@@ -1537,26 +1537,43 @@ On Windows use `.\gradlew.bat` and set the variables with `$env:NAME = "value"`.
 The process runs until it receives SIGTERM or SIGINT; its shutdown hook stops the server
 and closes the connection pool.
 
-### Seed a fresh local catalog and preview an estimate
+### Replace a catalog from the script
 
-With Fiona running against a fresh, disposable local database, bootstrap the `admin` user
-and set `FIONAS_TRUSTED_ORIGINS=http://localhost:8080` for the application. Use Node.js 20
-or newer to enter the acceptance catalog through Fiona's API and preview its canonical
-`$681.25` estimate. The script acts as the bootstrap administrator, whose session holds the
-customer-operation permissions (a real frontend uses a service access token instead):
+Use Node.js 20 or newer to replace a local or remote endpoint's active catalog through
+Fiona's API. Supply an administrator account on that endpoint with
+`commerce.offerings.manage`. For the default local URL, set
+`FIONAS_TRUSTED_ORIGINS=http://localhost:8080` on the application:
 
 ```bash
-FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/setup-local-commerce.mjs
+node scripts/replace-catalog.mjs
 ```
 
-The script also accepts `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
-`FIONAS_ADMIN_USERNAME`; each defaults to the local port 8080 setup and username `admin`.
-It does not load `.env` files or install npm packages. It intentionally seeds only a fresh
-catalog and stops if one already exists; existing catalogs are managed through revisioned
-mutations. Four category additions followed by one batch of 19 offerings produce revision 6.
-Each mutation sends `expectedRevision` from the preceding successful response, with
-no intervening GET or automatic retry. See [setup-local-commerce.mjs](scripts/setup-local-commerce.mjs)
-for the exact catalog entries and preview request.
+The script prompts for the base URL, administrator username, and administrator password.
+Press Enter at the base URL prompt to use `http://localhost:8080`; username and password
+are required. Password entry is hidden in an interactive terminal and preserves spaces.
+The request `Origin` is derived from the entered base URL, so include that origin in the
+application's `FIONAS_TRUSTED_ORIGINS` when using a different host or port. The script reads
+connection details from the prompts rather than environment variables. It also supports
+stdin input as three lines in that order. It does not load `.env` files or install npm
+packages. To target a remote deployment, enter its base URL (for example,
+`https://commerce.example.com`) and that deployment's administrator credentials.
+Edit the category and offering definitions in [replace-catalog.mjs](scripts/replace-catalog.mjs), then rerun the
+same command to replace the entire active catalog, including entries added through other
+tools. All active offerings are retired first, then their categories. Categories and offerings
+are rebuilt in the script's order: previously used keys are restored with complete new
+definitions, new keys are added, and omitted entries remain retired. Omitted optional
+properties are cleared. The catalog ID and reserved keys are retained; revisions keep increasing.
+Read-back verification checks the complete catalog, including ordering and configured properties.
+The script performs no estimate preview, price calculation, or expected-total check; offering
+prices are ordinary catalog properties it writes and verifies.
+
+A fresh catalog still reaches revision 6 after four category additions and one batch of
+19 offerings. Existing catalogs use separate add/restore batches for consecutive new/known
+offering keys to preserve order. Each mutation sends `expectedRevision` from the preceding
+successful response, with no automatic retry. Replacement is a sequence of committed API
+calls, not one atomic operation: readers can see an empty or partially rebuilt catalog, and
+a failure leaves completed mutations in place. After resolving the failure, rerun the script
+to rebuild from that state. Concurrent revision changes stop the run rather than being overwritten.
 
 Every seeded offering explicitly sends `selectionState=ENABLED`. Butter Pecan and New York
 Cheesecake are `UNAVAILABLE`, so they remain visible but cannot be selected; all other options
@@ -1568,19 +1585,16 @@ returning a flavor to availability requires a catalog mutation.
 
 Toppings now include Chopped Peanuts (`chopped-peanuts`, `infoNote: Contains peanuts`),
 with the existing four-to-six selection limits. New entries have no catalog surcharge.
-The canonical preview selects the first four hand-scooped flavors and the original six
-toppings, keeping its $681.25 total. Existing baseline test fixtures retain their smaller catalog.
-For an existing catalog, `node scripts/setup-local-commerce.mjs --capitalize-toppings`
-updates topping display names while preserving and verifying description, price, selection
-state, availability, `badge`, `statusNote`, and `infoNote`. Changed labels are updated in
-one complete-replacement batch; no request is sent when every label is already correct.
-A label edit never enables or makes an offering available. All seven configured toppings
-must exist; a missing topping aborts before any label update. This mode does not add missing options.
+Existing baseline test fixtures retain their smaller catalog; pricing behavior is verified
+separately by the application tests.
+To change capitalization or other labels, edit the `displayName` values under the same
+offering keys and rerun the script. All edits use this single catalog replacement workflow;
+the script accepts no command-line options.
 
 ### Smoke test Invoice payments and a refund locally
 
 With Fiona running locally and its Offerings catalog already initialized by
-`setup-local-commerce.mjs`, use Node.js 20 or newer to exercise the separate payment
+`replace-catalog.mjs`, use Node.js 20 or newer to exercise the separate payment
 recording, allocation, and refund routes. The local Administrator needs
 `commerce.refund.record` (fresh bootstrap grants it; update older roles using the
 [replacement flow above](#staff-authentication)):
@@ -1589,9 +1603,9 @@ recording, allocation, and refund routes. The local Administrator needs
 FIONAS_ADMIN_PASSWORD='your-local-password' node scripts/spoof-payment.mjs
 ```
 
-The script accepts the same `FIONAS_BASE_URL`, `FIONAS_ORIGIN`, and
-`FIONAS_ADMIN_USERNAME` defaults as the catalog setup script; `FIONAS_ADMIN_PASSWORD` is
-required. It creates a real local inquiry, configured with the same service it then invoices (so the
+The payment script uses `FIONAS_BASE_URL` and `FIONAS_ORIGIN` (both default to
+`http://localhost:8080`), `FIONAS_ADMIN_USERNAME` (default `admin`), and the required
+`FIONAS_ADMIN_PASSWORD`. It creates a real local inquiry, configured with the same service it then invoices (so the
 inquiry also has its initial Estimate), and a direct Invoice v1, records and allocates
 `$200.00` and `$150.00`, refunds `$50.00` from the second payment's allocation, then pays
 the server-returned reopened balance. Each standalone receipt is rediscovered through
@@ -1813,7 +1827,7 @@ the Docker CLI and removes it when the build ends. To use an existing server ins
 `TEST_DATABASE_JDBC_URL`, `TEST_DATABASE_USERNAME`, and `TEST_DATABASE_PASSWORD` (the user
 must be allowed to `CREATE DATABASE`). Each spec creates and drops its own database, and
 commerce-runtime applies the real migrations. There is no H2 and no test schema.
-Node.js 20 or newer must also be on PATH: the bootstrap smoke spec runs the actual setup
+Node.js 20 or newer must also be on PATH: the catalog smoke spec runs the actual replacement
 and payment scripts against a started test runtime. CI provisions Node.js 24 without npm
 dependencies or caching; Gradle tracks both scripts as test inputs.
 
@@ -1831,7 +1845,7 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `InquiryIdempotencySpec` | Forced overlapping PostgreSQL same/different commands, observed unique-key waits, either winner accepted; failed owner releases key to waiter; late rollback; incomplete claims rejected at commit; application-to-HTTP lost-response recovery and no replay pricing/catalog lookup |
 | `PublicInquirySubmissionSpec` | Current revision materialization; stale machine-readable conflict with zero writes and refreshed success; every advertised option for every duration; engine failures and retirement; hidden categories/offerings rejected publicly but accepted by staff at current revision; missing/null `pricingInputs` malformed with zero writes; no inquiry before catalog initialization |
 | `InquiryFormRoutesSpec` | Explicit public questions and lifecycle (service section required, unconfigured submissions malformed), input constraints and submission bindings, runtime prices, incompatible configuration failures, and definition 11, CHIPS hints for configured categories, cardinality, option-text/availability projection, local totals matching authoritative current previews, and captured stale forms rejected |
-| `SetupLocalCommerceSpec` | Actual Node setup/payment scripts against the running backend and throwaway PostgreSQL: four categories and 19 offerings at revision 6, five CHIPS questions with notes/availability, exact-four hand-scooped selections alongside soft serve, $681.25 pricing, zero-write rejections, lifecycle projection, fresh-only refusal, and seven-label batch maintenance preserving all properties with an unchanged-repeat no-op |
+| `ReplaceCatalogSpec` | Actual Node catalog replacement/payment scripts against the running backend and throwaway PostgreSQL: prompted credentials and input failures, four categories and 19 offerings at revision 6, five CHIPS questions with notes/availability, exact-four hand-scooped selections alongside soft serve, $681.25 pricing, zero-write rejections, lifecycle projection, repeatable replacement with catalog permissions alone, edited definitions and mixed new/restored ordering, omitted-entry retirement, property clearing, and partial-write recovery |
 | `GetInquiryFormSpec` | One snapshot per resolution, pricing facts derived from policy changes, exact duration contributions, hidden categories, and unusable configuration failures |
 | `InquiryRoutesSpec` | The HTTP API through the complete runtime handler: the public receipt never reveals an existing customer; inquiry list and detail require `fionas.inquiries.read` (`401`/`403`), including the documented Administrator upgrade grant; newest-first pages, default and maximum limits, full walks, timestamp ties, stable pages under new inquiries, invalid `limit`/`cursor`; pricing inputs recorded, pinned, rejected exactly as a preview rejects them, never trusting client amounts; preview → inquiry → staff read → estimate without re-entry; errors stay commerce-runtime's and undeclared methods stay `405` |
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |

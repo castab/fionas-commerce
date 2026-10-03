@@ -243,15 +243,34 @@ verifying ownership of the address. Decide these explicitly before changing the 
   selections alongside soft serve. Duration remains `INTEGER_CHOICE` with one allowed integer;
   offerings remain `OFFERING_CHOICE`, with catalog-owned minimum/maximum and single or multiple
   selection. Event type remains `STRING_CHOICE` with `SELECT`. Hints never change semantics.
-- The fresh local setup script adds four categories and one batch of 19 offerings, reaching
-  revision 6. `hand-scooped-flavor` has minimum/maximum four; all its keys use `hand-scooped-`
+- `scripts/replace-catalog.mjs` replaces the active catalog at a local or remote endpoint
+  using that endpoint's administrator credentials and `commerce.offerings.manage`.
+  It manages catalog definitions only: it performs no estimate preview,
+  price calculation, or expected-total check. It prompts for base URL (blank defaults to
+  `http://localhost:8080`), required administrator username, and required administrator
+  password, hiding terminal password input and preserving password whitespace. It reads no
+  connection environment variables; `Origin` is the entered URL's origin and must be trusted
+  by the application. Three-line stdin input supports integration tests. Invalid or incomplete
+  input fails before HTTP calls. A fresh run adds four categories and one batch
+  of 19 offerings, reaching revision 6. Every subsequent default run replaces all active
+  contents through the runtime HTTP API: retire all active offerings, retire all active
+  categories, then restore known keys or add new ones with the script's complete definitions.
+  Omitted entries stay retired and omitted optional properties are cleared. Preserve script
+  category/offering order, using consecutive add/restore offering batches when keys are mixed.
+  Catalog identity and lifetime key reservation remain intact; revisions increase rather than
+  reset. Read current and retired identities at the same observed revision before writing,
+  thread every mutation's returned expected revision, and stop on conflicts without retrying.
+  Read-back verification compares the complete ordered active contents. These API calls commit
+  separately; a failed run may leave partial contents, and a rerun rebuilds from that state.
+  No runtime-table SQL, catalog reset endpoint, or application startup seeding is introduced.
+  `hand-scooped-flavor` has minimum/maximum four; all its keys use `hand-scooped-`
   prefixes to avoid collisions with soft serve. Butter Pecan and New York Cheesecake are
   ENABLED/UNAVAILABLE and retain their nut/returning notes; other offerings are ENABLED/AVAILABLE.
   Chopped Peanuts adds a seventh topping with `infoNote: Contains peanuts`; topping limits
-  remain four to six. New offerings have no catalog prices. The $681.25 preview selects the
-  first four available hand-scooped flavors and the original six toppings; baseline fixtures
-  remain unchanged. Label maintenance requires all seven toppings, updates changed labels
-  in one batch, and preserves all other properties. Notes never schedule availability changes.
+  remain four to six. New offerings have no catalog prices; existing catalog prices remain
+  ordinary editable properties. Baseline pricing fixtures remain unchanged. Label edits use
+  the same keys and the normal replacement run; the script accepts no command-line options.
+  Notes never schedule availability changes.
 - Integer/string options have default-null `badge`, `statusNote`, and `infoNote`, mapped to
   response DTOs and omitted from JSON when absent. Each supplied domain value is nonblank,
   without trimming. Fiona currently consumes this text only for CHIPS rendering. Runtime
@@ -642,7 +661,7 @@ update, and none after the merge into `main`. `main` is expected to be protected
 through pull requests whose required CI check passed); the workflows cannot enforce this and must not
 try to configure it. Never re-add a `push` trigger to `ci.yml`, and never give a pull request
 workflow Docker Hub credentials.
-Pull request CI provisions Java 25 and Node.js 24 for the actual setup/payment script
+Pull request CI provisions Java 25 and Node.js 24 for the actual catalog replacement/payment script
 smoke tests against throwaway PostgreSQL, without npm dependencies or caching. Release
 artifact production does not run these tests or require Node.js.
 
@@ -688,7 +707,7 @@ is not a release asset.
 - **Commerce 0.0.21's V11/V12 reject populated legacy catalogs.** Runtime V12 replaces
   `commerce.offerings_snapshots` with `commerce.offerings_catalogs`. Fiona adds no migration
   and changes no existing migration. Stop the application, recreate the disposable database
-  volume, start PostgreSQL, start the upgraded backend, and run the updated setup script.
+  volume, start PostgreSQL, start the upgraded backend, and run `scripts/replace-catalog.mjs`.
   Old/new backends cannot share the new catalog schema. Deployed resets and frontend/client
   compatibility follow `docs/commerce-0.0.21-rollout.md` as a separately scheduled cutover.
   Never add conversion, dual reads/writes, or runtime-table SQL to Fiona.
@@ -698,12 +717,12 @@ is not a release asset.
   rows; Fiona V11 moves each complete `FionasPricingInputs` into `fionas.inquiries.pricing_inputs`
   and `fionas.financial_document_pricing.pricing_inputs`. Both refuse populated pre-release
   data instead of converting it: recreate the disposable database/volume, then rerun
-  `scripts/setup-local-commerce.mjs`. Never add a Fiona workaround, backfill, dual read/write,
+  `scripts/replace-catalog.mjs`. Never add a Fiona workaround, backfill, dual read/write,
   or nullable transitional column.
 
 - **Commerce 0.0.19's runtime V8 deliberately rejects existing offering rows.** Both
   independent state columns are required without invented defaults/backfills. Recreate
-  disposable local databases/volumes, then rerun `scripts/setup-local-commerce.mjs`.
+  disposable local databases/volumes, then rerun `scripts/replace-catalog.mjs`.
   Fresh databases apply runtime V8 before Fiona's migrations. Never compensate with a
   Fiona migration touching runtime tables, weaken V8, or continue after migration failure.
 
@@ -1447,11 +1466,15 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
   OpenAPI `info.version` are the Gradle project version the build was given, so a release's
   `-Pversion` is proven to reach both), and `ArchitectureSpec`.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
-- Node.js 20 or newer must be on PATH for `SetupLocalCommerceSpec`, which runs the actual
-  setup/payment scripts against a started test runtime and throwaway PostgreSQL. CI provisions
+- Node.js 20 or newer must be on PATH for `ReplaceCatalogSpec`, which runs the actual
+  catalog replacement/payment scripts against a started test runtime and throwaway PostgreSQL. CI provisions
   Node.js 24 without npm packages or caching. This spec covers the expanded catalog, five
   CHIPS questions, exact-four validation, unavailable choices, zero-write rejections, and
-  metadata-preserving label maintenance; baseline acceptance fixtures remain independent.
+  repeatable catalog replacement with only catalog
+  permissions, edited definitions and mixed new/restored ordering, omitted-entry retirement,
+  optional-property clearing, prompted stdin credentials and zero-write input failures,
+  and recovery from a partially written catalog. Catalog replacement performs
+  no customer or financial operation; baseline acceptance fixtures remain independent.
 
 ## Documentation synchronization
 
