@@ -194,6 +194,8 @@ The exact latest Quote/Invoice must match the expected version; Estimates reject
 with `422 invariant_violated`. Null (or absent) requirement revision expects no history at all,
 including no withdrawal history. A non-null revision must equal the latest requirement revision;
 it is never a don't-care token. Replacement and reactivation use this same PUT.
+Ownership/document checks, activation, and the returned financial-lineage projection share
+one REPEATABLE READ transaction, including its own newly appended requirement revision.
 
 Terms accept exactly `FIXED` amount/currency or `PERCENTAGE` percentage, for example
 `{"type":"PERCENTAGE","percentage":"25.125"}`. Unknown discriminators and mixed/missing fields

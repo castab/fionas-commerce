@@ -131,6 +131,10 @@ class ArchitectureSpec :
         }
 
         test("only operations open runtime transactions, and nothing builds its own transaction infrastructure") {
+            // Approval and its multi-query response must not gain an inner transaction or a second projection.
+            val approval = File(mainSources, "financial/SetDepositRequirement.kt").codeWithoutComments()
+            Regex("inTransaction").findAll(approval).count() shouldBe 1
+            Regex("financialLineages").findAll(approval).count() shouldBe 1
             sources()
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(

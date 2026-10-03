@@ -252,7 +252,8 @@ private fun RouteMetaDsl.depositErrors(
     permission: PermissionKey,
     unsafe: Boolean,
     mutation: Boolean = false,
-    validation: Boolean = false,
+    validation: String? = null,
+    withdrawal: Boolean = false,
 ) {
     principalAccess(permission, UNTRUSTED_ORIGIN.takeIf { unsafe })
     returningError(ErrorCategory.MALFORMED_REQUEST, "unreadable UUID, JSON body, or discriminator.", "Malformed request")
@@ -262,16 +263,18 @@ private fun RouteMetaDsl.depositErrors(
         "Financial document was not found",
     )
     if (mutation) {
+        val token = if (withdrawal) "requirement" else "document/requirement"
         returningError(
             ErrorCategory.CONFLICT,
-            "stale document/requirement token, already-withdrawn illegal transition, or runtime lineage contention; reload and retry the whole request.",
+            "stale $token token or runtime lineage contention; reload and retry the whole request." +
+                if (withdrawal) " Also `illegal_transition`: the latest requirement is already withdrawn." else "",
             "Stale expected revision",
         )
     }
-    if (validation) {
+    if (validation != null) {
         returningError(
             ErrorCategory.VALIDATION_FAILED,
-            "invalid terms, revisions, duplicate ids, or an Estimate activation.",
+            validation,
             "Invalid financial request",
         )
     }
@@ -328,7 +331,12 @@ fun setDepositRequirementRoute(
         tags += depositTag
         receiving(setDepositBody to SetDepositRequirementRequest(2, null, exampleTerms))
         returning(Status.OK, currentDepositBody to exampleActive)
-        depositErrors(CommercePermissions.DepositRequirementManage, true, mutation = true, validation = true)
+        depositErrors(
+            CommercePermissions.DepositRequirementManage,
+            true,
+            mutation = true,
+            validation = "invalid caller values, revisions, or deposit terms. Also `invariant_violated`: deposit approval on an Estimate.",
+        )
     } bindContract Method.PUT to { id: String, _: String ->
         access.requirePermission(CommercePermissions.DepositRequirementManage).then { request: Request ->
             val documentId = depositUuid(id)
@@ -358,7 +366,13 @@ fun withdrawDepositRequirementRoute(
         tags += depositTag
         receiving(withdrawDepositBody to WithdrawDepositRequirementRequest(1))
         returning(Status.OK, currentDepositBody to exampleWithdrawn)
-        depositErrors(CommercePermissions.DepositRequirementManage, true, mutation = true, validation = true)
+        depositErrors(
+            CommercePermissions.DepositRequirementManage,
+            true,
+            mutation = true,
+            validation = "expectedRequirementRevision must be at least 1.",
+            withdrawal = true,
+        )
     } bindContract (Method.DELETE) to { id: String, _: String ->
         access.requirePermission(CommercePermissions.DepositRequirementManage).then { request: Request ->
             val documentId = depositUuid(id)
@@ -386,7 +400,7 @@ fun queryFinancialLineagesRoute(
         tags += depositTag
         receiving(queryLineagesBody to QueryFinancialLineagesRequest(listOf(DEPOSIT_EXAMPLE_ID)))
         returning(Status.OK, lineagesBody to FinancialLineagesResponse(emptyList()))
-        depositErrors(CommercePermissions.FinancialDocumentRead, true, validation = true)
+        depositErrors(CommercePermissions.FinancialDocumentRead, true, validation = "duplicate lineage ids.")
     } bindContract Method.POST to { request ->
         access.requirePermission(CommercePermissions.FinancialDocumentRead).then { authorized: Request ->
             val body = queryLineagesBody(authorized)

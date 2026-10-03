@@ -66,6 +66,48 @@ class DepositRequirementOperationsSpec :
         }
         afterSpec { app.close() }
 
+        test("approval checks, mutation and all projection queries share the ownership REPEATABLE_READ transaction") {
+            val id = documents().single()
+            var ownershipCalls = 0
+            val sql = mutableListOf<String>()
+            val observing =
+                object : InquiryFinancialDocumentRepository by owners {
+                    override fun lockInquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? {
+                        ownershipCalls++
+                        val connection = transaction.handle.connection
+                        connection.transactionIsolation shouldBe Connection.TRANSACTION_REPEATABLE_READ
+                        // Observe the real runtime ledger through the caller's handle, including its final bulk read.
+                        transaction.handle.getConfig(SqlStatements::class.java).setSqlLogger(
+                            object : SqlLogger {
+                                override fun logBeforeExecution(context: StatementContext) {
+                                    (context.connection === connection) shouldBe true
+                                    context.connection.autoCommit shouldBe false
+                                    context.connection.transactionIsolation shouldBe Connection.TRANSACTION_REPEATABLE_READ
+                                    sql += context.rawSql
+                                }
+                            },
+                        )
+                        return owners.lockInquiryOf(transaction, documentId)
+                    }
+                }
+            val result = SetDepositRequirement(app.transactor, app.context.financialLedger, observing, pricing)(command(id))
+            ownershipCalls shouldBe 1
+            sql.first().contains("fionas.inquiry_financial_documents") shouldBe true
+            sql.any { it.contains("commerce.financial_document_snapshots") && it.contains("LIMIT 1") } shouldBe true
+            val writes = sql.withIndex().filter { it.value.startsWith("INSERT INTO commerce.deposit_requirement_revisions") }
+            writes.size shouldBe 1
+            // All four final projection queries must execute on the observed handle after its own write.
+            val projection = sql.drop(writes.single().index + 1)
+            projection.size shouldBe 4
+            projection.first().contains("SELECT DISTINCT ON (document_id)") shouldBe true
+            projection.last().contains("WHERE r.document_id IN") shouldBe true
+            result.depositRequirement!!.requirement.revision shouldBe DepositRequirementRevision.INITIAL
+            result.depositRequirement!!.createdAt shouldBe result.activity.latestDepositRequirementAt
+        }
+
         test("twenty lineages use one actual ownership SQL query and one runtime bulk call in the same REPEATABLE_READ transaction") {
             val ids = documents(20).reversed()
             var ownershipCalls = 0

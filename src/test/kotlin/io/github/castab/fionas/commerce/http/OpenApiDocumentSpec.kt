@@ -7,9 +7,11 @@ import io.github.castab.fionas.commerce.fionaVersion
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.openapi.fionaOpenApiDocument
+import io.github.castab.fionas.commerce.testing.metadataAuth
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldBeUnique
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.collections.shouldNotContain
@@ -930,6 +932,49 @@ class OpenApiDocumentSpec :
                     .at("properties")
                     .jsonObject.values
                     .forEach { (it.jsonObject.keys intersect setOf("type", "\$ref")).size shouldBe 1 }
+            }
+        }
+
+        test("deposit error descriptions enumerate only reachable codes with one response per status") {
+            val path = "/financial-documents/{documentId}/deposit-requirement"
+            val put = operation(path, "put")
+            put.text("responses", "409", "description") shouldContain "`conflict`"
+            put.text("responses", "409", "description") shouldNotContain "illegal_transition"
+            put.text("responses", "422", "description").let {
+                it shouldContain "`validation_failed`"
+                it shouldContain "`invariant_violated`"
+            }
+            val delete = operation(path, "delete")
+            delete.text("responses", "409", "description").let {
+                it shouldContain "`conflict`"
+                it shouldContain "`illegal_transition`"
+            }
+            delete.text("responses", "422", "description").let {
+                it shouldContain "`validation_failed`"
+                it shouldContain "expectedRequirementRevision"
+                it shouldNotContain "invariant_violated"
+            }
+            operation("/financial-documents/query", "post").let {
+                it.at("responses").jsonObject.containsKey("409") shouldBe false
+                it.text("responses", "422", "description") shouldContain "`validation_failed`"
+                it.text("responses", "422", "description") shouldNotContain "invariant_violated"
+            }
+            listOf(path, "$path/history").forEach {
+                operation(it, "get").at("responses").jsonObject.keys shouldContainExactlyInAnyOrder
+                    listOf("200", "400", "401", "403", "404", "500")
+            }
+            // Inspect executable metadata before rendering can collapse duplicate status entries.
+            val access = metadataAuth.access
+            listOf(
+                getDepositRequirementRoute({ error("not called") }, access),
+                getDepositRequirementHistoryRoute({ error("not called") }, access),
+                setDepositRequirementRoute({ error("not called") }, access),
+                withdrawDepositRequirementRoute({ error("not called") }, access),
+                queryFinancialLineagesRoute({ error("not called") }, access),
+            ).forEach { route ->
+                route.meta.responses
+                    .map { it.message.status }
+                    .shouldBeUnique()
             }
         }
 

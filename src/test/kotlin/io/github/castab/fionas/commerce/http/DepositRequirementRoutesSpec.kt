@@ -217,7 +217,10 @@ class DepositRequirementRoutesSpec :
             depositRows() shouldBe count
             withdraw(id).status shouldBe Status.OK
             set(id).status shouldBe Status.CONFLICT
-            withdraw(id, 2).status shouldBe Status.CONFLICT
+            withdraw(id, 2).also {
+                it.status shouldBe Status.CONFLICT
+                it.error().code shouldBe "illegal_transition"
+            }
             withdraw(newDocument()).status shouldBe Status.NOT_FOUND
         }
 
@@ -225,7 +228,10 @@ class DepositRequirementRoutesSpec :
             test("Fiona deposit stage policy for $stage") {
                 val id = newDocument(stage)
                 val before = depositRows()
-                set(id).status shouldBe status
+                set(id).also {
+                    it.status shouldBe status
+                    if (stage == "ESTIMATE") it.error().code shouldBe "invariant_violated"
+                }
                 depositRows() shouldBe before + if (status == Status.OK) 1 else 0
             }
         }
@@ -247,7 +253,10 @@ class DepositRequirementRoutesSpec :
             test("invalid deposit terms $index leave no revisions") {
                 val id = newDocument()
                 val count = depositRows()
-                set(id, terms = terms).status shouldBe Status.UNPROCESSABLE_ENTITY
+                set(id, terms = terms).also {
+                    it.status shouldBe Status.UNPROCESSABLE_ENTITY
+                    it.error().code shouldBe "validation_failed"
+                }
                 depositRows() shouldBe count
                 current(id).state() shouldBe CurrentDepositRequirementResponse.None(id.toString())
             }
@@ -264,7 +273,10 @@ class DepositRequirementRoutesSpec :
             test("malformed discriminator or union shape $index is 400") {
                 val id = newDocument()
                 val count = depositRows()
-                set(id, terms = terms).status shouldBe Status.BAD_REQUEST
+                set(id, terms = terms).also {
+                    it.status shouldBe Status.BAD_REQUEST
+                    it.error().code shouldBe "malformed_request"
+                }
                 depositRows() shouldBe count
             }
         }
@@ -284,6 +296,10 @@ class DepositRequirementRoutesSpec :
             val id = newDocument()
             set(id, version = 0).status shouldBe Status.UNPROCESSABLE_ENTITY
             set(id, revision = 0).status shouldBe Status.UNPROCESSABLE_ENTITY
+            withdraw(id, 0).also {
+                it.status shouldBe Status.UNPROCESSABLE_ENTITY
+                it.error().code shouldBe "validation_failed"
+            }
             app.adminRequest(Method.PUT, path(id), "{}").status shouldBe Status.BAD_REQUEST
             app.adminRequest(Method.DELETE, path(id), "{}").status shouldBe Status.BAD_REQUEST
         }
@@ -331,7 +347,10 @@ class DepositRequirementRoutesSpec :
                     result.activity.latestDepositRequirementAt shouldBe facts.depositRequirement?.createdAt?.toString()
                 }
             }
-            query(active, active).status shouldBe Status.UNPROCESSABLE_ENTITY
+            query(active, active).also {
+                it.status shouldBe Status.UNPROCESSABLE_ENTITY
+                it.error().code shouldBe "validation_failed"
+            }
             query(none, UUID.randomUUID()).status shouldBe Status.NOT_FOUND
             query(none, newDocument(owned = false)).status shouldBe Status.NOT_FOUND
         }
