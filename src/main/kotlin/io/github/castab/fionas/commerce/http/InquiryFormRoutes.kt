@@ -223,11 +223,15 @@ sealed interface InquiryFormInputResponse {
 data class InquiryFormIntegerOption(
     val value: Int,
     val label: String,
-    @ApiProperty(description = "Short label shown with the option at all times; absent or nonblank, under any control.")
+    @ApiProperty(description = "Optional CHIPS label; absent or nonblank. Fiona's code-owned options currently leave it null.")
     val badge: String? = null,
-    @ApiProperty(description = "Current situation; never implies or overrides availability. Absent or nonblank, under any control.")
+    @ApiProperty(
+        description = "Optional CHIPS situation text; never overrides availability. Fiona's code-owned options currently leave it null.",
+    )
     val statusNote: String? = null,
-    @ApiProperty(description = "Lasting fact shown on demand; absent or nonblank, under any control.")
+    @ApiProperty(
+        description = "Optional CHIPS fact shown on demand; absent or nonblank. Fiona's code-owned options currently leave it null.",
+    )
     val infoNote: String? = null,
 )
 
@@ -235,11 +239,15 @@ data class InquiryFormIntegerOption(
 data class InquiryFormStringOption(
     val value: String,
     val label: String,
-    @ApiProperty(description = "Short label shown with the option at all times; absent or nonblank, under any control.")
+    @ApiProperty(description = "Optional CHIPS label; absent or nonblank. Fiona's code-owned options currently leave it null.")
     val badge: String? = null,
-    @ApiProperty(description = "Current situation; never implies or overrides availability. Absent or nonblank, under any control.")
+    @ApiProperty(
+        description = "Optional CHIPS situation text; never overrides availability. Fiona's code-owned options currently leave it null.",
+    )
     val statusNote: String? = null,
-    @ApiProperty(description = "Lasting fact shown on demand; absent or nonblank, under any control.")
+    @ApiProperty(
+        description = "Optional CHIPS fact shown on demand; absent or nonblank. Fiona's code-owned options currently leave it null.",
+    )
     val infoNote: String? = null,
 )
 
@@ -272,7 +280,8 @@ fun getInquiryFormRoute(
         summary = "Read the customer inquiry form"
         description = "Ordered customer-facing questions for POST /inquiries. Input semantics and presentation hints are separate. " +
             "Duration, soft serve flavors, toppings, and cones/cups use CHIPS; offering limits determine single or multiple selection. " +
-            "Every option, including catalog OfferingDto options, may carry badge, statusNote, and infoNote under any control. " +
+            "Catalog option badge, statusNote, and infoNote pass through to CHIPS for the UI. " +
+            "Code-owned duration and event-type option text defaults to null, omitted from JSON, with no editing API. " +
             "statusNote never overrides availability; UNAVAILABLE options remain unselectable. " +
             "Service configuration is required: every inquiry is a request for configured ice cream service, priced on " +
             "submission into an initial Estimate. Required fields and category limits apply. Copy catalogRevision " +

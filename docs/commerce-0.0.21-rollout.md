@@ -13,10 +13,13 @@ cones/cups. Duration selects one `INTEGER_CHOICE` value; offering chips select o
 keys as catalog `minSelections`/`maxSelections` require. Event type remains `SELECT`.
 Preserve question order, keys, bindings, and requiredness.
 
-Render optional `badge`, `statusNote`, and `infoNote` on integer, string, and offering options.
-Absent text is omitted; supplied text is nonblank and is not trimmed. Text applies under
-any control. Availability is independent: show enabled unavailable options but block selection;
-omit disabled options. A reassuring status note never makes an unavailable option selectable.
+Render optional `badge`, `statusNote`, and `infoNote` for CHIPS. Catalog offering text passes
+through the runtime offering payload unchanged. Fiona's code-owned duration and event-type
+options currently use fixed null defaults; non-CHIPS options supply no text, with no endpoint
+or API for editing code-owned option text. The fields remain on the shared option types;
+there is no new CHIPS presentation wire shape. Supporting more controls/editing is deferred.
+Absent text is omitted; supplied text is nonblank and is not trimmed. Availability is
+independent: show enabled unavailable options but block selection; omit disabled options. A reassuring status note never makes an unavailable option selectable.
 
 Use these batch administration contracts, with the last observed `expectedRevision`:
 

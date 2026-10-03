@@ -299,7 +299,7 @@ class InquiryFormRoutesSpec :
             }
         }
 
-        test("integer and string option text maps to JSON independently of presentation controls") {
+        test("CHIPS option text maps to JSON while SELECT options retain null defaults") {
             val catalog =
                 GetOfferingsCatalog(application.transactor, application.context.offeringsSnapshotRepository)(FIONA_OFFERINGS_CATALOG_ID)
             val original = GetInquiryForm({ catalog })()
@@ -313,7 +313,7 @@ class InquiryFormRoutesSpec :
                                         when (val input = field.input) {
                                             is InquiryFormInput.IntegerChoice ->
                                                 field.copy(
-                                                    control = InquiryFormControl.SELECT,
+                                                    control = InquiryFormControl.CHIPS,
                                                     input =
                                                         input.copy(
                                                             options =
@@ -322,21 +322,6 @@ class InquiryFormRoutesSpec :
                                                                         badge = " Popular ",
                                                                         statusNote = "Today",
                                                                         infoNote = "Duration details",
-                                                                    )
-                                                                },
-                                                        ),
-                                                )
-                                            is InquiryFormInput.StringChoice ->
-                                                field.copy(
-                                                    control = InquiryFormControl.CHIPS,
-                                                    input =
-                                                        input.copy(
-                                                            options =
-                                                                input.options.map {
-                                                                    it.copy(
-                                                                        badge = "Event",
-                                                                        statusNote = "Current",
-                                                                        infoNote = "Event details",
                                                                     )
                                                                 },
                                                         ),
@@ -365,10 +350,14 @@ class InquiryFormRoutesSpec :
                 it.statusNote shouldBe "Today"
                 it.infoNote shouldBe "Duration details"
             }
-            (fields.single { it.key == "eventType" }.input as InquiryFormInputResponse.StringChoice).options.first().let {
-                it.badge shouldBe "Event"
-                it.statusNote shouldBe "Current"
-                it.infoNote shouldBe "Event details"
+            fields.single { it.key == "durationMinutes" }.presentation.control shouldBe InquiryFormControl.CHIPS
+            fields.single { it.key == "eventType" }.let { event ->
+                event.presentation.control shouldBe InquiryFormControl.SELECT
+                (event.input as InquiryFormInputResponse.StringChoice).options.forEach {
+                    it.badge shouldBe null
+                    it.statusNote shouldBe null
+                    it.infoNote shouldBe null
+                }
             }
             val defaultJson = application.http(Request(Method.GET, "/inquiry-form").asFionasWeb(application)).bodyString()
             listOf("badge", "statusNote", "infoNote").forEach { defaultJson.contains("\"$it\"") shouldBe false }

@@ -96,6 +96,10 @@ sealed interface InquiryFormInput {
     ) : InquiryFormInput
 }
 
+/**
+ * Code-owned choice data. Fiona currently uses option text only for CHIPS rendering;
+ * its duration and event-type definitions leave the text null, with no editing API.
+ */
 data class InquiryIntegerOption(
     val value: Int,
     val label: String,
@@ -113,6 +117,10 @@ data class InquiryIntegerOption(
     }
 }
 
+/**
+ * Code-owned choice data. Fiona currently uses option text only for CHIPS rendering;
+ * its duration and event-type definitions leave the text null, with no editing API.
+ */
 data class InquiryStringOption(
     val value: String,
     val label: String,

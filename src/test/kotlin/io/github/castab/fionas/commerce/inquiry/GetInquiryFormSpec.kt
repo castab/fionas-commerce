@@ -65,6 +65,26 @@ class GetInquiryFormSpec :
             }
         }
 
+        test("code-owned CHIPS durations and SELECT event types keep fixed null option text") {
+            val fields = GetInquiryForm({ catalog() })().sections.flatMap { it.fields }
+            fields.single { it.key == "durationMinutes" }.let { duration ->
+                duration.control shouldBe InquiryFormControl.CHIPS
+                (duration.input as InquiryFormInput.IntegerChoice).options.forEach {
+                    it.badge shouldBe null
+                    it.statusNote shouldBe null
+                    it.infoNote shouldBe null
+                }
+            }
+            fields.single { it.key == "eventType" }.let { event ->
+                event.control shouldBe InquiryFormControl.SELECT
+                (event.input as InquiryFormInput.StringChoice).options.forEach {
+                    it.badge shouldBe null
+                    it.statusNote shouldBe null
+                    it.infoNote shouldBe null
+                }
+            }
+        }
+
         test("public projection preserves the exact snapshot and ignores disabled prices while retaining unavailable pricing facts") {
             val snapshot =
                 OfferingsSnapshot.create(

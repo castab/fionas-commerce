@@ -242,8 +242,12 @@ verifying ownership of the address. Decide these explicitly before changing the 
   selection. Event type remains `STRING_CHOICE` with `SELECT`. Hints never change semantics.
 - Integer/string options have default-null `badge`, `statusNote`, and `infoNote`, mapped to
   response DTOs and omitted from JSON when absent. Each supplied domain value is nonblank,
-  without trimming. Fiona initially supplies none. Runtime offering `dto()` preserves its
-  own optional text. Text remains content under any control; `statusNote` never overrides
+  without trimming. Fiona currently consumes this text only for CHIPS rendering. Runtime
+  offering `dto()` preserves catalog-owned text for offering CHIPS. Code-owned duration and
+  event-type options use fixed null defaults; non-CHIPS options supply no text, and no endpoint
+  or API edits code-owned option text. Broader control usage or editing is a future feature,
+  not an implicit extension. Retain the shared option fields/wire shape; no separate CHIPS
+  presentation metadata model is needed. `statusNote` never overrides
   availability. Enabled unavailable offerings remain visible and unselectable, disabled
   offerings remain omitted. No frontend component name, new persistence, or form DSL is added.
 

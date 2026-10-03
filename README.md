@@ -396,10 +396,14 @@ or multiple selection according to catalog `minSelections`/`maxSelections`. Even
 Integer, string, and offering options may carry `badge` (short text beside an option),
 `statusNote` (its current situation), and `infoNote` (a lasting fact displayed on demand).
 Absent fields are omitted from JSON; supplied values must be nonblank and are preserved
-without trimming. Fiona's code-owned duration and event-type options initially supply none.
-Text remains valid under any control. `statusNote` never overrides availability: enabled
-unavailable offerings remain visible and unselectable, and disabled offerings remain hidden.
-
+without trimming. Fiona currently uses this text only when rendering CHIPS. Catalog offering
+text passes through the runtime's `OfferingDto` to the offering CHIPS. Fiona's code-owned
+duration and event-type options use fixed null defaults; non-CHIPS options supply no text,
+and there is no endpoint/API for editing code-owned option text. Supporting more controls or
+editable Fiona option text is a future feature. The option fields and wire format remain
+shared; no separate CHIPS metadata model is introduced. `statusNote` never overrides
+availability: enabled unavailable offerings remain visible and unselectable, and disabled
+offerings remain hidden.
 
 Contact information includes a required event **ZIP code**, bound to `/zipCode`.
 It accepts five ASCII digits after trimming and preserves leading zeroes. Missing, null,
