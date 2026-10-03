@@ -48,7 +48,10 @@ class FinancialDocumentAtomicitySpec :
         val sources = JdbiFinancialDocumentPricingRepository()
 
         fun pricing() =
-            FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), application.context.offeringsSnapshotRepository::retrieveVersion)
+            FionasPricing(
+                FionasOfferingsEngine(FIONAS_PRICING_POLICY),
+                application.context.offeringsSnapshotRepository::retrieveLatestVersion,
+            )
 
         fun inputs(guests: Int = 75) =
             FionasPricingInputs(

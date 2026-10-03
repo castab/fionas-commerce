@@ -96,11 +96,11 @@ class OpenApiDocumentSpec :
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "401", "403", "404", "500"),
-                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "401", "403", "404", "422", "500"),
+                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}/estimates", "post", "createInquiryEstimate") to
-                    listOf("201", "400", "401", "403", "404", "422", "500"),
+                    listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "post", "createInquiryFinancialDocument") to
-                    listOf("201", "400", "401", "403", "404", "422", "500"),
+                    listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "get", "listInquiryFinancialDocuments") to
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/financial-documents/{documentId}", "get", "getFinancialDocument") to
@@ -163,7 +163,6 @@ class OpenApiDocumentSpec :
             listOf(
                 Triple("/offering-catalog", "get", "fionasOfferingsGetCatalog"),
                 Triple("/offering-catalog", "post", "fionasOfferingsCreateCatalog"),
-                Triple("/offering-catalog/revisions/{revision}", "get", "fionasOfferingsGetCatalogRevision"),
                 Triple("/offering-catalog/categories", "get", "fionasOfferingsListCategories"),
                 Triple("/offering-catalog/categories", "post", "fionasOfferingsAddCategory"),
                 Triple("/offering-catalog/categories/{categoryKey}", "get", "fionasOfferingsGetCategory"),
@@ -172,11 +171,11 @@ class OpenApiDocumentSpec :
                 Triple("/offering-catalog/categories/{categoryKey}/restore", "post", "fionasOfferingsRestoreCategory"),
                 Triple("/offering-catalog/categories/{categoryKey}/offerings", "get", "fionasOfferingsListCategoryOfferings"),
                 Triple("/offering-catalog/offerings", "get", "fionasOfferingsListOfferings"),
-                Triple("/offering-catalog/offerings", "post", "fionasOfferingsAddOffering"),
+                Triple("/offering-catalog/offerings", "post", "fionasOfferingsAddOfferings"),
                 Triple("/offering-catalog/offerings/{offeringKey}", "get", "fionasOfferingsGetOffering"),
-                Triple("/offering-catalog/offerings/{offeringKey}", "put", "fionasOfferingsUpdateOffering"),
-                Triple("/offering-catalog/offerings/{offeringKey}", "delete", "fionasOfferingsRetireOffering"),
-                Triple("/offering-catalog/offerings/{offeringKey}/restore", "post", "fionasOfferingsRestoreOffering"),
+                Triple("/offering-catalog/offerings", "put", "fionasOfferingsUpdateOfferings"),
+                Triple("/offering-catalog/offerings/retire", "post", "fionasOfferingsRetireOfferings"),
+                Triple("/offering-catalog/offerings/restore", "post", "fionasOfferingsRestoreOfferings"),
                 Triple("/offering-catalog/retired/offerings", "get", "fionasOfferingsListRetiredOfferings"),
                 Triple("/offering-catalog/retired/categories", "get", "fionasOfferingsListRetiredCategories"),
             )
@@ -405,7 +404,7 @@ class OpenApiDocumentSpec :
         }
 
         test("runtime capability routes carry no host security metadata yet, an upstream gap rather than a Fiona choice") {
-            // commerce-runtime 0.0.20 lets a host neither add security to its capability routes nor marks its public
+            // commerce-runtime 0.0.21 lets a host neither add security to its capability routes nor marks its public
             // Offerings reads NoSecurity, so a contract-wide default would mislabel those reads. Its protected routes
             // still enforce Fiona's same AccessControl; this pins the gap so a runtime that closes it is noticed.
             (offeringOperations + adminOperations + principalOperations).forEach { (path, method, operationId) ->
@@ -469,7 +468,7 @@ class OpenApiDocumentSpec :
         }
 
         test("mounts one permission catalog route, so every operationId is unique") {
-            // commerce-runtime 0.0.20's standalone catalog capability reuses the administration route's
+            // commerce-runtime 0.0.21's standalone catalog capability reuses the administration route's
             // fixed authorizationListPermissions operationId, so only the administration route is mounted.
             document
                 .at("paths")
@@ -498,7 +497,56 @@ class OpenApiDocumentSpec :
                 }
         }
 
-        test("Offerings retirement retains the required integer expectedRevision query parameter") {
+        test("offering batches expose runtime item keys, states, result arrays, and retirement keys") {
+            listOf(
+                "post" to "/offering-catalog/offerings",
+                "put" to "/offering-catalog/offerings",
+                "post" to "/offering-catalog/offerings/restore",
+            ).forEach { (method, path) ->
+                val operation = operation(path, method)
+                val request = operation.at("requestBody", "content", "application/json", "schema")
+                val body = schema(request.text("\$ref").substringAfterLast('/'))
+                body.strings("required") shouldContainExactlyInAnyOrder listOf("expectedRevision", "offerings")
+                body.text("properties", "offerings", "type") shouldBe "array"
+                body.text("properties", "offerings", "items", "\$ref") shouldBe "#/components/schemas/OfferingDto"
+                val result =
+                    operation.at(
+                        "responses",
+                        if (path.endsWith("/restore") || method == "put") "200" else "201",
+                        "content",
+                        "application/json",
+                        "schema",
+                    )
+                val resultBody = schema(result.text("\$ref").substringAfterLast('/'))
+                resultBody.strings("required") shouldContainExactlyInAnyOrder listOf("revision", "offerings")
+            }
+            val request =
+                operation("/offering-catalog/offerings/retire", "post")
+                    .at("requestBody", "content", "application/json", "schema")
+            schema(request.text("\$ref").substringAfterLast('/')).let {
+                it.strings("required") shouldContainExactlyInAnyOrder listOf("expectedRevision", "keys")
+                it.text("properties", "keys", "type") shouldBe "array"
+                it.text("properties", "keys", "items", "type") shouldBe "string"
+            }
+            document.at("paths").jsonObject.containsKey("/offering-catalog/revisions/{revision}") shouldBe false
+            document.at("paths").jsonObject.containsKey("/offering-catalog/offerings/{offeringKey}/restore") shouldBe false
+            document.at("paths", "/offering-catalog/offerings/{offeringKey}").jsonObject.keys shouldBe setOf("get")
+            schema("OfferingDto").strings("required") shouldContainExactlyInAnyOrder
+                listOf("key", "category", "displayName", "selectionState", "availability")
+            listOf("InquiryFormIntegerOption", "InquiryFormStringOption", "OfferingDto").forEach { name ->
+                val option = schema(name)
+                listOf("badge", "statusNote", "infoNote").forEach { property ->
+                    option.strings("required").contains(property) shouldBe false
+                    if (name == "OfferingDto") {
+                        option.strings("properties", property, "type") shouldContainExactly listOf("string", "null")
+                    } else {
+                        option.text("properties", property, "type") shouldBe "string"
+                    }
+                }
+            }
+        }
+
+        test("Category retirement retains the required integer expectedRevision query parameter") {
             offeringOperations.filter { it.second == "delete" }.forEach { (path, method) ->
                 val revision = operation(path, method).at("parameters").jsonArray.single { it.text("name") == "expectedRevision" }
                 revision.text("in") shouldBe "query"
@@ -514,7 +562,8 @@ class OpenApiDocumentSpec :
                     operation(path, method).at("responses").jsonObject.keys shouldContainExactlyInAnyOrder
                         listOf(
                             if (method == "post" &&
-                                !path.endsWith("/restore")
+                                !path.endsWith("/restore") &&
+                                !path.endsWith("/retire")
                             ) {
                                 "201"
                             } else {
@@ -576,7 +625,14 @@ class OpenApiDocumentSpec :
                         (path to method) shouldBe ("/auth/login" to "post")
                         status shouldBe "429"
                     } else if (code == "CATALOG_REVISION_STALE") {
-                        (path to method) shouldBe ("/inquiries" to "post")
+                        method shouldBe "post"
+                        listOf(
+                            "/inquiries",
+                            "/estimate-preview",
+                            "/inquiries/{inquiryId}/estimates",
+                            "/inquiries/{inquiryId}/financial-documents",
+                            "/financial-documents/{documentId}/change-orders",
+                        ).contains(path) shouldBe true
                         status shouldBe "409"
                     } else {
                         ErrorCategory.entries
@@ -864,12 +920,12 @@ class OpenApiDocumentSpec :
                 it.text("properties", "options", "items", "\$ref") shouldBe "#/components/schemas/OfferingDto"
             }
             schema("InquiryFormPresentation").strings("properties", "control", "enum") shouldContainExactly
-                listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES", "DATE")
+                listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES", "DATE", "CHIPS")
         }
 
-        test("inquiry form v7 reuses required runtime state enums and documents public visibility and structural rejections") {
+        test("inquiry form v10 reuses required runtime state enums and documents public visibility and structural rejections") {
             val form = operation("/inquiry-form", "get")
-            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 9
+            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 10
             form
                 .at("responses", "200", "content", "application/json", "example", "sections")
                 .jsonArray

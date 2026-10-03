@@ -99,12 +99,36 @@ sealed interface InquiryFormInput {
 data class InquiryIntegerOption(
     val value: Int,
     val label: String,
-)
+    /** A short label shown with the option at all times; absent or nonblank. */
+    val badge: String? = null,
+    /** Current situation only; never overrides availability. Absent or nonblank. */
+    val statusNote: String? = null,
+    /** A lasting fact shown on demand; absent or nonblank. */
+    val infoNote: String? = null,
+) {
+    init {
+        require(badge == null || badge.isNotBlank()) { "Option badge must be absent or nonblank" }
+        require(statusNote == null || statusNote.isNotBlank()) { "Option status note must be absent or nonblank" }
+        require(infoNote == null || infoNote.isNotBlank()) { "Option info note must be absent or nonblank" }
+    }
+}
 
 data class InquiryStringOption(
     val value: String,
     val label: String,
-)
+    /** A short label shown with the option at all times; absent or nonblank. */
+    val badge: String? = null,
+    /** Current situation only; never overrides availability. Absent or nonblank. */
+    val statusNote: String? = null,
+    /** A lasting fact shown on demand; absent or nonblank. */
+    val infoNote: String? = null,
+) {
+    init {
+        require(badge == null || badge.isNotBlank()) { "Option badge must be absent or nonblank" }
+        require(statusNote == null || statusNote.isNotBlank()) { "Option status note must be absent or nonblank" }
+        require(infoNote == null || infoNote.isNotBlank()) { "Option info note must be absent or nonblank" }
+    }
+}
 
 /** Hints only: clients choose their own components, accessibility, layout, and styling. */
-enum class InquiryFormControl { TEXT, TEXTAREA, NUMBER, CHECKBOX, SELECT, CARDS, CHECKBOXES, DATE }
+enum class InquiryFormControl { TEXT, TEXTAREA, NUMBER, CHECKBOX, SELECT, CARDS, CHECKBOXES, DATE, CHIPS }

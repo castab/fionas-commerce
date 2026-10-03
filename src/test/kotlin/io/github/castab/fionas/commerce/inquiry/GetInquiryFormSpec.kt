@@ -35,8 +35,35 @@ class GetInquiryFormSpec :
             OfferingsSnapshot.create(
                 FIONA_OFFERINGS_CATALOG_ID,
                 listOf(OfferingCategory(publicCategory, "Flavors")),
-                listOf(Offering(OfferingKey("flavor"), publicCategory, "Flavor", price = price)),
+                listOf(
+                    Offering(
+                        OfferingKey("flavor"),
+                        publicCategory,
+                        "Flavor",
+                        price = price,
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
+
+        test("option text is absent by default, nonblank when supplied, and preserved without trimming") {
+            InquiryIntegerOption(90, "90 minutes").badge shouldBe null
+            InquiryStringOption("OTHER", "Other").infoNote shouldBe null
+            listOf("", " ", "\t\n").forEach { blank ->
+                shouldThrow<IllegalArgumentException> { InquiryIntegerOption(90, "Duration", badge = blank) }
+                shouldThrow<IllegalArgumentException> { InquiryIntegerOption(90, "Duration", statusNote = blank) }
+                shouldThrow<IllegalArgumentException> { InquiryIntegerOption(90, "Duration", infoNote = blank) }
+                shouldThrow<IllegalArgumentException> { InquiryStringOption("OTHER", "Other", badge = blank) }
+                shouldThrow<IllegalArgumentException> { InquiryStringOption("OTHER", "Other", statusNote = blank) }
+                shouldThrow<IllegalArgumentException> { InquiryStringOption("OTHER", "Other", infoNote = blank) }
+            }
+            InquiryIntegerOption(90, "Duration", badge = " Popular ").badge shouldBe " Popular "
+            InquiryStringOption("OTHER", "Other", statusNote = " Today ", infoNote = " Details ").let {
+                it.statusNote shouldBe " Today "
+                it.infoNote shouldBe " Details "
+            }
+        }
 
         test("public projection preserves the exact snapshot and ignores disabled prices while retaining unavailable pricing facts") {
             val snapshot =
@@ -44,13 +71,20 @@ class GetInquiryFormSpec :
                     FIONA_OFFERINGS_CATALOG_ID,
                     listOf(OfferingCategory(publicCategory, "Flavors", minimumSelections = 2)),
                     listOf(
-                        Offering(OfferingKey("available"), publicCategory, "Available"),
+                        Offering(
+                            OfferingKey("available"),
+                            publicCategory,
+                            "Available",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
                         Offering(
                             OfferingKey("disabled"),
                             publicCategory,
                             "Disabled",
                             price = OfferingPrice.Fixed(money("1.00", "EUR")),
                             selectionState = OfferingSelectionState.DISABLED,
+                            availability = OfferingAvailability.AVAILABLE,
                         ),
                         Offering(
                             OfferingKey("temporary"),
@@ -58,6 +92,7 @@ class GetInquiryFormSpec :
                             "Temporary",
                             price = OfferingPrice.PerDuration(money("3.00"), Duration.ofHours(1)),
                             availability = OfferingAvailability.UNAVAILABLE,
+                            selectionState = OfferingSelectionState.ENABLED,
                         ),
                         Offering(
                             OfferingKey("both"),
@@ -82,7 +117,14 @@ class GetInquiryFormSpec :
             val later =
                 first.replaceOffering(
                     OfferingKey("flavor"),
-                    Offering(OfferingKey("flavor"), publicCategory, "Updated", price = OfferingPrice.Fixed(money("50.00"))),
+                    Offering(
+                        OfferingKey("flavor"),
+                        publicCategory,
+                        "Updated",
+                        price = OfferingPrice.Fixed(money("50.00")),
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
                 )
             var reads = 0
             val form = GetInquiryForm({ if (reads++ == 0) first else later })()
@@ -121,6 +163,8 @@ class GetInquiryFormSpec :
                             policy.toppingCategory,
                             "Premium",
                             price = OfferingPrice.PerQuantity(money("0.50", "CAD"), policy.guestDimension),
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
                         ),
                     ),
                 )
@@ -177,6 +221,8 @@ class GetInquiryFormSpec :
                             hiddenKey,
                             "Equipment",
                             price = OfferingPrice.PerQuantity(money("2.00", "EUR"), QuantityDimension("vehicle")),
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
                         ),
                 )
             val form = GetInquiryForm({ withHidden })()

@@ -388,29 +388,90 @@ class FinancialDocumentRoutesSpec :
             get("/financial-documents/${estimate.id}/history").history().versions shouldHaveSize 1
         }
 
-        test("a change order prices exactly the catalog revision it names, old or new, never a silent upgrade") {
+        test("new staff pricing rejects old catalog revisions without modifying existing documents") {
             val estimate = newEstimate()
+            val inquiryId = application.createInquiry()
             val mango = application.addOffering(revision, "mango", "soft-serve-flavor", "Mango", perGuest("1.00"))
-
-            // The old revision stays usable deliberately, and stays recorded as the source.
-            val kept = changeOrder(estimate.id, pricingBody(revision, guests = 76, expectedVersion = 1)).document()
-            kept.pricing!!.catalogRevision shouldBe revision
-            kept.total shouldBe "687.00"
-            // The old revision has no mango: it is rejected, not repriced from the later revision.
-            changeOrder(estimate.id, pricingBody(revision, softServe = listOf("mango"), expectedVersion = 2)).let {
-                it.status shouldBe Status.UNPROCESSABLE_ENTITY
-                it.error().message shouldContain "UNKNOWN_OFFERING"
+            val snapshots = application.database.count("commerce.financial_document_snapshots")
+            val sources = application.database.count("fionas.financial_document_pricing")
+            val owners = application.database.count("fionas.inquiry_financial_documents")
+            val stale = pricingBody(revision)
+            val rejected =
+                listOf(
+                    changeOrder(estimate.id, pricingBody(revision, guests = 76, expectedVersion = 1)),
+                    estimate(inquiryId, stale),
+                ) +
+                    listOf("ESTIMATE", "QUOTE", "INVOICE").map { stage ->
+                        application.adminPost("/inquiries/$inquiryId/financial-documents", stale.dropLast(1) + """, "stage":"$stage"}""")
+                    }
+            rejected.forEach {
+                it.status shouldBe Status.CONFLICT
+                it.error() shouldBe
+                    ErrorResponse(
+                        CATALOG_REVISION_STALE,
+                        "The offerings catalog changed; reload it and review the selections before pricing again",
+                    )
+                it.header("Cache-Control") shouldBe "no-store"
             }
-            // The newer revision is used only when named.
-            val adopted = changeOrder(estimate.id, pricingBody(mango, softServe = listOf("mango"), expectedVersion = 2)).document()
+            application.database.count("commerce.financial_document_snapshots") shouldBe snapshots
+            application.database.count("fionas.financial_document_pricing") shouldBe sources
+            application.database.count("fionas.inquiry_financial_documents") shouldBe owners
+            get("/financial-documents/${estimate.id}").document().total shouldBe estimate.total
+            val adopted = changeOrder(estimate.id, pricingBody(mango, softServe = listOf("mango"), expectedVersion = 1)).document()
             adopted.pricing!!.catalogRevision shouldBe mango
             adopted.lines.map { it.description } shouldContain "Mango"
-            // A persisted estimate from the old revision is still priced from it.
-            newEstimate(pricingBody(revision)).pricing!!.catalogRevision shouldBe revision
-            // A revision that does not exist is not found.
-            changeOrder(estimate.id, pricingBody(mango + 1, expectedVersion = 3)).let {
+            changeOrder(estimate.id, pricingBody(mango + 1, expectedVersion = 2)).let {
                 it.status shouldBe Status.NOT_FOUND
                 it.error() shouldBe ErrorResponse("not_found", "Offerings catalog revision r${mango + 1} was not found")
+            }
+            estimate(inquiryId, pricingBody(mango)).status shouldBe Status.CREATED
+            revision = mango
+        }
+
+        test("future and missing catalogs reject every staff pricing path while recorded documents still transition") {
+            TestApplication.create().use { fresh ->
+                val current = fresh.createAcceptanceCatalog()
+                val inquiry = fresh.createInquiry()
+                val document = fresh.initialEstimateOf(inquiry)
+                val snapshotCount = fresh.database.count("commerce.financial_document_snapshots")
+
+                fun rejectedPricing(requested: Int) =
+                    listOf(
+                        fresh.adminPost("/inquiries/$inquiry/estimates", pricingBody(requested)),
+                        fresh.adminPost(
+                            "/financial-documents/$document/change-orders",
+                            pricingBody(requested, guests = 80, expectedVersion = 1),
+                        ),
+                        fresh.http(
+                            Request(Method.POST, "/estimate-preview")
+                                .asFionasWeb(fresh)
+                                .header("Content-Type", "application/json")
+                                .body(pricingBody(requested)),
+                        ),
+                    ) +
+                        listOf("ESTIMATE", "QUOTE", "INVOICE").map { stage ->
+                            fresh.adminPost(
+                                "/inquiries/$inquiry/financial-documents",
+                                pricingBody(requested).dropLast(1) +
+                                    """, "stage":"$stage"}""",
+                            )
+                        }
+                rejectedPricing(current + 1).forEach { it.status shouldBe Status.NOT_FOUND }
+                fresh.database.count("commerce.financial_document_snapshots") shouldBe snapshotCount
+                fresh.database.count("fionas.financial_document_pricing") shouldBe 0
+                // Test-only deletion observes independence; production catalogs remain runtime-owned.
+                fresh.database.execute("DELETE FROM commerce.offerings_catalogs")
+                rejectedPricing(current).forEach { it.status shouldBe Status.NOT_FOUND }
+                fresh.database.count("commerce.financial_document_snapshots") shouldBe snapshotCount
+                fresh.database.count("fionas.financial_document_pricing") shouldBe 0
+                fresh.adminGet("/financial-documents/$document").document().total shouldBe "681.25"
+                fresh
+                    .adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""")
+                    .status shouldBe Status.OK
+                fresh
+                    .adminPost("/financial-documents/$document/invoice", """{"expectedVersion":2}""")
+                    .status shouldBe Status.OK
+                fresh.adminGet("/financial-documents/$document/history").history().versions shouldHaveSize 3
             }
         }
 

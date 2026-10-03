@@ -1,7 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.offering.OfferingsCatalogId
-import io.github.castab.commerce.runtime.offering.GetOfferingsCatalogRevision
+import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
 import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerRepository
@@ -293,11 +293,11 @@ class ArchitectureSpec :
             val runtimeOfferingTypes =
                 JarFile(
                     File(
-                        GetOfferingsCatalogRevision::class.java.protectionDomain.codeSource.location
+                        GetOfferingsCatalog::class.java.protectionDomain.codeSource.location
                             .toURI(),
                     ),
                 ).use { jar ->
-                    val directory = GetOfferingsCatalogRevision::class.java.packageName.replace('.', '/') + "/"
+                    val directory = GetOfferingsCatalog::class.java.packageName.replace('.', '/') + "/"
                     jar
                         .entries()
                         .toList()

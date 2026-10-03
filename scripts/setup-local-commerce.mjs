@@ -121,21 +121,21 @@ async function main() {
       if (!offering) throw new Error(`Active topping ${key} was not found; no labels were changed`);
       return { offering, displayName };
     });
+    const changed = updates.filter(({ offering, displayName }) => offering.displayName !== displayName);
     let revision = catalog.revision;
-    for (const { offering, displayName } of updates) {
-      if (offering.displayName === displayName) continue;
-      const path = `/offering-catalog/offerings/${encodeURIComponent(offering.key)}`;
+    if (changed.length > 0) {
+      const path = "/offering-catalog/offerings";
       const updated = await request("PUT", path, {
         body: {
-          expectedRevision: revision, category: category.key, displayName,
-          selectionState: offering.selectionState, availability: offering.availability,
-          ...(offering.description == null ? {} : { description: offering.description }),
-          ...(offering.price == null ? {} : { price: offering.price }),
+          expectedRevision: revision,
+          offerings: changed.map(({ offering, displayName }) => ({ ...offering, displayName })),
         },
         authenticated: true, expectedStatus: 200,
       });
       revision = revisionFrom(updated.data, path);
-      console.log(`${offering.key}: ${displayName} (revision ${revision})`);
+      for (const { offering, displayName } of changed) {
+        console.log(`${offering.key}: ${displayName} (revision ${revision})`);
+      }
     }
     const latest = (await request("GET", "/offering-catalog", { expectedStatus: 200 })).data;
     const latestToppings = latest.categories.find(({ key }) => key === "topping").offerings;
@@ -143,7 +143,8 @@ async function main() {
       const current = latestToppings.find(({ key }) => key === offering.key);
       if (!current || current.displayName !== displayName || current.description !== offering.description ||
           JSON.stringify(current.price) !== JSON.stringify(offering.price) ||
-          current.selectionState !== offering.selectionState || current.availability !== offering.availability) {
+          current.selectionState !== offering.selectionState || current.availability !== offering.availability ||
+          current.badge !== offering.badge || current.statusNote !== offering.statusNote || current.infoNote !== offering.infoNote) {
         throw new Error(`Verification failed for topping ${offering.key}; reload the catalog before continuing`);
       }
     }
@@ -196,14 +197,16 @@ async function main() {
       price: { kind: "PER_QUANTITY", amount: "0.75", currency: "USD", dimension: "guest" },
     },
   ];
-  for (const offering of offerings) {
-    const path = "/offering-catalog/offerings";
-    const created = await request("POST", path, {
-      body: { expectedRevision: catalogRevision, ...offering, selectionState: "ENABLED", availability: "AVAILABLE" }, authenticated: true, expectedStatus: 201,
-    });
-    catalogRevision = revisionFrom(created.data, path);
-    console.log(`Added offering ${offering.key}: revision ${catalogRevision}`);
-  }
+  const path = "/offering-catalog/offerings";
+  const createdOfferings = await request("POST", path, {
+    body: {
+      expectedRevision: catalogRevision,
+      offerings: offerings.map((offering) => ({ ...offering, selectionState: "ENABLED", availability: "AVAILABLE" })),
+    },
+    authenticated: true, expectedStatus: 201,
+  });
+  catalogRevision = revisionFrom(createdOfferings.data, path);
+  console.log(`Added ${offerings.length} offerings in one batch: revision ${catalogRevision}`);
 
   const catalog = await request("GET", "/offering-catalog", { expectedStatus: 200 });
   if (catalog.data?.revision !== catalogRevision) {

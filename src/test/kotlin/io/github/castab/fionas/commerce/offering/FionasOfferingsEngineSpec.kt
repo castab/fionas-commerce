@@ -3,11 +3,13 @@ package io.github.castab.fionas.commerce.offering
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingCategorySelection
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingSelections
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsEvaluation
@@ -49,7 +51,14 @@ class FionasOfferingsEngineSpec :
             category: String,
             displayName: String = key,
             price: OfferingPrice? = null,
-        ) = Offering(OfferingKey(key), OfferingCategoryKey(category), displayName, price = price)
+        ) = Offering(
+            OfferingKey(key),
+            OfferingCategoryKey(category),
+            displayName,
+            price = price,
+            selectionState = OfferingSelectionState.ENABLED,
+            availability = OfferingAvailability.AVAILABLE,
+        )
 
         val toppings = listOf("sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough")
         val snapshot =
