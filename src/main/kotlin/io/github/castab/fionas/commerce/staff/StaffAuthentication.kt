@@ -61,6 +61,7 @@ object FionaPermissions {
     val CredentialsManage = PermissionKey("fionas.credentials.manage")
     val InquiriesRead = PermissionKey("fionas.inquiries.read")
     val InquiriesCreate = PermissionKey("fionas.inquiries.create")
+    val InquiriesManage = PermissionKey("fionas.inquiries.manage")
     val InquiryFormRead = PermissionKey("fionas.inquiry-form.read")
     val EstimatePreviewCreate = PermissionKey("fionas.estimate-preview.create")
 
@@ -85,6 +86,12 @@ object FionaPermissions {
                 InquiriesCreate,
                 "Submit inquiries",
                 "Record a customer's inquiry with its configured service, which prices and materializes its initial Estimate",
+                inquiries,
+            ),
+            PermissionDefinition(
+                InquiriesManage,
+                "Manage inquiry fulfillment",
+                "Mark booked inquiries served and close served inquiries with an exactly zero Invoice balance",
                 inquiries,
             ),
             PermissionDefinition(
@@ -247,6 +254,7 @@ class BootstrapFirstAdmin(
                                 FionaPermissions.CredentialsManage,
                                 FionaPermissions.InquiriesRead,
                                 FionaPermissions.InquiriesCreate,
+                                FionaPermissions.InquiriesManage,
                                 FionaPermissions.InquiryFormRead,
                                 FionaPermissions.EstimatePreviewCreate,
                             ),

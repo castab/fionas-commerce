@@ -37,14 +37,14 @@ value class InquiryMessage(
 }
 
 /**
- * A prospective customer's initial request to Fiona's, before any booking exists.
+ * A customer's durable request to Fiona's, retained through booking, service and closeout.
  *
  * Every inquiry is a request for configured ice cream service: it is recorded with the
  * [FionasPricingInputs] the customer configured and its initial Estimate, in one transaction.
  *
  * An inquiry is not a booking and implements no booking lifecycle phase. Its canonical initial
- * Estimate is created with it; subsequent quote, invoice, booking, and lifecycle relationships
- * are application policy.
+ * Estimate lineage drives its lifecycle projection; Invoice proves booking and Fiona owns
+ * only served/closed operational facts.
  */
 data class Inquiry(
     val id: InquiryId,
@@ -68,6 +68,7 @@ data class InquiryDetails(
     val inquiry: Inquiry,
     val customer: Customer,
     val pricingInputs: FionasPricingInputs,
+    val lifecycle: InquiryLifecycle,
 ) {
     init {
         require(inquiry.customerId == customer.id) { "Inquiry ${inquiry.id.value} belongs to another customer" }

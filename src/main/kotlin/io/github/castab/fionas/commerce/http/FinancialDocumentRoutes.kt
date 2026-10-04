@@ -1067,7 +1067,9 @@ fun issueInvoiceRoute(
         description =
             "Issues the latest version, a quote, as an invoice: a new immutable snapshot with the same lines and the " +
                 "legacy pricing metadata when present, never repriced. Payments applied to earlier versions stay attached to them and " +
-                "still count toward the settlement. An estimate cannot become an invoice directly.",
+                "still count toward the settlement. An estimate cannot become an invoice directly. " +
+                "This manual action is allowed only for RELATED lineages. Canonical INITIAL_ESTIMATE lineages " +
+                "reject it with illegal_transition and become Invoice only through active deposit satisfaction.",
         from = "a quote",
         example = exampleInvoice,
         transition = issueInvoice,
@@ -1171,7 +1173,10 @@ fun recordPaymentRoute(
             "Records a payment and applies the whole of it to the exact version named, which must be the document's " +
             "latest version, a quote (for example a deposit) or an invoice. The allocation stays attached to that " +
             "version when the document later advances, and still counts toward its settlement. The payment's currency " +
-            "is the document's. Payment status is never stored: the response's settlement is derived. Requires " +
+            "is the document's. Satisfying an ACTIVE deposit on the canonical INITIAL_ESTIMATE Quote atomically " +
+            "issues its Invoice. The response retains the original Quote allocation and returns current settlement; " +
+            "GET the document or inquiry detail to read the new current Invoice. " +
+            "RELATED lineages never automatically advance. Payment status is never stored: settlement is derived. Requires " +
             "`commerce.payment.record`."
         tags += payments
         receiving(recordPaymentRequest to examplePayment)
@@ -1329,7 +1334,10 @@ fun allocatePaymentRoute(
         description =
             "Applies part of an existing payment to the specified latest Quote or Invoice snapshot of a Fiona-owned " +
             "lineage. The allocation remains attached to that version; settlement is derived from allocation " +
-            "history. Requires `commerce.payment.record`."
+            "history. Satisfying an ACTIVE deposit on the canonical INITIAL_ESTIMATE Quote atomically issues its " +
+            "Invoice. The response returns current settlement and the allocation's original Quote reference; " +
+            "GET the document or inquiry detail to read the new current Invoice. " +
+            "RELATED lineages never automatically advance. Requires `commerce.payment.record`."
         tags += payments
         receiving(allocatePaymentRequest to exampleAllocatePayment)
         returning(

@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.financial
 
+import io.github.castab.commerce.deposit.DepositRequirement
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.FinancialDocumentReconciliation
@@ -7,6 +8,7 @@ import io.github.castab.commerce.payment.PaymentAllocation
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.financial.FinancialDocumentVersion
 import io.github.castab.commerce.runtime.financial.FinancialLedger
+import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -135,6 +137,55 @@ internal class FionaFinancialDocuments(
         inquiryId: InquiryId,
         documentId: UUID,
     ): InquiryFinancialDocument = describe(transaction, inquiryId, documentId)
+
+    /** Reuses the authoritative post-mutation view instead of reconciling it a second time. */
+    fun describeLocked(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+        view: FinancialLineageView,
+    ): InquiryFinancialDocument =
+        InquiryFinancialDocument(
+            inquiryId,
+            PricedSnapshot(view.latestVersion, pricingSources.find(transaction, view.latestVersion.document.reference)),
+            view.reconciliation,
+        )
+
+    fun isCanonical(
+        transaction: Transaction,
+        current: Current,
+    ): Boolean = associations.initialEstimateOf(transaction, current.inquiryId) == current.document.id
+
+    /** Shared Invoice mechanics; callers own the association lock and transition policy. */
+    fun invoice(
+        transaction: Transaction,
+        current: Current,
+    ) {
+        val invoice = ledger.issueInvoice(transaction, current.document.id)
+        pricingSources.copy(transaction, current.document.reference, invoice.reference)
+    }
+
+    /**
+     * Applies Fiona's booking policy after a deposit-affecting mutation under the association
+     * lock. READ COMMITTED sees allocations committed by the preceding lock holder. Document,
+     * allocations and deposit terms cannot change under that lock; the runtime reads refund
+     * unwinds in one statement, so its reconciliation includes the refunds observed there.
+     * An Invoice remains booked even when later refunds reduce deposit satisfaction.
+     * Returns no booking view for Invoice or RELATED paths, which need only ordinary settlement.
+     */
+    fun bookIfDepositSatisfied(
+        transaction: Transaction,
+        current: Current,
+    ): FinancialLineageView? {
+        if (current.document !is FinancialDocument.Quote || !isCanonical(transaction, current)) return null
+        val view = ledger.financialLineages(transaction, listOf(current.document.id)).single()
+        if (view.depositRequirement?.requirement is DepositRequirement.Active &&
+            view.depositSatisfied == true
+        ) {
+            invoice(transaction, current)
+            return ledger.financialLineages(transaction, listOf(current.document.id)).single()
+        }
+        return view
+    }
 
     private fun describe(
         transaction: Transaction,

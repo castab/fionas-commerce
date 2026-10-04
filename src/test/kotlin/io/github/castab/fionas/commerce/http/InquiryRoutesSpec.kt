@@ -360,7 +360,7 @@ class InquiryRoutesSpec :
                 it.pricingInputs.catalogRevision shouldBe revision
             }
             response.keys() shouldBe
-                setOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType")
+                setOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType", "lifecycle")
         }
 
         test("an authorized read of an unknown inquiry is not found, and a malformed id a malformed request") {

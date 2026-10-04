@@ -1,5 +1,8 @@
 package io.github.castab.fionas.commerce.inquiry
 
+import io.github.castab.commerce.financial.FinancialDocument
+import io.github.castab.commerce.financial.LineItem
+import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingCategorySelection
 import io.github.castab.commerce.offering.OfferingKey
@@ -16,7 +19,9 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import java.math.BigDecimal
 import java.time.Duration
+import java.util.Currency
 import java.util.UUID
 
 class InquiryValuesSpec :
@@ -72,10 +77,21 @@ class InquiryValuesSpec :
                     EventType.BIRTHDAY,
                 )
 
-            InquiryDetails(inquiry, customer, requested).customer shouldBe customer
+            val currency = Currency.getInstance("USD")
+            val lifecycle =
+                InquiryLifecycle.project(
+                    FinancialDocument.Estimate.create(
+                        UUID.randomUUID(),
+                        listOf(
+                            LineItem(UUID.randomUUID(), "Service", null, null, Money(BigDecimal("100"), currency), Money.zero(currency)),
+                        ),
+                    ),
+                    null,
+                )
+            InquiryDetails(inquiry, customer, requested, lifecycle).customer shouldBe customer
             InquirySummary(inquiry, customer).customer shouldBe customer
             shouldThrow<IllegalArgumentException> {
-                InquiryDetails(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer, requested)
+                InquiryDetails(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer, requested, lifecycle)
             }
             shouldThrow<IllegalArgumentException> {
                 InquirySummary(inquiry.copy(customerId = CustomerId(UUID.randomUUID())), customer)

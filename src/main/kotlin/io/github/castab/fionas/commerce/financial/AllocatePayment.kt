@@ -42,7 +42,11 @@ class AllocatePayment(
             val amount = paymentMoney(command.amount, document.currency)
             val allocation =
                 ledger.allocatePayment(transaction, command.paymentId, newAllocationId(), document.reference, amount, now)
-            AllocatedPayment(allocation, documents.describeLocked(transaction, current.inquiryId, command.documentId))
+            val view = documents.bookIfDepositSatisfied(transaction, current)
+            val result =
+                view?.let { documents.describeLocked(transaction, current.inquiryId, it) }
+                    ?: documents.describeLocked(transaction, current.inquiryId, document.id)
+            AllocatedPayment(allocation, result)
         }
     }
 }

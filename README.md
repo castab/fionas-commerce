@@ -16,7 +16,8 @@ artifacts.
 > invoice) and record payments against them; the documents, payments, and settlement are
 > commerce-runtime's financial ledger, and Fiona records which inquiry owns each document and
 > optional legacy staff pricing metadata. Financial snapshots contain self-contained concrete
-> lines and need no offering/catalog data. There are no bookings or payment-provider
+> lines and need no offering/catalog data. Booking is projected from the canonical Invoice,
+> with Fiona served/closed facts; there is no separate Booking aggregate or payment-provider
 > integrations yet. Staff authentication protects administration and every financial route.
 
 ## How it fits together
@@ -154,7 +155,7 @@ Every route accepts a staff session or SERVICE access token with the required pe
 | `GET /financial-documents/{documentId}` | `commerce.financial-document.read` | The latest version, optional legacy staff pricing metadata, and current settlement. |
 | `GET /financial-documents/{documentId}/history` | `commerce.financial-document.read` | Every version, oldest first, with optional legacy staff pricing metadata. |
 | `POST /financial-documents/{documentId}/quote` | `commerce.financial-document.create` | Issues the latest estimate as a quote, unchanged. |
-| `POST /financial-documents/{documentId}/invoice` | `commerce.financial-document.create` | Issues the latest quote as an invoice, unchanged. |
+| `POST /financial-documents/{documentId}/invoice` | `commerce.financial-document.create` | Manually invoices a RELATED Quote, unchanged. Canonical lineages require deposit-driven booking. |
 | `POST /financial-documents/{documentId}/change-orders` | `commerce.financial-document.create` | Reprices the latest version from revised inputs, in its current stage. |
 | `POST /financial-documents/{documentId}/payments` | `commerce.payment.record` | Records a payment and applies all of it to the latest version, a quote or an invoice. `201`. |
 | `GET /financial-documents/{documentId}/payments` | `commerce.financial-document.read` | Every payment ever allocated to any version of the document, each with its complete history: allocations (to any document), refunds, refund allocations, and derived reconciliation. `[]` when it has none. |
@@ -194,8 +195,9 @@ The exact latest Quote/Invoice must match the expected version; Estimates reject
 with `422 invariant_violated`. Null (or absent) requirement revision expects no history at all,
 including no withdrawal history. A non-null revision must equal the latest requirement revision;
 it is never a don't-care token. Replacement and reactivation use this same PUT.
-Ownership/document checks, activation, and the returned financial-lineage projection share
-one REPEATABLE READ transaction, including its own newly appended requirement revision.
+Ownership/document checks, activation, booking policy and returned financial-lineage projection
+share one READ COMMITTED transaction under the association lock, including newly appended
+requirement and Invoice versions. Waiters see prior committed allocations before evaluating deposits.
 
 Terms accept exactly `FIXED` amount/currency or `PERCENTAGE` percentage, for example
 `{"type":"PERCENTAGE","percentage":"25.125"}`. Unknown discriminators and mixed/missing fields
@@ -235,8 +237,8 @@ never payment `receivedAt` or unrelated standalone refund time. It carries no da
 age, customer details or workflow state.
 
 **Upgrading to commerce-runtime 0.0.22:** http4k stays at 6.58.0.0. Runtime V13 owns deposit
-structures and lineage concurrency references and runs before Fiona's stream, which still ends
-at V11. No Fiona V12 or duplicate deposit table is added. New bootstrap Administrator roles
+structures and lineage concurrency references and runs before Fiona's stream. Fiona V12 adds
+only inquiry fulfillment provenance; no duplicate deposit table is added. New bootstrap Administrator roles
 receive `commerce.deposit-requirement.manage`; startup never modifies an existing role. For an
 existing Administrator, read `GET /admin/access/roles/commerce.administrator`, retain its current
 permissions and add that key, then PUT the complete set to
@@ -245,8 +247,8 @@ The permission appears in the runtime-backed `/admin/access/permissions` catalog
 
 Commerce domain/runtime owns deposit vocabulary, invariants, persistence, frozen resolution,
 reconciliation and bulk facts. Fiona owns lineage ownership, Quote/Invoice eligibility,
-authorization exposure and HTTP contracts. Satisfaction has no booking, invoice issuance,
-inquiry-status or other workflow consequence in this slice.
+authorization exposure, HTTP contracts and the canonical deposit-satisfaction booking policy below.
+Runtime satisfaction arithmetic remains authoritative; Fiona does not persist its result.
 
 **Staff authentication API**, implemented by Fiona (see [Staff authentication](#staff-authentication)):
 
@@ -1018,25 +1020,83 @@ human explanations, across previews, inquiry submissions, persisted documents, a
 
 ## Financial documents and payments
 
-Staff turn an inquiry into Fiona's first commercial workflow:
+Every accepted inquiry already creates its canonical Estimate. Staff evolve that lineage:
 
 ```text
 Inquiry I
-   │ POST /inquiries/{I}/estimates                       D/v1 Estimate
+   │ POST /inquiries                                    D/v1 canonical Estimate
    │ POST /financial-documents/{D}/change-orders         D/v2 Estimate   (repriced)
    │ POST /financial-documents/{D}/quote                 D/v3 Quote      (same lines)
-   │ POST /financial-documents/{D}/payments              $300 deposit → allocated to D/v3
-   │ POST /financial-documents/{D}/invoice               D/v4 Invoice    (same lines)
+   │ PUT /financial-documents/{D}/deposit-requirement    active positive $300 requirement
+   │ POST /financial-documents/{D}/payments              $300 allocated to D/v3; D/v4 Invoice atomically
    │ POST /financial-documents/{D}/change-orders         D/v5 Invoice    (repriced)
-   ▼ POST /financial-documents/{D}/payments              final payment → allocated to D/v5
+   │ POST /inquiries/{I}/served                          SERVED fact (Invoice unchanged)
+   │ POST /financial-documents/{D}/payments              final payment → allocated to D/v5
+   ▼ POST /inquiries/{I}/close                           CLOSED fact, only at exact zero balance
 GET /financial-documents/{D}   latest Invoice D/v5, settlement across the whole lineage
 ```
 
 An inquiry can also begin a new lineage directly at `D/v1 Quote` or `D/v1 Invoice`
 through `POST /inquiries/{inquiryId}/financial-documents`. These are legitimate first
 snapshots with `previousVersion: null`; no Estimate or Quote is synthesized before them.
-The existing `/estimates` endpoint creates `D/v1 Estimate` through the same pricing and
+These staff-created lineages are RELATED and never drive inquiry lifecycle. The existing
+`/estimates` endpoint creates a RELATED `D/v1 Estimate` through the same pricing and
 persistence operation.
+
+### Inquiry lifecycle and fulfillment
+
+Staff `GET /inquiries/{inquiryId}` includes `lifecycle`: canonical `documentId`, projected
+`stage`, and optional `served`/`closed` facts. Each fact has `occurredAt`, `principalKind`
+(`USER` or `SERVICE`) and `principalId`. Detail requires only `fionas.inquiries.read` and
+reads inquiry, canonical latest stage and operational facts in one REPEATABLE READ snapshot.
+
+| Canonical latest document and fulfillment | Lifecycle stage |
+|---|---|
+| Estimate, no fulfillment | REQUESTED |
+| Quote, no fulfillment | QUOTED |
+| Invoice, no served fact | BOOKED |
+| Invoice, served, not closed | SERVED |
+| Invoice, served and closed | CLOSED |
+
+Issuing Quote is the firm proposal boundary. Booking requires a positive active deposit:
+`RecordDocumentPayment`, `AllocatePayment` and `SetDepositRequirement` promote the canonical
+Quote to Invoice when runtime `FinancialLineageView.depositSatisfied` is true. Promotion
+and optional legacy pricing metadata copy share the triggering mutation's transaction;
+failure rolls back all writes. Partial deposits or money without active terms remain QUOTED.
+Activation/replacement against sufficient already-applied money books immediately. Application
+operation results contain the new current Invoice. HTTP payment/allocation responses retain
+their allocation references and return current settlement; the deposit endpoint retains its
+deposit union response. Document/detail/bulk reads expose the new current Invoice version.
+The allocation still names the exact Quote version it paid. Stale expected versions conflict.
+
+`POST /financial-documents/{documentId}/invoice` (`issueInvoice`) rejects canonical
+INITIAL_ESTIMATE lineages with `409 illegal_transition`. It remains available for RELATED
+Quotes, whose Invoices do not book inquiries. First-snapshot RELATED Invoices likewise
+leave the canonical lifecycle unchanged. Invoice is the durable booking fact: later refunds
+may make deposit satisfaction false without demotion. Invoice change orders retain lifecycle.
+There is no zero-deposit booking, separate Booking aggregate or stored five-state status.
+
+| Action | operationId | Eligibility |
+|---|---|---|
+| `POST /inquiries/{inquiryId}/served` | `markInquiryServed` | BOOKED; records service without financial mutation |
+| `POST /inquiries/{inquiryId}/close` | `closeInquiry` | SERVED and current canonical Invoice balance exactly zero |
+
+Both actions take no body and return `InquiryLifecycleResponse` (`200`), recording the
+authenticated principal and injected Clock timestamp at microsecond precision. They require
+`fionas.inquiries.manage`, independently of inquiry/financial read grants. Session cookies
+require trusted Origin; token-only SERVICE calls use ordinary live permission enforcement.
+Anonymous/forbidden requests return `401`/`403`; missing inquiry `404`; malformed id `400`;
+ineligible or repeated transitions `409 illegal_transition` without rewriting provenance.
+New bootstrap Administrator roles include the new permission. Existing roles are never
+expanded at startup: read their current grants, add `fionas.inquiries.manage`, then replace
+the complete desired grant set through `/admin/access`.
+
+Fiona V12 `inquiry_fulfillment` stores served time/principal and optional complete closed
+time/principal. Closed requires served at both model and database level. It stores no
+financial stage, balance or deposit satisfaction. Positive outstanding balance and negative
+overpayment both prevent closure; equality uses exact decimal semantics. There is no
+automatic close, date-driven progression, unserve or reopen. Later ledger mutations after
+closure remain allowed. Impossible fulfillment before a canonical Invoice fails internally.
 
 The responsibilities are split three ways:
 
@@ -1129,7 +1189,8 @@ mutation responses all expose it. It stays unchanged on reread and is distinct f
 Fiona's inquiry-association timestamp; Fiona generates no document creation timestamp.
 
 **Transitions never reprice.** `quote` appends a quote with the estimate's lines and copies
-legacy pricing metadata only when present; `invoice` does the same from a quote. There is no
+legacy pricing metadata only when present; manual `invoice` does the same from a RELATED quote.
+Canonical Quotes instead reach Invoice through atomic deposit satisfaction. There is no
 estimate-to-invoice shortcut: a transition the latest version does not have is
 commerce-runtime's `409 illegal_transition`.
 
@@ -1296,7 +1357,7 @@ total minus the net applied. Over-application is allowed; the balance is then ne
 response names the payment, the allocation, the exact version, and the settlement after it.
 The two facts are committed atomically. All payment amounts remain exact decimal strings,
 never JSON floating-point numbers. Provider SDKs, webhooks, stored payment status,
-stored document balance, booking conversion, events/outbox/CQRS, and allocation
+stored document balance, separate Booking aggregates, events/outbox/CQRS, and allocation
 reversals remain outside this workflow.
 
 **One transaction per operation.** Each operation opens one runtime transaction and passes
@@ -1345,7 +1406,7 @@ The document is OpenAPI 3.1.0. `info.version` is the Gradle project version
 (`0.0.0-SNAPSHOT` by default in `gradle.properties`; a release build sets
 `-Pversion=<version>`). It declares no server host, so it is the same in every
 environment. The stable `operationId`s are `createInquiry`, `listInquiries`, `getInquiry`, `getInquiryForm`,
-`previewEstimate`, `createInquiryEstimate`, `createInquiryFinancialDocument`, `listInquiryFinancialDocuments`,
+`markInquiryServed`, `closeInquiry`, `previewEstimate`, `createInquiryEstimate`, `createInquiryFinancialDocument`, `listInquiryFinancialDocuments`,
 `getFinancialDocument`, `getFinancialDocumentHistory`, `issueQuote`, `issueInvoice`,
 `createChangeOrder`, `recordPayment`, `recordStandalonePayment`, `allocatePayment`, `login`, `logout`, `getCurrentUser`, and
 `setStaffPassword`, and for the catalog
@@ -1517,6 +1578,9 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   reference, and the pricing source's scalar columns with one `NOT NULL` JSON-object
   `pricing_inputs` jsonb in `inquiries` and in `financial_document_pricing`. It converts
   nothing and fails on a populated database, which must be recreated.
+  `V12` adds `inquiry_fulfillment`, keyed by inquiry, with served timestamp and USER/SERVICE
+  provenance and optional complete closed timestamp/provenance. It adds no lifecycle stage
+  or financial facts and requires no backfill.
   Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   current Offerings catalog storage and the financial ledger's snapshots (with
@@ -1924,6 +1988,8 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order; an inquiry cannot commit without them |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer, inquiry and requested inputs roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry + initial Estimate together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
+| `InquiryLifecycleSpec` | Canonical projection; deposit booking by payment, allocation and activation/replacement; RELATED isolation; manual canonical rejection; metadata preservation; triggering mutations rolling back with Invoice failure; forced concurrent payments; refund stability; served/closed provenance, exact-zero closeout and change orders |
+| `InquiryLifecycleRoutesSpec` | Detail and explicit actions through the full handler; USER/SERVICE provenance, live manage permission, authentication, Origin policy, malformed/missing inquiries, repeated transitions and no arbitrary PATCH |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
 | `InquiryIdempotencyRoutesSpec` | Full-handler replay with exact receipts, no second inquiry/Estimate/association; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |

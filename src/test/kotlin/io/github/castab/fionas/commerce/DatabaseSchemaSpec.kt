@@ -46,6 +46,7 @@ class DatabaseSchemaSpec :
                     "flyway_schema_history",
                     "customers",
                     "inquiries",
+                    "inquiry_fulfillment",
                     "inquiry_submissions",
                     "user_credentials",
                     "inquiry_financial_documents",

@@ -5,11 +5,10 @@ import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.financial.FinancialLineageView
-import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
-/** Approves explicit terms on the exact latest Fiona Quote/Invoice; never causes workflow transitions. */
+/** Approves terms and atomically books a canonical Quote whose active positive deposit is satisfied. */
 class SetDepositRequirement(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
@@ -26,7 +25,7 @@ class SetDepositRequirement(
     private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
 
     operator fun invoke(command: Command): FinancialLineageView =
-        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
+        transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, command.documentId, command.expectedDocumentVersion)
             current.document.requirePaymentDestination()
             if (command.terms is DepositTerms.Fixed) {
@@ -39,6 +38,7 @@ class SetDepositRequirement(
                 command.terms,
                 command.expectedRequirementRevision,
             )
-            ledger.financialLineages(transaction, listOf(command.documentId)).single()
+            documents.bookIfDepositSatisfied(transaction, current)
+                ?: ledger.financialLineages(transaction, listOf(command.documentId)).single()
         }
 }

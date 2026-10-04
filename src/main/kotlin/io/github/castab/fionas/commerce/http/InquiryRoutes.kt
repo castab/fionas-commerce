@@ -177,6 +177,7 @@ data class InquiryResponse(
     @ApiProperty(description = "The recorded event calendar date, without a time or time zone.", format = "date")
     val eventDate: String,
     val eventType: InquiryEventType,
+    val lifecycle: InquiryLifecycleResponse,
 )
 
 /** The commercial inputs recorded with an inquiry, pinned to the catalog revision the customer chose from. */
@@ -278,7 +279,7 @@ private val cursorQuery =
             "the previous page's last inquiry.",
     )
 
-internal val inquiries = Tag("Inquiries", "A prospective customer's request to Fiona's, before any booking exists.")
+internal val inquiries = Tag("Inquiries", "Configured service requests through quotation, booking, service and closeout.")
 
 private val exampleSelections =
     listOf(
@@ -302,6 +303,7 @@ private val exampleReceipt =
     InquiryReceiptResponse(id = "c755f7cd-1e28-4c75-a85f-d066ede7387d", createdAt = "2026-09-26T21:19:39.321012Z")
 private val exampleInquiry =
     InquiryResponse(
+        lifecycle = InquiryLifecycleResponse("aec8f5a3-9d32-470b-a519-55b17f0cfb27", InquiryStageResponse.REQUESTED),
         id = "c755f7cd-1e28-4c75-a85f-d066ede7387d",
         customerId = "602df298-8d54-45b6-a40c-bbf80949a3b8",
         name = "Jane Doe",
@@ -521,7 +523,9 @@ fun getInquiryRoute(
         summary = "Read an inquiry"
         description =
             "The persisted inquiry, the customer who made it, and the configuration submitted with it, which a staff " +
-            "estimate can start from. Requires `${FionaPermissions.InquiriesRead.value}`."
+            "estimate can start from, and its lifecycle projected from the canonical INITIAL_ESTIMATE lineage plus " +
+            "served/closed facts in one REPEATABLE_READ snapshot. RELATED documents and event date never advance it. " +
+            "Requires `${FionaPermissions.InquiriesRead.value}`."
         tags += inquiries
         returning(Status.OK, inquiryResponse to exampleInquiry, "The inquiry.")
         returningError(ErrorCategory.MALFORMED_REQUEST, "`inquiryId` is not a UUID.", "Malformed request: path 'inquiryId'")
@@ -564,6 +568,7 @@ private fun position(cursor: String): InquiryListPosition =
 
 private fun InquiryDetails.toResponse() =
     InquiryResponse(
+        lifecycle = lifecycle.toResponse(),
         id = inquiry.id.value.toString(),
         customerId = customer.id.value.toString(),
         name = customer.name.value,

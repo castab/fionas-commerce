@@ -59,6 +59,8 @@ import java.time.Duration
  */
 private val notInvoked =
     FionaOperations(
+        markInquiryServed = { error("Rendering never serves an inquiry") },
+        closeInquiry = { error("Rendering never closes an inquiry") },
         getInquiryForm = { error("Rendering the OpenAPI document never reads the inquiry form") },
         createInquiry = { error("Rendering the OpenAPI document never creates an inquiry") },
         listInquiries = { error("Rendering the OpenAPI document never lists inquiries") },

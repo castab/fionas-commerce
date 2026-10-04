@@ -67,7 +67,11 @@ class RecordDocumentPayment(
                 validating { PaymentRecord(newPaymentId(), amount, command.method, command.receivedAt ?: now, command.externalReference) }
             val allocation =
                 ledger.recordPaymentAgainstDocument(transaction, payment, newAllocationId(), document.reference, payment.amount, now)
-            RecordedPayment(payment, allocation, documents.describeLocked(transaction, current.inquiryId, command.documentId))
+            val view = documents.bookIfDepositSatisfied(transaction, current)
+            val result =
+                view?.let { documents.describeLocked(transaction, current.inquiryId, it) }
+                    ?: documents.describeLocked(transaction, current.inquiryId, document.id)
+            RecordedPayment(payment, allocation, result)
         }
     }
 }

@@ -12,8 +12,10 @@ import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRe
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
+import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.InquirySubmissionRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
 import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
@@ -104,6 +106,7 @@ class ArchitectureSpec :
             listOf(
                 CustomerRepository::class.java,
                 InquiryRepository::class.java,
+                InquiryFulfillmentRepository::class.java,
                 InquirySubmissionRepository::class.java,
                 CredentialRepository::class.java,
                 InquiryFinancialDocumentRepository::class.java,
@@ -119,6 +122,7 @@ class ArchitectureSpec :
             listOf(
                 JdbiCustomerRepository::class.java,
                 JdbiInquiryRepository::class.java,
+                JdbiInquiryFulfillmentRepository::class.java,
                 JdbiInquirySubmissionRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
@@ -134,12 +138,13 @@ class ArchitectureSpec :
             // Approval and its multi-query response must not gain an inner transaction or a second projection.
             val approval = File(mainSources, "financial/SetDepositRequirement.kt").codeWithoutComments()
             Regex("inTransaction").findAll(approval).count() shouldBe 1
-            Regex("financialLineages").findAll(approval).count() shouldBe 1
+            Regex("bookIfDepositSatisfied").findAll(approval).count() shouldBe 1
             sources()
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
+                    "inquiry/ManageInquiryFulfillment.kt: inTransaction",
                     "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
                     "financial/GetDepositRequirement.kt: inTransaction",
@@ -222,6 +227,8 @@ class ArchitectureSpec :
             val routes =
                 fionaApiRoutes(
                     FionaOperations(
+                        markInquiryServed = { error("not called") },
+                        closeInquiry = { error("not called") },
                         getInquiryForm = { error("not called") },
                         createInquiry = { error("not called") },
                         listInquiries = { error("not called") },
@@ -437,7 +444,7 @@ class ArchitectureSpec :
             // or roll back with Fiona's. A convenience overload would open a second transaction.
             val ledgerCall = Regex("""\bledger\s*\.\s*(\w+)\s*\(\s*(\w*)""")
             val calls =
-                sources { it.path.contains("${File.separator}financial${File.separator}") }
+                sources()
                     .flatMap { file ->
                         ledgerCall.findAll(file.readText()).map { "${file.name}: ${it.groupValues[1]}(${it.groupValues[2]}" }
                     }
@@ -508,6 +515,7 @@ class ArchitectureSpec :
                     FionaPermissions.CredentialsManage,
                     FionaPermissions.InquiriesRead,
                     FionaPermissions.InquiriesCreate,
+                    FionaPermissions.InquiriesManage,
                     FionaPermissions.InquiryFormRead,
                     FionaPermissions.EstimatePreviewCreate,
                 )
