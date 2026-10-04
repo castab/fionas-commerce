@@ -103,6 +103,10 @@ class OpenApiDocumentSpec :
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "post", "createInquiryFinancialDocument") to
                     listOf("201", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/inquiries/{inquiryId}/served", "post", "markInquiryServed") to
+                    listOf("200", "400", "401", "403", "404", "409", "500"),
+                Triple("/inquiries/{inquiryId}/close", "post", "closeInquiry") to
+                    listOf("200", "400", "401", "403", "404", "409", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "get", "listInquiryFinancialDocuments") to
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/financial-documents/{documentId}", "get", "getFinancialDocument") to
@@ -153,6 +157,8 @@ class OpenApiDocumentSpec :
                 "createInquiry" to "Inquiries",
                 "listInquiries" to "Inquiries",
                 "getInquiry" to "Inquiries",
+                "markInquiryServed" to "Inquiries",
+                "closeInquiry" to "Inquiries",
                 "previewEstimate" to "Estimates",
                 "createInquiryEstimate" to "Financial documents",
                 "createInquiryFinancialDocument" to "Financial documents",
@@ -284,6 +290,8 @@ class OpenApiDocumentSpec :
                 "InquiryPricingInputs",
                 "InquiryReceiptResponse",
                 "InquiryResponse",
+                "InquiryLifecycleResponse",
+                "InquiryMilestoneResponse",
                 "InquiryRequestedPricing",
                 "InquiryListResponse",
                 "InquiryListItem",
@@ -848,14 +856,50 @@ class OpenApiDocumentSpec :
 
             val response = schema("InquiryResponse")
             response.strings("required") shouldContainExactly
-                listOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType")
+                listOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType", "lifecycle")
             val properties = response.at("properties").jsonObject
             properties.keys.toList() shouldContainExactly
-                listOf("id", "customerId", "name", "email", "message", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType")
+                listOf(
+                    "id",
+                    "customerId",
+                    "name",
+                    "email",
+                    "message",
+                    "createdAt",
+                    "pricingInputs",
+                    "zipCode",
+                    "eventDate",
+                    "eventType",
+                    "lifecycle",
+                )
             properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryRequestedPricing"
-            (properties - "pricingInputs").values.forEach { it.text("type") shouldBe "string" }
+            properties.getValue("lifecycle").text("\$ref") shouldBe "#/components/schemas/InquiryLifecycleResponse"
+            (properties - "pricingInputs" - "lifecycle").values.forEach { it.text("type") shouldBe "string" }
             properties.filterValues { "format" in it.jsonObject }.mapValues { (_, property) -> property.text("format") } shouldBe
                 mapOf("id" to "uuid", "customerId" to "uuid", "createdAt" to "date-time", "eventDate" to "date")
+        }
+
+        test("lifecycle actions expose projected stages and authenticated provenance without an arbitrary state input") {
+            val lifecycle = schema("InquiryLifecycleResponse")
+            lifecycle.strings("required") shouldContainExactly listOf("documentId", "stage")
+            lifecycle.strings("properties", "stage", "enum") shouldContainExactly
+                listOf("REQUESTED", "QUOTED", "BOOKED", "SERVED", "CLOSED")
+            lifecycle.text("properties", "served", "\$ref") shouldBe "#/components/schemas/InquiryMilestoneResponse"
+            lifecycle.text("properties", "closed", "\$ref") shouldBe "#/components/schemas/InquiryMilestoneResponse"
+            val milestone = schema("InquiryMilestoneResponse")
+            milestone.strings("required") shouldContainExactly listOf("occurredAt", "principalKind", "principalId")
+            milestone.text("properties", "occurredAt", "format") shouldBe "date-time"
+            milestone.text("properties", "principalId", "format") shouldBe "uuid"
+            milestone.strings("properties", "principalKind", "enum") shouldContainExactly listOf("USER", "SERVICE")
+            listOf("served", "close").forEach { action ->
+                val route = operation("/inquiries/{inquiryId}/$action", "post")
+                route.jsonObject.containsKey("requestBody") shouldBe false
+                route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                    "#/components/schemas/InquiryLifecycleResponse"
+                route.text("responses", "409", "description") shouldContain "illegal_transition"
+                route.text("description") shouldContain "principal"
+            }
+            operation("/financial-documents/{documentId}/invoice", "post").text("description") shouldContain "RELATED"
         }
 
         test("describes an inquiry's pricing inputs as the estimate's commercial inputs: never amounts, and pinned to a revision") {

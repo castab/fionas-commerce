@@ -470,7 +470,22 @@ class FinancialDocumentRoutesSpec :
                     .status shouldBe Status.OK
                 fresh
                     .adminPost("/financial-documents/$document/invoice", """{"expectedVersion":2}""")
-                    .status shouldBe Status.OK
+                    .status shouldBe Status.CONFLICT
+                fresh
+                    .adminRequest(
+                        Method.PUT,
+                        "/financial-documents/$document/deposit-requirement",
+                        """{"expectedDocumentVersion":2,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
+                    ).status shouldBe Status.OK
+                fresh
+                    .adminPost(
+                        "/financial-documents/$document/payments",
+                        """{"documentVersion":2,"amount":"50","method":"CARD"}""",
+                    ).let {
+                        it.status shouldBe Status.CREATED
+                        it.payment().documentVersion shouldBe 2
+                    }
+                fresh.adminGet("/financial-documents/$document").document().stage shouldBe "INVOICE"
                 fresh.adminGet("/financial-documents/$document/history").history().versions shouldHaveSize 3
             }
         }

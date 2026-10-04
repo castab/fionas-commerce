@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.inquiry
 
+import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
@@ -24,13 +25,13 @@ import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.InquiryDocumentPurpose
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
-import io.github.castab.fionas.commerce.financial.IssueInvoice
 import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
+import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
@@ -357,10 +358,9 @@ class InquiryMaterializationSpec :
             val quote = IssueQuote(application.transactor, application.context.financialLedger, associations, sources)(id, Version.of(2))
             quote.latest.document.lineItems shouldBe changed.lineItems
             quote.latest.pricing.shouldBeNull()
-            val invoice =
-                IssueInvoice(application.transactor, application.context.financialLedger, associations, sources)(id, Version.of(3))
-            invoice.latest.document.lineItems shouldBe changed.lineItems
-            invoice.latest.pricing.shouldBeNull()
+            SetDepositRequirement(application.transactor, application.context.financialLedger, associations, sources)(
+                SetDepositRequirement.Command(id, Version.of(3), null, DepositTerms.Fixed(Money(BigDecimal("50.00"), initial.currency))),
+            )
             val payment =
                 RecordDocumentPayment(
                     application.transactor,
@@ -368,7 +368,9 @@ class InquiryMaterializationSpec :
                     associations,
                     sources,
                     testClock,
-                )(RecordDocumentPayment.Command(id, Version.of(4), BigDecimal("50.00"), PaymentMethod.CARD, null, null))
+                )(RecordDocumentPayment.Command(id, Version.of(3), BigDecimal("50.00"), PaymentMethod.CARD, null, null))
+            payment.document.latest.document.version shouldBe Version.of(4)
+            payment.document.latest.document.lineItems shouldBe changed.lineItems
             payment.document.latest.pricing
                 .shouldBeNull()
             val refund =

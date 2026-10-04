@@ -35,8 +35,10 @@ import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryForm
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.InquiryLifecycle
 import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
+import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.offering.EstimatePreview
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.SecretPassword
@@ -68,6 +70,8 @@ class FionaOperations(
     val createInquiry: (CreateInquiry.Command) -> Inquiry,
     val listInquiries: (ListInquiries.Command) -> InquiryPage,
     val getInquiry: (InquiryId) -> InquiryDetails,
+    val markInquiryServed: (ManageInquiryFulfillment.Command) -> InquiryLifecycle,
+    val closeInquiry: (ManageInquiryFulfillment.Command) -> InquiryLifecycle,
     val getInquiryForm: () -> InquiryForm,
     val previewEstimate: (FionasPricingInputs) -> EstimatePreview,
     val createInquiryEstimate: (InquiryId, FionasPricingInputs) -> InquiryFinancialDocument,
@@ -116,6 +120,8 @@ fun fionaApiRoutes(
         createInquiryRoute(operations.createInquiry, auth.access),
         listInquiriesRoute(operations.listInquiries, auth.access),
         getInquiryRoute(operations.getInquiry, auth.access),
+        inquiryFulfillmentRoute("served", "markInquiryServed", operations.markInquiryServed, auth.access),
+        inquiryFulfillmentRoute("close", "closeInquiry", operations.closeInquiry, auth.access),
         previewEstimateRoute(operations.previewEstimate, auth.access),
         createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
         createInquiryFinancialDocumentRoute(operations.createInquiryFinancialDocument, auth.access),

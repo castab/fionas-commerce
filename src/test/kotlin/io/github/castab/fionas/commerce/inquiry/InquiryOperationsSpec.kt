@@ -68,7 +68,17 @@ class InquiryOperationsSpec :
             { inquiryId },
         )
 
-        fun getInquiry() = GetInquiry(application.transactor, customers, inquiries)
+        fun getInquiry() =
+            GetInquiry(
+                application.transactor,
+                customers,
+                inquiries,
+                ReadInquiryLifecycle(
+                    application.context.financialLedger,
+                    JdbiInquiryFinancialDocumentRepository(),
+                    JdbiInquiryFulfillmentRepository(),
+                ),
+            )
 
         fun inputs(
             catalogRevision: Int = revision,

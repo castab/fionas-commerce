@@ -1,21 +1,23 @@
 package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 
 /**
- * Reads one inquiry, the customer who made it, and the pricing inputs requested with it, in
- * one consistent transaction.
+ * Reads one inquiry, its customer, requested pricing inputs and canonical lifecycle from
+ * one repeatable database snapshot.
  */
 class GetInquiry(
     private val transactor: Transactor,
     private val customers: CustomerRepository,
     private val inquiries: InquiryRepository,
+    private val lifecycle: ReadInquiryLifecycle,
 ) {
     /** Fails with [CommerceFailure.NotFound] when no inquiry has [id]. */
     operator fun invoke(id: InquiryId): InquiryDetails =
-        transactor.inTransaction { transaction ->
+        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
             val (inquiry, requested) =
                 inquiries.findRequested(transaction, id)
                     ?: throw CommerceFailure.NotFound("Inquiry ${id.value} was not found")
@@ -24,6 +26,6 @@ class GetInquiry(
                 checkNotNull(customers.findById(transaction, inquiry.customerId)) {
                     "Inquiry ${id.value} references a missing customer"
                 }
-            InquiryDetails(inquiry, customer, requested)
+            InquiryDetails(inquiry, customer, requested, lifecycle.read(transaction, id))
         }
 }

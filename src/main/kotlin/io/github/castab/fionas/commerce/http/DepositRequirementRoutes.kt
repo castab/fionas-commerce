@@ -136,7 +136,11 @@ sealed interface CurrentDepositRequirementResponse {
         val terms: DepositTermsRequest,
         @ApiProperty(description = "Frozen amount resolved at approval, unchanged by later document versions.")
         val requiredAmount: DepositMoneyResponse,
-        @ApiProperty(description = "Current runtime netApplied >= requiredAmount; refunds can undo this. No booking consequence.")
+        @ApiProperty(
+            description =
+                "Current runtime netApplied >= requiredAmount. Canonical Quote satisfaction triggers booking on writes; " +
+                    "later refunds can undo satisfaction but never demote Invoice.",
+        )
         val satisfied: Boolean,
     ) : CurrentDepositRequirementResponse
 
@@ -233,7 +237,10 @@ private val depositHistoryBody = jsonBody(DepositRequirementHistoryResponse.seri
 private val queryLineagesBody = jsonBody(QueryFinancialLineagesRequest.serializer())
 private val lineagesBody = jsonBody(FinancialLineagesResponse.serializer())
 private val depositTag =
-    Tag("Deposit requirements", "Immutable approved financial terms, with current derived satisfaction and no workflow consequences.")
+    Tag(
+        "Deposit requirements",
+        "Immutable approved financial terms; satisfaction of an active canonical Quote deposit atomically books it as Invoice.",
+    )
 private const val DEPOSIT_EXAMPLE_ID = "5f0c6a7e-8c1d-4f63-9b2a-0d8e7f6a5b4c"
 private val exampleTerms = DepositTermsRequest.Fixed("100.00", "USD")
 private val exampleActive =
@@ -289,7 +296,7 @@ fun getDepositRequirementRoute(
         operationId = "getFinancialDocumentDepositRequirement"
         summary = "Read current deposit requirement"
         description =
-            "Requires commerce.financial-document.read. NONE means no history; ACTIVE includes current financial satisfaction; WITHDRAWN contains no terms. One REPEATABLE_READ snapshot, no locks or workflow effects."
+            "Requires commerce.financial-document.read. NONE means no history; ACTIVE includes current financial satisfaction; WITHDRAWN contains no terms. One unlocked REPEATABLE_READ snapshot. This read never advances lifecycle."
         tags += depositTag
         returning(Status.OK, currentDepositBody to exampleActive)
         depositErrors(CommercePermissions.FinancialDocumentRead, false)
@@ -327,7 +334,7 @@ fun setDepositRequirementRoute(
         operationId = "setFinancialDocumentDepositRequirement"
         summary = "Approve, replace, or reactivate deposit terms"
         description =
-            "Requires commerce.deposit-requirement.manage. Only the exact latest Quote/Invoice is eligible. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen. No workflow effects."
+            "Requires commerce.deposit-requirement.manage. Only the exact latest Quote/Invoice is eligible. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen. If already-applied value satisfies these active terms on the canonical INITIAL_ESTIMATE Quote, the same transaction issues Invoice and books the inquiry. RELATED lineages do not book inquiries."
         tags += depositTag
         receiving(setDepositBody to SetDepositRequirementRequest(2, null, exampleTerms))
         returning(Status.OK, currentDepositBody to exampleActive)

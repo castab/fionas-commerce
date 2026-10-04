@@ -77,7 +77,7 @@ Examples include:
 - Fiona customers;
 - customer contact information;
 - event or service details;
-- Fiona-specific booking information;
+- inquiry fulfillment and closeout facts;
 - locations;
 - guest counts;
 - catering-specific selections or context;
@@ -307,6 +307,60 @@ It is acceptable for Fiona to expose derived values in an HTTP response or UI-fa
 A derived response field is not automatically a persistent application field.
 
 Persist something only when it represents an independent Fiona business fact or decision.
+
+## Inquiry lifecycle projection and booking policy
+
+The inquiry's unique `INITIAL_ESTIMATE` lineage drives its operational lifecycle. Other
+`RELATED` lineages remain financial artifacts, including first-snapshot Invoices, and
+never make the inquiry booked. There is no separate Booking aggregate or persisted
+five-state status.
+
+| Canonical latest stage and Fiona facts | Projected inquiry stage |
+|---|---|
+| Estimate, no fulfillment facts | REQUESTED |
+| Quote, no fulfillment facts | QUOTED |
+| Invoice, no served fact | BOOKED |
+| Invoice, served and not closed | SERVED |
+| Invoice, served and closed | CLOSED |
+
+Issuing the canonical Quote is the firm proposal boundary. A positive active deposit is
+required for booking. `RecordDocumentPayment`, `AllocatePayment`, and
+`SetDepositRequirement` apply one Fiona policy after their mutation: read the runtime's
+authoritative `FinancialLineageView`; if the canonical Quote's active deposit is satisfied,
+issue its Invoice and copy optional legacy pricing metadata in the same transaction.
+Promotion failure rolls back the triggering mutation. Partial payment and money without
+active terms leave it quoted. Manual canonical Invoice issuance is rejected. Manual
+issuance on RELATED lineages remains available. No zero-deposit booking path exists.
+
+Invoice is the durable booking fact. Refunds may reverse deposit satisfaction but do not
+demote Invoice or erase booking. Invoice change orders retain BOOKED/SERVED/CLOSED
+projection while changing runtime reconciliation. Event date never advances lifecycle.
+
+Fiona V12 stores only operational facts in `inquiry_fulfillment`: served timestamp and
+acting principal kind/identity, plus optional complete closed provenance. A row requires
+served provenance, so closed cannot exist without served. USER and SERVICE identities
+use commerce-domain's principal model. The injected Clock supplies microsecond timestamps.
+No financial stage, balance, payment status or deposit truth is stored here.
+
+Explicit service requires BOOKED; explicit closure requires SERVED and authoritative current
+Invoice balance exactly zero, including scale-independent decimal equality. Negative
+overpayment blocks closure. Repeated actions conflict without rewriting provenance. There
+is no unserve or reopen. Later ledger activity after closure is allowed; eligibility is
+evaluated at the close command. Internally impossible fulfillment before Invoice fails loudly.
+
+All three booking triggers and fulfillment actions serialize on the existing canonical
+association row. They use READ COMMITTED so waiters observe the preceding committed
+allocations before applying booking policy. While that row is locked, Fiona cannot change
+the document, its allocations or deposit terms. Refunds do not take that lock; the runtime
+reads their unwinds in one statement against the stable allocation set. Detail reads use
+one REPEATABLE READ snapshot. No nested transactions, retry loops or runtime-table SQL
+are introduced.
+
+Staff detail exposes this projection with `fionas.inquiries.read`. Business-action endpoints
+`POST /inquiries/{inquiryId}/served` (`markInquiryServed`) and
+`POST /inquiries/{inquiryId}/close` (`closeInquiry`) require `fionas.inquiries.manage`, using
+the existing AccessControl, session/SERVICE authentication and cookie Origin policy.
+New bootstrap Administrators receive the permission; existing role grants are unchanged.
 
 ---
 

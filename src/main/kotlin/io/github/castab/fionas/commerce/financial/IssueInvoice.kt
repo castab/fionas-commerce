@@ -7,7 +7,7 @@ import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
 /**
- * Issues the latest quote of a Fiona lineage as an invoice, without repricing: the invoice
+ * Manually issues the latest quote of a RELATED Fiona lineage as an invoice, without repricing: the invoice
  * is a new immutable snapshot with the same concrete lines. Fiona copies optional legacy
  * pricing metadata when present; the transition does not require it. There is no estimate-to-invoice shortcut.
  *
@@ -16,12 +16,14 @@ import java.util.UUID
  * the invoice (`CommerceFailure.IllegalTransition` when the latest snapshot is not a quote),
  * and any legacy pricing metadata is copied to the new version. Payments applied to earlier
  * snapshots stay attached to them and still count toward the lineage's settlement.
+ * Canonical INITIAL_ESTIMATE lineages reject manual invoicing; their deposit-satisfaction
+ * booking policy reuses the same transaction-taking Invoice mechanics.
  */
 class IssueInvoice(
     private val transactor: Transactor,
-    private val ledger: FinancialLedger,
+    ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    private val pricingSources: FinancialDocumentPricingRepository,
+    pricingSources: FinancialDocumentPricingRepository,
 ) {
     private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
 
@@ -31,8 +33,12 @@ class IssueInvoice(
     ): InquiryFinancialDocument =
         transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, documentId, expectedVersion)
-            val invoice = ledger.issueInvoice(transaction, documentId)
-            pricingSources.copy(transaction, current.document.reference, invoice.reference)
+            if (documents.isCanonical(transaction, current)) {
+                throw CommerceFailure.IllegalTransition(
+                    "The canonical inquiry lineage is invoiced automatically when its active deposit is satisfied",
+                )
+            }
+            documents.invoice(transaction, current)
             documents.describeLocked(transaction, current.inquiryId, documentId)
         }
 }

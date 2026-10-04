@@ -45,10 +45,13 @@ import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiryForm
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
+import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.PublicInquiryPricing
+import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
 import io.github.castab.fionas.commerce.offering.FionasPricing
@@ -148,6 +151,9 @@ fun fionaApplication(
             val ledger = context.financialLedger
             val documentOwners = JdbiInquiryFinancialDocumentRepository()
             val pricingSources = JdbiFinancialDocumentPricingRepository()
+            val fulfillment = JdbiInquiryFulfillmentRepository()
+            val lifecycle = ReadInquiryLifecycle(ledger, documentOwners, fulfillment)
+            val manageFulfillment = ManageInquiryFulfillment(context.transactor, inquiries, documentOwners, ledger, fulfillment, clock)
             val materialize = MaterializeInquiryFinancialDocument(ledger, documentOwners, clock)
             val createDocument =
                 CreateInquiryFinancialDocument(
@@ -172,7 +178,9 @@ fun fionaApplication(
                         materialize,
                     )::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
-                    getInquiry = GetInquiry(context.transactor, customers, inquiries)::invoke,
+                    getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)::invoke,
+                    markInquiryServed = manageFulfillment::markServed,
+                    closeInquiry = manageFulfillment::close,
                     getInquiryForm = GetInquiryForm(
                         GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)::invoke,
                     )::invoke,
