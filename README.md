@@ -94,6 +94,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
 | `POST /inquiries/{inquiryId}/communications/acknowledge` | `fionas.communications.acknowledge` | Record explicit customer-email acknowledgement; repeated calls return `204`. |
 | `GET /staff/dashboard` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | One coherent snapshot of operational counts and enriched staff work queues. USER sessions and SERVICE tokens are supported. |
+| `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
 
 The server-side web frontend (`fionas-web`, or a future BFF) calls `GET /inquiry-form`,
 `POST /estimate-preview`, and `POST /inquiries` as a SERVICE principal, with
@@ -1047,6 +1048,25 @@ These staff-created lineages are RELATED and never drive inquiry lifecycle. The 
 persistence operation.
 
 ### Inquiry lifecycle and fulfillment
+
+`GET /staff/requests/{inquiryId}` (`readStaffRequest`) returns exactly two members:
+`inquiry`, using the existing `InquiryResponse`, and `financial`, using the existing
+`FinancialDocumentResponse`. One unlocked REPEATABLE READ snapshot covers the durable
+customer, inquiry message/event facts, pinned requested pricing inputs, canonical lifecycle,
+and current immutable financial version/lines/totals/currency. `financial.reconciliation`
+is always present and describes current derived settlement. It selects only
+the explicit `INITIAL_ESTIMATE` relationship; `RELATED` lineages are excluded. Missing or
+inconsistent canonical/customer data fails with generic `500 internal_failure`.
+
+This is a derived read projection with no duplicate persistence. Inquiry pricing inputs
+describe customer intent; financial facts remain authoritative and require no catalog read
+or repricing. Both `fionas.inquiries.read` and `commerce.financial-document.read` are required
+for USER sessions or SERVICE tokens. Safe GET requires no trusted Origin and successful
+responses use `Cache-Control: no-store`. The returned `financial.id`, `financial.version`,
+and `financial.stage` let staff issue the reviewed Estimate through the existing
+`POST /financial-documents/{documentId}/quote` with `expectedVersion`; stale versions still
+conflict and require reload. Reading never issues/sends a Quote or records communication.
+Standalone inquiry and financial endpoints remain supported with unchanged JSON contracts.
 
 Staff `GET /inquiries/{inquiryId}` includes `lifecycle`: canonical `documentId`, projected
 `stage`, and optional `served`/`closed` facts. Each fact has `occurredAt`, `principalKind`
@@ -2099,6 +2119,7 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `InquiryLifecycleSpec` | Canonical projection; deposit booking by payment, allocation and activation/replacement; RELATED isolation; manual canonical rejection; metadata preservation; triggering mutations rolling back with Invoice failure; forced concurrent payments; refund stability; served/closed provenance, exact-zero closeout and change orders |
 | `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; three overlapping attention queues and exact onset/UUID ordering; durable-order clearing/provenance with both PostgreSQL contention directions; SQL/pure projection parity and 1,800-row reduction; EXACT/FROM qualifiers; stale-quote boundaries, explicit application event-zone/DST boundaries and invalid configuration, exact balance signs/scales; ten set-based SQL reads for one/many inquiries; concurrent financial/enrichment/communication snapshot coherence; integrity failures; live USER/SERVICE permissions and acknowledgement; final reason/schema shape and no-store |
 | `InquiryLifecycleRoutesSpec` | Detail and explicit actions through the full handler; USER/SERVICE provenance, live manage permission, authentication, Origin policy, malformed/missing inquiries, repeated transitions and no arbitrary PATCH |
+| `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after Quote issuance, RELATED exclusion, strict integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, unchanged nested DTO contracts, both live USER/SERVICE read permissions, no-store and existing Quote concurrency input |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
 | `InquiryIdempotencyRoutesSpec` | Full-handler replay with exact receipts, no second inquiry/Estimate/association; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |

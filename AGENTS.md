@@ -1297,6 +1297,23 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
 
 ## Deposit requirements and bulk financial lineages
 
+- `ReadStaffRequest` is a derived, read-only application projection in `staff`, not a new
+  aggregate or persisted workspace. `GET /staff/requests/{inquiryId}` (`readStaffRequest`)
+  returns `{inquiry: InquiryResponse, financial: FinancialDocumentResponse}` through shared
+  HTTP mappings. One unlocked REPEATABLE READ transaction composes the transaction-taking
+  cores of `GetInquiry` and `GetFinancialDocument`. The lifecycle's explicit INITIAL_ESTIMATE
+  relationship selects the canonical lineage; RELATED lineages never participate. Financial
+  ownership and lifecycle document identity must agree. Unknown inquiries are 404; missing
+  canonical/customer data or disagreement fails internally, never as nullable financial state.
+  Requested pricing inputs remain pinned inquiry intent; current immutable lines, totals,
+  version and current derived reconciliation come from the runtime ledger without catalog
+  access or repricing. `financial.reconciliation` is always present on this endpoint.
+  BOTH `fionas.inquiries.read` and `commerce.financial-document.read` are required through the
+  existing USER/SERVICE authentication. Safe GET requires no trusted Origin; success is no-store.
+  `financial.id` and `financial.version` supply the existing Quote transition's documentId and
+  expectedVersion. Reads never issue/send Quotes or record communication. Existing standalone
+  inquiry and financial reads and Quote concurrency semantics remain first-class.
+
 - `ReadInquiryOperationalStates` derives the complete operational population in one unlocked
   REPEATABLE READ transaction: `InquiryRepository.ids` checks population completeness,
   `InquiryFinancialDocumentRepository.initialEstimates` reads only canonical relationships,
@@ -1486,7 +1503,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...inquiry` | `Inquiry` and its values/repositories; submission key, canonical fingerprint and transaction-bound submission repository; requested pricing inputs/history; lifecycle projection, fulfillment repository and explicit service/closeout; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries`, public eligibility/pricing and the customer form's `InquiryForm` values/`GetInquiryForm` adapter |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), the persisted pricing-inputs JSON (`PersistedPricingInputs.kt`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
 | `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
-| `...staff` | Fiona's credential persistence, password verification, permission definition, first-admin bootstrap, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
+| `...staff` | Fiona's credential persistence, password verification, permission definition, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
@@ -1713,6 +1730,11 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
   database reduction. Keep `DashboardEventCalendarSpec` application composition with a UTC
   Clock, default/alternate event zones, local midnight and DST boundaries, and invalid
   configuration. Dashboard amount qualifiers need operation and HTTP/OpenAPI coverage.
+- Keep `StaffRequestSpec` and `StaffRequestRoutesSpec`: canonical-only detail, customer/event
+  intent, Quote evolution, integrity errors, shared transaction identity and paused-snapshot
+  coherence during concurrent Quote/payment commits, nested response parity, USER/SERVICE
+  permission intersection, safe GET Origin behavior, and no-store. OpenAPI must describe the
+  mounted request route and reuse the existing inquiry and financial schemas.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
 - Node.js 20 or newer must be on PATH for `ReplaceCatalogSpec`, which runs the actual
   catalog replacement/payment scripts against a started test runtime and throwaway PostgreSQL. CI provisions

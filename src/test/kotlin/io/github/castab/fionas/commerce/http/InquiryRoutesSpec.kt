@@ -1,12 +1,25 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.runtime.http.AccessControl
+import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.authentication
+import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.RoleKey
+import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.inquiry.GetInquiry
+import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TOPPINGS
@@ -15,6 +28,7 @@ import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.asFionasWeb
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.withBearer
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -31,10 +45,12 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.http4k.contract.contract
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.core.then
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -373,6 +389,53 @@ class InquiryRoutesSpec :
             application.adminGet("/inquiries/not-a-uuid").let {
                 it.status shouldBe Status.BAD_REQUEST
                 it.error() shouldBe ErrorResponse("malformed_request", "Malformed request: path 'inquiryId'")
+            }
+        }
+
+        test("a present inquiry with a missing runtime canonical lineage returns a generic internal failure") {
+            val id = post(inquiryBody("missing-lineage-${UUID.randomUUID()}@example.com")).receipt().id
+            application.adminGet("/inquiries/$id").status shouldBe Status.OK
+            // Simulate a dangling canonical lookup at Fiona's repository seam, keeping the real FK intact.
+            val absentDocument = UUID.randomUUID()
+            val associations =
+                object : InquiryFinancialDocumentRepository by JdbiInquiryFinancialDocumentRepository() {
+                    override fun initialEstimateOf(
+                        transaction: Transaction,
+                        inquiryId: InquiryId,
+                    ): UUID = absentDocument
+                }
+            val read =
+                GetInquiry(
+                    application.transactor,
+                    JdbiCustomerRepository(),
+                    JdbiInquiryRepository(),
+                    ReadInquiryLifecycle(application.context.financialLedger, associations, JdbiInquiryFulfillmentRepository()),
+                )
+            val handler =
+                CommerceErrorHandling.then(
+                    contract {
+                        renderer = fionaOpenApi("test")
+                        routes +=
+                            getInquiryRoute(
+                                read::invoke,
+                                AccessControl(
+                                    authentication(ServiceAccessTokenAuthenticator(application.context.serviceAccessTokens)),
+                                    application.authorization,
+                                ),
+                            )
+                    },
+                )
+            val service = application.provisionService("inquiry-integrity-reader", setOf(FionaPermissions.InquiriesRead))
+            val token = application.serviceToken(service)
+            val response = handler(Request(Method.GET, "/inquiries/$id").withBearer(token))
+            response.status shouldBe Status.INTERNAL_SERVER_ERROR
+            Json.parseToJsonElement(response.bodyString()) shouldBe
+                Json.parseToJsonElement("""{"code":"internal_failure","message":"The request could not be completed"}""")
+
+            val unknown = UUID.randomUUID()
+            handler(Request(Method.GET, "/inquiries/$unknown").withBearer(token)).let {
+                it.status shouldBe Status.NOT_FOUND
+                it.error() shouldBe ErrorResponse("not_found", "Inquiry $unknown was not found")
             }
         }
 

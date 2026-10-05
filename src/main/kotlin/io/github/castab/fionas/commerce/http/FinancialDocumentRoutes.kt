@@ -1,11 +1,8 @@
 package io.github.castab.fionas.commerce.http
 
-import io.github.castab.commerce.financial.FinancialDocument
-import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.ExternalPaymentReference
 import io.github.castab.commerce.payment.ExternalRefundReference
-import io.github.castab.commerce.payment.FinancialDocumentReconciliation
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.payment.PaymentReconciliation
 import io.github.castab.commerce.payment.PaymentRecord
@@ -21,7 +18,6 @@ import io.github.castab.fionas.commerce.financial.AllocatedPayment
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
-import io.github.castab.fionas.commerce.financial.PricedSnapshot
 import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
@@ -675,7 +671,7 @@ private fun exampleDocument(
 
 private fun unpaid(total: String) = DocumentReconciliation("0.00", "0.00", total, "USD")
 
-private val exampleEstimate = exampleDocument(1, "ESTIMATE", 75, unpaid("681.25"))
+internal val exampleEstimate = exampleDocument(1, "ESTIMATE", 75, unpaid("681.25"))
 private val exampleChangedEstimate = exampleDocument(2, "ESTIMATE", 100, unpaid("825.00"))
 private val exampleQuote = exampleDocument(3, "QUOTE", 100, unpaid("825.00"))
 private val exampleInvoice = exampleDocument(4, "INVOICE", 100, DocumentReconciliation("300.00", "300.00", "525.00", "USD"))
@@ -1506,64 +1502,8 @@ private fun allocationDocumentId(value: String): UUID =
         throw LensFailure(Invalid(allocationDocumentIdBodyMeta), cause = e)
     }
 
-private fun InquiryFinancialDocument.toResponse() = latest.toResponse(inquiryId, reconciliation)
-
 private fun InquiryFinancialDocumentHistory.toResponse() =
     FinancialDocumentHistoryResponse(documentId.toString(), inquiryId.value.toString(), versions.map { it.toResponse(inquiryId, null) })
-
-private fun PricedSnapshot.toResponse(
-    inquiryId: InquiryId,
-    reconciliation: FinancialDocumentReconciliation?,
-) = FinancialDocumentResponse(
-    id = document.id.toString(),
-    version = document.version.number,
-    createdAt = createdAt.toString(),
-    previousVersion = document.previousVersion?.number,
-    stage =
-        when (document) {
-            is FinancialDocument.Estimate -> "ESTIMATE"
-            is FinancialDocument.Quote -> "QUOTE"
-            is FinancialDocument.Invoice -> "INVOICE"
-        },
-    inquiryId = inquiryId.value.toString(),
-    pricing = pricing?.toResponse(),
-    lines = document.lineItems.map { it.toResponse() },
-    subtotal = document.subtotal.decimal(),
-    taxAmount = document.taxAmount.decimal(),
-    total = document.total.decimal(),
-    currency = document.currency.currencyCode,
-    reconciliation = reconciliation?.toResponse(),
-)
-
-private fun FionasPricingInputs.toResponse() =
-    DocumentPricing(
-        catalogRevision = catalogRevision.number,
-        guestCount = context.guestCount,
-        guestCountIsMinimum = context.guestCountIsMinimum,
-        durationMinutes = Math.toIntExact(context.duration.toMinutes()),
-        selections = selections.categories.map { block -> PricingSelection(block.category.value, block.offerings.map { it.value }) },
-    )
-
-private fun LineItem.toResponse() =
-    FinancialDocumentLine(
-        id = id.toString(),
-        description = description,
-        subDescription = subDescription,
-        quantity = quantity?.stripTrailingZeros()?.toPlainString(),
-        unitPrice = price.decimal(),
-        subtotal = subtotal.decimal(),
-        taxAmount = taxAmount.decimal(),
-        total = total.decimal(),
-        currency = currency.currencyCode,
-    )
-
-private fun FinancialDocumentReconciliation.toResponse() =
-    DocumentReconciliation(
-        grossAllocated = grossAllocated.decimal(),
-        netApplied = netApplied.decimal(),
-        balance = balance.decimal(),
-        currency = currency.currencyCode,
-    )
 
 private fun RecordedPayment.toResponse() =
     RecordedPaymentResponse(

@@ -23,7 +23,6 @@ import io.github.castab.fionas.commerce.inquiry.InquirySummary
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ZipCode
 import io.github.castab.fionas.commerce.offering.CatalogRevisionStale
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
@@ -259,7 +258,7 @@ private val inquiryListResponse = jsonBody(InquiryListResponse.serializer())
 
 // A plain string for the contract: a contract treats a path value its lens rejects as an
 // unmatched route (404), while an id that is not a UUID is a malformed request (400).
-private val inquiryIdPath =
+internal val inquiryDetailIdPath =
     Path.of("inquiryId", "The inquiry's id.", mapOf("schema" to mapOf("format" to "uuid")))
 
 private val limitQuery =
@@ -301,7 +300,7 @@ private val exampleRequest =
     )
 private val exampleReceipt =
     InquiryReceiptResponse(id = "c755f7cd-1e28-4c75-a85f-d066ede7387d", createdAt = "2026-09-26T21:19:39.321012Z")
-private val exampleInquiry =
+internal val exampleInquiry =
     InquiryResponse(
         lifecycle = InquiryLifecycleResponse("aec8f5a3-9d32-470b-a519-55b17f0cfb27", InquiryStageResponse.REQUESTED),
         id = "c755f7cd-1e28-4c75-a85f-d066ede7387d",
@@ -518,7 +517,7 @@ fun getInquiryRoute(
     getInquiry: (InquiryId) -> InquiryDetails,
     access: AccessControl,
 ): ContractRoute =
-    "/inquiries" / inquiryIdPath meta {
+    "/inquiries" / inquiryDetailIdPath meta {
         operationId = "getInquiry"
         summary = "Read an inquiry"
         description =
@@ -542,11 +541,11 @@ fun getInquiryRoute(
     }
 
 /** The id in the path segment; one that is not a UUID is reported as the unreadable path value it is. */
-private fun inquiryId(segment: String): InquiryId =
+internal fun inquiryId(segment: String): InquiryId =
     try {
         InquiryId(UUID.fromString(segment))
     } catch (e: IllegalArgumentException) {
-        throw LensFailure(Invalid(inquiryIdPath.meta), cause = e)
+        throw LensFailure(Invalid(inquiryDetailIdPath.meta), cause = e)
     }
 
 /*
@@ -565,30 +564,6 @@ private fun position(cursor: String): InquiryListPosition =
     } catch (e: DateTimeParseException) {
         throw LensFailure(Invalid(cursorQuery.meta), cause = e)
     }
-
-private fun InquiryDetails.toResponse() =
-    InquiryResponse(
-        lifecycle = lifecycle.toResponse(),
-        id = inquiry.id.value.toString(),
-        customerId = customer.id.value.toString(),
-        name = customer.name.value,
-        email = customer.email.value,
-        message = inquiry.message?.value,
-        createdAt = inquiry.createdAt.toString(),
-        pricingInputs = pricingInputs.toResponse(),
-        zipCode = inquiry.zipCode.value,
-        eventDate = inquiry.eventDate.value.toString(),
-        eventType = InquiryEventType.valueOf(inquiry.eventType.name),
-    )
-
-private fun FionasPricingInputs.toResponse() =
-    InquiryRequestedPricing(
-        catalogRevision = catalogRevision.number,
-        guestCount = context.guestCount,
-        guestCountIsMinimum = context.guestCountIsMinimum,
-        durationMinutes = Math.toIntExact(context.duration.toMinutes()),
-        selections = selections.categories.map { block -> PricingSelection(block.category.value, block.offerings.map { it.value }) },
-    )
 
 private fun InquiryPage.toResponse() =
     InquiryListResponse(
