@@ -1098,6 +1098,17 @@ overpayment both prevent closure; equality uses exact decimal semantics. There i
 automatic close, date-driven progression, unserve or reopen. Later ledger mutations after
 closure remain allowed. Impossible fulfillment before a canonical Invoice fails internally.
 
+`ReadInquiryOperationalStates` provides an application-only operational snapshot of all
+inquiries. Set-based canonical association, runtime financial lineage and fulfillment reads
+share one unlocked REPEATABLE READ transaction; an additional inquiry-ID read checks that
+every inquiry has its canonical relationship. Missing relationships fail instead of omitting
+inquiries. Each state retains the runtime's authoritative `FinancialLineageView` and uses
+`InquiryLifecycle.project`. Pure counts classify New as REQUESTED, Quoted as QUOTED,
+Booked as BOOKED or SERVED, and Needs closing as SERVED with an exactly-zero current
+Invoice balance, independent of decimal scale. Booked and Needs closing overlap; CLOSED
+contributes to neither. Event dates and deposit satisfaction do not affect these counts.
+Operational states and counts are never persisted; this read introduces no HTTP endpoint.
+
 The responsibilities are split three ways:
 
 ```text

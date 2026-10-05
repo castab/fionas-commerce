@@ -139,11 +139,15 @@ class ArchitectureSpec :
             val approval = File(mainSources, "financial/SetDepositRequirement.kt").codeWithoutComments()
             Regex("inTransaction").findAll(approval).count() shouldBe 1
             Regex("bookIfDepositSatisfied").findAll(approval).count() shouldBe 1
+            val operational = File(mainSources, "inquiry/ReadInquiryOperationalStates.kt").codeWithoutComments()
+            Regex("inTransaction").findAll(operational).count() shouldBe 1
+            operational.contains("inTransaction(TransactionIsolation.REPEATABLE_READ)") shouldBe true
             sources()
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
+                    "inquiry/ReadInquiryOperationalStates.kt: inTransaction",
                     "inquiry/ManageInquiryFulfillment.kt: inTransaction",
                     "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
