@@ -1351,8 +1351,8 @@ Clearing follows record order; quote inactivity follows actual email `occurredAt
 acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when
 its actual email time leaves the Quote stale. The `(inquiry_id, recorded_order)` index
 includes `kind` and `occurred_at` for the aggregate read.
-Communication-kind clearing and quote-activity semantics use exhaustive Kotlin `when`
-expressions without `else`; every new kind requires explicit decisions for both, with SQL
+Communication-kind clearing, quote-activity and principal-provenance semantics use exhaustive Kotlin `when`
+expressions without `else`; every new kind requires explicit decisions for all three, with SQL
 kind lists kept explicit and verified against the pure projection.
 `RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
 No provider/public webhook, email bodies, attachments, delivery tracking, notifications,

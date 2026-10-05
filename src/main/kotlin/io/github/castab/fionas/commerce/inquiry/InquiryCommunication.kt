@@ -29,6 +29,13 @@ enum class InquiryCommunicationKind {
                 CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT -> true
                 STAFF_ACKNOWLEDGED -> false
             }
+
+    val requiresActingPrincipal: Boolean
+        get() =
+            when (this) {
+                CUSTOMER_EMAIL_RECEIVED -> false
+                STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED -> true
+            }
 }
 
 /** Append-only activity facts. No email content, provider identity or delivery inference. */
@@ -41,7 +48,7 @@ data class InquiryCommunication(
 ) {
     init {
         require(occurredAt == occurredAt.truncatedTo(ChronoUnit.MICROS)) { "Communication timestamp must have microsecond precision" }
-        require((kind == InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED) == (principalId == null)) {
+        require(kind.requiresActingPrincipal == (principalId != null)) {
             "Only staff activity has acting principal provenance"
         }
     }

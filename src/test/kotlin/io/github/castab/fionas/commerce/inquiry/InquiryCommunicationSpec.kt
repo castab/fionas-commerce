@@ -37,12 +37,21 @@ class InquiryCommunicationSpec :
             order: Long = 1,
         ) = recorded(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, at, order)
 
-        test("every communication kind explicitly defines attention clearing and quote activity") {
-            InquiryCommunicationKind.entries.map { Triple(it, it.clearsCustomerAttention, it.contributesToQuoteActivity) } shouldBe
+        test("every communication kind explicitly defines attention clearing, quote activity and principal provenance") {
+            data class Semantics(
+                val kind: InquiryCommunicationKind,
+                val clears: Boolean,
+                val quoteActivity: Boolean,
+                val requiresPrincipal: Boolean,
+            )
+
+            InquiryCommunicationKind.entries.map {
+                Semantics(it, it.clearsCustomerAttention, it.contributesToQuoteActivity, it.requiresActingPrincipal)
+            } shouldBe
                 listOf(
-                    Triple(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, false, true),
-                    Triple(InquiryCommunicationKind.STAFF_EMAIL_SENT, true, true),
-                    Triple(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, true, false),
+                    Semantics(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, false, true, false),
+                    Semantics(InquiryCommunicationKind.STAFF_EMAIL_SENT, true, true, true),
+                    Semantics(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, true, false, true),
                 )
         }
 
@@ -76,6 +85,9 @@ class InquiryCommunicationSpec :
             }
             shouldThrow<IllegalArgumentException> {
                 fact(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, monday).copy(principalId = null)
+            }
+            shouldThrow<IllegalArgumentException> {
+                fact(InquiryCommunicationKind.STAFF_EMAIL_SENT, monday).copy(principalId = null)
             }
             shouldThrow<IllegalArgumentException> { fact(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, monday.plusNanos(1)) }
         }
