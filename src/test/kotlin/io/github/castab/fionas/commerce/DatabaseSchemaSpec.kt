@@ -6,6 +6,9 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.TestDatabase
+import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.createInquiry
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContain
@@ -13,6 +16,7 @@ import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldStartWith
+import java.util.UUID
 
 /** The database shape fionas-commerce ends up with after commerce-runtime's migration phase. */
 class DatabaseSchemaSpec :
@@ -47,6 +51,7 @@ class DatabaseSchemaSpec :
                     "customers",
                     "inquiries",
                     "inquiry_fulfillment",
+                    "inquiry_communications",
                     "inquiry_submissions",
                     "user_credentials",
                     "inquiry_financial_documents",
@@ -134,6 +139,68 @@ class DatabaseSchemaSpec :
             "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.$table'::regclass " +
                 "AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%$column%'",
         )
+
+        test("communication facts have strict kind/provenance checks, microsecond time, inquiry FK and bulk-read index") {
+            val database = application.database
+            database.foreignKeys("inquiry_communications") shouldContainExactly listOf("inquiry_id → fionas.inquiries(id)")
+            database.columns(
+                "inquiry_communications",
+                "id",
+                "inquiry_id",
+                "kind",
+                "occurred_at",
+                "principal_kind",
+                "principal_id",
+                "recorded_order",
+            ) shouldContainExactly
+                listOf(
+                    "id NO uuid",
+                    "inquiry_id NO uuid",
+                    "kind NO text",
+                    "occurred_at NO timestamp with time zone",
+                    "principal_id YES uuid",
+                    "principal_kind YES text",
+                    "recorded_order NO bigint",
+                )
+            database.strings(
+                "SELECT datetime_precision::text FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                    "AND table_name = 'inquiry_communications' AND column_name = 'occurred_at'",
+            ) shouldContainExactly listOf("6")
+            database.strings(
+                "SELECT is_identity || ':' || identity_generation FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                    "AND table_name = 'inquiry_communications' AND column_name = 'recorded_order'",
+            ) shouldContainExactly listOf("YES:ALWAYS")
+            database.strings(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas' " +
+                    "AND indexname = 'inquiry_communications_inquiry_order_idx'",
+            ) shouldContainExactly
+                listOf(
+                    "CREATE INDEX inquiry_communications_inquiry_order_idx ON fionas.inquiry_communications USING btree (inquiry_id, recorded_order) INCLUDE (kind, occurred_at)",
+                )
+            application.createAcceptanceCatalog()
+            val inquiry = application.createInquiry()
+            val principal =
+                application.authorization
+                    .findUserByUsername("admin")!!
+                    .id.value
+
+            fun insert(
+                id: String,
+                kind: String,
+                actorKind: String,
+                actor: String,
+            ) = database.execute(
+                "INSERT INTO fionas.inquiry_communications (id, inquiry_id, kind, occurred_at, principal_kind, principal_id) " +
+                    "VALUES ('${UUID.randomUUID()}', '$id', '$kind', now(), $actorKind, $actor)",
+            )
+            shouldThrow<Exception> { insert(UUID.randomUUID().toString(), "CUSTOMER_EMAIL_RECEIVED", "NULL", "NULL") }
+            shouldThrow<Exception> { insert(inquiry, "UNKNOWN", "NULL", "NULL") }
+            shouldThrow<Exception> { insert(inquiry, "STAFF_ACKNOWLEDGED", "NULL", "NULL") }
+            shouldThrow<Exception> { insert(inquiry, "STAFF_EMAIL_SENT", "'USER'", "NULL") }
+            shouldThrow<Exception> { insert(inquiry, "STAFF_EMAIL_SENT", "'OTHER'", "'$principal'") }
+            shouldThrow<Exception> { insert(inquiry, "CUSTOMER_EMAIL_RECEIVED", "'USER'", "'$principal'") }
+            database.count("fionas.inquiry_communications") shouldBe 0
+        }
 
         val obsoletePricingTables =
             listOf(

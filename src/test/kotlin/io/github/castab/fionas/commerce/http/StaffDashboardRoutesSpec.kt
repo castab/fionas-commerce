@@ -3,12 +3,18 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
+import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
+import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.communicationHistory
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import kotlinx.serialization.json.Json
@@ -19,6 +25,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
+import java.util.UUID
 
 class StaffDashboardRoutesSpec :
     FunSpec({
@@ -29,7 +36,7 @@ class StaffDashboardRoutesSpec :
         beforeTest { app = TestApplication.create() }
         afterTest { app.close() }
 
-        test("empty dashboard has the exact availability shape, one microsecond timestamp, and no-store") {
+        test("empty dashboard has the final three queues, one microsecond timestamp, and no-store") {
             val response = app.adminGet(path)
             response.status shouldBe Status.OK
             response.header("Cache-Control") shouldBe "no-store"
@@ -38,14 +45,10 @@ class StaffDashboardRoutesSpec :
             json.getValue("asOf") shouldBe JsonPrimitive(STORED_INSTANT.toString())
             json.getValue("summary").jsonObject shouldBe Json.parseToJsonElement("""{"new":0,"quoted":0,"booked":0,"needsClosing":0}""")
             val queues = json.getValue("workQueue").jsonObject
-            queues.keys shouldBe setOf("needsQuote", "awaitingQuoteReply", "needsClosing", "needsReply", "needsResolution")
-            listOf("needsQuote", "awaitingQuoteReply", "needsClosing").forEach {
-                queues.getValue(it).jsonObject shouldBe Json.parseToJsonElement("""{"available":true,"items":[]}""")
+            queues.keys shouldBe setOf("needsReply", "needsQuote", "needsResolution")
+            queues.values.forEach {
+                it.jsonObject shouldBe Json.parseToJsonElement("""{"items":[]}""")
             }
-            queues.getValue("needsReply") shouldBe
-                Json.parseToJsonElement("""{"available":false,"items":[],"unavailableReason":"COMMUNICATIONS_NOT_IMPLEMENTED"}""")
-            queues.getValue("needsResolution") shouldBe
-                Json.parseToJsonElement("""{"available":false,"items":[],"unavailableReason":"RESOLUTION_POLICY_NOT_DEFINED"}""")
         }
 
         test("both live permissions gate USER and SERVICE before evaluation and retain session precedence") {
@@ -125,6 +128,7 @@ class StaffDashboardRoutesSpec :
             requested.version shouldBe 1
             requested.financialStage shouldBe "ESTIMATE"
             requested.total shouldBe "681.25"
+            requested.totalQualifier shouldBe DashboardTotalQualifierResponse.EXACT
             requested.balance shouldBe "681.25"
             requested.currency shouldBe "USD"
             requested.inquiryCreatedAt shouldBe STORED_INSTANT.toString()
@@ -149,18 +153,24 @@ class StaffDashboardRoutesSpec :
                     "version",
                     "financialStage",
                     "total",
+                    "totalQualifier",
                     "balance",
                     "currency",
                     "inquiryCreatedAt",
                     "latestDocumentVersionAt",
+                    "attentionSince",
+                    "reasons",
                 )
             app.adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
+            RecordInquiryCommunication(app.transactor, JdbiInquiryCommunicationRepository(), testClock)
+                .customerEmailReceived(InquiryId(UUID.fromString(id)), STORED_INSTANT)
             val quote =
                 read()
-                    .workQueue.awaitingQuoteReply.items
+                    .workQueue.needsReply.items
                     .single()
             quote.stage shouldBe InquiryStageResponse.QUOTED
             quote.financialStage shouldBe "QUOTE"
+            quote.totalQualifier shouldBe DashboardTotalQualifierResponse.EXACT
             quote.version shouldBe 2
             read().workQueue.needsQuote.items shouldBe emptyList()
             quote.customerId shouldBe requested.customerId
@@ -180,6 +190,18 @@ class StaffDashboardRoutesSpec :
                 .jsonPrimitive.content shouldBe "internal_failure"
             failure.bodyString().contains("Dashboard") shouldBe false
             app.database.execute("UPDATE fionas.customers SET name = 'Jane Doe'")
+            val storedPricing = app.database.strings("SELECT pricing_inputs::text FROM fionas.inquiries WHERE id = '$id'").single()
+            app.database.execute("UPDATE fionas.inquiries SET pricing_inputs = '{\"corrupt\":true}'::jsonb")
+            val corruptPricing = app.adminGet(path)
+            corruptPricing.status shouldBe Status.INTERNAL_SERVER_ERROR
+            corruptPricing.bodyString().contains("pricing_inputs") shouldBe false
+            corruptPricing.bodyString().contains("corrupt") shouldBe false
+            app.transactor.inTransaction {
+                it.handle
+                    .createUpdate("UPDATE fionas.inquiries SET pricing_inputs = CAST(:inputs AS jsonb)")
+                    .bind("inputs", storedPricing)
+                    .execute()
+            }
             val actor =
                 app.authorization
                     .findUserByUsername("admin")!!
@@ -189,5 +211,75 @@ class StaffDashboardRoutesSpec :
                     "VALUES ('$id', '${STORED_INSTANT}', 'USER', '$actor')",
             )
             app.adminGet(path).status shouldBe Status.INTERNAL_SERVER_ERROR
+        }
+
+        test("unread inbound overlaps served balance resolution; acknowledgement clears reply with USER and SERVICE provenance") {
+            app.createAcceptanceCatalog()
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
+            val document = UUID.fromString(app.initialEstimateOf(id.value.toString()))
+            app.transactor.inTransaction {
+                app.context.financialLedger.issueQuote(it, document)
+                app.context.financialLedger.issueInvoice(it, document)
+            }
+            app.adminPost("/inquiries/${id.value}/served").status shouldBe Status.OK
+            val record =
+                RecordInquiryCommunication(app.transactor, JdbiInquiryCommunicationRepository(), testClock)
+            record.customerEmailReceived(id, STORED_INSTANT.minusSeconds(3600))
+            record.customerEmailReceived(id, STORED_INSTANT.minusSeconds(60))
+
+            fun read() = CommerceJson.asA(app.adminGet(path).bodyString(), StaffDashboardResponse.serializer())
+            val before = read()
+            before.workQueue.needsReply.items
+                .single()
+                .attentionSince shouldBe STORED_INSTANT.minusSeconds(3600).toString()
+            before.workQueue.needsReply.items
+                .single()
+                .reasons shouldBe
+                listOf(StaffAttentionReasonResponse.CUSTOMER_COMMUNICATION_UNACKNOWLEDGED)
+            val balance =
+                before.workQueue.needsResolution.items
+                    .single()
+            balance.reasons shouldBe listOf(StaffAttentionReasonResponse.SERVED_WITH_BALANCE_DUE)
+            balance.attentionSince shouldBe STORED_INSTANT.toString()
+            val acknowledge = "/inquiries/${id.value}/communications/acknowledge"
+            app.http(Request(Method.POST, acknowledge)).status shouldBe Status.UNAUTHORIZED
+            val service = app.provisionService("communications", setOf(FionaPermissions.InquiriesRead))
+            val token = app.serviceToken(service)
+
+            fun bearer(target: String = acknowledge) = app.http(Request(Method.POST, target).header("Authorization", "Bearer $token"))
+            bearer().status shouldBe Status.FORBIDDEN
+            app.authorization.replaceRolePermissions(service.role, setOf(FionaPermissions.CommunicationsAcknowledge))
+            bearer("/inquiries/not-a-uuid/communications/acknowledge").status shouldBe Status.BAD_REQUEST
+            bearer("/inquiries/${UUID.randomUUID()}/communications/acknowledge").status shouldBe Status.NOT_FOUND
+            val response = bearer()
+            response.status shouldBe Status.NO_CONTENT
+            response.header("Cache-Control") shouldBe "no-store"
+            bearer().status shouldBe Status.NO_CONTENT
+            read().workQueue.needsReply.items shouldBe emptyList()
+            read()
+                .workQueue.needsResolution.items
+                .single() shouldBe balance
+            app.adminPost(acknowledge).status shouldBe Status.NO_CONTENT
+            app.http(Request(Method.POST, acknowledge).header("Cookie", app.adminCookie)).status shouldBe Status.FORBIDDEN
+            val facts = app.transactor.inTransaction { communicationHistory(it, id) }
+            facts.filter { it.activity.kind.name == "STAFF_ACKNOWLEDGED" }.map { it.activity.principalId }.toSet() shouldBe
+                setOf(service.id, app.authorization.findUserByUsername("admin")!!.id)
+            // Read operations do not append activity or mutate the ledger.
+            repeat(2) { read() }
+            app.transactor.inTransaction { communicationHistory(it, id).size } shouldBe
+                facts.size
+            record.customerEmailReceived(id, STORED_INSTANT.minusSeconds(7200))
+            read()
+                .workQueue.needsReply.items
+                .single()
+                .attentionSince shouldBe STORED_INSTANT.minusSeconds(7200).toString()
+            val cookie = app.adminCookie
+            app.authorization.replaceRolePermissions(CommerceRoles.Administrator, permissions)
+            app
+                .http(
+                    Request(Method.POST, acknowledge)
+                        .header("Cookie", cookie)
+                        .header("Origin", TEST_ORIGIN),
+                ).status shouldBe Status.FORBIDDEN
         }
     })

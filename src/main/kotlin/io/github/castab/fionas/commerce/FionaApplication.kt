@@ -45,6 +45,7 @@ import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiryForm
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
@@ -53,6 +54,7 @@ import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.PublicInquiryPricing
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
+import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
 import io.github.castab.fionas.commerce.offering.FionasPricing
@@ -69,6 +71,7 @@ import io.github.castab.fionas.commerce.staff.SetStaffPassword
 import io.github.castab.fionas.commerce.staff.StaffPasswordAuthenticator
 import org.http4k.core.then
 import java.time.Clock
+import java.time.ZoneId
 import java.util.Properties
 
 /**
@@ -82,6 +85,12 @@ const val FIONA_MIGRATION_SCHEMA = "fionas"
  * after its own. Never `db/commerce`; the runtime discovers and applies its migrations itself.
  */
 const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
+
+val FIONA_DEFAULT_EVENT_CALENDAR_ZONE: ZoneId = ZoneId.of("America/Los_Angeles")
+
+/** Event LocalDate boundaries are Fiona configuration, independent of the server timestamp Clock. */
+fun fionaEventCalendarZone(environment: Map<String, String> = System.getenv()): ZoneId =
+    environment["FIONAS_EVENT_TIME_ZONE"]?.let(ZoneId::of) ?: FIONA_DEFAULT_EVENT_CALENDAR_ZONE
 
 /**
  * Everything Fiona's contributes to commerce-runtime: the schema and location of its own
@@ -122,6 +131,7 @@ fun fionaApplication(
             ?.toSet()
             ?: emptySet(),
     loginRateLimit: LoginRateLimit = LoginRateLimit(),
+    eventCalendarZone: ZoneId = fionaEventCalendarZone(),
 ): ApplicationContributions =
     ApplicationContributions(
         migrations =
@@ -153,6 +163,7 @@ fun fionaApplication(
             val ledger = context.financialLedger
             val documentOwners = JdbiInquiryFinancialDocumentRepository()
             val pricingSources = JdbiFinancialDocumentPricingRepository()
+            val communications = JdbiInquiryCommunicationRepository()
             val fulfillment = JdbiInquiryFulfillmentRepository()
             val lifecycle = ReadInquiryLifecycle(ledger, documentOwners, fulfillment)
             val manageFulfillment = ManageInquiryFulfillment(context.transactor, inquiries, documentOwners, ledger, fulfillment, clock)
@@ -176,6 +187,8 @@ fun fionaApplication(
                         inquiries,
                         customers,
                         clock,
+                        communications,
+                        eventCalendarZone,
                     )::invoke,
                     createInquiry = CreateInquiry(
                         context.transactor,
@@ -188,6 +201,11 @@ fun fionaApplication(
                     )::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
                     getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)::invoke,
+                    acknowledgeInquiryCommunication = RecordInquiryCommunication(
+                        context.transactor,
+                        communications,
+                        clock,
+                    )::acknowledge,
                     markInquiryServed = manageFulfillment::markServed,
                     closeInquiry = manageFulfillment::close,
                     getInquiryForm = GetInquiryForm(

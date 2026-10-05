@@ -15,21 +15,23 @@ import java.util.UUID
  * pricing inputs are the row's `pricing_inputs` jsonb, in Fiona's persisted representation.
  */
 class JdbiInquiryRepository : InquiryRepository {
-    override fun findByIds(
+    override fun findRequestedByIds(
         transaction: Transaction,
         ids: Set<InquiryId>,
-    ): Map<InquiryId, Inquiry> {
+    ): Map<InquiryId, RequestedInquiry> {
         if (ids.isEmpty()) return emptyMap()
         return transaction.handle
             .createQuery(
                 """
-                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type
+                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type, pricing_inputs
                 FROM fionas.inquiries WHERE id = ANY(:ids)
                 """.trimIndent(),
             ).bindArray("ids", UUID::class.java, ids.map { it.value })
-            .map(inquiryRow)
-            .list()
-            .associateBy { it.id }
+            .map { row, context ->
+                val inquiry = inquiryRow.map(row, context)
+                RequestedInquiry(inquiry, restorePersistedPricingInputs("inquiry ${inquiry.id.value}", row.getString("pricing_inputs")))
+            }.list()
+            .associateBy { it.inquiry.id }
     }
 
     override fun ids(transaction: Transaction): Set<InquiryId> =

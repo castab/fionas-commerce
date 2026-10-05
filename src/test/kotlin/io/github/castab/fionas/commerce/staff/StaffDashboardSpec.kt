@@ -16,10 +16,17 @@ import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentReposi
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.inquiry.Inquiry
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunication
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationId
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.InquiryMilestone
 import io.github.castab.fionas.commerce.inquiry.InquiryOperationalCounts
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryStage
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
@@ -64,27 +71,28 @@ class StaffDashboardSpec :
             people: CustomerRepository = customers,
             canonical: InquiryFinancialDocumentRepository = owners,
             clock: Clock = testClock,
+            communication: InquiryCommunicationRepository = JdbiInquiryCommunicationRepository(),
         ) = ReadStaffDashboard(
             app.transactor,
             ReadInquiryOperationalStates(app.transactor, records, canonical, app.context.financialLedger, facts),
             records,
             people,
             clock,
+            communication,
+            ZoneId.of("America/Los_Angeles"),
         )
 
         beforeTest { app = TestApplication.create() }
         afterTest { app.close() }
 
-        test("empty population has zero counts, supported empty queues and explicit unavailable capability") {
+        test("empty population has zero counts and three empty attention queues") {
             val result = operation()()
             result.summary shouldBe InquiryOperationalCounts(0, 0, 0, 0)
             result.asOf shouldBe STORED_INSTANT
-            listOf(result.workQueue.needsQuote, result.workQueue.awaitingQuoteReply, result.workQueue.needsClosing).forEach {
+            listOf(result.workQueue.needsQuote, result.workQueue.needsReply, result.workQueue.needsResolution).forEach {
                 it.items shouldBe emptyList()
             }
-            result.workQueue.needsReply.reason shouldBe StaffQueueUnavailability.COMMUNICATIONS_NOT_IMPLEMENTED
-            result.workQueue.needsResolution.reason shouldBe StaffQueueUnavailability.RESOLUTION_POLICY_NOT_DEFINED
-            app.transactor.inTransaction { inquiries.findByIds(it, emptySet()) } shouldBe emptyMap()
+            app.transactor.inTransaction { inquiries.findRequestedByIds(it, emptySet()) } shouldBe emptyMap()
         }
 
         test("customer and event enrichment orders complete queues by oldest inquiry then lexical UUID including high-bit ties") {
@@ -147,9 +155,44 @@ class StaffDashboardSpec :
                 it.total shouldBe "9.375"
                 it.balance shouldBe "9.375"
             }
+            // Reply and resolution onsets deliberately invert inquiry creation ordering, with the same high-bit UUID tie.
+            val actor = app.authorization.findUserByUsername("admin")!!.id
+            app.transactor.inTransaction { transaction ->
+                records.forEach { record ->
+                    val since = if (record.id == oldest.id) STORED_INSTANT else STORED_INSTANT.minusSeconds(86400)
+                    JdbiInquiryCommunicationRepository().append(
+                        transaction,
+                        InquiryCommunication(
+                            InquiryCommunicationId(UUID.randomUUID()),
+                            record.id,
+                            InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED,
+                            since,
+                            null,
+                        ),
+                    )
+                    val document = owners.initialEstimateOf(transaction, record.id)!!
+                    app.context.financialLedger.issueQuote(transaction, document)
+                    app.context.financialLedger.issueInvoice(transaction, document)
+                    facts.serve(transaction, record.id, InquiryMilestone(since, actor))
+                }
+            }
+            val attention = operation()()
+            listOf(attention.workQueue.needsReply, attention.workQueue.needsResolution).forEach { queue ->
+                queue.items.map { it.inquiryId.value.toString() } shouldBe listOf(tied[1], tied[0], oldest.id.value.toString())
+                queue.items.map { it.attentionSince } shouldBe
+                    listOf(
+                        STORED_INSTANT.minusSeconds(86400),
+                        STORED_INSTANT.minusSeconds(86400),
+                        STORED_INSTANT,
+                    )
+                queue.items
+                    .map { it.inquiryId }
+                    .toSet()
+                    .size shouldBe 3
+            }
         }
 
-        test("one and twenty inquiries use nine unlocked SQL statements, set enrichment and one Clock evaluation after first read") {
+        test("one and twenty inquiries use ten unlocked SQL statements, set enrichment and one Clock evaluation after first read") {
             app.createAcceptanceCatalog()
             listOf(1, 20).forEach { size ->
                 repeat(if (size == 1) 1 else 19) { app.createInquiry("shared@example.com") }
@@ -157,6 +200,7 @@ class StaffDashboardSpec :
                 var observed: Transaction? = null
                 var inquiryCalls = 0
                 var customerCalls = 0
+                var communicationCalls = 0
                 var clockCalls = 0
                 val records =
                     object : InquiryRepository by inquiries {
@@ -174,15 +218,15 @@ class StaffDashboardSpec :
                             return inquiries.ids(transaction)
                         }
 
-                        override fun findByIds(
+                        override fun findRequestedByIds(
                             transaction: Transaction,
                             ids: Set<InquiryId>,
-                        ): Map<InquiryId, Inquiry> {
+                        ): Map<InquiryId, RequestedInquiry> {
                             transaction shouldBe observed
                             inquiryCalls++
                             ids.size shouldBe size
                             return inquiries
-                                .findByIds(transaction, ids)
+                                .findRequestedByIds(transaction, ids)
                                 .entries
                                 .reversed()
                                 .associate { it.toPair() }
@@ -228,15 +272,29 @@ class StaffDashboardSpec :
                             return TEST_INSTANT
                         }
                     }
-                val result = operation(records, people, clock = clock)()
+                val communication =
+                    object : InquiryCommunicationRepository by JdbiInquiryCommunicationRepository() {
+                        override fun attentionFor(
+                            transaction: Transaction,
+                            inquiryIds: Collection<InquiryId>,
+                        ): Map<InquiryId, InquiryCommunicationAttention> {
+                            transaction shouldBe observed
+                            inquiryIds.size shouldBe size
+                            communicationCalls++
+                            return JdbiInquiryCommunicationRepository().attentionFor(transaction, inquiryIds)
+                        }
+                    }
+                val result = operation(records, people, clock = clock, communication = communication)()
                 result.asOf shouldBe STORED_INSTANT
                 result.summary.new shouldBe size
                 result.workQueue.needsQuote.items.size shouldBe size
                 listOf(inquiryCalls, customerCalls, clockCalls) shouldBe listOf(1, 1, 1)
-                sql.size shouldBe 9
+                communicationCalls shouldBe 1
+                sql.size shouldBe 10
                 sql.none { it.contains("FOR UPDATE") || it.contains("FOR NO KEY UPDATE") } shouldBe true
                 sql.count { it.contains("FROM fionas.inquiries") } shouldBe 2
                 sql.count { it.contains("FROM fionas.customers") } shouldBe 1
+                sql.count { it.contains("FROM fionas.inquiry_communications") } shouldBe 1
             }
         }
 
@@ -246,10 +304,17 @@ class StaffDashboardSpec :
                 app.createInquiry()
                 val records =
                     object : InquiryRepository by inquiries {
-                        override fun findByIds(
+                        override fun findRequestedByIds(
                             transaction: Transaction,
                             ids: Set<InquiryId>,
-                        ): Map<InquiryId, Inquiry> = if (missing == "inquiry") emptyMap() else inquiries.findByIds(transaction, ids)
+                        ): Map<InquiryId, RequestedInquiry> =
+                            if (missing ==
+                                "inquiry"
+                            ) {
+                                emptyMap()
+                            } else {
+                                inquiries.findRequestedByIds(transaction, ids)
+                            }
                     }
                 val people =
                     object : CustomerRepository by customers {
@@ -274,6 +339,20 @@ class StaffDashboardSpec :
                 "Canonical dashboard financial data is missing"
         }
 
+        test("communication projection outside the complete population fails the whole projection") {
+            app.createAcceptanceCatalog()
+            app.createInquiry()
+            val invalid =
+                object : InquiryCommunicationRepository by JdbiInquiryCommunicationRepository() {
+                    override fun attentionFor(
+                        transaction: Transaction,
+                        inquiryIds: Collection<InquiryId>,
+                    ) = mapOf(InquiryId(UUID.randomUUID()) to InquiryCommunicationAttention(STORED_INSTANT, STORED_INSTANT))
+                }
+            shouldThrow<IllegalStateException> { operation(communication = invalid)() }.message shouldBe
+                "Dashboard communication activity is outside the operational population or corrupt"
+        }
+
         test("concurrent quote and customer/event writer cannot mix operational and enrichment snapshots") {
             app.createAcceptanceCatalog()
             val id = app.createInquiry()
@@ -282,13 +361,13 @@ class StaffDashboardSpec :
             val resume = CountDownLatch(1)
             val records =
                 object : InquiryRepository by inquiries {
-                    override fun findByIds(
+                    override fun findRequestedByIds(
                         transaction: Transaction,
                         ids: Set<InquiryId>,
-                    ): Map<InquiryId, Inquiry> {
+                    ): Map<InquiryId, RequestedInquiry> {
                         paused.countDown()
                         check(resume.await(30, TimeUnit.SECONDS))
-                        return inquiries.findByIds(transaction, ids)
+                        return inquiries.findRequestedByIds(transaction, ids)
                     }
                 }
             val reader = CompletableFuture.supplyAsync { operation(records)() }
@@ -303,14 +382,25 @@ class StaffDashboardSpec :
                                 .createUpdate(
                                     "UPDATE fionas.inquiries SET event_date = DATE '2027-01-02', event_type = 'CORPORATE'",
                                 ).execute()
+                            JdbiInquiryCommunicationRepository().append(
+                                transaction,
+                                InquiryCommunication(
+                                    InquiryCommunicationId(UUID.randomUUID()),
+                                    InquiryId(UUID.fromString(id)),
+                                    InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED,
+                                    STORED_INSTANT,
+                                    null,
+                                ),
+                            )
                         }
                     }.get(10, TimeUnit.SECONDS)
             } finally {
                 resume.countDown()
             }
+            val snapshot = reader.get(10, TimeUnit.SECONDS)
+            snapshot.workQueue.needsReply.items shouldBe emptyList()
             val old =
-                reader
-                    .get(10, TimeUnit.SECONDS)
+                snapshot
                     .workQueue.needsQuote.items
                     .single()
             old.stage shouldBe InquiryStage.REQUESTED
@@ -320,7 +410,7 @@ class StaffDashboardSpec :
             old.latestFinancialVersion.document.version shouldBe Version.INITIAL
             val current =
                 operation()()
-                    .workQueue.awaitingQuoteReply.items
+                    .workQueue.needsReply.items
                     .single()
             current.stage shouldBe InquiryStage.QUOTED
             current.customerName.value shouldBe "Changed Customer"

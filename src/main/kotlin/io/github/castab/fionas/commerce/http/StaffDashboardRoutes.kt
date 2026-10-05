@@ -44,34 +44,32 @@ data class StaffDashboardSummaryResponse(
 
 @Serializable
 data class StaffDashboardWorkQueueResponse(
-    val needsQuote: StaffWorkQueueResponse,
-    @ApiProperty(
-        description =
-            "Canonical Quote is the firm-proposal boundary; " +
-                "this is not evidence of message delivery or a communications reply queue.",
-    )
-    val awaitingQuoteReply: StaffWorkQueueResponse,
-    val needsClosing: StaffWorkQueueResponse,
     val needsReply: StaffWorkQueueResponse,
+    val needsQuote: StaffWorkQueueResponse,
     val needsResolution: StaffWorkQueueResponse,
 )
 
-/** Stable transport codes describing unimplemented business capability, never caller permissions. */
 @Serializable
-enum class StaffQueueUnavailableReason { COMMUNICATIONS_NOT_IMPLEMENTED, RESOLUTION_POLICY_NOT_DEFINED }
+enum class StaffAttentionReasonResponse {
+    CUSTOMER_COMMUNICATION_UNACKNOWLEDGED,
+    NEEDS_QUOTE,
+    QUOTE_STALE,
+    EVENT_DATE_PASSED_UNSERVED,
+    SERVED_WITH_BALANCE_DUE,
+    READY_TO_CLOSE,
+}
+
+@Serializable
+enum class DashboardTotalQualifierResponse { EXACT, FROM }
 
 @Serializable
 data class StaffWorkQueueResponse(
-    @ApiProperty(description = "True for supported queues even when empty; false for unimplemented business capability.") val available:
-        Boolean,
     @ApiProperty(
         description =
-            "All qualifying items, oldest inquiry creation time first then lexical inquiry UUID ascending; " +
-                "no cap or pagination. Not longest customer waits.",
+            "All qualifying items, attentionSince ascending then lexical inquiry UUID ascending; " +
+                "queues may overlap. No pagination.",
     )
     val items: List<StaffDashboardItemResponse>,
-    @ApiProperty(description = "Absent for available queues. Unavailable queues have no items and one stable reason code.")
-    val unavailableReason: StaffQueueUnavailableReason? = null,
 )
 
 @Serializable
@@ -86,6 +84,12 @@ data class StaffDashboardItemResponse(
     val version: Int,
     @ApiProperty(description = "Latest canonical financial stage: ESTIMATE, QUOTE, or INVOICE.") val financialStage: String,
     @ApiProperty(description = "Exact decimal current document total, in currency.") val total: String,
+    @ApiProperty(
+        description =
+            "FROM means the current Estimate is based on a minimum guest count. " +
+                "Quote and Invoice totals are EXACT. No currency formatting is implied.",
+    )
+    val totalQualifier: DashboardTotalQualifierResponse,
     @ApiProperty(description = "Exact decimal current reconciliation balance, in currency; may be negative.") val balance: String,
     @ApiProperty(description = "ISO 4217 currency of total and balance.") val currency: String,
     @ApiProperty(format = "date-time") val inquiryCreatedAt: String,
@@ -94,6 +98,9 @@ data class StaffDashboardItemResponse(
         format = "date-time",
     )
     val latestDocumentVersionAt: String,
+    @ApiProperty(description = "When this queue condition began; earliest onset when multiple reasons apply.", format = "date-time")
+    val attentionSince: String,
+    val reasons: List<StaffAttentionReasonResponse>,
     @ApiProperty(format = "date-time") val servedAt: String? = null,
 )
 
@@ -102,19 +109,13 @@ internal fun StaffDashboard.toResponse() =
         asOf.toString(),
         StaffDashboardSummaryResponse(summary.new, summary.quoted, summary.booked, summary.needsClosing),
         StaffDashboardWorkQueueResponse(
-            workQueue.needsQuote.toResponse(),
-            workQueue.awaitingQuoteReply.toResponse(),
-            workQueue.needsClosing.toResponse(),
             workQueue.needsReply.toResponse(),
+            workQueue.needsQuote.toResponse(),
             workQueue.needsResolution.toResponse(),
         ),
     )
 
-private fun StaffWorkQueue.toResponse(): StaffWorkQueueResponse =
-    when (this) {
-        is StaffWorkQueue.Available -> StaffWorkQueueResponse(true, items.map { it.toResponse() })
-        is StaffWorkQueue.Unavailable -> StaffWorkQueueResponse(false, emptyList(), StaffQueueUnavailableReason.valueOf(reason.name))
-    }
+private fun StaffWorkQueue.toResponse() = StaffWorkQueueResponse(items.map { it.toResponse() })
 
 private fun StaffDashboardItem.toResponse(): StaffDashboardItemResponse {
     val document = latestFinancialVersion.document
@@ -133,10 +134,13 @@ private fun StaffDashboardItem.toResponse(): StaffDashboardItemResponse {
             is FinancialDocument.Invoice -> "INVOICE"
         },
         document.total.decimal(),
+        DashboardTotalQualifierResponse.valueOf(totalQualifier.name),
         balance.decimal(),
         document.currency.currencyCode,
         inquiryCreatedAt.toString(),
         latestFinancialVersion.createdAt.toString(),
+        attentionSince.toString(),
+        reasons.map { StaffAttentionReasonResponse.valueOf(it.name) },
         servedAt?.toString(),
     )
 }
@@ -146,16 +150,20 @@ internal fun readStaffDashboardRoute(
     access: AccessControl,
 ): ContractRoute {
     val body = jsonBody(StaffDashboardResponse.serializer())
-    val empty = StaffWorkQueueResponse(true, emptyList())
+    val empty = StaffWorkQueueResponse(emptyList())
     return "/staff/dashboard" meta {
         operationId = "readStaffDashboard"
         summary = "Read the staff dashboard"
         description = "One coherent unlocked REPEATABLE READ snapshot of all inquiries, canonical financial facts, customers and events. " +
             "Requires BOTH `${FionaPermissions.InquiriesRead.value}` and `${CommercePermissions.FinancialDocumentRead.value}` " +
-            "for USER sessions or SERVICE tokens. Queues are oldest inquiries first, not customer wait durations. " +
-            "Needs quote = REQUESTED; awaiting quote reply = QUOTED; needs closing = SERVED with exactly zero canonical Invoice balance. " +
-            "Booked and needs closing overlap; CLOSED, positive balances and negative overpayments are excluded from needs closing. " +
-            "Needs reply and needs resolution are unavailable capabilities, independent of permissions. Reads never promote booking. " +
+            "for USER sessions or SERVICE tokens. Queues sort by attentionSince then lexical inquiry UUID and may overlap. " +
+            "Needs reply = customer email durably recorded after the latest staff reply or acknowledgement; needs quote = REQUESTED. " +
+            "Resolution reasons are QUOTE_STALE (3 days since latest Quote version or inbound/staff-sent email), " +
+            "EVENT_DATE_PASSED_UNSERVED (BOOKED after event date in Fiona's configured event calendar zone, " +
+            "default America/Los_Angeles), " +
+            "SERVED_WITH_BALANCE_DUE (positive), " +
+            "and READY_TO_CLOSE (SERVED with exactly zero canonical Invoice balance). Acknowledgement does not reset quote inactivity. " +
+            "Served resolution attention starts at served time; negative overpayment is not ready to close. Reads never promote booking. " +
             "All items are returned without pagination. Successful responses use Cache-Control: no-store."
         tags += Tag("Staff dashboard", "Fiona operational queues composed from canonical commerce facts and inquiry/customer data.")
         principalAuthentication()
@@ -170,13 +178,7 @@ internal fun readStaffDashboardRoute(
                 StaffDashboardResponse(
                     "2026-10-05T01:00:00.000001Z",
                     StaffDashboardSummaryResponse(0, 0, 0, 0),
-                    StaffDashboardWorkQueueResponse(
-                        empty,
-                        empty,
-                        empty,
-                        StaffWorkQueueResponse(false, emptyList(), StaffQueueUnavailableReason.COMMUNICATIONS_NOT_IMPLEMENTED),
-                        StaffWorkQueueResponse(false, emptyList(), StaffQueueUnavailableReason.RESOLUTION_POLICY_NOT_DEFINED),
-                    ),
+                    StaffDashboardWorkQueueResponse(empty, empty, empty),
                 ),
         )
         returningError(

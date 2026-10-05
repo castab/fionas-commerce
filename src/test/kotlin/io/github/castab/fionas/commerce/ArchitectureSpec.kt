@@ -12,9 +12,11 @@ import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRe
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.InquirySubmissionRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
@@ -107,6 +109,7 @@ class ArchitectureSpec :
                 CustomerRepository::class.java,
                 InquiryRepository::class.java,
                 InquiryFulfillmentRepository::class.java,
+                InquiryCommunicationRepository::class.java,
                 InquirySubmissionRepository::class.java,
                 CredentialRepository::class.java,
                 InquiryFinancialDocumentRepository::class.java,
@@ -123,6 +126,7 @@ class ArchitectureSpec :
                 JdbiCustomerRepository::class.java,
                 JdbiInquiryRepository::class.java,
                 JdbiInquiryFulfillmentRepository::class.java,
+                JdbiInquiryCommunicationRepository::class.java,
                 JdbiInquirySubmissionRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
@@ -146,6 +150,7 @@ class ArchitectureSpec :
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(
                     "inquiry/CreateInquiry.kt: inTransaction",
+                    "inquiry/RecordInquiryCommunication.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
                     "inquiry/ReadInquiryOperationalStates.kt: inTransaction",
                     "inquiry/ManageInquiryFulfillment.kt: inTransaction",
@@ -232,6 +237,7 @@ class ArchitectureSpec :
             val routes =
                 fionaApiRoutes(
                     FionaOperations(
+                        acknowledgeInquiryCommunication = { error("not called while rendering") },
                         readStaffDashboard = { error("not called") },
                         markInquiryServed = { error("not called") },
                         closeInquiry = { error("not called") },
@@ -521,6 +527,7 @@ class ArchitectureSpec :
                     FionaPermissions.CredentialsManage,
                     FionaPermissions.InquiriesRead,
                     FionaPermissions.InquiriesCreate,
+                    FionaPermissions.CommunicationsAcknowledge,
                     FionaPermissions.InquiriesManage,
                     FionaPermissions.InquiryFormRead,
                     FionaPermissions.EstimatePreviewCreate,

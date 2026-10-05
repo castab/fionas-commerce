@@ -1,13 +1,17 @@
 package io.github.castab.fionas.commerce.staff
 
+import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.customer.CustomerRepository
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryOperationalState
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import java.time.Clock
+import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 
 /** Composes canonical operations and complete customer/event enrichment in one unlocked snapshot. */
@@ -17,6 +21,9 @@ class ReadStaffDashboard(
     private val inquiries: InquiryRepository,
     private val customers: CustomerRepository,
     private val clock: Clock,
+    private val communications: InquiryCommunicationRepository,
+    private val eventCalendarZone: ZoneId,
+    private val policy: DashboardAttentionPolicy = DashboardAttentionPolicy(),
 ) {
     operator fun invoke(): StaffDashboard =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
@@ -29,13 +36,14 @@ class ReadStaffDashboard(
                 }
             val asOf = clock.instant().truncatedTo(ChronoUnit.MICROS)
             val ids = snapshot.states.map { it.inquiryId }.toSet()
-            val records = inquiries.findByIds(transaction, ids)
+            val requested = inquiries.findRequestedByIds(transaction, ids)
             check(
-                records.keys == ids &&
-                    records.all { (id, record) ->
-                        id == record.id
+                requested.keys == ids &&
+                    requested.all { (id, record) ->
+                        id == record.inquiry.id
                     },
             ) { "Dashboard inquiry enrichment is incomplete or corrupt" }
+            val records = requested.mapValues { it.value.inquiry }
             val customerIds = records.values.map { it.customerId }.toSet()
             val people = customers.findByIds(transaction, customerIds)
             check(
@@ -44,36 +52,63 @@ class ReadStaffDashboard(
                         id == customer.id
                     },
             ) { "Dashboard customer enrichment is incomplete or corrupt" }
-            val ordered =
-                snapshot.states.sortedWith(
-                    compareBy({ records.getValue(it.inquiryId).createdAt }, { it.inquiryId.value.toString() }),
-                )
+            val attention = communications.attentionFor(transaction, ids)
+            check(ids.containsAll(attention.keys)) {
+                "Dashboard communication activity is outside the operational population or corrupt"
+            }
 
-            fun queue(predicate: (InquiryOperationalState) -> Boolean) =
-                StaffWorkQueue.Available(
-                    ordered.filter(predicate).map { state ->
-                        val inquiry = records.getValue(state.inquiryId)
-                        val customer = people.getValue(inquiry.customerId)
-                        StaffDashboardItem(
-                            inquiry.id,
-                            customer.id,
-                            customer.name,
-                            inquiry.eventDate,
-                            inquiry.eventType,
-                            state.lifecycle.stage,
-                            state.financial.latestVersion,
-                            state.financial.reconciliation.balance,
-                            inquiry.createdAt,
-                            state.lifecycle.fulfillment
-                                ?.served
-                                ?.occurredAt,
-                        )
-                    },
+            fun communication(state: InquiryOperationalState) = attention[state.inquiryId] ?: InquiryCommunicationAttention(null, null)
+
+            fun queue(project: (InquiryOperationalState) -> StaffAttention?) =
+                StaffWorkQueue(
+                    snapshot.states
+                        .mapNotNull { state ->
+                            val reason = project(state) ?: return@mapNotNull null
+                            val inquiry = records.getValue(state.inquiryId)
+                            val customer = people.getValue(inquiry.customerId)
+                            StaffDashboardItem(
+                                inquiry.id,
+                                customer.id,
+                                customer.name,
+                                inquiry.eventDate,
+                                inquiry.eventType,
+                                state.lifecycle.stage,
+                                state.financial.latestVersion,
+                                if (state.financial.latestVersion.document is FinancialDocument.Estimate &&
+                                    requested
+                                        .getValue(inquiry.id)
+                                        .pricingInputs.context.guestCountIsMinimum
+                                ) {
+                                    DashboardTotalQualifier.FROM
+                                } else {
+                                    DashboardTotalQualifier.EXACT
+                                },
+                                state.financial.reconciliation.balance,
+                                inquiry.createdAt,
+                                state.lifecycle.fulfillment
+                                    ?.served
+                                    ?.occurredAt,
+                                reason.attentionSince,
+                                reason.reasons,
+                            )
+                        }.sortedWith(compareBy({ it.attentionSince }, { it.inquiryId.value.toString() })),
                 )
             StaffDashboard(
                 asOf,
                 snapshot.counts,
-                StaffDashboardWorkQueue(queue { it.needsQuote }, queue { it.awaitingQuoteReply }, queue { it.needsClosing }),
+                StaffDashboardWorkQueue(
+                    queue { policy.needsReply(communication(it)) },
+                    queue { policy.needsQuote(it, records.getValue(it.inquiryId).createdAt) },
+                    queue {
+                        policy.needsResolution(
+                            it,
+                            records.getValue(it.inquiryId).eventDate,
+                            communication(it),
+                            asOf,
+                            eventCalendarZone,
+                        )
+                    },
+                ),
             )
         }
 }

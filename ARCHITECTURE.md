@@ -78,6 +78,7 @@ Examples include:
 - customer contact information;
 - event or service details;
 - inquiry fulfillment and closeout facts;
+- inquiry communication activity and Fiona attention policy;
 - locations;
 - guest counts;
 - catering-specific selections or context;
@@ -472,14 +473,85 @@ READ snapshot. Financial truth remains runtime `FinancialLineageView`; lifecycle
 `InquiryLifecycle.project`. Integrity failures reject the whole dashboard. Neither counts,
 queues nor enriched financial facts are persisted, and reads never trigger booking promotion.
 
-`GET /staff/dashboard` is an application-owned HTTP projection requiring both inquiry-read
-and financial-document-read permissions through the shared live AccessControl for USER or
-SERVICE principals. Fiona classifies needsQuote, awaitingQuoteReply and needsClosing using
-the same pure predicates as operational counts. Canonical Quote is the firm-proposal boundary,
-not evidence of communication. Needs reply and Needs resolution remain explicitly unavailable
-until communications semantics and a resolution policy exist. The projection evaluates one
-Clock timestamp and returns all queue items oldest inquiry first; it invents no customer-wait
-duration or database commit watermark. It adds no new booking aggregate or workflow state.
+The dashboard exposes `asOf`, the unchanged four-count `summary`, and exactly three
+`workQueue` members: `needsReply`, `needsQuote`, `needsResolution`, each `{items: [...]}`.
+Items retain high-level customer/event and canonical financial facts, and add
+`attentionSince`, stable `reasons`, and semantic `totalQualifier`. `FROM` applies only
+to a current canonical Estimate with requested `guestCountIsMinimum=true`; exact-count
+Estimates and all Quotes/Invoices are `EXACT`. Queue membership does not change this rule.
+Clients format currency and the localized `from` label without another inquiry request.
+Every queue sorts by onset ascending then lexical inquiry UUID. Queues may overlap; each inquiry appears only once within a queue. Clients
+format durations from `asOf` and `attentionSince`; no pagination or preformatted age.
+
+- `needsReply`: CUSTOMER_COMMUNICATION_UNACKNOWLEDGED when inbound customer email is
+  durably recorded after the latest staff reply or acknowledgement's `recordedOrder`.
+  Anchor: minimum actual `occurredAt` among outstanding inbound. Earlier-recorded inbound
+  is cleared regardless of business timestamp; later-ingested backdated or equal-time
+  inbound remains outstanding. Multiple emails produce one item.
+- `needsQuote`: NEEDS_QUOTE for REQUESTED, anchored at inquiry creation. It shares the
+  operational predicate with `summary.new`, so queue size equals that count.
+- `needsResolution` aggregates every applicable reason, anchored at the earliest onset:
+  QUOTE_STALE for QUOTED at or beyond three days since the maximum of current Quote
+  version time, latest inbound email and latest staff-sent email; anchor is that maximum
+  plus three days. STAFF_ACKNOWLEDGED never resets quote inactivity. EVENT_DATE_PASSED_UNSERVED
+  for BOOKED after its event calendar day, anchored at the next day's start in Fiona's
+  explicit event calendar zone. SERVED_WITH_BALANCE_DUE for SERVED positive canonical
+  Invoice balance and READY_TO_CLOSE for SERVED exact-zero balance, both anchored at authoritative served time.
+  Negative overpayment and CLOSED qualify for neither served reason. READY_TO_CLOSE shares
+  the operational needsClosing predicate, so its item count equals `summary.needsClosing`.
+
+Fiona V13 `inquiry_communications` stores append-only source facts: activity UUID, inquiry
+FK, kind (CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED), microsecond
+`occurredAt` timestamp, database-generated positive unique BIGINT identity `recorded_order`,
+and required USER/SERVICE acting provenance for staff activity only. `occurredAt` records
+when communication happened; `recordedOrder` records durable Fiona ingestion/observation order.
+Repository appends acquire `SELECT id FROM fionas.inquiries ... FOR UPDATE` before inserting
+and allocating the identity, in the caller's transaction. The locking lookup is the sole
+inquiry existence check; a missing inquiry fails before insertion. Same-inquiry writes wait for the
+preceding commit/rollback; unrelated inquiries remain independent. Sequence gaps are allowed.
+Clearing follows record order; quote inactivity follows actual email `occurredAt`, excluding
+acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when
+its actual email time leaves the Quote stale. The `(inquiry_id, recorded_order)` index
+includes `kind` and `occurred_at` for the aggregate read.
+`RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
+No provider/public webhook, email bodies, attachments, delivery tracking, notifications,
+mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
+attention membership and resolution reasons remain pure Fiona policy, never persisted.
+
+`POST /inquiries/{inquiryId}/communications/acknowledge` (`acknowledgeInquiryCommunication`)
+requires `fionas.communications.acknowledge` through the same live AccessControl for USER
+or SERVICE, with existing unsafe-cookie Origin policy. It appends server Clock time and
+authenticated provenance, clears inbound already durably recorded before the action, and
+returns 204/no-store. Later ingestion stays outstanding regardless of `occurredAt`.
+Repeated calls succeed and append another fact, even without outstanding inbound. Unknown
+inquiries return 404, malformed UUIDs 400, missing auth/permission 401/403. It never changes
+financial state or lifecycle. New bootstrap Administrators receive the permission; existing
+roles require explicit read-modify-replace grants through `/admin/access`.
+
+`ReadStaffDashboard` owns one unlocked REPEATABLE READ spanning the existing transaction-taking
+operational core, bulk inquiry/requested-pricing/customer enrichment and one PostgreSQL
+communication attention aggregate. `attentionFor(transaction, inquiryIds)` returns at most
+one `(unacknowledgedSince, latestEmailAt)` value per inquiry with activity. A single set-based
+window/filtered aggregate derives the clearing order and the two actual-time values; full
+historical communication rows never reach the dashboard. Returned communication data is
+O(inquiries), even as append-only history grows. Requested pricing restoration remains strict;
+corrupt data fails the whole read rather than defaulting the minimum flag. Complete
+population integrity is mandatory, including records outside queues. Nonempty populations
+use exactly ten SQL statements for one or many inquiries. Concurrent commits cannot mix
+financial, fulfillment, enrichment and communication snapshots. One injected Clock `asOf`
+truncated to microseconds evaluates policy, not a database commit watermark. Read permissions
+remain BOTH `fionas.inquiries.read` and `commerce.financial-document.read`; GET statuses stay
+200/401/403/500, runtime errors, no-store success. Financial truth remains FinancialLineageView,
+lifecycle remains InquiryLifecycle.project, and reads never promote/demote booking. No generic
+commerce ownership moves into Fiona and no upstream release is required.
+
+`fionaApplication` resolves `FIONAS_EVENT_TIME_ZONE` to an explicit `eventCalendarZone`
+and passes it to `ReadStaffDashboard` and `DashboardAttentionPolicy`. Default:
+`America/Los_Angeles`; valid alternate IANA IDs include `America/New_York` and `UTC`.
+Invalid/blank configured IDs fail during application configuration/composition before serving.
+The server Clock still obtains absolute Instants and microsecond timestamps, normally with
+`Clock.systemUTC()`. Neither `asOf` nor persisted timestamps become local timestamps, and
+event dates remain LocalDate. Event calendar interpretation never derives from `clock.zone`.
 
 Dashboard and frontend requirements often ask questions such as:
 

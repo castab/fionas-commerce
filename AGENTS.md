@@ -106,6 +106,7 @@ Fiona owns, and persists in its own tables:
   optional legacy staff pricing metadata, change-order intent, and payment acceptance policy (see
   [Financial documents and payments](#financial-documents-and-payments));
 - inquiry served/closed operational facts with authenticated principal provenance;
+- inquiry communication activity (inbound email, staff-sent email, acknowledgement) and dashboard attention policy;
 - contacts (future);
 - event and service details, and service locations (future);
 - further relationships between these records and generic commerce facts (future), for
@@ -843,6 +844,9 @@ after runtime-owned migrations.
   `V12` adds `inquiry_fulfillment`, keyed by inquiry, with served timestamp and USER/SERVICE
   provenance plus optional complete closed timestamp/provenance. Served is mandatory in
   every row; closed fields must be all absent or all present. No stage, amount or backfill.
+  `V13` adds Fiona-only append-only inquiry communication facts, database-generated durable
+  record order and an inquiry/order covering index. The still-unmerged V13 was corrected
+  in place before release; no externally immutable migration was affected.
   `ArchitectureSpec` confines runtime schema references to these purposes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration. (One pre-release exception, before any
@@ -966,7 +970,7 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   RoleManage, RoleAssign, the runtime's `RuntimePermissions.ServiceCredentialManage` (without it
   the first administrator could create a service but never issue its credential), and Fiona's
   `fionas.credentials.manage`, `fionas.inquiries.read`, `fionas.inquiries.create`, `fionas.inquiries.manage`,
-  `fionas.inquiry-form.read`, and `fionas.estimate-preview.create`. It has no wildcard or
+  `fionas.inquiry-form.read`, `fionas.communications.acknowledge`, and `fionas.estimate-preview.create`. It has no wildcard or
   automatic future grants. Grants are fixed when bootstrap creates the role; startup never
   mutates an existing Administrator role, whose grants are managed through `/admin/access`:
   an Administrator created by an earlier release gains any of these (for example
@@ -978,7 +982,8 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
 - Fiona contributes `fionas.credentials.manage` (group `fionas.credentials`),
   `fionas.inquiries.read`, `fionas.inquiries.create`, `fionas.inquiries.manage`, `fionas.inquiry-form.read` (group
   `fionas.inquiries`), and `fionas.estimate-preview.create` (group `fionas.pricing`) through
-  `ApplicationContributions.permissionDefinitions`. The runtime permission catalog and
+  `ApplicationContributions.permissionDefinitions`. Fiona additionally defines
+  `fionas.communications.acknowledge` in group `fionas.communications`. The runtime permission catalog and
   live resolver remain the only authorization source.
 - Fiona composes one `AccessControl` from the cookie `SessionAuthenticator(context.sessions,
   SessionCookie("__Host-fionas_session"))`, then the `ServiceAccessTokenAuthenticator`, and the
@@ -1306,34 +1311,88 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
   never replace them with per-inquiry reads. Its standalone invocation owns the transaction;
   the transaction-taking core supports `ReadStaffDashboard` without duplicating checks.
 
-- `ReadStaffDashboard` owns one unlocked REPEATABLE READ transaction covering the operational
-  core and bulk `InquiryRepository.findByIds` / `CustomerRepository.findByIds` enrichment.
-  Inquiry enrichment excludes pricing inputs. Verify the complete operational population and
-  customer coverage, including inquiries outside supported queues; missing/corrupt data is an
-  internal failure, never partial success. Nonempty populations use nine SQL statements,
-  independent of population size. Capture one injected Clock `asOf` truncated to microseconds
-  after the operational read, inside the transaction; it is an evaluation timestamp, not a
-  database commit watermark. Never nest the standalone reader or enrich after its transaction.
-- GET `/staff/dashboard` (`readStaffDashboard`) is a ContractRoute wired through
-  `FionaOperations`, the composition root and offline OpenAPI. Require BOTH InquiriesRead and
-  FinancialDocumentRead before invocation through the existing live AccessControl, for USER
-  sessions and SERVICE tokens alike. No dashboard permission, role-name check, startup grants
-  or principal parameter. Preserve session precedence and safe-GET cookie Origin behavior.
-  Actual statuses are 200/401/403/500 with runtime error envelopes; success is no-store.
-- Dashboard summary uses the existing operational counts. Supported queues are needsQuote =
-  REQUESTED, awaitingQuoteReply = QUOTED, and needsClosing = SERVED with exact-zero canonical
-  Invoice balance. Shared pure state predicates serve counts and queues; HTTP only maps DTOs.
-  Awaiting quote reply identifies the firm-proposal stage, never message delivery. Return all
-  qualifying items by creation time ascending then lexical inquiry UUID ascending, oldest
-  inquiries first, never a customer-wait interpretation. Items carry minimal customer/event,
-  canonical latest financial identity/stage, exact money, creation times and optional served
-  time. No lines/history, contact details, URLs, booking identity, ages or waitingSince.
-- All supported queues have available=true even when empty and omit unavailableReason.
-  needsReply remains available=false/items=[]/COMMUNICATIONS_NOT_IMPLEMENTED;
-  needsResolution remains available=false/items=[]/RESOLUTION_POLICY_NOT_DEFINED.
-  These stable transport reasons describe capability, never permissions. Do not substitute
-  the supported queues or invent communications/resolution semantics. No persistence or
-  read-triggered booking promotion accompanies the dashboard.
+The dashboard exposes `asOf`, the unchanged four-count `summary`, and exactly three
+`workQueue` members: `needsReply`, `needsQuote`, `needsResolution`, each `{items: [...]}`.
+Items retain high-level customer/event and canonical financial facts, and add
+`attentionSince`, stable `reasons`, and semantic `totalQualifier`. `FROM` applies only
+to a current canonical Estimate with requested `guestCountIsMinimum=true`; exact-count
+Estimates and all Quotes/Invoices are `EXACT`. Queue membership does not change this rule.
+Clients format currency and the localized `from` label without another inquiry request.
+Every queue sorts by onset ascending then lexical inquiry UUID. Queues may overlap; each inquiry appears only once within a queue. Clients
+format durations from `asOf` and `attentionSince`; no pagination or preformatted age.
+
+- `needsReply`: CUSTOMER_COMMUNICATION_UNACKNOWLEDGED when inbound customer email is
+  durably recorded after the latest staff reply or acknowledgement's `recordedOrder`.
+  Anchor: minimum actual `occurredAt` among outstanding inbound. Earlier-recorded inbound
+  is cleared regardless of business timestamp; later-ingested backdated or equal-time
+  inbound remains outstanding. Multiple emails produce one item.
+- `needsQuote`: NEEDS_QUOTE for REQUESTED, anchored at inquiry creation. It shares the
+  operational predicate with `summary.new`, so queue size equals that count.
+- `needsResolution` aggregates every applicable reason, anchored at the earliest onset:
+  QUOTE_STALE for QUOTED at or beyond three days since the maximum of current Quote
+  version time, latest inbound email and latest staff-sent email; anchor is that maximum
+  plus three days. STAFF_ACKNOWLEDGED never resets quote inactivity. EVENT_DATE_PASSED_UNSERVED
+  for BOOKED after its event calendar day, anchored at the next day's start in Fiona's
+  explicit event calendar zone. SERVED_WITH_BALANCE_DUE for SERVED positive canonical
+  Invoice balance and READY_TO_CLOSE for SERVED exact-zero balance, both anchored at authoritative served time.
+  Negative overpayment and CLOSED qualify for neither served reason. READY_TO_CLOSE shares
+  the operational needsClosing predicate, so its item count equals `summary.needsClosing`.
+
+Fiona V13 `inquiry_communications` stores append-only source facts: activity UUID, inquiry
+FK, kind (CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED), microsecond
+`occurredAt` timestamp, database-generated positive unique BIGINT identity `recorded_order`,
+and required USER/SERVICE acting provenance for staff activity only. `occurredAt` records
+when communication happened; `recordedOrder` records durable Fiona ingestion/observation order.
+Repository appends acquire `SELECT id FROM fionas.inquiries ... FOR UPDATE` before inserting
+and allocating the identity, in the caller's transaction. The locking lookup is the sole
+inquiry existence check; a missing inquiry fails before insertion. Same-inquiry writes wait for the
+preceding commit/rollback; unrelated inquiries remain independent. Sequence gaps are allowed.
+Clearing follows record order; quote inactivity follows actual email `occurredAt`, excluding
+acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when
+its actual email time leaves the Quote stale. The `(inquiry_id, recorded_order)` index
+includes `kind` and `occurred_at` for the aggregate read.
+Communication-kind clearing, quote-activity and principal-provenance semantics use exhaustive Kotlin `when`
+expressions without `else`; every new kind requires explicit decisions for all three, with SQL
+kind lists kept explicit and verified against the pure projection.
+`RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
+No provider/public webhook, email bodies, attachments, delivery tracking, notifications,
+mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
+attention membership and resolution reasons remain pure Fiona policy, never persisted.
+
+`POST /inquiries/{inquiryId}/communications/acknowledge` (`acknowledgeInquiryCommunication`)
+requires `fionas.communications.acknowledge` through the same live AccessControl for USER
+or SERVICE, with existing unsafe-cookie Origin policy. It appends server Clock time and
+authenticated provenance, clears inbound already durably recorded before the action, and
+returns 204/no-store. Later ingestion stays outstanding regardless of `occurredAt`.
+Repeated calls succeed and append another fact, even without outstanding inbound. Unknown
+inquiries return 404, malformed UUIDs 400, missing auth/permission 401/403. It never changes
+financial state or lifecycle. New bootstrap Administrators receive the permission; existing
+roles require explicit read-modify-replace grants through `/admin/access`.
+
+`ReadStaffDashboard` owns one unlocked REPEATABLE READ spanning the existing transaction-taking
+operational core, bulk inquiry/requested-pricing/customer enrichment and one PostgreSQL
+communication attention aggregate. `attentionFor(transaction, inquiryIds)` returns at most
+one `(unacknowledgedSince, latestEmailAt)` value per inquiry with activity. A single set-based
+window/filtered aggregate derives the clearing order and the two actual-time values; full
+historical communication rows never reach the dashboard. Returned communication data is
+O(inquiries), even as append-only history grows. Requested pricing restoration remains strict;
+corrupt data fails the whole read rather than defaulting the minimum flag. Complete
+population integrity is mandatory, including records outside queues. Nonempty populations
+use exactly ten SQL statements for one or many inquiries. Concurrent commits cannot mix
+financial, fulfillment, enrichment and communication snapshots. One injected Clock `asOf`
+truncated to microseconds evaluates policy, not a database commit watermark. Read permissions
+remain BOTH `fionas.inquiries.read` and `commerce.financial-document.read`; GET statuses stay
+200/401/403/500, runtime errors, no-store success. Financial truth remains FinancialLineageView,
+lifecycle remains InquiryLifecycle.project, and reads never promote/demote booking. No generic
+commerce ownership moves into Fiona and no upstream release is required.
+
+`fionaApplication` resolves `FIONAS_EVENT_TIME_ZONE` to an explicit `eventCalendarZone`
+and passes it to `ReadStaffDashboard` and `DashboardAttentionPolicy`. Default:
+`America/Los_Angeles`; valid alternate IANA IDs include `America/New_York` and `UTC`.
+Invalid/blank configured IDs fail during application configuration/composition before serving.
+The server Clock still obtains absolute Instants and microsecond timestamps, normally with
+`Clock.systemUTC()`. Neither `asOf` nor persisted timestamps become local timestamps, and
+event dates remain LocalDate. Event calendar interpretation never derives from `clock.zone`.
 
 - Commerce 0.0.22 owns `DepositTerms`, `DepositRequirement`, `DepositRequirementRevision`,
   persisted timestamps, frozen amount resolution, reconciliation/satisfaction,
@@ -1424,10 +1483,10 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
-| `...inquiry` | `Inquiry` and its values/repositories; submission key, canonical fingerprint and transaction-bound submission repository; requested pricing inputs/history; lifecycle projection, fulfillment repository and explicit service/closeout; `CreateInquiry`, `GetInquiry`, `ListInquiries`, public eligibility/pricing and the customer form's `InquiryForm` values/`GetInquiryForm` adapter |
+| `...inquiry` | `Inquiry` and its values/repositories; submission key, canonical fingerprint and transaction-bound submission repository; requested pricing inputs/history; lifecycle projection, fulfillment repository and explicit service/closeout; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries`, public eligibility/pricing and the customer form's `InquiryForm` values/`GetInquiryForm` adapter |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), the persisted pricing-inputs JSON (`PersistedPricingInputs.kt`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
 | `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
-| `...staff` | Fiona's credential persistence, password verification, permission definition, first-admin bootstrap, and `ReadStaffDashboard` / dashboard projection |
+| `...staff` | Fiona's credential persistence, password verification, permission definition, first-admin bootstrap, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
@@ -1446,7 +1505,7 @@ Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
 webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, event publishing,
 outbox, NATS, persisted financial projections, CQRS, separate Booking aggregates,
-cancellation, decline, archive, reopen, unserve, zero-deposit booking, communications and resolution workflows,
+cancellation, decline, archive, reopen, unserve, zero-deposit booking, email provider integration and broader communication workflows,
 a generic line-source identity, stored balances or payment statuses, tax,
 travel fees, minimum orders, inventory, availability schedules/windows, catalog seeding or import, deposit
 schedules, customer merge or deduplication, inquiry search, filters, or
@@ -1597,6 +1656,8 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
   `TEST_DATABASE_JDBC_URL`). Each spec creates its own database; the real migrations are
   applied by commerce-runtime through `TestApplication`, which composes the application
   exactly as `main()` does and exposes the runtime's own `Transactor`.
+  The harness explicitly supplies Fiona's canonical Los Angeles event calendar default;
+  host environment overrides are tested separately through explicit configuration maps.
 - Keep: value-object tests, repository integration tests, operation tests (including
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
   invisible until commit), `FinancialDocumentAtomicitySpec` (a Fiona failure after a ledger
@@ -1647,6 +1708,11 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
   artifact, byte-deterministic), `ApplicationVersionSpec` (the reported version and the
   OpenAPI `info.version` are the Gradle project version the build was given, so a release's
   `-Pversion` is proven to reach both), and `ArchitectureSpec`.
+- Keep `InquiryCommunicationRepositorySpec` SQL/pure projection parity, real same-inquiry lock
+  contention in both append directions, unrelated-writer independence and large-history
+  database reduction. Keep `DashboardEventCalendarSpec` application composition with a UTC
+  Clock, default/alternate event zones, local midnight and DST boundaries, and invalid
+  configuration. Dashboard amount qualifiers need operation and HTTP/OpenAPI coverage.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
 - Node.js 20 or newer must be on PATH for `ReplaceCatalogSpec`, which runs the actual
   catalog replacement/payment scripts against a started test runtime and throwaway PostgreSQL. CI provisions

@@ -16,11 +16,11 @@ interface InquiryRepository {
     /** Complete inquiry population for checking canonical relationship coverage, without loading inquiry details. */
     fun ids(transaction: Transaction): Set<InquiryId>
 
-    /** Required inquiry records as a set, without requested pricing inputs. No ordering is promised. */
-    fun findByIds(
+    /** Bulk inquiry and strictly restored requested pricing enrichment. No ordering is promised. */
+    fun findRequestedByIds(
         transaction: Transaction,
         ids: Set<InquiryId>,
-    ): Map<InquiryId, Inquiry>
+    ): Map<InquiryId, RequestedInquiry>
 
     /**
      * Inserts [inquiry] with the [pricingInputs] the customer requested, in one row. Its customer

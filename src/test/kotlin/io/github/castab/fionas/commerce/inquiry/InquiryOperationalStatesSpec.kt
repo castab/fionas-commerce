@@ -23,7 +23,9 @@ import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.http.StaffDashboardSummaryResponse
+import io.github.castab.fionas.commerce.staff.DashboardAttentionPolicy
 import io.github.castab.fionas.commerce.staff.ReadStaffDashboard
+import io.github.castab.fionas.commerce.staff.StaffAttentionReason
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
@@ -38,6 +40,7 @@ import org.jdbi.v3.core.statement.SqlStatements
 import org.jdbi.v3.core.statement.StatementContext
 import java.math.BigDecimal
 import java.sql.Connection
+import java.time.ZoneId
 import java.util.Currency
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -65,6 +68,8 @@ class InquiryOperationalStatesSpec :
                 inquiries,
                 JdbiCustomerRepository(),
                 testClock,
+                JdbiInquiryCommunicationRepository(),
+                ZoneId.of("America/Los_Angeles"),
             )()
 
         fun requested(): Pair<InquiryId, UUID> {
@@ -171,21 +176,21 @@ class InquiryOperationalStatesSpec :
             dashboard.summary shouldBe snapshot.counts
             dashboard.workQueue.needsQuote.items
                 .map { it.inquiryId } shouldBe listOf(requested.first)
-            dashboard.workQueue.awaitingQuoteReply.items
-                .map { it.inquiryId } shouldBe listOf(quoted.first)
-            dashboard.workQueue.needsClosing.items
+            dashboard.workQueue.needsResolution.items
+                .filter { StaffAttentionReason.READY_TO_CLOSE in it.reasons }
                 .map { it.inquiryId } shouldBe listOf(zero.first)
-            dashboard.workQueue.needsClosing.items
-                .single()
+            dashboard.workQueue.needsResolution.items
+                .single { StaffAttentionReason.READY_TO_CLOSE in it.reasons }
                 .servedAt shouldBe STORED_INSTANT
             val response = app.adminGet("/staff/dashboard")
             response.status.code shouldBe 200
             val dto = CommerceJson.asA(response.bodyString(), StaffDashboardResponse.serializer())
             dto.summary shouldBe StaffDashboardSummaryResponse(1, 1, 4, 1)
-            dto.workQueue.needsClosing.items
+            dto.workQueue.needsResolution.items
+                .filter { it.reasons.any { reason -> reason.name == "READY_TO_CLOSE" } }
                 .map { it.inquiryId } shouldBe listOf(zero.first.value.toString())
-            dto.workQueue.needsClosing.items
-                .single()
+            dto.workQueue.needsResolution.items
+                .single { it.reasons.any { reason -> reason.name == "READY_TO_CLOSE" } }
                 .balance shouldBe "0.00"
             val states = snapshot.states.associateBy { it.inquiryId }
             listOf(
@@ -281,7 +286,19 @@ class InquiryOperationalStatesSpec :
                 }
             // Projection below has only in-memory input and needs no transaction or database collaborator.
             states.forEach { InquiryOperationalCounts.project(listOf(it)) shouldBe InquiryOperationalCounts(0, 0, 1, 1) }
-            states.forEach { it.needsClosing shouldBe true }
+            states.forEach {
+                it.needsClosing shouldBe true
+                val resolution =
+                    DashboardAttentionPolicy().needsResolution(
+                        it,
+                        EventDate.of("2020-01-01"),
+                        InquiryCommunicationAttention(null, null),
+                        STORED_INSTANT,
+                        testClock.zone,
+                    )!!
+                resolution.reasons shouldBe setOf(StaffAttentionReason.READY_TO_CLOSE)
+                resolution.attentionSince shouldBe STORED_INSTANT
+            }
             InquiryOperationalCounts.project(states) shouldBe InquiryOperationalCounts(0, 0, 3, 3)
             val source = states.toMutableList()
             val snapshot = InquiryOperationalSnapshot(source)

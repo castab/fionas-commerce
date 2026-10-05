@@ -17,6 +17,7 @@ import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.ServiceIdentity
+import io.github.castab.fionas.commerce.FIONA_DEFAULT_EVENT_CALENDAR_ZONE
 import io.github.castab.fionas.commerce.fionaApplication
 import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.SERVICE_TOKEN_PATH
@@ -30,6 +31,7 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import java.time.Clock
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Base64
 import java.util.UUID
@@ -151,16 +153,11 @@ class TestApplication private constructor(
                 BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
             loginRateLimit: LoginRateLimit = LoginRateLimit(),
             trustedOrigins: Set<String> = setOf(TEST_ORIGIN),
+            eventCalendarZone: ZoneId = FIONA_DEFAULT_EVENT_CALENDAR_ZONE,
         ): TestApplication {
             val database = TestDatabase.create()
             try {
-                val fiona =
-                    fionaApplication(
-                        clock,
-                        bootstrap,
-                        trustedOrigins,
-                        loginRateLimit = loginRateLimit,
-                    )
+                val fiona = fionaApplication(clock, bootstrap, trustedOrigins, loginRateLimit, eventCalendarZone)
                 var context: CommerceRuntimeContext? = null
                 val runtime =
                     commerceRuntime(
