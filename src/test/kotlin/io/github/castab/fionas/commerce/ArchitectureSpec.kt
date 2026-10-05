@@ -146,6 +146,11 @@ class ArchitectureSpec :
             val operational = File(mainSources, "inquiry/ReadInquiryOperationalStates.kt").codeWithoutComments()
             Regex("inTransaction").findAll(operational).count() shouldBe 1
             operational.contains("inTransaction(TransactionIsolation.REPEATABLE_READ)") shouldBe true
+            val request = File(mainSources, "staff/ReadStaffRequest.kt").codeWithoutComments()
+            Regex("inTransaction").findAll(request).count() shouldBe 1
+            request.contains("inTransaction(TransactionIsolation.REPEATABLE_READ)") shouldBe true
+            request.contains("inquiries.read(transaction, id)") shouldBe true
+            request.contains("financial.read(transaction, inquiry.lifecycle.documentId)") shouldBe true
             sources()
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(
@@ -156,6 +161,7 @@ class ArchitectureSpec :
                     "inquiry/ManageInquiryFulfillment.kt: inTransaction",
                     "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
+                    "staff/ReadStaffRequest.kt: inTransaction",
                     "staff/ReadStaffDashboard.kt: inTransaction",
                     "financial/GetDepositRequirement.kt: inTransaction",
                     "financial/GetDepositRequirementHistory.kt: inTransaction",
@@ -238,6 +244,7 @@ class ArchitectureSpec :
                 fionaApiRoutes(
                     FionaOperations(
                         acknowledgeInquiryCommunication = { error("not called while rendering") },
+                        readStaffRequest = { error("not called while rendering") },
                         readStaffDashboard = { error("not called") },
                         markInquiryServed = { error("not called") },
                         closeInquiry = { error("not called") },

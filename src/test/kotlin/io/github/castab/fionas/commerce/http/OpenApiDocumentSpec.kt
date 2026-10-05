@@ -84,6 +84,25 @@ class OpenApiDocumentSpec :
             method: String,
         ) = document.at("paths", path, method).jsonObject
 
+        test("staff request composes existing detail schemas and documents both permissions") {
+            val route = operation("/staff/requests/{inquiryId}", "get")
+            route.text("operationId") shouldBe "readStaffRequest"
+            val id = route.at("parameters").jsonArray.single { it.text("name") == "inquiryId" }
+            id.text("in") shouldBe "path"
+            id.at("required").jsonPrimitive.content shouldBe "true"
+            id.text("schema", "format") shouldBe "uuid"
+            route.text("description") shouldContain "fionas.inquiries.read"
+            route.text("description") shouldContain "commerce.financial-document.read"
+            route.text("description") shouldContain "BOTH"
+            route.text("description") shouldContain "INITIAL_ESTIMATE"
+            route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/StaffRequestResponse"
+            val response = schema("StaffRequestResponse")
+            response.strings("required") shouldContainExactly listOf("inquiry", "financial")
+            response.text("properties", "inquiry", "\$ref") shouldBe "#/components/schemas/InquiryResponse"
+            response.text("properties", "financial", "\$ref") shouldBe "#/components/schemas/FinancialDocumentResponse"
+        }
+
         test("staff dashboard schemas describe attention reasons, enrichment and both live permissions") {
             val route = operation("/staff/dashboard", "get")
             route.text("operationId") shouldBe "readStaffDashboard"
@@ -155,6 +174,7 @@ class OpenApiDocumentSpec :
                 Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "acknowledgeInquiryCommunication") to
                     listOf("204", "400", "401", "403", "404", "500"),
                 Triple("/staff/dashboard", "get", "readStaffDashboard") to listOf("200", "401", "403", "500"),
+                Triple("/staff/requests/{inquiryId}", "get", "readStaffRequest") to listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "403", "404", "500"),
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
@@ -215,6 +235,7 @@ class OpenApiDocumentSpec :
         val tags =
             mapOf(
                 "readStaffDashboard" to "Staff dashboard",
+                "readStaffRequest" to "Staff requests",
                 "acknowledgeInquiryCommunication" to "Inquiries",
                 "getInquiryForm" to "Inquiries",
                 "createInquiry" to "Inquiries",
@@ -312,6 +333,7 @@ class OpenApiDocumentSpec :
         val fionaSchemas =
             listOf(
                 "StaffDashboardResponse",
+                "StaffRequestResponse",
                 "StaffDashboardSummaryResponse",
                 "StaffDashboardWorkQueueResponse",
                 "StaffWorkQueueResponse",
@@ -440,6 +462,7 @@ class OpenApiDocumentSpec :
             document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder
                 listOf(
                     "Staff dashboard",
+                    "Staff requests",
                     "Inquiries",
                     "Estimates",
                     "Financial documents",

@@ -67,6 +67,7 @@ import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.staff.Login
 import io.github.castab.fionas.commerce.staff.PasswordHasher
 import io.github.castab.fionas.commerce.staff.ReadStaffDashboard
+import io.github.castab.fionas.commerce.staff.ReadStaffRequest
 import io.github.castab.fionas.commerce.staff.SetStaffPassword
 import io.github.castab.fionas.commerce.staff.StaffPasswordAuthenticator
 import org.http4k.core.then
@@ -179,8 +180,11 @@ fun fionaApplication(
                     clock,
                     materialize = materialize,
                 )
+            val getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)
+            val getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)
             val operations =
                 FionaOperations(
+                    readStaffRequest = ReadStaffRequest(context.transactor, getInquiry, getFinancialDocument)::invoke,
                     readStaffDashboard = ReadStaffDashboard(
                         context.transactor,
                         ReadInquiryOperationalStates(context.transactor, inquiries, documentOwners, ledger, fulfillment),
@@ -200,7 +204,7 @@ fun fionaApplication(
                         materialize,
                     )::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
-                    getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)::invoke,
+                    getInquiry = getInquiry::invoke,
                     acknowledgeInquiryCommunication = RecordInquiryCommunication(
                         context.transactor,
                         communications,
@@ -225,7 +229,7 @@ fun fionaApplication(
                     createInquiryFinancialDocument = createDocument::invoke,
                     listInquiryFinancialDocuments =
                         ListInquiryFinancialDocuments(context.transactor, inquiries, ledger, documentOwners, pricingSources)::invoke,
-                    getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    getFinancialDocument = getFinancialDocument::invoke,
                     getFinancialDocumentHistory =
                         GetFinancialDocumentHistory(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     getDepositRequirement = GetDepositRequirement(context.transactor, ledger, documentOwners)::invoke,

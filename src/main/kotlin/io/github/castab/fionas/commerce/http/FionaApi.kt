@@ -44,6 +44,7 @@ import io.github.castab.fionas.commerce.offering.EstimatePreview
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import io.github.castab.fionas.commerce.staff.StaffDashboard
+import io.github.castab.fionas.commerce.staff.StaffRequest
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
 import org.http4k.contract.Root
@@ -70,6 +71,7 @@ const val API_DOCS_PATH = "/docs"
  */
 class FionaOperations(
     val acknowledgeInquiryCommunication: (RecordInquiryCommunication.Acknowledge) -> Unit,
+    val readStaffRequest: (InquiryId) -> StaffRequest,
     val readStaffDashboard: () -> StaffDashboard,
     val createInquiry: (CreateInquiry.Command) -> Inquiry,
     val listInquiries: (ListInquiries.Command) -> InquiryPage,
@@ -121,6 +123,7 @@ fun fionaApiRoutes(
 ): List<ContractRoute> =
     listOf(
         acknowledgeInquiryCommunicationRoute(operations.acknowledgeInquiryCommunication, auth.access),
+        readStaffRequestRoute(operations.readStaffRequest, auth.access),
         readStaffDashboardRoute(operations.readStaffDashboard, auth.access),
         getInquiryFormRoute(operations.getInquiryForm, auth.access),
         createInquiryRoute(operations.createInquiry, auth.access),

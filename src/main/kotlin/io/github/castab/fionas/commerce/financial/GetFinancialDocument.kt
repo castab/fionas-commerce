@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
@@ -22,6 +23,12 @@ class GetFinancialDocument(
 
     operator fun invoke(documentId: UUID): InquiryFinancialDocument =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
-            documents.current(transaction, documentId)
+            read(transaction, documentId)
         }
+
+    /** Composes the current financial view in the caller's repeatable snapshot. */
+    internal fun read(
+        transaction: Transaction,
+        documentId: UUID,
+    ): InquiryFinancialDocument = documents.current(transaction, documentId)
 }
