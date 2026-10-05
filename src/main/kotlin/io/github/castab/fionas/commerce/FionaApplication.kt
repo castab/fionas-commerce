@@ -86,9 +86,11 @@ const val FIONA_MIGRATION_SCHEMA = "fionas"
  */
 const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
 
+val FIONA_DEFAULT_EVENT_CALENDAR_ZONE: ZoneId = ZoneId.of("America/Los_Angeles")
+
 /** Event LocalDate boundaries are Fiona configuration, independent of the server timestamp Clock. */
 fun fionaEventCalendarZone(environment: Map<String, String> = System.getenv()): ZoneId =
-    ZoneId.of(environment["FIONAS_EVENT_TIME_ZONE"] ?: "America/Los_Angeles")
+    environment["FIONAS_EVENT_TIME_ZONE"]?.let(ZoneId::of) ?: FIONA_DEFAULT_EVENT_CALENDAR_ZONE
 
 /**
  * Everything Fiona's contributes to commerce-runtime: the schema and location of its own
@@ -201,7 +203,6 @@ fun fionaApplication(
                     getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)::invoke,
                     acknowledgeInquiryCommunication = RecordInquiryCommunication(
                         context.transactor,
-                        inquiries,
                         communications,
                         clock,
                     )::acknowledge,

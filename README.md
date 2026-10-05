@@ -1153,7 +1153,8 @@ FK, kind (CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED), micros
 and required USER/SERVICE acting provenance for staff activity only. `occurredAt` records
 when communication happened; `recordedOrder` records durable Fiona ingestion/observation order.
 Repository appends acquire `SELECT id FROM fionas.inquiries ... FOR UPDATE` before inserting
-and allocating the identity, in the caller's transaction. Same-inquiry writes wait for the
+and allocating the identity, in the caller's transaction. The locking lookup is the sole
+inquiry existence check; a missing inquiry fails before insertion. Same-inquiry writes wait for the
 preceding commit/rollback; unrelated inquiries remain independent. Sequence gaps are allowed.
 Clearing follows record order; quote inactivity follows actual email `occurredAt`, excluding
 acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when

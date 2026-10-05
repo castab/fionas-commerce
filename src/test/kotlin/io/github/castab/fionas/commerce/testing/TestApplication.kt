@@ -17,6 +17,7 @@ import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.ServiceIdentity
+import io.github.castab.fionas.commerce.FIONA_DEFAULT_EVENT_CALENDAR_ZONE
 import io.github.castab.fionas.commerce.fionaApplication
 import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.SERVICE_TOKEN_PATH
@@ -152,16 +153,11 @@ class TestApplication private constructor(
                 BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
             loginRateLimit: LoginRateLimit = LoginRateLimit(),
             trustedOrigins: Set<String> = setOf(TEST_ORIGIN),
-            eventCalendarZone: ZoneId? = null,
+            eventCalendarZone: ZoneId = FIONA_DEFAULT_EVENT_CALENDAR_ZONE,
         ): TestApplication {
             val database = TestDatabase.create()
             try {
-                val fiona =
-                    if (eventCalendarZone == null) {
-                        fionaApplication(clock, bootstrap, trustedOrigins, loginRateLimit)
-                    } else {
-                        fionaApplication(clock, bootstrap, trustedOrigins, loginRateLimit, eventCalendarZone)
-                    }
+                val fiona = fionaApplication(clock, bootstrap, trustedOrigins, loginRateLimit, eventCalendarZone)
                 var context: CommerceRuntimeContext? = null
                 val runtime =
                     commerceRuntime(

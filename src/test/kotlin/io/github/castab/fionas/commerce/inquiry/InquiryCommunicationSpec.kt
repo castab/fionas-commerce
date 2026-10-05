@@ -37,6 +37,15 @@ class InquiryCommunicationSpec :
             order: Long = 1,
         ) = recorded(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, at, order)
 
+        test("every communication kind explicitly defines attention clearing and quote activity") {
+            InquiryCommunicationKind.entries.map { Triple(it, it.clearsCustomerAttention, it.contributesToQuoteActivity) } shouldBe
+                listOf(
+                    Triple(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, false, true),
+                    Triple(InquiryCommunicationKind.STAFF_EMAIL_SENT, true, true),
+                    Triple(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, true, false),
+                )
+        }
+
         test("empty, one and multiple inbound preserve earliest outstanding and latest email activity regardless of read order") {
             InquiryCommunicationAttention.project(emptyList()) shouldBe InquiryCommunicationAttention(null, null)
             InquiryCommunicationAttention.project(listOf(inbound(monday))) shouldBe InquiryCommunicationAttention(monday, monday)

@@ -1344,12 +1344,16 @@ FK, kind (CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED), micros
 and required USER/SERVICE acting provenance for staff activity only. `occurredAt` records
 when communication happened; `recordedOrder` records durable Fiona ingestion/observation order.
 Repository appends acquire `SELECT id FROM fionas.inquiries ... FOR UPDATE` before inserting
-and allocating the identity, in the caller's transaction. Same-inquiry writes wait for the
+and allocating the identity, in the caller's transaction. The locking lookup is the sole
+inquiry existence check; a missing inquiry fails before insertion. Same-inquiry writes wait for the
 preceding commit/rollback; unrelated inquiries remain independent. Sequence gaps are allowed.
 Clearing follows record order; quote inactivity follows actual email `occurredAt`, excluding
 acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when
 its actual email time leaves the Quote stale. The `(inquiry_id, recorded_order)` index
 includes `kind` and `occurred_at` for the aggregate read.
+Communication-kind clearing and quote-activity semantics use exhaustive Kotlin `when`
+expressions without `else`; every new kind requires explicit decisions for both, with SQL
+kind lists kept explicit and verified against the pure projection.
 `RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
 No provider/public webhook, email bodies, attachments, delivery tracking, notifications,
 mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
@@ -1652,6 +1656,8 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
   `TEST_DATABASE_JDBC_URL`). Each spec creates its own database; the real migrations are
   applied by commerce-runtime through `TestApplication`, which composes the application
   exactly as `main()` does and exposes the runtime's own `Transactor`.
+  The harness explicitly supplies Fiona's canonical Los Angeles event calendar default;
+  host environment overrides are tested separately through explicit configuration maps.
 - Keep: value-object tests, repository integration tests, operation tests (including
   atomic rollback), `RuntimeTransactionSpec` (Fiona writes roll back together and stay
   invisible until commit), `FinancialDocumentAtomicitySpec` (a Fiona failure after a ledger

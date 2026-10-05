@@ -10,7 +10,26 @@ value class InquiryCommunicationId(
     val value: UUID,
 )
 
-enum class InquiryCommunicationKind { CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED }
+enum class InquiryCommunicationKind {
+    CUSTOMER_EMAIL_RECEIVED,
+    STAFF_EMAIL_SENT,
+    STAFF_ACKNOWLEDGED,
+    ;
+
+    val clearsCustomerAttention: Boolean
+        get() =
+            when (this) {
+                CUSTOMER_EMAIL_RECEIVED -> false
+                STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED -> true
+            }
+
+    val contributesToQuoteActivity: Boolean
+        get() =
+            when (this) {
+                CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT -> true
+                STAFF_ACKNOWLEDGED -> false
+            }
+}
 
 /** Append-only activity facts. No email content, provider identity or delivery inference. */
 data class InquiryCommunication(
@@ -48,7 +67,7 @@ data class InquiryCommunicationAttention(
             val clearedOrder =
                 activity
                     .filter {
-                        it.activity.kind != InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED
+                        it.activity.kind.clearsCustomerAttention
                     }.maxOfOrNull { it.recordedOrder }
             val outstanding =
                 activity.filter {
@@ -57,7 +76,7 @@ data class InquiryCommunicationAttention(
                 }
             return InquiryCommunicationAttention(
                 outstanding.minOfOrNull { it.activity.occurredAt },
-                activity.filter { it.activity.kind != InquiryCommunicationKind.STAFF_ACKNOWLEDGED }.maxOfOrNull { it.activity.occurredAt },
+                activity.filter { it.activity.kind.contributesToQuoteActivity }.maxOfOrNull { it.activity.occurredAt },
             )
         }
     }

@@ -1,12 +1,16 @@
 package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.communicationHistory
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.testClock
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.jdbi.v3.core.statement.SqlLogger
@@ -38,6 +42,58 @@ class InquiryCommunicationRepositorySpec :
             STORED_INSTANT.plusSeconds(seconds),
             if (kind == InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED) null else app.authorization.findUserByUsername("admin")!!.id,
         )
+
+        test("communication append uses only the authoritative locking lookup and insert; missing inquiry stops at the lookup") {
+            val statements = mutableListOf<String>()
+            val observed =
+                object : InquiryCommunicationRepository by repository {
+                    override fun append(
+                        transaction: Transaction,
+                        activity: InquiryCommunication,
+                    ): RecordedInquiryCommunication {
+                        transaction.handle.getConfig(SqlStatements::class.java).setSqlLogger(
+                            object : SqlLogger {
+                                override fun logBeforeExecution(context: StatementContext) {
+                                    statements.add(context.rawSql)
+                                }
+                            },
+                        )
+                        return repository.append(transaction, activity)
+                    }
+                }
+            val recorder = RecordInquiryCommunication(app.transactor, observed, testClock)
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
+            recorder.customerEmailReceived(id, STORED_INSTANT)
+            statements.size shouldBe 2
+            statements[0] shouldBe "SELECT id FROM fionas.inquiries WHERE id = :inquiry FOR UPDATE"
+            statements[1].startsWith("INSERT INTO fionas.inquiry_communications ") shouldBe true
+            statements[1].endsWith("RETURNING recorded_order") shouldBe true
+            statements.clear()
+            shouldThrow<CommerceFailure.NotFound> {
+                recorder.customerEmailReceived(InquiryId(UUID.randomUUID()), STORED_INSTANT)
+            }
+            statements shouldBe listOf("SELECT id FROM fionas.inquiries WHERE id = :inquiry FOR UPDATE")
+            app.database.count("fionas.inquiry_communications") shouldBe 1
+        }
+
+        test("the application operation rolls back an append when its repository fails after insertion") {
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
+            val failing =
+                object : InquiryCommunicationRepository by repository {
+                    override fun append(
+                        transaction: Transaction,
+                        activity: InquiryCommunication,
+                    ): RecordedInquiryCommunication {
+                        repository.append(transaction, activity)
+                        error("Failure after append")
+                    }
+                }
+            shouldThrow<IllegalStateException> {
+                RecordInquiryCommunication(app.transactor, failing, testClock).customerEmailReceived(id, STORED_INSTANT)
+            }
+            app.database.count("fionas.inquiry_communications") shouldBe 0
+            app.transactor.inTransaction { repository.attentionFor(it, listOf(id)) } shouldBe emptyMap()
+        }
 
         test("SQL aggregate agrees with pure durable-order semantics for backdated, equal-time and shuffled histories") {
             val histories =

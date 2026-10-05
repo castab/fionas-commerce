@@ -33,6 +33,39 @@ class DashboardEventCalendarSpec :
             }
         }
 
+        test("explicit UTC configuration does not change the harness default unless supplied to it") {
+            val configured = fionaEventCalendarZone(mapOf("FIONAS_EVENT_TIME_ZONE" to "UTC"))
+            configured.id shouldBe "UTC"
+            val midnightUtc = Instant.parse("2026-07-26T00:00:00Z")
+            val clock = Clock.fixed(midnightUtc, ZoneOffset.UTC)
+            listOf(null, configured).forEach { calendarZone ->
+                val application =
+                    if (calendarZone == null) {
+                        TestApplication.create(clock = clock)
+                    } else {
+                        TestApplication.create(clock = clock, eventCalendarZone = calendarZone)
+                    }
+                application.use { app ->
+                    app.createAcceptanceCatalog()
+                    val id = app.createInquiry()
+                    app.database.execute("UPDATE fionas.inquiries SET event_date = DATE '2026-07-25' WHERE id = '$id'")
+                    val document = UUID.fromString(app.initialEstimateOf(id))
+                    app.transactor.inTransaction {
+                        app.context.financialLedger.issueQuote(it, document)
+                        app.context.financialLedger.issueInvoice(it, document)
+                    }
+                    val dashboard = CommerceJson.asA(app.adminGet("/staff/dashboard").bodyString(), StaffDashboardResponse.serializer())
+                    if (calendarZone == null) {
+                        dashboard.workQueue.needsResolution.items shouldBe emptyList()
+                    } else {
+                        dashboard.workQueue.needsResolution.items
+                            .single()
+                            .attentionSince shouldBe midnightUtc.toString()
+                    }
+                }
+            }
+        }
+
         val boundaries =
             listOf(
                 Triple("2026-07-25", "2026-07-26T07:00:00Z", null),
@@ -54,7 +87,13 @@ class DashboardEventCalendarSpec :
                         override fun instant(): Instant = now
                     }
                 val alternate = configuredZone?.let { fionaEventCalendarZone(mapOf("FIONAS_EVENT_TIME_ZONE" to it)) }
-                TestApplication.create(clock = utcClock, eventCalendarZone = alternate).use { app ->
+                val application =
+                    if (alternate == null) {
+                        TestApplication.create(clock = utcClock)
+                    } else {
+                        TestApplication.create(clock = utcClock, eventCalendarZone = alternate)
+                    }
+                application.use { app ->
                     app.createAcceptanceCatalog()
                     val id = app.createInquiry()
                     app.database.execute("UPDATE fionas.inquiries SET event_date = DATE '$date' WHERE id = '$id'")

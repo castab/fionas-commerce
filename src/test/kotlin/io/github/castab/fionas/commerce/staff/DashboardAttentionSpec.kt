@@ -64,8 +64,7 @@ class DashboardAttentionSpec :
             calendarZone,
         )()
 
-        fun recorder(at: Instant = STORED_INSTANT) =
-            RecordInquiryCommunication(app.transactor, inquiries, communications, Clock.fixed(at, zone))
+        fun recorder(at: Instant = STORED_INSTANT) = RecordInquiryCommunication(app.transactor, communications, Clock.fixed(at, zone))
 
         fun actor() = app.authorization.findUserByUsername("admin")!!.id
 

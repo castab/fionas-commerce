@@ -5,7 +5,6 @@ import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
@@ -163,7 +162,7 @@ class StaffDashboardRoutesSpec :
                     "reasons",
                 )
             app.adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
-            RecordInquiryCommunication(app.transactor, JdbiInquiryRepository(), JdbiInquiryCommunicationRepository(), testClock)
+            RecordInquiryCommunication(app.transactor, JdbiInquiryCommunicationRepository(), testClock)
                 .customerEmailReceived(InquiryId(UUID.fromString(id)), STORED_INSTANT)
             val quote =
                 read()
@@ -224,7 +223,7 @@ class StaffDashboardRoutesSpec :
             }
             app.adminPost("/inquiries/${id.value}/served").status shouldBe Status.OK
             val record =
-                RecordInquiryCommunication(app.transactor, JdbiInquiryRepository(), JdbiInquiryCommunicationRepository(), testClock)
+                RecordInquiryCommunication(app.transactor, JdbiInquiryCommunicationRepository(), testClock)
             record.customerEmailReceived(id, STORED_INSTANT.minusSeconds(3600))
             record.customerEmailReceived(id, STORED_INSTANT.minusSeconds(60))
 

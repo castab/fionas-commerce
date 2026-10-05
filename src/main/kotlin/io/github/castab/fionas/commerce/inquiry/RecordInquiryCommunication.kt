@@ -1,6 +1,5 @@
 package io.github.castab.fionas.commerce.inquiry
 
-import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.PrincipalId
 import java.time.Clock
@@ -11,7 +10,6 @@ import java.util.UUID
 /** Adapter-facing email facts and the explicit staff acknowledgement action; no financial mutations. */
 class RecordInquiryCommunication(
     private val transactor: Transactor,
-    private val inquiries: InquiryRepository,
     private val communications: InquiryCommunicationRepository,
     private val clock: Clock,
     private val newId: () -> UUID = UUID::randomUUID,
@@ -44,7 +42,6 @@ class RecordInquiryCommunication(
         principalId: PrincipalId?,
     ): InquiryCommunication =
         transactor.inTransaction { transaction ->
-            inquiries.findById(transaction, inquiryId) ?: throw CommerceFailure.NotFound("Inquiry was not found")
             val activity =
                 InquiryCommunication(
                     InquiryCommunicationId(newId()),
