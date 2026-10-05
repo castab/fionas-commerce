@@ -1,0 +1,16 @@
+package io.github.castab.fionas.commerce.inquiry
+
+import io.github.castab.commerce.runtime.persistence.Transaction
+
+interface InquiryCommunicationRepository {
+    fun append(
+        transaction: Transaction,
+        activity: InquiryCommunication,
+    )
+
+    /** Bulk source facts for this population, in the caller's snapshot. Absence means no activity. */
+    fun findAll(
+        transaction: Transaction,
+        inquiryIds: Collection<InquiryId>,
+    ): Map<InquiryId, List<InquiryCommunication>>
+}

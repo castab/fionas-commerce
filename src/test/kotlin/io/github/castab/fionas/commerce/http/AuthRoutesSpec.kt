@@ -103,6 +103,7 @@ class AuthRoutesSpec :
                         FionaPermissions.InquiriesRead,
                         FionaPermissions.InquiriesCreate,
                         FionaPermissions.InquiriesManage,
+                        FionaPermissions.CommunicationsAcknowledge,
                         FionaPermissions.InquiryFormRead,
                         FionaPermissions.EstimatePreviewCreate,
                     )
@@ -120,12 +121,14 @@ class AuthRoutesSpec :
             }
         }
 
-        test("later bootstrap does not add deposit, refund, inquiry-read or fulfillment permissions to an existing Administrator role") {
+        test(
+            "later bootstrap does not add deposit, refund, inquiry-read, fulfillment or communication permissions to an existing Administrator role",
+        ) {
             TestApplication.create().use { app ->
                 val role = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator))
                 val previous =
                     role.permissions - CommercePermissions.DepositRequirementManage - CommercePermissions.RefundRecord -
-                        FionaPermissions.InquiriesRead - FionaPermissions.InquiriesManage
+                        FionaPermissions.InquiriesRead - FionaPermissions.InquiriesManage - FionaPermissions.CommunicationsAcknowledge
                 app.authorization.replaceRolePermissions(CommerceRoles.Administrator, previous)
                 BootstrapFirstAdmin(app.transactor, app.authorization, JdbiCredentialRepository(), PasswordHasher(), testClock).invoke(
                     BootstrapAdmin("other", "Other", null, null, SecretPassword.of("another-test-password")),

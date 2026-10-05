@@ -61,6 +61,7 @@ object FionaPermissions {
     val CredentialsManage = PermissionKey("fionas.credentials.manage")
     val InquiriesRead = PermissionKey("fionas.inquiries.read")
     val InquiriesCreate = PermissionKey("fionas.inquiries.create")
+    val CommunicationsAcknowledge = PermissionKey("fionas.communications.acknowledge")
     val InquiriesManage = PermissionKey("fionas.inquiries.manage")
     val InquiryFormRead = PermissionKey("fionas.inquiry-form.read")
     val EstimatePreviewCreate = PermissionKey("fionas.estimate-preview.create")
@@ -87,6 +88,12 @@ object FionaPermissions {
                 "Submit inquiries",
                 "Record a customer's inquiry with its configured service, which prices and materializes its initial Estimate",
                 inquiries,
+            ),
+            PermissionDefinition(
+                CommunicationsAcknowledge,
+                "Acknowledge inquiry communications",
+                "Explicitly acknowledge customer email attention without changing quote activity or lifecycle",
+                PermissionGroup("fionas.communications"),
             ),
             PermissionDefinition(
                 InquiriesManage,
@@ -255,6 +262,7 @@ class BootstrapFirstAdmin(
                                 FionaPermissions.InquiriesRead,
                                 FionaPermissions.InquiriesCreate,
                                 FionaPermissions.InquiriesManage,
+                                FionaPermissions.CommunicationsAcknowledge,
                                 FionaPermissions.InquiryFormRead,
                                 FionaPermissions.EstimatePreviewCreate,
                             ),

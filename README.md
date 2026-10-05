@@ -92,6 +92,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 | `GET /inquiry-form` | `fionas.inquiry-form.read` | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
+| `POST /inquiries/{inquiryId}/communications/acknowledge` | `fionas.communications.acknowledge` | Record explicit customer-email acknowledgement; repeated calls return `204`. |
 | `GET /staff/dashboard` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | One coherent snapshot of operational counts and enriched staff work queues. USER sessions and SERVICE tokens are supported. |
 
 The server-side web frontend (`fionas-web`, or a future BFF) calls `GET /inquiry-form`,
@@ -783,6 +784,7 @@ the runtime permission catalog, each naming a capability rather than a kind of c
 | `fionas.credentials.manage` | `fionas.credentials` | Set or reset staff password credentials |
 | `fionas.inquiries.read` | `fionas.inquiries` | List and read inquiries |
 | `fionas.inquiries.create` | `fionas.inquiries` | `POST /inquiries` |
+| `fionas.communications.acknowledge` | `fionas.communications` | Explicitly acknowledge customer email attention |
 | `fionas.inquiry-form.read` | `fionas.inquiries` | `GET /inquiry-form` |
 | `fionas.estimate-preview.create` | `fionas.pricing` | `POST /estimate-preview` |
 
@@ -790,14 +792,14 @@ The bootstrap Administrator role explicitly grants OfferingsManage, FinancialDoc
 FinancialDocumentCreate, PaymentRecord, RefundRecord, PrincipalRead, PrincipalManage, RoleRead, RoleManage,
 RoleAssign, the runtime's ServiceCredentialManage (`commerce.service-credential.manage`, so the
 first administrator can issue a service's credential, not only create it and assign its roles),
-CredentialsManage, InquiriesRead, InquiriesCreate, InquiryFormRead, and EstimatePreviewCreate.
+CredentialsManage, InquiriesRead, InquiriesCreate, InquiriesManage, CommunicationsAcknowledge, InquiryFormRead, and EstimatePreviewCreate.
 There is no wildcard. Future permissions are not granted automatically, and
 the grants are fixed when bootstrap creates the role: startup never changes an existing
 Administrator role. An installation upgrading from an earlier release retains its existing
 grants. To enable newer capabilities for that role, first `GET /admin/access/roles/commerce.administrator`
 and inspect its current permissions. Add whichever of `commerce.refund.record`, `fionas.inquiries.read`,
 `commerce.service-credential.manage`, `fionas.inquiries.create`, `fionas.inquiry-form.read`, and
-`fionas.estimate-preview.create` it lacks to that set, then
+`fionas.communications.acknowledge`, `fionas.inquiries.manage`, and `fionas.estimate-preview.create` it lacks to that set, then
 `PUT /admin/access/roles/commerce.administrator/permissions` with the **complete desired
 permission list**. This endpoint replaces the role's full set of grants; sending only the
 new permission would remove every existing grant, including installation-specific ones.
@@ -1118,38 +1120,55 @@ the `/staff` path adds no human-only restriction. No role grants change at start
 It returns `200`, `401`, `403`, or a caller-safe `500` for missing/corrupt data, using
 the runtime's error envelopes. Successful responses have `Cache-Control: no-store`.
 
-Supported queues have `available: true`, all matching `items`, and no unavailable reason:
+The dashboard exposes `asOf`, the unchanged four-count `summary`, and exactly three
+`workQueue` members: `needsReply`, `needsQuote`, `needsResolution`, each `{items: [...]}`.
+Items retain high-level customer/event and canonical financial facts, and add
+`attentionSince` and stable `reasons`. Every queue sorts by onset ascending then lexical
+inquiry UUID. Queues may overlap; each inquiry appears only once within a queue. Clients
+format durations from `asOf` and `attentionSince`; no pagination or preformatted age.
 
-- `needsQuote`: REQUESTED inquiries.
-- `awaitingQuoteReply`: QUOTED inquiries. Canonical Quote issuance is the firm-proposal
-  boundary; this does not establish message delivery or a communications reply obligation.
-- `needsClosing`: SERVED inquiries with exactly zero current canonical Invoice balance.
-  Positive outstanding balances and negative overpayments both exclude them. These items
-  also contribute to Booked; CLOSED inquiries contribute to neither.
+- `needsReply`: CUSTOMER_COMMUNICATION_UNACKNOWLEDGED when inbound customer email is
+  strictly after the latest staff reply or acknowledgement. Anchor: earliest outstanding
+  inbound. Equal-time inbound is cleared. Multiple emails produce one item.
+- `needsQuote`: NEEDS_QUOTE for REQUESTED, anchored at inquiry creation. It shares the
+  operational predicate with `summary.new`, so queue size equals that count.
+- `needsResolution` aggregates every applicable reason, anchored at the earliest onset:
+  QUOTE_STALE for QUOTED at or beyond three days since the maximum of current Quote
+  version time, latest inbound email and latest staff-sent email; anchor is that maximum
+  plus three days. STAFF_ACKNOWLEDGED never resets quote inactivity. EVENT_DATE_PASSED_UNSERVED
+  for BOOKED after its event calendar day, anchored at the next day's start in the injected
+  Clock zone. SERVED_WITH_BALANCE_DUE for SERVED positive canonical Invoice balance and
+  READY_TO_CLOSE for SERVED exact-zero balance, both anchored at authoritative served time.
+  Negative overpayment and CLOSED qualify for neither served reason. READY_TO_CLOSE shares
+  the operational needsClosing predicate, so its item count equals `summary.needsClosing`.
 
-`needsReply` has `available: false`, `items: []`, and
-`unavailableReason: "COMMUNICATIONS_NOT_IMPLEMENTED"`. `needsResolution` has the same
-unavailable shape with `"RESOLUTION_POLICY_NOT_DEFINED"`. These stable transport codes
-describe absent business capability, independent of caller permissions; no communications
-or resolution policy is inferred from the supported queues.
+Fiona V13 `inquiry_communications` stores append-only source facts: activity UUID, inquiry
+FK, kind (CUSTOMER_EMAIL_RECEIVED, STAFF_EMAIL_SENT, STAFF_ACKNOWLEDGED), microsecond
+occurrence timestamp, and required USER/SERVICE acting provenance for staff activity only.
+`RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
+No provider/public webhook, email bodies, attachments, delivery tracking, notifications,
+mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
+attention membership and resolution reasons remain pure Fiona policy, never persisted.
 
-Every supported queue returns all items, ordered by inquiry creation time ascending then
-lexical inquiry UUID ascending: oldest inquiries first, not longest customer waits.
-Items expose `inquiryId`, `customerId`, `customerName`, `eventDate`, `eventType`, projected
-`stage`, canonical `documentId`, latest `version` and `financialStage`, exact-decimal
-`total` and `balance` with ISO `currency`, `inquiryCreatedAt`, `latestDocumentVersionAt`,
-and `servedAt` when applicable. They expose no contact details, lines/history, URLs, age,
-or waiting-since interpretation. RELATED lineages never supply lifecycle or financial data.
+`POST /inquiries/{inquiryId}/communications/acknowledge` (`acknowledgeInquiryCommunication`)
+requires `fionas.communications.acknowledge` through the same live AccessControl for USER
+or SERVICE, with existing unsafe-cookie Origin policy. It appends server Clock time and
+authenticated provenance, clears inbound at or before that time, and returns 204/no-store.
+Repeated calls succeed and append another fact, even without outstanding inbound. Unknown
+inquiries return 404, malformed UUIDs 400, missing auth/permission 401/403. It never changes
+financial state or lifecycle. New bootstrap Administrators receive the permission; existing
+roles require explicit read-modify-replace grants through `/admin/access`.
 
-`ReadStaffDashboard` owns one unlocked REPEATABLE READ transaction. It invokes the existing
-operational core, captures one injected Clock `asOf` truncated to microseconds after the
-snapshot has been read, then bulk-loads inquiries without pricing inputs and customers
-through `findByIds` in that same transaction. Complete enrichment is mandatory, including
-records outside supported queues. Nine SQL statements for nonempty populations remain
-independent of population size. `asOf` is the projection evaluation timestamp, not an exact
-database commit watermark. An empty population returns zero counts, empty supported queues
-and both explicitly unavailable sections. Reads never promote or demote booking and add no
-dashboard persistence, frontend, communications, resolution workflow or lifecycle transitions.
+`ReadStaffDashboard` owns one unlocked REPEATABLE READ spanning the existing transaction-taking
+operational core, bulk inquiry/customer enrichment and one bulk communication read. Complete
+population integrity is mandatory, including records outside queues. Nonempty populations
+use exactly ten SQL statements for one or many inquiries. Concurrent commits cannot mix
+financial, fulfillment, enrichment and communication snapshots. One injected Clock `asOf`
+truncated to microseconds evaluates policy, not a database commit watermark. Read permissions
+remain BOTH `fionas.inquiries.read` and `commerce.financial-document.read`; GET statuses stay
+200/401/403/500, runtime errors, no-store success. Financial truth remains FinancialLineageView,
+lifecycle remains InquiryLifecycle.project, and reads never promote/demote booking. No generic
+commerce ownership moves into Fiona and no upstream release is required.
 
 The responsibilities are split three ways:
 
@@ -1634,6 +1653,8 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   `V12` adds `inquiry_fulfillment`, keyed by inquiry, with served timestamp and USER/SERVICE
   provenance and optional complete closed timestamp/provenance. It adds no lifecycle stage
   or financial facts and requires no backfill.
+  `V13` adds append-only `inquiry_communications` source facts with inquiry FK, strict kind/actor
+  checks, microsecond timestamps and an inquiry/time index. It adds no dashboard state.
   Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   current Offerings catalog storage and the financial ledger's snapshots (with
@@ -2042,7 +2063,7 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer, inquiry and requested inputs roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry + initial Estimate together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
 | `InquiryLifecycleSpec` | Canonical projection; deposit booking by payment, allocation and activation/replacement; RELATED isolation; manual canonical rejection; metadata preservation; triggering mutations rolling back with Invoice failure; forced concurrent payments; refund stability; served/closed provenance, exact-zero closeout and change orders |
-| `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec` | Canonical complete population and overlapping counts; enriched queues, deterministic ordering, exact money and microsecond evaluation time; nine set-based SQL reads independent of population size; concurrent-writer snapshot coherence; safe integrity failures; USER/SERVICE authentication, both live permissions, Origin behavior, availability shape and no-store success |
+| `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec` | Complete canonical counts; three overlapping attention queues and exact onset/UUID ordering; communication clearing/provenance, stale-quote boundaries, Clock-zone/DST date boundaries, exact balance signs/scales; ten set-based SQL reads for one/many inquiries; concurrent financial/enrichment/communication snapshot coherence; integrity failures; live USER/SERVICE permissions and acknowledgement; final reason/schema shape and no-store |
 | `InquiryLifecycleRoutesSpec` | Detail and explicit actions through the full handler; USER/SERVICE provenance, live manage permission, authentication, Origin policy, malformed/missing inquiries, repeated transitions and no arbitrary PATCH |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |

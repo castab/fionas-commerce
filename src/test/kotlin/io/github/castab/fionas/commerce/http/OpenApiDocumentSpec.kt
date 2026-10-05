@@ -84,7 +84,7 @@ class OpenApiDocumentSpec :
             method: String,
         ) = document.at("paths", path, method).jsonObject
 
-        test("staff dashboard schemas describe exact availability, enrichment and both live permissions") {
+        test("staff dashboard schemas describe attention reasons, enrichment and both live permissions") {
             val route = operation("/staff/dashboard", "get")
             route.text("operationId") shouldBe "readStaffDashboard"
             route.text("description") shouldContain "Requires BOTH `fionas.inquiries.read` and `commerce.financial-document.read`"
@@ -96,11 +96,10 @@ class OpenApiDocumentSpec :
             schema("StaffDashboardSummaryResponse").strings("required") shouldContainExactly
                 listOf("new", "quoted", "booked", "needsClosing")
             schema("StaffDashboardWorkQueueResponse").strings("required") shouldContainExactly
-                listOf("needsQuote", "awaitingQuoteReply", "needsClosing", "needsReply", "needsResolution")
+                listOf("needsReply", "needsQuote", "needsResolution")
             val queue = schema("StaffWorkQueueResponse")
-            queue.strings("required") shouldContainExactly listOf("available", "items")
-            queue.strings("properties", "unavailableReason", "enum") shouldContainExactly
-                listOf("COMMUNICATIONS_NOT_IMPLEMENTED", "RESOLUTION_POLICY_NOT_DEFINED")
+            queue.strings("required") shouldContainExactly listOf("items")
+            queue.at("properties").jsonObject.keys shouldBe setOf("items")
             val item = schema("StaffDashboardItemResponse")
             item.strings("required") shouldContainExactly
                 listOf(
@@ -118,14 +117,25 @@ class OpenApiDocumentSpec :
                     "currency",
                     "inquiryCreatedAt",
                     "latestDocumentVersionAt",
+                    "attentionSince",
+                    "reasons",
                 )
             listOf("total", "balance", "currency").forEach { item.text("properties", it, "type") shouldBe "string" }
             listOf("inquiryId", "customerId", "documentId").forEach { item.text("properties", it, "format") shouldBe "uuid" }
             item.text("properties", "eventDate", "format") shouldBe "date"
-            listOf("inquiryCreatedAt", "latestDocumentVersionAt", "servedAt").forEach {
+            listOf("inquiryCreatedAt", "latestDocumentVersionAt", "servedAt", "attentionSince").forEach {
                 item.text("properties", it, "format") shouldBe "date-time"
             }
             item.strings("properties", "stage", "enum") shouldContainExactly listOf("REQUESTED", "QUOTED", "BOOKED", "SERVED", "CLOSED")
+            item.strings("properties", "reasons", "items", "enum") shouldContainExactly
+                listOf(
+                    "CUSTOMER_COMMUNICATION_UNACKNOWLEDGED",
+                    "NEEDS_QUOTE",
+                    "QUOTE_STALE",
+                    "EVENT_DATE_PASSED_UNSERVED",
+                    "SERVED_WITH_BALANCE_DUE",
+                    "READY_TO_CLOSE",
+                )
         }
 
         test("login documents its rate limit") {
@@ -138,6 +148,8 @@ class OpenApiDocumentSpec :
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
+                Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "acknowledgeInquiryCommunication") to
+                    listOf("204", "400", "401", "403", "404", "500"),
                 Triple("/staff/dashboard", "get", "readStaffDashboard") to listOf("200", "401", "403", "500"),
                 Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "403", "404", "500"),
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "404", "409", "422", "500"),
@@ -199,6 +211,7 @@ class OpenApiDocumentSpec :
         val tags =
             mapOf(
                 "readStaffDashboard" to "Staff dashboard",
+                "acknowledgeInquiryCommunication" to "Inquiries",
                 "getInquiryForm" to "Inquiries",
                 "createInquiry" to "Inquiries",
                 "listInquiries" to "Inquiries",

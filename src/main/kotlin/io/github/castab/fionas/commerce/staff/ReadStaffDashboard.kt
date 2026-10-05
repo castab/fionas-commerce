@@ -4,6 +4,8 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.customer.CustomerRepository
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryOperationalState
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
@@ -17,6 +19,8 @@ class ReadStaffDashboard(
     private val inquiries: InquiryRepository,
     private val customers: CustomerRepository,
     private val clock: Clock,
+    private val communications: InquiryCommunicationRepository,
+    private val policy: DashboardAttentionPolicy = DashboardAttentionPolicy(),
 ) {
     operator fun invoke(): StaffDashboard =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
@@ -44,36 +48,47 @@ class ReadStaffDashboard(
                         id == customer.id
                     },
             ) { "Dashboard customer enrichment is incomplete or corrupt" }
-            val ordered =
-                snapshot.states.sortedWith(
-                    compareBy({ records.getValue(it.inquiryId).createdAt }, { it.inquiryId.value.toString() }),
-                )
+            val activity = communications.findAll(transaction, ids)
+            check(ids.containsAll(activity.keys) && activity.all { (id, facts) -> facts.all { it.inquiryId == id } }) {
+                "Dashboard communication activity is outside the operational population or corrupt"
+            }
+            val attention = activity.mapValues { InquiryCommunicationAttention.project(it.value) }
 
-            fun queue(predicate: (InquiryOperationalState) -> Boolean) =
-                StaffWorkQueue.Available(
-                    ordered.filter(predicate).map { state ->
-                        val inquiry = records.getValue(state.inquiryId)
-                        val customer = people.getValue(inquiry.customerId)
-                        StaffDashboardItem(
-                            inquiry.id,
-                            customer.id,
-                            customer.name,
-                            inquiry.eventDate,
-                            inquiry.eventType,
-                            state.lifecycle.stage,
-                            state.financial.latestVersion,
-                            state.financial.reconciliation.balance,
-                            inquiry.createdAt,
-                            state.lifecycle.fulfillment
-                                ?.served
-                                ?.occurredAt,
-                        )
-                    },
+            fun communication(state: InquiryOperationalState) = attention[state.inquiryId] ?: InquiryCommunicationAttention(null, null)
+
+            fun queue(project: (InquiryOperationalState) -> StaffAttention?) =
+                StaffWorkQueue(
+                    snapshot.states
+                        .mapNotNull { state ->
+                            val reason = project(state) ?: return@mapNotNull null
+                            val inquiry = records.getValue(state.inquiryId)
+                            val customer = people.getValue(inquiry.customerId)
+                            StaffDashboardItem(
+                                inquiry.id,
+                                customer.id,
+                                customer.name,
+                                inquiry.eventDate,
+                                inquiry.eventType,
+                                state.lifecycle.stage,
+                                state.financial.latestVersion,
+                                state.financial.reconciliation.balance,
+                                inquiry.createdAt,
+                                state.lifecycle.fulfillment
+                                    ?.served
+                                    ?.occurredAt,
+                                reason.attentionSince,
+                                reason.reasons,
+                            )
+                        }.sortedWith(compareBy({ it.attentionSince }, { it.inquiryId.value.toString() })),
                 )
             StaffDashboard(
                 asOf,
                 snapshot.counts,
-                StaffDashboardWorkQueue(queue { it.needsQuote }, queue { it.awaitingQuoteReply }, queue { it.needsClosing }),
+                StaffDashboardWorkQueue(
+                    queue { policy.needsReply(communication(it)) },
+                    queue { policy.needsQuote(it, records.getValue(it.inquiryId).createdAt) },
+                    queue { policy.needsResolution(it, records.getValue(it.inquiryId).eventDate, communication(it), asOf, clock.zone) },
+                ),
             )
         }
 }

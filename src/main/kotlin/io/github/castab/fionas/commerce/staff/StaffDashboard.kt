@@ -19,24 +19,23 @@ data class StaffDashboard(
 )
 
 data class StaffDashboardWorkQueue(
-    val needsQuote: StaffWorkQueue.Available,
-    val awaitingQuoteReply: StaffWorkQueue.Available,
-    val needsClosing: StaffWorkQueue.Available,
-    val needsReply: StaffWorkQueue.Unavailable = StaffWorkQueue.Unavailable(StaffQueueUnavailability.COMMUNICATIONS_NOT_IMPLEMENTED),
-    val needsResolution: StaffWorkQueue.Unavailable = StaffWorkQueue.Unavailable(StaffQueueUnavailability.RESOLUTION_POLICY_NOT_DEFINED),
+    val needsReply: StaffWorkQueue,
+    val needsQuote: StaffWorkQueue,
+    val needsResolution: StaffWorkQueue,
 )
 
-enum class StaffQueueUnavailability { COMMUNICATIONS_NOT_IMPLEMENTED, RESOLUTION_POLICY_NOT_DEFINED }
+/** All items ordered by attentionSince ascending, then lexical inquiry UUID. Queues may overlap. */
+data class StaffWorkQueue(
+    val items: List<StaffDashboardItem>,
+)
 
-sealed interface StaffWorkQueue {
-    /** All items, oldest inquiry first, then lexical UUID order. This is not customer wait duration. */
-    data class Available(
-        val items: List<StaffDashboardItem>,
-    ) : StaffWorkQueue
-
-    data class Unavailable(
-        val reason: StaffQueueUnavailability,
-    ) : StaffWorkQueue
+enum class StaffAttentionReason {
+    CUSTOMER_COMMUNICATION_UNACKNOWLEDGED,
+    NEEDS_QUOTE,
+    QUOTE_STALE,
+    EVENT_DATE_PASSED_UNSERVED,
+    SERVED_WITH_BALANCE_DUE,
+    READY_TO_CLOSE,
 }
 
 data class StaffDashboardItem(
@@ -50,4 +49,6 @@ data class StaffDashboardItem(
     val balance: Money,
     val inquiryCreatedAt: Instant,
     val servedAt: Instant?,
+    val attentionSince: Instant,
+    val reasons: Set<StaffAttentionReason>,
 )
