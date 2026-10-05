@@ -22,7 +22,10 @@ class GetInquiry(
             read(transaction, id)
         }
 
-    /** Composes the same detail in the caller's repeatable snapshot, without opening a transaction. */
+    /**
+     * Reads detail inside the caller-owned transaction without opening another.
+     * The caller chooses isolation; [invoke] and ReadStaffRequest use REPEATABLE READ.
+     */
     internal fun read(
         transaction: Transaction,
         id: InquiryId,

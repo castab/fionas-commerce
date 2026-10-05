@@ -24,7 +24,11 @@ import org.http4k.core.with
 data class StaffRequestResponse(
     @ApiProperty(description = "Authoritative inquiry detail, including customer, event, pinned requested pricing intent and lifecycle.")
     val inquiry: InquiryResponse,
-    @ApiProperty(description = "Current canonical INITIAL_ESTIMATE lineage only; immutable financial facts and current reconciliation.")
+    @ApiProperty(
+        description =
+            "Current canonical INITIAL_ESTIMATE lineage only; immutable financial facts. " +
+                "financial.reconciliation is always present and describes current derived settlement.",
+    )
     val financial: FinancialDocumentResponse,
 )
 
@@ -38,7 +42,8 @@ internal fun readStaffRequestRoute(
         operationId = "readStaffRequest"
         summary = "Read a staff request"
         description = "One unlocked REPEATABLE_READ snapshot of inquiry, durable customer, event facts, requested pricing intent, " +
-            "canonical lifecycle and the latest immutable INITIAL_ESTIMATE financial lineage with current reconciliation. " +
+            "canonical lifecycle and the latest immutable INITIAL_ESTIMATE financial lineage. " +
+            "financial.reconciliation is always present and describes current derived settlement. " +
             "RELATED lineages are excluded. Requires BOTH `${FionaPermissions.InquiriesRead.value}` and " +
             "`${CommercePermissions.FinancialDocumentRead.value}` for USER sessions or SERVICE tokens. " +
             "Financial lines and totals are authoritative; requested pricing inputs remain inquiry history. " +

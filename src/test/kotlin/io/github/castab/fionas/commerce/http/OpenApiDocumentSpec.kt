@@ -95,12 +95,14 @@ class OpenApiDocumentSpec :
             route.text("description") shouldContain "commerce.financial-document.read"
             route.text("description") shouldContain "BOTH"
             route.text("description") shouldContain "INITIAL_ESTIMATE"
+            route.text("description") shouldContain "financial.reconciliation is always present"
             route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/StaffRequestResponse"
             val response = schema("StaffRequestResponse")
             response.strings("required") shouldContainExactly listOf("inquiry", "financial")
             response.text("properties", "inquiry", "\$ref") shouldBe "#/components/schemas/InquiryResponse"
             response.text("properties", "financial", "\$ref") shouldBe "#/components/schemas/FinancialDocumentResponse"
+            response.text("properties", "financial", "description") shouldContain "financial.reconciliation is always present"
         }
 
         test("staff dashboard schemas describe attention reasons, enrichment and both live permissions") {

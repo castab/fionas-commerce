@@ -11,6 +11,7 @@ import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.withBearer
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -42,8 +43,10 @@ class StaffRequestRoutesSpec :
             json.getValue("inquiry") shouldBe Json.parseToJsonElement(app.adminGet("/inquiries/$id").bodyString())
             json.getValue("financial") shouldBe Json.parseToJsonElement(app.adminGet("/financial-documents/$document").bodyString())
             val view = CommerceJson.asA(response.bodyString(), StaffRequestResponse.serializer())
+            view.inquiry.id shouldBe view.financial.inquiryId
             view.inquiry.lifecycle.documentId shouldBe view.financial.id
             view.financial.inquiryId shouldBe id
+            view.financial.reconciliation.shouldNotBeNull()
             view.financial.stage shouldBe "ESTIMATE"
             view.financial.version shouldBe 1
             app
@@ -53,6 +56,9 @@ class StaffRequestRoutesSpec :
                 ).status shouldBe
                 Status.OK
             val quoted = CommerceJson.asA(app.adminGet(path).bodyString(), StaffRequestResponse.serializer())
+            quoted.inquiry.id shouldBe quoted.financial.inquiryId
+            quoted.inquiry.lifecycle.documentId shouldBe quoted.financial.id
+            quoted.financial.reconciliation.shouldNotBeNull()
             quoted.inquiry.lifecycle.stage shouldBe InquiryStageResponse.QUOTED
             quoted.financial.stage shouldBe "QUOTE"
             quoted.financial.id shouldBe document

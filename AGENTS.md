@@ -1306,7 +1306,8 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
   ownership and lifecycle document identity must agree. Unknown inquiries are 404; missing
   canonical/customer data or disagreement fails internally, never as nullable financial state.
   Requested pricing inputs remain pinned inquiry intent; current immutable lines, totals,
-  version and reconciliation come from the runtime ledger without catalog access or repricing.
+  version and current derived reconciliation come from the runtime ledger without catalog
+  access or repricing. `financial.reconciliation` is always present on this endpoint.
   BOTH `fionas.inquiries.read` and `commerce.financial-document.read` are required through the
   existing USER/SERVICE authentication. Safe GET requires no trusted Origin; success is no-store.
   `financial.id` and `financial.version` supply the existing Quote transition's documentId and

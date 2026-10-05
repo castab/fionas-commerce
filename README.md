@@ -1053,7 +1053,8 @@ persistence operation.
 `inquiry`, using the existing `InquiryResponse`, and `financial`, using the existing
 `FinancialDocumentResponse`. One unlocked REPEATABLE READ snapshot covers the durable
 customer, inquiry message/event facts, pinned requested pricing inputs, canonical lifecycle,
-and current immutable financial version/lines/totals/currency/reconciliation. It selects only
+and current immutable financial version/lines/totals/currency. `financial.reconciliation`
+is always present and describes current derived settlement. It selects only
 the explicit `INITIAL_ESTIMATE` relationship; `RELATED` lineages are excluded. Missing or
 inconsistent canonical/customer data fails with generic `500 internal_failure`.
 

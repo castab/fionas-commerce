@@ -26,7 +26,10 @@ class GetFinancialDocument(
             read(transaction, documentId)
         }
 
-    /** Composes the current financial view in the caller's repeatable snapshot. */
+    /**
+     * Reads the current financial view inside the caller-owned transaction without opening another.
+     * The caller chooses isolation; [invoke] and ReadStaffRequest use REPEATABLE READ.
+     */
     internal fun read(
         transaction: Transaction,
         documentId: UUID,
