@@ -19,19 +19,24 @@ class ReadInquiryOperationalStates(
 ) {
     operator fun invoke(): InquiryOperationalSnapshot =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
-            val ids = inquiries.ids(transaction)
-            val canonical = associations.initialEstimates(transaction)
-            check(canonical.keys == ids) { "Inquiry population does not match canonical initial Estimate relationships" }
-            check(canonical.values.toSet().size == canonical.size) { "Canonical financial lineage belongs to multiple inquiries" }
-            val views = readLineages(transaction, canonical.values)
-            val financial = views.associateBy { it.latestVersion.document.id }
-            check(financial.size == views.size && financial.keys == canonical.values.toSet()) {
-                "Canonical financial lineages are incomplete or corrupt"
-            }
-            val facts = fulfillment.findAll(transaction, ids)
-            check(ids.containsAll(facts.keys)) { "Fulfillment returned an inquiry outside the operational population" }
-            InquiryOperationalSnapshot(
-                canonical.map { (inquiry, document) -> InquiryOperationalState(inquiry, financial.getValue(document), facts[inquiry]) },
-            )
+            invoke(transaction)
         }
+
+    /** Caller owns an unlocked REPEATABLE_READ transaction covering this read and any enrichment. */
+    operator fun invoke(transaction: Transaction): InquiryOperationalSnapshot {
+        val ids = inquiries.ids(transaction)
+        val canonical = associations.initialEstimates(transaction)
+        check(canonical.keys == ids) { "Inquiry population does not match canonical initial Estimate relationships" }
+        check(canonical.values.toSet().size == canonical.size) { "Canonical financial lineage belongs to multiple inquiries" }
+        val views = readLineages(transaction, canonical.values)
+        val financial = views.associateBy { it.latestVersion.document.id }
+        check(financial.size == views.size && financial.keys == canonical.values.toSet()) {
+            "Canonical financial lineages are incomplete or corrupt"
+        }
+        val facts = fulfillment.findAll(transaction, ids)
+        check(ids.containsAll(facts.keys)) { "Fulfillment returned an inquiry outside the operational population" }
+        return InquiryOperationalSnapshot(
+            canonical.map { (inquiry, document) -> InquiryOperationalState(inquiry, financial.getValue(document), facts[inquiry]) },
+        )
+    }
 }

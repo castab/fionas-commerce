@@ -84,6 +84,50 @@ class OpenApiDocumentSpec :
             method: String,
         ) = document.at("paths", path, method).jsonObject
 
+        test("staff dashboard schemas describe exact availability, enrichment and both live permissions") {
+            val route = operation("/staff/dashboard", "get")
+            route.text("operationId") shouldBe "readStaffDashboard"
+            route.text("description") shouldContain "Requires BOTH `fionas.inquiries.read` and `commerce.financial-document.read`"
+            route.text("description") shouldContain "Cache-Control: no-store"
+            route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/StaffDashboardResponse"
+            schema("StaffDashboardResponse").strings("required") shouldContainExactly listOf("asOf", "summary", "workQueue")
+            schema("StaffDashboardResponse").text("properties", "asOf", "format") shouldBe "date-time"
+            schema("StaffDashboardSummaryResponse").strings("required") shouldContainExactly
+                listOf("new", "quoted", "booked", "needsClosing")
+            schema("StaffDashboardWorkQueueResponse").strings("required") shouldContainExactly
+                listOf("needsQuote", "awaitingQuoteReply", "needsClosing", "needsReply", "needsResolution")
+            val queue = schema("StaffWorkQueueResponse")
+            queue.strings("required") shouldContainExactly listOf("available", "items")
+            queue.strings("properties", "unavailableReason", "enum") shouldContainExactly
+                listOf("COMMUNICATIONS_NOT_IMPLEMENTED", "RESOLUTION_POLICY_NOT_DEFINED")
+            val item = schema("StaffDashboardItemResponse")
+            item.strings("required") shouldContainExactly
+                listOf(
+                    "inquiryId",
+                    "customerId",
+                    "customerName",
+                    "eventDate",
+                    "eventType",
+                    "stage",
+                    "documentId",
+                    "version",
+                    "financialStage",
+                    "total",
+                    "balance",
+                    "currency",
+                    "inquiryCreatedAt",
+                    "latestDocumentVersionAt",
+                )
+            listOf("total", "balance", "currency").forEach { item.text("properties", it, "type") shouldBe "string" }
+            listOf("inquiryId", "customerId", "documentId").forEach { item.text("properties", it, "format") shouldBe "uuid" }
+            item.text("properties", "eventDate", "format") shouldBe "date"
+            listOf("inquiryCreatedAt", "latestDocumentVersionAt", "servedAt").forEach {
+                item.text("properties", it, "format") shouldBe "date-time"
+            }
+            item.strings("properties", "stage", "enum") shouldContainExactly listOf("REQUESTED", "QUOTED", "BOOKED", "SERVED", "CLOSED")
+        }
+
         test("login documents its rate limit") {
             operation("/auth/login", "post").text("responses", "429", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/ErrorResponse"
@@ -94,6 +138,7 @@ class OpenApiDocumentSpec :
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
+                Triple("/staff/dashboard", "get", "readStaffDashboard") to listOf("200", "401", "403", "500"),
                 Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "403", "404", "500"),
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
@@ -153,6 +198,7 @@ class OpenApiDocumentSpec :
         // Each Fiona operation's tag.
         val tags =
             mapOf(
+                "readStaffDashboard" to "Staff dashboard",
                 "getInquiryForm" to "Inquiries",
                 "createInquiry" to "Inquiries",
                 "listInquiries" to "Inquiries",
@@ -248,6 +294,11 @@ class OpenApiDocumentSpec :
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
+                "StaffDashboardResponse",
+                "StaffDashboardSummaryResponse",
+                "StaffDashboardWorkQueueResponse",
+                "StaffWorkQueueResponse",
+                "StaffDashboardItemResponse",
                 "CurrentDepositRequirementResponse",
                 "CurrentDepositRequirementResponse_NONE",
                 "CurrentDepositRequirementResponse_ACTIVE",
@@ -371,6 +422,7 @@ class OpenApiDocumentSpec :
             document.text("info", "version") shouldBe fionaVersion()
             document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder
                 listOf(
+                    "Staff dashboard",
                     "Inquiries",
                     "Estimates",
                     "Financial documents",

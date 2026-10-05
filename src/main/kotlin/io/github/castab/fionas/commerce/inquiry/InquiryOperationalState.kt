@@ -10,6 +10,13 @@ class InquiryOperationalState(
     fulfillment: InquiryFulfillment?,
 ) {
     val lifecycle: InquiryLifecycle = InquiryLifecycle.project(financial.latestVersion.document, fulfillment)
+
+    val needsQuote: Boolean get() = lifecycle.stage == InquiryStage.REQUESTED
+    val awaitingQuoteReply: Boolean get() = lifecycle.stage == InquiryStage.QUOTED
+    val needsClosing: Boolean get() =
+        lifecycle.stage == InquiryStage.SERVED &&
+            financial.reconciliation.balance.amount
+                .signum() == 0
 }
 
 /** Overlapping operational counts, derived only from canonical lifecycle and runtime reconciliation. */
@@ -22,15 +29,10 @@ data class InquiryOperationalCounts(
     companion object {
         fun project(states: Collection<InquiryOperationalState>): InquiryOperationalCounts =
             InquiryOperationalCounts(
-                new = states.count { it.lifecycle.stage == InquiryStage.REQUESTED },
-                quoted = states.count { it.lifecycle.stage == InquiryStage.QUOTED },
+                new = states.count { it.needsQuote },
+                quoted = states.count { it.awaitingQuoteReply },
                 booked = states.count { it.lifecycle.stage == InquiryStage.BOOKED || it.lifecycle.stage == InquiryStage.SERVED },
-                needsClosing =
-                    states.count {
-                        it.lifecycle.stage == InquiryStage.SERVED &&
-                            it.financial.reconciliation.balance.amount
-                                .signum() == 0
-                    },
+                needsClosing = states.count { it.needsClosing },
             )
     }
 }

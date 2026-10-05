@@ -7,10 +7,12 @@ import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentMethod
+import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.IssueQuote
@@ -19,6 +21,9 @@ import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRe
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
+import io.github.castab.fionas.commerce.http.StaffDashboardResponse
+import io.github.castab.fionas.commerce.http.StaffDashboardSummaryResponse
+import io.github.castab.fionas.commerce.staff.ReadStaffDashboard
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
@@ -52,6 +57,15 @@ class InquiryOperationalStatesSpec :
         fun money(amount: String) = Money(BigDecimal(amount), Currency.getInstance("USD"))
 
         fun read() = ReadInquiryOperationalStates(app.transactor, inquiries, owners, app.context.financialLedger, facts)()
+
+        fun dashboard() =
+            ReadStaffDashboard(
+                app.transactor,
+                ReadInquiryOperationalStates(app.transactor, inquiries, owners, app.context.financialLedger, facts),
+                inquiries,
+                JdbiCustomerRepository(),
+                testClock,
+            )()
 
         fun requested(): Pair<InquiryId, UUID> {
             val id = app.createInquiry()
@@ -153,6 +167,26 @@ class InquiryOperationalStatesSpec :
             val snapshot = read()
             snapshot.states.size shouldBe 7
             snapshot.counts shouldBe InquiryOperationalCounts(1, 1, 4, 1)
+            val dashboard = dashboard()
+            dashboard.summary shouldBe snapshot.counts
+            dashboard.workQueue.needsQuote.items
+                .map { it.inquiryId } shouldBe listOf(requested.first)
+            dashboard.workQueue.awaitingQuoteReply.items
+                .map { it.inquiryId } shouldBe listOf(quoted.first)
+            dashboard.workQueue.needsClosing.items
+                .map { it.inquiryId } shouldBe listOf(zero.first)
+            dashboard.workQueue.needsClosing.items
+                .single()
+                .servedAt shouldBe STORED_INSTANT
+            val response = app.adminGet("/staff/dashboard")
+            response.status.code shouldBe 200
+            val dto = CommerceJson.asA(response.bodyString(), StaffDashboardResponse.serializer())
+            dto.summary shouldBe StaffDashboardSummaryResponse(1, 1, 4, 1)
+            dto.workQueue.needsClosing.items
+                .map { it.inquiryId } shouldBe listOf(zero.first.value.toString())
+            dto.workQueue.needsClosing.items
+                .single()
+                .balance shouldBe "0.00"
             val states = snapshot.states.associateBy { it.inquiryId }
             listOf(
                 requested to InquiryOperationalCounts(1, 0, 0, 0),
@@ -207,6 +241,19 @@ class InquiryOperationalStatesSpec :
                 .single()
                 .lifecycle.stage shouldBe InquiryStage.REQUESTED
             snapshot.counts shouldBe InquiryOperationalCounts(1, 0, 0, 0)
+            val item =
+                dashboard()
+                    .workQueue.needsQuote.items
+                    .single()
+            item.latestFinancialVersion.document.id shouldBe canonical
+            item.latestFinancialVersion.document.total shouldBe
+                snapshot.states
+                    .single()
+                    .financial.latestVersion.document.total
+            item.balance shouldBe
+                snapshot.states
+                    .single()
+                    .financial.reconciliation.balance
             app.transactor.inTransaction { owners.initialEstimates(it) } shouldBe mapOf(inquiry to canonical)
         }
 
@@ -234,6 +281,7 @@ class InquiryOperationalStatesSpec :
                 }
             // Projection below has only in-memory input and needs no transaction or database collaborator.
             states.forEach { InquiryOperationalCounts.project(listOf(it)) shouldBe InquiryOperationalCounts(0, 0, 1, 1) }
+            states.forEach { it.needsClosing shouldBe true }
             InquiryOperationalCounts.project(states) shouldBe InquiryOperationalCounts(0, 0, 3, 3)
             val source = states.toMutableList()
             val snapshot = InquiryOperationalSnapshot(source)

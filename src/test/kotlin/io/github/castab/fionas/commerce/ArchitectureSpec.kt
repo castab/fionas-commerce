@@ -151,6 +151,7 @@ class ArchitectureSpec :
                     "inquiry/ManageInquiryFulfillment.kt: inTransaction",
                     "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
+                    "staff/ReadStaffDashboard.kt: inTransaction",
                     "financial/GetDepositRequirement.kt: inTransaction",
                     "financial/GetDepositRequirementHistory.kt: inTransaction",
                     "financial/SetDepositRequirement.kt: inTransaction",
@@ -231,6 +232,7 @@ class ArchitectureSpec :
             val routes =
                 fionaApiRoutes(
                     FionaOperations(
+                        readStaffDashboard = { error("not called") },
                         markInquiryServed = { error("not called") },
                         closeInquiry = { error("not called") },
                         getInquiryForm = { error("not called") },
