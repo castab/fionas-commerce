@@ -343,6 +343,80 @@ class InquiryOperationalStatesSpec :
             }
         }
 
+        test("canonical relationships with a different inquiry population fail even when population sizes match") {
+            val pair = requested()
+            val corrupt =
+                object : InquiryFinancialDocumentRepository by owners {
+                    override fun initialEstimates(transaction: Transaction): Map<InquiryId, UUID> =
+                        mapOf(InquiryId(UUID.randomUUID()) to pair.second)
+                }
+            shouldThrow<IllegalStateException> {
+                ReadInquiryOperationalStates(app.transactor, inquiries, corrupt, app.context.financialLedger, facts)()
+            }.message shouldBe "Inquiry population does not match canonical initial Estimate relationships"
+        }
+
+        test("multiple inquiries resolving to one canonical lineage fail rather than sharing financial state") {
+            val first = requested()
+            val second = requested()
+            val corrupt =
+                object : InquiryFinancialDocumentRepository by owners {
+                    override fun initialEstimates(transaction: Transaction): Map<InquiryId, UUID> =
+                        mapOf(first.first to first.second, second.first to first.second)
+                }
+            shouldThrow<IllegalStateException> {
+                ReadInquiryOperationalStates(app.transactor, inquiries, corrupt, app.context.financialLedger, facts)()
+            }.message shouldBe "Canonical financial lineage belongs to multiple inquiries"
+        }
+
+        listOf("incomplete", "duplicate", "unexpected").forEach { corruption ->
+            test("$corruption runtime bulk results fail instead of returning a partial or ambiguous operational snapshot") {
+                requested()
+                requested()
+                val unrelated =
+                    FinancialDocument.Invoice.create(
+                        UUID.randomUUID(),
+                        listOf(LineItem(UUID.randomUUID(), "Unrelated service", null, null, money("20.00"), money("0.00"))),
+                    )
+                app.transactor.inTransaction { app.context.financialLedger.create(it, unrelated) }
+                shouldThrow<IllegalStateException> {
+                    ReadInquiryOperationalStates(
+                        app.transactor,
+                        inquiries,
+                        owners,
+                        app.context.financialLedger,
+                        facts,
+                        readLineages = { transaction, ids ->
+                            val views = app.context.financialLedger.financialLineages(transaction, ids)
+                            when (corruption) {
+                                "incomplete" -> views.take(1)
+                                "duplicate" -> listOf(views.first(), views.first())
+                                else ->
+                                    views.take(1) +
+                                        app.context.financialLedger.financialLineages(transaction, listOf(unrelated.id))
+                            }
+                        },
+                    )()
+                }.message shouldBe "Canonical financial lineages are incomplete or corrupt"
+                // The fault is confined to the read seam; authoritative data still yields the complete population.
+                read().counts shouldBe InquiryOperationalCounts(2, 0, 0, 0)
+            }
+        }
+
+        test("fulfillment outside the inquiry population fails instead of being silently discarded") {
+            requested()
+            val corrupt =
+                object : InquiryFulfillmentRepository by facts {
+                    override fun findAll(
+                        transaction: Transaction,
+                        inquiryIds: Collection<InquiryId>,
+                    ): Map<InquiryId, InquiryFulfillment> =
+                        mapOf(InquiryId(UUID.randomUUID()) to InquiryFulfillment(InquiryMilestone(STORED_INSTANT, user)))
+                }
+            shouldThrow<IllegalStateException> {
+                ReadInquiryOperationalStates(app.transactor, inquiries, owners, app.context.financialLedger, corrupt)()
+            }.message shouldBe "Fulfillment returned an inquiry outside the operational population"
+        }
+
         test("fulfillment before canonical Invoice still fails in the authoritative projector") {
             val pair = requested()
             app.transactor.inTransaction { facts.serve(it, pair.first, InquiryMilestone(STORED_INSTANT, user)) }
