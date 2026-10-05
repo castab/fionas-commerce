@@ -52,6 +52,7 @@ import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.PublicInquiryPricing
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
+import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
 import io.github.castab.fionas.commerce.offering.FionasPricing
@@ -63,6 +64,7 @@ import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.staff.Login
 import io.github.castab.fionas.commerce.staff.PasswordHasher
+import io.github.castab.fionas.commerce.staff.ReadStaffDashboard
 import io.github.castab.fionas.commerce.staff.SetStaffPassword
 import io.github.castab.fionas.commerce.staff.StaffPasswordAuthenticator
 import org.http4k.core.then
@@ -168,6 +170,13 @@ fun fionaApplication(
                 )
             val operations =
                 FionaOperations(
+                    readStaffDashboard = ReadStaffDashboard(
+                        context.transactor,
+                        ReadInquiryOperationalStates(context.transactor, inquiries, documentOwners, ledger, fulfillment),
+                        inquiries,
+                        customers,
+                        clock,
+                    )::invoke,
                     createInquiry = CreateInquiry(
                         context.transactor,
                         customers,

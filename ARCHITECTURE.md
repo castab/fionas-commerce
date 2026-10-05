@@ -466,6 +466,21 @@ Exposure is an application decision.
 
 # 17. UI Requirements Do Not Define Persistence
 
+Fiona's `ReadStaffDashboard` composes the existing complete canonical operational reader's
+transaction-taking core with bulk inquiry and customer enrichment in one unlocked REPEATABLE
+READ snapshot. Financial truth remains runtime `FinancialLineageView`; lifecycle remains
+`InquiryLifecycle.project`. Integrity failures reject the whole dashboard. Neither counts,
+queues nor enriched financial facts are persisted, and reads never trigger booking promotion.
+
+`GET /staff/dashboard` is an application-owned HTTP projection requiring both inquiry-read
+and financial-document-read permissions through the shared live AccessControl for USER or
+SERVICE principals. Fiona classifies needsQuote, awaitingQuoteReply and needsClosing using
+the same pure predicates as operational counts. Canonical Quote is the firm-proposal boundary,
+not evidence of communication. Needs reply and Needs resolution remain explicitly unavailable
+until communications semantics and a resolution policy exist. The projection evaluates one
+Clock timestamp and returns all queue items oldest inquiry first; it invents no customer-wait
+duration or database commit watermark. It adds no new booking aggregate or workflow state.
+
 Dashboard and frontend requirements often ask questions such as:
 
 - is the deposit satisfied?

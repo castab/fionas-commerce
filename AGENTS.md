@@ -1303,7 +1303,37 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
   booked = BOOKED or SERVED, needsClosing = SERVED with balance `signum() == 0`.
   These counts overlap, exclude CLOSED, and ignore event dates and deposit satisfaction.
   Neither states nor counts are persisted. Preserve bulk reads and caller-owned transactions;
-  never replace them with per-inquiry reads. This primitive has no HTTP contract yet.
+  never replace them with per-inquiry reads. Its standalone invocation owns the transaction;
+  the transaction-taking core supports `ReadStaffDashboard` without duplicating checks.
+
+- `ReadStaffDashboard` owns one unlocked REPEATABLE READ transaction covering the operational
+  core and bulk `InquiryRepository.findByIds` / `CustomerRepository.findByIds` enrichment.
+  Inquiry enrichment excludes pricing inputs. Verify the complete operational population and
+  customer coverage, including inquiries outside supported queues; missing/corrupt data is an
+  internal failure, never partial success. Nonempty populations use nine SQL statements,
+  independent of population size. Capture one injected Clock `asOf` truncated to microseconds
+  after the operational read, inside the transaction; it is an evaluation timestamp, not a
+  database commit watermark. Never nest the standalone reader or enrich after its transaction.
+- GET `/staff/dashboard` (`readStaffDashboard`) is a ContractRoute wired through
+  `FionaOperations`, the composition root and offline OpenAPI. Require BOTH InquiriesRead and
+  FinancialDocumentRead before invocation through the existing live AccessControl, for USER
+  sessions and SERVICE tokens alike. No dashboard permission, role-name check, startup grants
+  or principal parameter. Preserve session precedence and safe-GET cookie Origin behavior.
+  Actual statuses are 200/401/403/500 with runtime error envelopes; success is no-store.
+- Dashboard summary uses the existing operational counts. Supported queues are needsQuote =
+  REQUESTED, awaitingQuoteReply = QUOTED, and needsClosing = SERVED with exact-zero canonical
+  Invoice balance. Shared pure state predicates serve counts and queues; HTTP only maps DTOs.
+  Awaiting quote reply identifies the firm-proposal stage, never message delivery. Return all
+  qualifying items by creation time ascending then lexical inquiry UUID ascending, oldest
+  inquiries first, never a customer-wait interpretation. Items carry minimal customer/event,
+  canonical latest financial identity/stage, exact money, creation times and optional served
+  time. No lines/history, contact details, URLs, booking identity, ages or waitingSince.
+- All supported queues have available=true even when empty and omit unavailableReason.
+  needsReply remains available=false/items=[]/COMMUNICATIONS_NOT_IMPLEMENTED;
+  needsResolution remains available=false/items=[]/RESOLUTION_POLICY_NOT_DEFINED.
+  These stable transport reasons describe capability, never permissions. Do not substitute
+  the supported queues or invent communications/resolution semantics. No persistence or
+  read-triggered booking promotion accompanies the dashboard.
 
 - Commerce 0.0.22 owns `DepositTerms`, `DepositRequirement`, `DepositRequirementRevision`,
   persisted timestamps, frozen amount resolution, reconciliation/satisfaction,
@@ -1397,7 +1427,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...inquiry` | `Inquiry` and its values/repositories; submission key, canonical fingerprint and transaction-bound submission repository; requested pricing inputs/history; lifecycle projection, fulfillment repository and explicit service/closeout; `CreateInquiry`, `GetInquiry`, `ListInquiries`, public eligibility/pricing and the customer form's `InquiryForm` values/`GetInquiryForm` adapter |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), the persisted pricing-inputs JSON (`PersistedPricingInputs.kt`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
 | `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
-| `...staff` | Fiona's credential persistence, password verification, permission definition, and first-admin bootstrap |
+| `...staff` | Fiona's credential persistence, password verification, permission definition, first-admin bootstrap, and `ReadStaffDashboard` / dashboard projection |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
@@ -1416,7 +1446,7 @@ Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
 webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, event publishing,
 outbox, NATS, persisted financial projections, CQRS, separate Booking aggregates,
-cancellation, decline, archive, reopen, unserve, zero-deposit booking, dashboard queries,
+cancellation, decline, archive, reopen, unserve, zero-deposit booking, communications and resolution workflows,
 a generic line-source identity, stored balances or payment statuses, tax,
 travel fees, minimum orders, inventory, availability schedules/windows, catalog seeding or import, deposit
 schedules, customer merge or deduplication, inquiry search, filters, or

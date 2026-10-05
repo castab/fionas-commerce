@@ -92,6 +92,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 | `GET /inquiry-form` | `fionas.inquiry-form.read` | Explicit public questions, input constraints, rendering hints, and advisory pricing facts from one catalog revision. `404` before catalog initialization; `500` for incompatible public pricing configuration. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
+| `GET /staff/dashboard` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | One coherent snapshot of operational counts and enriched staff work queues. USER sessions and SERVICE tokens are supported. |
 
 The server-side web frontend (`fionas-web`, or a future BFF) calls `GET /inquiry-form`,
 `POST /estimate-preview`, and `POST /inquiries` as a SERVICE principal, with
@@ -1107,7 +1108,48 @@ inquiries. Each state retains the runtime's authoritative `FinancialLineageView`
 Booked as BOOKED or SERVED, and Needs closing as SERVED with an exactly-zero current
 Invoice balance, independent of decimal scale. Booked and Needs closing overlap; CLOSED
 contributes to neither. Event dates and deposit satisfaction do not affect these counts.
-Operational states and counts are never persisted; this read introduces no HTTP endpoint.
+Operational states and counts are never persisted. The standalone reader retains its own
+transaction; its transaction-taking core also composes with `ReadStaffDashboard`.
+
+`GET /staff/dashboard` (`readStaffDashboard`) returns `asOf`, `summary` (the four counts
+above), and `workQueue`. It requires **both** `fionas.inquiries.read` and
+`commerce.financial-document.read`, resolved live for USER sessions or SERVICE tokens;
+the `/staff` path adds no human-only restriction. No role grants change at startup.
+It returns `200`, `401`, `403`, or a caller-safe `500` for missing/corrupt data, using
+the runtime's error envelopes. Successful responses have `Cache-Control: no-store`.
+
+Supported queues have `available: true`, all matching `items`, and no unavailable reason:
+
+- `needsQuote`: REQUESTED inquiries.
+- `awaitingQuoteReply`: QUOTED inquiries. Canonical Quote issuance is the firm-proposal
+  boundary; this does not establish message delivery or a communications reply obligation.
+- `needsClosing`: SERVED inquiries with exactly zero current canonical Invoice balance.
+  Positive outstanding balances and negative overpayments both exclude them. These items
+  also contribute to Booked; CLOSED inquiries contribute to neither.
+
+`needsReply` has `available: false`, `items: []`, and
+`unavailableReason: "COMMUNICATIONS_NOT_IMPLEMENTED"`. `needsResolution` has the same
+unavailable shape with `"RESOLUTION_POLICY_NOT_DEFINED"`. These stable transport codes
+describe absent business capability, independent of caller permissions; no communications
+or resolution policy is inferred from the supported queues.
+
+Every supported queue returns all items, ordered by inquiry creation time ascending then
+lexical inquiry UUID ascending: oldest inquiries first, not longest customer waits.
+Items expose `inquiryId`, `customerId`, `customerName`, `eventDate`, `eventType`, projected
+`stage`, canonical `documentId`, latest `version` and `financialStage`, exact-decimal
+`total` and `balance` with ISO `currency`, `inquiryCreatedAt`, `latestDocumentVersionAt`,
+and `servedAt` when applicable. They expose no contact details, lines/history, URLs, age,
+or waiting-since interpretation. RELATED lineages never supply lifecycle or financial data.
+
+`ReadStaffDashboard` owns one unlocked REPEATABLE READ transaction. It invokes the existing
+operational core, captures one injected Clock `asOf` truncated to microseconds after the
+snapshot has been read, then bulk-loads inquiries without pricing inputs and customers
+through `findByIds` in that same transaction. Complete enrichment is mandatory, including
+records outside supported queues. Nine SQL statements for nonempty populations remain
+independent of population size. `asOf` is the projection evaluation timestamp, not an exact
+database commit watermark. An empty population returns zero counts, empty supported queues
+and both explicitly unavailable sections. Reads never promote or demote booking and add no
+dashboard persistence, frontend, communications, resolution workflow or lifecycle transitions.
 
 The responsibilities are split three ways:
 
@@ -2000,6 +2042,7 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer, inquiry and requested inputs roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry + initial Estimate together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
 | `InquiryLifecycleSpec` | Canonical projection; deposit booking by payment, allocation and activation/replacement; RELATED isolation; manual canonical rejection; metadata preservation; triggering mutations rolling back with Invoice failure; forced concurrent payments; refund stability; served/closed provenance, exact-zero closeout and change orders |
+| `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec` | Canonical complete population and overlapping counts; enriched queues, deterministic ordering, exact money and microsecond evaluation time; nine set-based SQL reads independent of population size; concurrent-writer snapshot coherence; safe integrity failures; USER/SERVICE authentication, both live permissions, Origin behavior, availability shape and no-store success |
 | `InquiryLifecycleRoutesSpec` | Detail and explicit actions through the full handler; USER/SERVICE provenance, live manage permission, authentication, Origin policy, malformed/missing inquiries, repeated transitions and no arbitrary PATCH |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
