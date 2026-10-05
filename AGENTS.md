@@ -1292,6 +1292,19 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
 
 ## Deposit requirements and bulk financial lineages
 
+- `ReadInquiryOperationalStates` derives the complete operational population in one unlocked
+  REPEATABLE READ transaction: `InquiryRepository.ids` checks population completeness,
+  `InquiryFinancialDocumentRepository.initialEstimates` reads only canonical relationships,
+  one transaction-taking runtime `financialLineages` call supplies authoritative financial
+  views, and `InquiryFulfillmentRepository.findAll` reads facts as a set. Missing/corrupt
+  relationships fail internally; never skip an inquiry or use RELATED lineages. Every state
+  delegates lifecycle to `InquiryLifecycle.project`. `InquiryOperationalSnapshot` retains
+  those runtime views and derives pure counts: new = REQUESTED, quoted = QUOTED,
+  booked = BOOKED or SERVED, needsClosing = SERVED with balance `signum() == 0`.
+  These counts overlap, exclude CLOSED, and ignore event dates and deposit satisfaction.
+  Neither states nor counts are persisted. Preserve bulk reads and caller-owned transactions;
+  never replace them with per-inquiry reads. This primitive has no HTTP contract yet.
+
 - Commerce 0.0.22 owns `DepositTerms`, `DepositRequirement`, `DepositRequirementRevision`,
   persisted timestamps, frozen amount resolution, reconciliation/satisfaction,
   `FinancialLineageView`/`FinancialLineageActivity` and bulk reads. Fiona never duplicates

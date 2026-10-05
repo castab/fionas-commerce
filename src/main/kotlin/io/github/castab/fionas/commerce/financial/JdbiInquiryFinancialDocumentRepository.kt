@@ -8,6 +8,15 @@ import java.util.UUID
 
 /** [InquiryFinancialDocumentRepository] on `fionas.inquiry_financial_documents`, through the transaction's JDBI handle. */
 class JdbiInquiryFinancialDocumentRepository : InquiryFinancialDocumentRepository {
+    override fun initialEstimates(transaction: Transaction): Map<InquiryId, UUID> =
+        transaction.handle
+            .createQuery(
+                "SELECT inquiry_id, document_id FROM fionas.inquiry_financial_documents WHERE purpose = 'INITIAL_ESTIMATE'",
+            ).map { row, _ -> InquiryId(row.getObject("inquiry_id", UUID::class.java)) to row.getObject("document_id", UUID::class.java) }
+            .list()
+            .also { rows -> check(rows.map { it.first }.toSet().size == rows.size) { "Duplicate canonical inquiry relationships" } }
+            .toMap()
+
     override fun associate(
         transaction: Transaction,
         association: InquiryDocumentAssociation,

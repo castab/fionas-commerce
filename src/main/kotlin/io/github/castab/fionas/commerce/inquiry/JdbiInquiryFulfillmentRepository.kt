@@ -6,10 +6,24 @@ import io.github.castab.commerce.runtime.persistence.isUniqueViolation
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
+import java.sql.ResultSet
 import java.time.OffsetDateTime
 import java.util.UUID
 
 class JdbiInquiryFulfillmentRepository : InquiryFulfillmentRepository {
+    override fun findAll(
+        transaction: Transaction,
+        inquiryIds: Collection<InquiryId>,
+    ): Map<InquiryId, InquiryFulfillment> {
+        if (inquiryIds.isEmpty()) return emptyMap()
+        return transaction.handle
+            .createQuery("SELECT * FROM fionas.inquiry_fulfillment WHERE inquiry_id IN (<ids>)")
+            .bindList("ids", inquiryIds.map { it.value })
+            .map { row, _ -> InquiryId(row.getObject("inquiry_id", UUID::class.java)) to fulfillment(row) }
+            .list()
+            .toMap()
+    }
+
     override fun find(
         transaction: Transaction,
         inquiryId: InquiryId,
@@ -17,19 +31,22 @@ class JdbiInquiryFulfillmentRepository : InquiryFulfillmentRepository {
         transaction.handle
             .createQuery("SELECT * FROM fionas.inquiry_fulfillment WHERE inquiry_id = :id")
             .bind("id", inquiryId.value)
-            .map { row, _ ->
-                fun actor(prefix: String): PrincipalId =
-                    when (val kind = row.getString("${prefix}_by_kind")) {
-                        "USER" -> UserId(row.getObject("${prefix}_by_id", UUID::class.java))
-                        "SERVICE" -> ServiceId(row.getObject("${prefix}_by_id", UUID::class.java))
-                        else -> error("Invalid fulfillment principal kind: $kind")
-                    }
-                InquiryFulfillment(
-                    InquiryMilestone(row.getObject("served_at", OffsetDateTime::class.java).toInstant(), actor("served")),
-                    row.getObject("closed_at", OffsetDateTime::class.java)?.let { InquiryMilestone(it.toInstant(), actor("closed")) },
-                )
-            }.findOne()
+            .map { row, _ -> fulfillment(row) }
+            .findOne()
             .orElse(null)
+
+    private fun fulfillment(row: ResultSet): InquiryFulfillment {
+        fun actor(prefix: String): PrincipalId =
+            when (val kind = row.getString("${prefix}_by_kind")) {
+                "USER" -> UserId(row.getObject("${prefix}_by_id", UUID::class.java))
+                "SERVICE" -> ServiceId(row.getObject("${prefix}_by_id", UUID::class.java))
+                else -> error("Invalid fulfillment principal kind: $kind")
+            }
+        return InquiryFulfillment(
+            InquiryMilestone(row.getObject("served_at", OffsetDateTime::class.java).toInstant(), actor("served")),
+            row.getObject("closed_at", OffsetDateTime::class.java)?.let { InquiryMilestone(it.toInstant(), actor("closed")) },
+        )
+    }
 
     override fun serve(
         transaction: Transaction,

@@ -15,6 +15,13 @@ import java.util.UUID
  * pricing inputs are the row's `pricing_inputs` jsonb, in Fiona's persisted representation.
  */
 class JdbiInquiryRepository : InquiryRepository {
+    override fun ids(transaction: Transaction): Set<InquiryId> =
+        transaction.handle
+            .createQuery("SELECT id FROM fionas.inquiries")
+            .map { row, _ -> InquiryId(row.getObject("id", UUID::class.java)) }
+            .list()
+            .toSet()
+
     override fun insert(
         transaction: Transaction,
         inquiry: Inquiry,

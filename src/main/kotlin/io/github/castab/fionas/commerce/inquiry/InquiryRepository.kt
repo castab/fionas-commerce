@@ -13,6 +13,9 @@ import io.github.castab.fionas.commerce.offering.FionasPricingInputs
  * pinned to the catalog revision it names; never lines, amounts, or totals.
  */
 interface InquiryRepository {
+    /** Complete inquiry population for checking canonical relationship coverage, without loading inquiry details. */
+    fun ids(transaction: Transaction): Set<InquiryId>
+
     /**
      * Inserts [inquiry] with the [pricingInputs] the customer requested, in one row. Its customer
      * must already exist in the same database.
