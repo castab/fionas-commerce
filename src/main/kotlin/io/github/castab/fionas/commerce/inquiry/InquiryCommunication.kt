@@ -28,21 +28,36 @@ data class InquiryCommunication(
     }
 }
 
-/** Pure timestamp interpretation; equal-time inbound is cleared, because only strictly later inbound counts. */
+/** Database-assigned observation order, allocated only after acquiring the per-inquiry append lock. */
+data class RecordedInquiryCommunication(
+    val activity: InquiryCommunication,
+    val recordedOrder: Long,
+) {
+    init {
+        require(recordedOrder > 0)
+    }
+}
+
+/** Clearing follows durable append order; attention age and meaningful email activity follow actual occurrence time. */
 data class InquiryCommunicationAttention(
     val unacknowledgedSince: Instant?,
     val latestEmailAt: Instant?,
 ) {
     companion object {
-        fun project(activity: Collection<InquiryCommunication>): InquiryCommunicationAttention {
-            val clearedAt = activity.filter { it.kind != InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED }.maxOfOrNull { it.occurredAt }
+        fun project(activity: Collection<RecordedInquiryCommunication>): InquiryCommunicationAttention {
+            val clearedOrder =
+                activity
+                    .filter {
+                        it.activity.kind != InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED
+                    }.maxOfOrNull { it.recordedOrder }
             val outstanding =
                 activity.filter {
-                    it.kind == InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED && (clearedAt == null || it.occurredAt > clearedAt)
+                    it.activity.kind == InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED &&
+                        (clearedOrder == null || it.recordedOrder > clearedOrder)
                 }
             return InquiryCommunicationAttention(
-                outstanding.minOfOrNull { it.occurredAt },
-                activity.filter { it.kind != InquiryCommunicationKind.STAFF_ACKNOWLEDGED }.maxOfOrNull { it.occurredAt },
+                outstanding.minOfOrNull { it.activity.occurredAt },
+                activity.filter { it.activity.kind != InquiryCommunicationKind.STAFF_ACKNOWLEDGED }.maxOfOrNull { it.activity.occurredAt },
             )
         }
     }

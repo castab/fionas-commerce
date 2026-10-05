@@ -40,6 +40,7 @@ import org.jdbi.v3.core.statement.SqlStatements
 import org.jdbi.v3.core.statement.StatementContext
 import java.math.BigDecimal
 import java.sql.Connection
+import java.time.ZoneId
 import java.util.Currency
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -68,6 +69,7 @@ class InquiryOperationalStatesSpec :
                 JdbiCustomerRepository(),
                 testClock,
                 JdbiInquiryCommunicationRepository(),
+                ZoneId.of("America/Los_Angeles"),
             )()
 
         fun requested(): Pair<InquiryId, UUID> {

@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.staff
 
+import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
@@ -10,6 +11,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryOperationalState
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import java.time.Clock
+import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 
 /** Composes canonical operations and complete customer/event enrichment in one unlocked snapshot. */
@@ -20,6 +22,7 @@ class ReadStaffDashboard(
     private val customers: CustomerRepository,
     private val clock: Clock,
     private val communications: InquiryCommunicationRepository,
+    private val eventCalendarZone: ZoneId,
     private val policy: DashboardAttentionPolicy = DashboardAttentionPolicy(),
 ) {
     operator fun invoke(): StaffDashboard =
@@ -33,13 +36,14 @@ class ReadStaffDashboard(
                 }
             val asOf = clock.instant().truncatedTo(ChronoUnit.MICROS)
             val ids = snapshot.states.map { it.inquiryId }.toSet()
-            val records = inquiries.findByIds(transaction, ids)
+            val requested = inquiries.findRequestedByIds(transaction, ids)
             check(
-                records.keys == ids &&
-                    records.all { (id, record) ->
-                        id == record.id
+                requested.keys == ids &&
+                    requested.all { (id, record) ->
+                        id == record.inquiry.id
                     },
             ) { "Dashboard inquiry enrichment is incomplete or corrupt" }
+            val records = requested.mapValues { it.value.inquiry }
             val customerIds = records.values.map { it.customerId }.toSet()
             val people = customers.findByIds(transaction, customerIds)
             check(
@@ -48,11 +52,10 @@ class ReadStaffDashboard(
                         id == customer.id
                     },
             ) { "Dashboard customer enrichment is incomplete or corrupt" }
-            val activity = communications.findAll(transaction, ids)
-            check(ids.containsAll(activity.keys) && activity.all { (id, facts) -> facts.all { it.inquiryId == id } }) {
+            val attention = communications.attentionFor(transaction, ids)
+            check(ids.containsAll(attention.keys)) {
                 "Dashboard communication activity is outside the operational population or corrupt"
             }
-            val attention = activity.mapValues { InquiryCommunicationAttention.project(it.value) }
 
             fun communication(state: InquiryOperationalState) = attention[state.inquiryId] ?: InquiryCommunicationAttention(null, null)
 
@@ -71,6 +74,15 @@ class ReadStaffDashboard(
                                 inquiry.eventType,
                                 state.lifecycle.stage,
                                 state.financial.latestVersion,
+                                if (state.financial.latestVersion.document is FinancialDocument.Estimate &&
+                                    requested
+                                        .getValue(inquiry.id)
+                                        .pricingInputs.context.guestCountIsMinimum
+                                ) {
+                                    DashboardTotalQualifier.FROM
+                                } else {
+                                    DashboardTotalQualifier.EXACT
+                                },
                                 state.financial.reconciliation.balance,
                                 inquiry.createdAt,
                                 state.lifecycle.fulfillment
@@ -87,7 +99,15 @@ class ReadStaffDashboard(
                 StaffDashboardWorkQueue(
                     queue { policy.needsReply(communication(it)) },
                     queue { policy.needsQuote(it, records.getValue(it.inquiryId).createdAt) },
-                    queue { policy.needsResolution(it, records.getValue(it.inquiryId).eventDate, communication(it), asOf, clock.zone) },
+                    queue {
+                        policy.needsResolution(
+                            it,
+                            records.getValue(it.inquiryId).eventDate,
+                            communication(it),
+                            asOf,
+                            eventCalendarZone,
+                        )
+                    },
                 ),
             )
         }

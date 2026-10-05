@@ -41,7 +41,7 @@ data class DashboardAttentionPolicy(
         eventDate: EventDate,
         communication: InquiryCommunicationAttention,
         asOf: Instant,
-        zone: ZoneId,
+        eventCalendarZone: ZoneId,
     ): StaffAttention? {
         val reasons = linkedMapOf<StaffAttentionReason, Instant>()
         if (state.lifecycle.stage == InquiryStage.QUOTED) {
@@ -49,11 +49,11 @@ data class DashboardAttentionPolicy(
             val staleAt = activity.plus(quoteStaleAfter)
             if (asOf >= staleAt) reasons[StaffAttentionReason.QUOTE_STALE] = staleAt
         }
-        if (state.lifecycle.stage == InquiryStage.BOOKED && eventDate.value < asOf.atZone(zone).toLocalDate()) {
+        if (state.lifecycle.stage == InquiryStage.BOOKED && eventDate.value < asOf.atZone(eventCalendarZone).toLocalDate()) {
             reasons[StaffAttentionReason.EVENT_DATE_PASSED_UNSERVED] =
                 eventDate.value
                     .plusDays(1)
-                    .atStartOfDay(zone)
+                    .atStartOfDay(eventCalendarZone)
                     .toInstant()
         }
         if (state.lifecycle.stage == InquiryStage.SERVED) {

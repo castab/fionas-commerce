@@ -1,8 +1,11 @@
 package io.github.castab.fionas.commerce.staff
 
+import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.http.DashboardTotalQualifierResponse
+import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.inquiry.EventDate
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationId
@@ -15,9 +18,11 @@ import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.communicationHistory
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -54,8 +59,9 @@ class DashboardAttentionSpec :
             operational(),
             inquiries,
             JdbiCustomerRepository(),
-            Clock.fixed(at, calendarZone),
+            Clock.fixed(at, ZoneId.of("UTC")),
             communications,
+            calendarZone,
         )()
 
         fun recorder(at: Instant = STORED_INSTANT) =
@@ -133,6 +139,73 @@ class DashboardAttentionSpec :
             read(STORED_INSTANT).workQueue.needsQuote.items shouldBe emptyList()
         }
 
+        listOf(false, true).forEach { minimum ->
+            test("total qualifier follows canonical Estimate minimum flag then becomes EXACT at Quote and Invoice: minimum=$minimum") {
+                val id =
+                    InquiryId(
+                        UUID.fromString(
+                            app.createInquiry(pricing = {
+                                pricingBody(it).replace("\"guestCount\":", "\"guestCountIsMinimum\":$minimum,\"guestCount\":")
+                            }),
+                        ),
+                    )
+                recorder().customerEmailReceived(id, STORED_INSTANT)
+                val expected = if (minimum) DashboardTotalQualifier.FROM else DashboardTotalQualifier.EXACT
+                val estimate = read(STORED_INSTANT)
+                listOf(estimate.workQueue.needsQuote, estimate.workQueue.needsReply).forEach {
+                    it.items.single().totalQualifier shouldBe expected
+                }
+
+                fun http() = CommerceJson.asA(app.adminGet("/staff/dashboard").bodyString(), StaffDashboardResponse.serializer())
+                listOf(http().workQueue.needsQuote, http().workQueue.needsReply).forEach {
+                    it.items.single().totalQualifier shouldBe DashboardTotalQualifierResponse.valueOf(expected.name)
+                }
+                quote(id)
+                val stale =
+                    state(id)
+                        .financial.latestVersion.createdAt
+                        .plus(Duration.ofDays(3))
+                val quoted = read(stale)
+                listOf(quoted.workQueue.needsReply, quoted.workQueue.needsResolution).forEach {
+                    it.items.single().totalQualifier shouldBe DashboardTotalQualifier.EXACT
+                }
+                http()
+                    .workQueue.needsReply.items
+                    .single()
+                    .totalQualifier shouldBe DashboardTotalQualifierResponse.EXACT
+                app.transactor.inTransaction { app.context.financialLedger.issueInvoice(it, UUID.fromString(document(id))) }
+                serve(id)
+                val invoice = read(STORED_INSTANT)
+                listOf(invoice.workQueue.needsReply, invoice.workQueue.needsResolution).forEach {
+                    it.items.single().totalQualifier shouldBe DashboardTotalQualifier.EXACT
+                }
+                listOf(http().workQueue.needsReply, http().workQueue.needsResolution).forEach {
+                    it.items.single().totalQualifier shouldBe DashboardTotalQualifierResponse.EXACT
+                }
+            }
+        }
+
+        test("backdated inbound ingested after acknowledgement needs reply but quote inactivity uses actual email time") {
+            val id = requested()
+            quote(id)
+            val issued = state(id).financial.latestVersion.createdAt
+            recorder(issued.plus(Duration.ofDays(10))).acknowledge(RecordInquiryCommunication.Acknowledge(id, actor()))
+            val backdated = issued.plusSeconds(3600)
+            recorder().customerEmailReceived(id, backdated)
+            val at = backdated.plus(Duration.ofDays(3))
+            val result = read(at)
+            result.workQueue.needsReply.items
+                .single()
+                .attentionSince shouldBe backdated
+            result.workQueue.needsResolution.items
+                .single()
+                .attentionSince shouldBe at
+            result.workQueue.needsResolution.items
+                .single()
+                .reasons shouldBe setOf(StaffAttentionReason.QUOTE_STALE)
+            read(at.minusNanos(1000)).workQueue.needsResolution.items shouldBe emptyList()
+        }
+
         test("quote threshold is inclusive; inbound and sent reset it, acknowledgement does not, booking removes it") {
             val id = requested()
             quote(id)
@@ -180,7 +253,7 @@ class DashboardAttentionSpec :
             read(sentAt.plus(Duration.ofDays(10))).workQueue.needsResolution.items shouldBe emptyList()
         }
 
-        test("event attention begins after scheduled day in Clock zone, including DST, and only for BOOKED") {
+        test("event attention begins after scheduled day in explicit event calendar zone, including DST, and only for BOOKED") {
             val id = requested()
             val yesterday = EventDate.of("2026-03-08")
             val today = EventDate.of("2026-03-09")
@@ -270,7 +343,7 @@ class DashboardAttentionSpec :
             received.occurredAt shouldBe STORED_INSTANT
             received.principalId shouldBe null
             val sent = recorder().staffEmailSent(id, STORED_INSTANT, actor())
-            app.transactor.inTransaction { communications.findAll(it, listOf(id))[id]!!.toSet() } shouldBe setOf(received, sent)
+            app.transactor.inTransaction { communicationHistory(it, id).map { row -> row.activity }.toSet() } shouldBe setOf(received, sent)
             shouldThrow<CommerceFailure.NotFound> { recorder().customerEmailReceived(InquiryId(UUID.randomUUID()), STORED_INSTANT) }
             shouldThrow<IllegalStateException> {
                 app.transactor.inTransaction {
@@ -284,6 +357,6 @@ class DashboardAttentionSpec :
                     error("rollback")
                 }
             }
-            app.transactor.inTransaction { communications.findAll(it, listOf(id))[id]!!.size } shouldBe 2
+            app.transactor.inTransaction { communicationHistory(it, id).size } shouldBe 2
         }
     })

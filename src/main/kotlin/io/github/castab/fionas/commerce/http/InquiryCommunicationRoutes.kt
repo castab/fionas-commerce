@@ -29,7 +29,9 @@ internal fun acknowledgeInquiryCommunicationRoute(
         operationId = "acknowledgeInquiryCommunication"
         summary = "Acknowledge customer communication"
         description = "Records an explicit acknowledgement at the server Clock time with authenticated USER or SERVICE provenance. " +
-            "Clears customer email at or before that timestamp. Repeated acknowledgements succeed and append a fresh fact. " +
+            "Clears customer email durably recorded before this action; " +
+            "later ingestion remains outstanding even with an older occurredAt. " +
+            "Repeated acknowledgements succeed and append a fresh fact. " +
             "Does not reset quote inactivity or change financial/lifecycle state. No message content or provider integration."
         tags += inquiries
         principalAccess(FionaPermissions.CommunicationsAcknowledge, UNTRUSTED_ORIGIN)

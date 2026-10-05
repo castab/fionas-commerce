@@ -26,29 +26,38 @@ class InquiryCommunicationSpec :
             if (kind == InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED) null else staff,
         )
 
-        fun inbound(at: Instant) = fact(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, at)
+        fun recorded(
+            kind: InquiryCommunicationKind,
+            at: Instant,
+            order: Long,
+        ) = RecordedInquiryCommunication(fact(kind, at), order)
+
+        fun inbound(
+            at: Instant,
+            order: Long = 1,
+        ) = recorded(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, at, order)
 
         test("empty, one and multiple inbound preserve earliest outstanding and latest email activity regardless of read order") {
             InquiryCommunicationAttention.project(emptyList()) shouldBe InquiryCommunicationAttention(null, null)
             InquiryCommunicationAttention.project(listOf(inbound(monday))) shouldBe InquiryCommunicationAttention(monday, monday)
-            InquiryCommunicationAttention.project(listOf(inbound(tuesday), inbound(monday))) shouldBe
+            InquiryCommunicationAttention.project(listOf(inbound(tuesday, 2), inbound(monday))) shouldBe
                 InquiryCommunicationAttention(monday, tuesday)
         }
         listOf(InquiryCommunicationKind.STAFF_EMAIL_SENT, InquiryCommunicationKind.STAFF_ACKNOWLEDGED).forEach { kind ->
-            test("$kind clears inbound at or before it and later inbound re-enters") {
-                val clearing = fact(kind, tuesday)
+            test("$kind clears already recorded inbound and later ingestion re-enters regardless of occurredAt") {
+                val clearing = recorded(kind, tuesday, 2)
                 InquiryCommunicationAttention.project(listOf(inbound(monday), clearing)).unacknowledgedSince shouldBe null
                 InquiryCommunicationAttention.project(listOf(inbound(tuesday), clearing)).unacknowledgedSince shouldBe null
-                InquiryCommunicationAttention.project(listOf(inbound(wednesday), clearing, inbound(monday))) shouldBe
-                    InquiryCommunicationAttention(wednesday, wednesday)
+                InquiryCommunicationAttention.project(listOf(inbound(monday, 3), clearing, inbound(tuesday))) shouldBe
+                    InquiryCommunicationAttention(monday, tuesday)
             }
         }
         test("latest clearing wins and acknowledgement never advances meaningful email activity") {
             InquiryCommunicationAttention.project(
                 listOf(
                     inbound(monday),
-                    fact(InquiryCommunicationKind.STAFF_EMAIL_SENT, tuesday),
-                    fact(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, wednesday),
+                    recorded(InquiryCommunicationKind.STAFF_EMAIL_SENT, tuesday, 2),
+                    recorded(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, wednesday, 3),
                 ),
             ) shouldBe InquiryCommunicationAttention(null, tuesday)
         }
@@ -59,6 +68,6 @@ class InquiryCommunicationSpec :
             shouldThrow<IllegalArgumentException> {
                 fact(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, monday).copy(principalId = null)
             }
-            shouldThrow<IllegalArgumentException> { inbound(monday.plusNanos(1)) }
+            shouldThrow<IllegalArgumentException> { fact(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, monday.plusNanos(1)) }
         }
     })

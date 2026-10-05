@@ -11,6 +11,7 @@ import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.communicationHistory
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
@@ -128,6 +129,7 @@ class StaffDashboardRoutesSpec :
             requested.version shouldBe 1
             requested.financialStage shouldBe "ESTIMATE"
             requested.total shouldBe "681.25"
+            requested.totalQualifier shouldBe DashboardTotalQualifierResponse.EXACT
             requested.balance shouldBe "681.25"
             requested.currency shouldBe "USD"
             requested.inquiryCreatedAt shouldBe STORED_INSTANT.toString()
@@ -152,6 +154,7 @@ class StaffDashboardRoutesSpec :
                     "version",
                     "financialStage",
                     "total",
+                    "totalQualifier",
                     "balance",
                     "currency",
                     "inquiryCreatedAt",
@@ -168,6 +171,7 @@ class StaffDashboardRoutesSpec :
                     .single()
             quote.stage shouldBe InquiryStageResponse.QUOTED
             quote.financialStage shouldBe "QUOTE"
+            quote.totalQualifier shouldBe DashboardTotalQualifierResponse.EXACT
             quote.version shouldBe 2
             read().workQueue.needsQuote.items shouldBe emptyList()
             quote.customerId shouldBe requested.customerId
@@ -187,6 +191,18 @@ class StaffDashboardRoutesSpec :
                 .jsonPrimitive.content shouldBe "internal_failure"
             failure.bodyString().contains("Dashboard") shouldBe false
             app.database.execute("UPDATE fionas.customers SET name = 'Jane Doe'")
+            val storedPricing = app.database.strings("SELECT pricing_inputs::text FROM fionas.inquiries WHERE id = '$id'").single()
+            app.database.execute("UPDATE fionas.inquiries SET pricing_inputs = '{\"corrupt\":true}'::jsonb")
+            val corruptPricing = app.adminGet(path)
+            corruptPricing.status shouldBe Status.INTERNAL_SERVER_ERROR
+            corruptPricing.bodyString().contains("pricing_inputs") shouldBe false
+            corruptPricing.bodyString().contains("corrupt") shouldBe false
+            app.transactor.inTransaction {
+                it.handle
+                    .createUpdate("UPDATE fionas.inquiries SET pricing_inputs = CAST(:inputs AS jsonb)")
+                    .bind("inputs", storedPricing)
+                    .execute()
+            }
             val actor =
                 app.authorization
                     .findUserByUsername("admin")!!
@@ -246,18 +262,18 @@ class StaffDashboardRoutesSpec :
                 .single() shouldBe balance
             app.adminPost(acknowledge).status shouldBe Status.NO_CONTENT
             app.http(Request(Method.POST, acknowledge).header("Cookie", app.adminCookie)).status shouldBe Status.FORBIDDEN
-            val facts = app.transactor.inTransaction { JdbiInquiryCommunicationRepository().findAll(it, listOf(id)).getValue(id) }
-            facts.filter { it.kind.name == "STAFF_ACKNOWLEDGED" }.map { it.principalId }.toSet() shouldBe
+            val facts = app.transactor.inTransaction { communicationHistory(it, id) }
+            facts.filter { it.activity.kind.name == "STAFF_ACKNOWLEDGED" }.map { it.activity.principalId }.toSet() shouldBe
                 setOf(service.id, app.authorization.findUserByUsername("admin")!!.id)
             // Read operations do not append activity or mutate the ledger.
             repeat(2) { read() }
-            app.transactor.inTransaction { JdbiInquiryCommunicationRepository().findAll(it, listOf(id)).getValue(id).size } shouldBe
+            app.transactor.inTransaction { communicationHistory(it, id).size } shouldBe
                 facts.size
-            record.customerEmailReceived(id, STORED_INSTANT.plusSeconds(1))
+            record.customerEmailReceived(id, STORED_INSTANT.minusSeconds(7200))
             read()
                 .workQueue.needsReply.items
                 .single()
-                .attentionSince shouldBe STORED_INSTANT.plusSeconds(1).toString()
+                .attentionSince shouldBe STORED_INSTANT.minusSeconds(7200).toString()
             val cookie = app.adminCookie
             app.authorization.replaceRolePermissions(CommerceRoles.Administrator, permissions)
             app

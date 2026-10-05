@@ -38,6 +38,8 @@ enum class StaffAttentionReason {
     READY_TO_CLOSE,
 }
 
+enum class DashboardTotalQualifier { EXACT, FROM }
+
 data class StaffDashboardItem(
     val inquiryId: InquiryId,
     val customerId: CustomerId,
@@ -46,6 +48,7 @@ data class StaffDashboardItem(
     val eventType: EventType,
     val stage: InquiryStage,
     val latestFinancialVersion: FinancialDocumentVersion,
+    val totalQualifier: DashboardTotalQualifier,
     val balance: Money,
     val inquiryCreatedAt: Instant,
     val servedAt: Instant?,

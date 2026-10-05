@@ -30,6 +30,7 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import java.time.Clock
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Base64
 import java.util.UUID
@@ -151,16 +152,16 @@ class TestApplication private constructor(
                 BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
             loginRateLimit: LoginRateLimit = LoginRateLimit(),
             trustedOrigins: Set<String> = setOf(TEST_ORIGIN),
+            eventCalendarZone: ZoneId? = null,
         ): TestApplication {
             val database = TestDatabase.create()
             try {
                 val fiona =
-                    fionaApplication(
-                        clock,
-                        bootstrap,
-                        trustedOrigins,
-                        loginRateLimit = loginRateLimit,
-                    )
+                    if (eventCalendarZone == null) {
+                        fionaApplication(clock, bootstrap, trustedOrigins, loginRateLimit)
+                    } else {
+                        fionaApplication(clock, bootstrap, trustedOrigins, loginRateLimit, eventCalendarZone)
+                    }
                 var context: CommerceRuntimeContext? = null
                 val runtime =
                     commerceRuntime(

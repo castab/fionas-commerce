@@ -17,6 +17,7 @@ import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRe
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunication
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationId
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
@@ -78,6 +79,7 @@ class StaffDashboardSpec :
             people,
             clock,
             communication,
+            ZoneId.of("America/Los_Angeles"),
         )
 
         beforeTest { app = TestApplication.create() }
@@ -90,7 +92,7 @@ class StaffDashboardSpec :
             listOf(result.workQueue.needsQuote, result.workQueue.needsReply, result.workQueue.needsResolution).forEach {
                 it.items shouldBe emptyList()
             }
-            app.transactor.inTransaction { inquiries.findByIds(it, emptySet()) } shouldBe emptyMap()
+            app.transactor.inTransaction { inquiries.findRequestedByIds(it, emptySet()) } shouldBe emptyMap()
         }
 
         test("customer and event enrichment orders complete queues by oldest inquiry then lexical UUID including high-bit ties") {
@@ -216,15 +218,15 @@ class StaffDashboardSpec :
                             return inquiries.ids(transaction)
                         }
 
-                        override fun findByIds(
+                        override fun findRequestedByIds(
                             transaction: Transaction,
                             ids: Set<InquiryId>,
-                        ): Map<InquiryId, Inquiry> {
+                        ): Map<InquiryId, RequestedInquiry> {
                             transaction shouldBe observed
                             inquiryCalls++
                             ids.size shouldBe size
                             return inquiries
-                                .findByIds(transaction, ids)
+                                .findRequestedByIds(transaction, ids)
                                 .entries
                                 .reversed()
                                 .associate { it.toPair() }
@@ -272,14 +274,14 @@ class StaffDashboardSpec :
                     }
                 val communication =
                     object : InquiryCommunicationRepository by JdbiInquiryCommunicationRepository() {
-                        override fun findAll(
+                        override fun attentionFor(
                             transaction: Transaction,
                             inquiryIds: Collection<InquiryId>,
-                        ): Map<InquiryId, List<InquiryCommunication>> {
+                        ): Map<InquiryId, InquiryCommunicationAttention> {
                             transaction shouldBe observed
                             inquiryIds.size shouldBe size
                             communicationCalls++
-                            return JdbiInquiryCommunicationRepository().findAll(transaction, inquiryIds)
+                            return JdbiInquiryCommunicationRepository().attentionFor(transaction, inquiryIds)
                         }
                     }
                 val result = operation(records, people, clock = clock, communication = communication)()
@@ -302,10 +304,17 @@ class StaffDashboardSpec :
                 app.createInquiry()
                 val records =
                     object : InquiryRepository by inquiries {
-                        override fun findByIds(
+                        override fun findRequestedByIds(
                             transaction: Transaction,
                             ids: Set<InquiryId>,
-                        ): Map<InquiryId, Inquiry> = if (missing == "inquiry") emptyMap() else inquiries.findByIds(transaction, ids)
+                        ): Map<InquiryId, RequestedInquiry> =
+                            if (missing ==
+                                "inquiry"
+                            ) {
+                                emptyMap()
+                            } else {
+                                inquiries.findRequestedByIds(transaction, ids)
+                            }
                     }
                 val people =
                     object : CustomerRepository by customers {
@@ -330,29 +339,18 @@ class StaffDashboardSpec :
                 "Canonical dashboard financial data is missing"
         }
 
-        test("communication keys and row identities outside the complete population fail the whole projection") {
+        test("communication projection outside the complete population fails the whole projection") {
             app.createAcceptanceCatalog()
-            val id = InquiryId(UUID.fromString(app.createInquiry()))
-            val outside = InquiryId(UUID.randomUUID())
-            val activity =
-                InquiryCommunication(
-                    InquiryCommunicationId(UUID.randomUUID()),
-                    outside,
-                    InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED,
-                    STORED_INSTANT,
-                    null,
-                )
-            listOf(outside, id).forEach { key ->
-                val invalid =
-                    object : InquiryCommunicationRepository by JdbiInquiryCommunicationRepository() {
-                        override fun findAll(
-                            transaction: Transaction,
-                            inquiryIds: Collection<InquiryId>,
-                        ) = mapOf(key to listOf(activity))
-                    }
-                shouldThrow<IllegalStateException> { operation(communication = invalid)() }.message shouldBe
-                    "Dashboard communication activity is outside the operational population or corrupt"
-            }
+            app.createInquiry()
+            val invalid =
+                object : InquiryCommunicationRepository by JdbiInquiryCommunicationRepository() {
+                    override fun attentionFor(
+                        transaction: Transaction,
+                        inquiryIds: Collection<InquiryId>,
+                    ) = mapOf(InquiryId(UUID.randomUUID()) to InquiryCommunicationAttention(STORED_INSTANT, STORED_INSTANT))
+                }
+            shouldThrow<IllegalStateException> { operation(communication = invalid)() }.message shouldBe
+                "Dashboard communication activity is outside the operational population or corrupt"
         }
 
         test("concurrent quote and customer/event writer cannot mix operational and enrichment snapshots") {
@@ -363,13 +361,13 @@ class StaffDashboardSpec :
             val resume = CountDownLatch(1)
             val records =
                 object : InquiryRepository by inquiries {
-                    override fun findByIds(
+                    override fun findRequestedByIds(
                         transaction: Transaction,
                         ids: Set<InquiryId>,
-                    ): Map<InquiryId, Inquiry> {
+                    ): Map<InquiryId, RequestedInquiry> {
                         paused.countDown()
                         check(resume.await(30, TimeUnit.SECONDS))
-                        return inquiries.findByIds(transaction, ids)
+                        return inquiries.findRequestedByIds(transaction, ids)
                     }
                 }
             val reader = CompletableFuture.supplyAsync { operation(records)() }

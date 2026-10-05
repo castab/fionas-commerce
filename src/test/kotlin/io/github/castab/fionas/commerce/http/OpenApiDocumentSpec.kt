@@ -113,6 +113,7 @@ class OpenApiDocumentSpec :
                     "version",
                     "financialStage",
                     "total",
+                    "totalQualifier",
                     "balance",
                     "currency",
                     "inquiryCreatedAt",
@@ -120,6 +121,9 @@ class OpenApiDocumentSpec :
                     "attentionSince",
                     "reasons",
                 )
+            item.strings("properties", "totalQualifier", "enum") shouldContainExactly listOf("EXACT", "FROM")
+            item.text("properties", "totalQualifier", "description") shouldContain "minimum guest count"
+            item.text("properties", "totalQualifier", "description") shouldContain "Quote and Invoice totals are EXACT"
             listOf("total", "balance", "currency").forEach { item.text("properties", it, "type") shouldBe "string" }
             listOf("inquiryId", "customerId", "documentId").forEach { item.text("properties", it, "format") shouldBe "uuid" }
             item.text("properties", "eventDate", "format") shouldBe "date"

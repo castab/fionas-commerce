@@ -151,6 +151,7 @@ class DatabaseSchemaSpec :
                 "occurred_at",
                 "principal_kind",
                 "principal_id",
+                "recorded_order",
             ) shouldContainExactly
                 listOf(
                     "id NO uuid",
@@ -159,17 +160,22 @@ class DatabaseSchemaSpec :
                     "occurred_at NO timestamp with time zone",
                     "principal_id YES uuid",
                     "principal_kind YES text",
+                    "recorded_order NO bigint",
                 )
             database.strings(
                 "SELECT datetime_precision::text FROM information_schema.columns WHERE table_schema = 'fionas' " +
                     "AND table_name = 'inquiry_communications' AND column_name = 'occurred_at'",
             ) shouldContainExactly listOf("6")
             database.strings(
+                "SELECT is_identity || ':' || identity_generation FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                    "AND table_name = 'inquiry_communications' AND column_name = 'recorded_order'",
+            ) shouldContainExactly listOf("YES:ALWAYS")
+            database.strings(
                 "SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas' " +
-                    "AND indexname = 'inquiry_communications_inquiry_at_idx'",
+                    "AND indexname = 'inquiry_communications_inquiry_order_idx'",
             ) shouldContainExactly
                 listOf(
-                    "CREATE INDEX inquiry_communications_inquiry_at_idx ON fionas.inquiry_communications USING btree (inquiry_id, occurred_at)",
+                    "CREATE INDEX inquiry_communications_inquiry_order_idx ON fionas.inquiry_communications USING btree (inquiry_id, recorded_order) INCLUDE (kind, occurred_at)",
                 )
             application.createAcceptanceCatalog()
             val inquiry = application.createInquiry()

@@ -12,7 +12,14 @@ class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
     override fun append(
         transaction: Transaction,
         activity: InquiryCommunication,
-    ) {
+    ): RecordedInquiryCommunication {
+        // Lock before allocating the identity: same-inquiry append order must follow transaction visibility.
+        transaction.handle
+            .createQuery("SELECT id FROM fionas.inquiries WHERE id = :inquiry FOR UPDATE")
+            .bind("inquiry", activity.inquiryId.value)
+            .mapTo(UUID::class.java)
+            .findOne()
+            .orElseThrow { CommerceFailure.NotFound("Inquiry was not found") }
         val principal = activity.principalId
         val kind =
             when (principal) {
@@ -27,45 +34,56 @@ class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
                 null -> null
             }
         try {
-            transaction.handle
-                .createUpdate(
-                    "INSERT INTO fionas.inquiry_communications (id, inquiry_id, kind, occurred_at, principal_kind, principal_id) " +
-                        "VALUES (:id, :inquiry, :kind, :at, :principalKind, CAST(:principalId AS uuid))",
-                ).bind("id", activity.id.value)
-                .bind("inquiry", activity.inquiryId.value)
-                .bind("kind", activity.kind.name)
-                .bind("at", activity.occurredAt)
-                .bind("principalKind", kind)
-                .bindByType("principalId", actor, UUID::class.java)
-                .execute()
+            val order =
+                transaction.handle
+                    .createQuery(
+                        "INSERT INTO fionas.inquiry_communications (id, inquiry_id, kind, occurred_at, principal_kind, principal_id) " +
+                            "VALUES (:id, :inquiry, :kind, :at, :principalKind, CAST(:principalId AS uuid)) RETURNING recorded_order",
+                    ).bind("id", activity.id.value)
+                    .bind("inquiry", activity.inquiryId.value)
+                    .bind("kind", activity.kind.name)
+                    .bind("at", activity.occurredAt)
+                    .bind("principalKind", kind)
+                    .bindByType("principalId", actor, UUID::class.java)
+                    .mapTo(Long::class.javaObjectType)
+                    .one()
+            return RecordedInquiryCommunication(activity, order)
         } catch (failure: Exception) {
             if (failure.isUniqueViolation()) throw CommerceFailure.Conflict("Communication activity already exists", failure)
             throw failure
         }
     }
 
-    override fun findAll(
+    override fun attentionFor(
         transaction: Transaction,
         inquiryIds: Collection<InquiryId>,
-    ): Map<InquiryId, List<InquiryCommunication>> {
+    ): Map<InquiryId, InquiryCommunicationAttention> {
         if (inquiryIds.isEmpty()) return emptyMap()
         return transaction.handle
-            .createQuery("SELECT * FROM fionas.inquiry_communications WHERE inquiry_id IN (<ids>)")
-            .bindList("ids", inquiryIds.map { it.value })
-            .map { row, _ ->
-                InquiryCommunication(
-                    InquiryCommunicationId(row.getObject("id", UUID::class.java)),
-                    InquiryId(row.getObject("inquiry_id", UUID::class.java)),
-                    InquiryCommunicationKind.valueOf(row.getString("kind")),
-                    row.getObject("occurred_at", OffsetDateTime::class.java).toInstant(),
-                    when (val kind = row.getString("principal_kind")) {
-                        "USER" -> UserId(row.getObject("principal_id", UUID::class.java))
-                        "SERVICE" -> ServiceId(row.getObject("principal_id", UUID::class.java))
-                        null -> null
-                        else -> error("Invalid communication principal kind: $kind")
-                    },
+            .createQuery(
+                """
+                WITH scoped AS (
+                    SELECT inquiry_id, kind, occurred_at, recorded_order,
+                           max(recorded_order) FILTER (WHERE kind IN ('STAFF_EMAIL_SENT', 'STAFF_ACKNOWLEDGED'))
+                               OVER (PARTITION BY inquiry_id) AS clearing_order
+                    FROM fionas.inquiry_communications WHERE inquiry_id = ANY(:ids)
                 )
+                SELECT inquiry_id,
+                       min(occurred_at) FILTER (
+                           WHERE kind = 'CUSTOMER_EMAIL_RECEIVED'
+                             AND (clearing_order IS NULL OR recorded_order > clearing_order)
+                       ) AS unacknowledged_since,
+                       max(occurred_at) FILTER (WHERE kind IN ('CUSTOMER_EMAIL_RECEIVED', 'STAFF_EMAIL_SENT')) AS latest_email_at
+                FROM scoped GROUP BY inquiry_id
+                """.trimIndent(),
+            ).bindArray("ids", UUID::class.java, inquiryIds.map { it.value })
+            .map { row, _ ->
+                InquiryId(row.getObject("inquiry_id", UUID::class.java)) to
+                    InquiryCommunicationAttention(
+                        row.getObject("unacknowledged_since", OffsetDateTime::class.java)?.toInstant(),
+                        row.getObject("latest_email_at", OffsetDateTime::class.java)?.toInstant(),
+                    )
             }.list()
-            .groupBy { it.inquiryId }
+            .toMap()
     }
 }

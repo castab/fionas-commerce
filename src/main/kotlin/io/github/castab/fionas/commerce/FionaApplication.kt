@@ -71,6 +71,7 @@ import io.github.castab.fionas.commerce.staff.SetStaffPassword
 import io.github.castab.fionas.commerce.staff.StaffPasswordAuthenticator
 import org.http4k.core.then
 import java.time.Clock
+import java.time.ZoneId
 import java.util.Properties
 
 /**
@@ -84,6 +85,10 @@ const val FIONA_MIGRATION_SCHEMA = "fionas"
  * after its own. Never `db/commerce`; the runtime discovers and applies its migrations itself.
  */
 const val FIONA_MIGRATION_LOCATION = "classpath:db/fionas"
+
+/** Event LocalDate boundaries are Fiona configuration, independent of the server timestamp Clock. */
+fun fionaEventCalendarZone(environment: Map<String, String> = System.getenv()): ZoneId =
+    ZoneId.of(environment["FIONAS_EVENT_TIME_ZONE"] ?: "America/Los_Angeles")
 
 /**
  * Everything Fiona's contributes to commerce-runtime: the schema and location of its own
@@ -124,6 +129,7 @@ fun fionaApplication(
             ?.toSet()
             ?: emptySet(),
     loginRateLimit: LoginRateLimit = LoginRateLimit(),
+    eventCalendarZone: ZoneId = fionaEventCalendarZone(),
 ): ApplicationContributions =
     ApplicationContributions(
         migrations =
@@ -180,6 +186,7 @@ fun fionaApplication(
                         customers,
                         clock,
                         communications,
+                        eventCalendarZone,
                     )::invoke,
                     createInquiry = CreateInquiry(
                         context.transactor,

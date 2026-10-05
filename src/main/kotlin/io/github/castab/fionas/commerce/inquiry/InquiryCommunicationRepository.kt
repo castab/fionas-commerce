@@ -6,11 +6,11 @@ interface InquiryCommunicationRepository {
     fun append(
         transaction: Transaction,
         activity: InquiryCommunication,
-    )
+    ): RecordedInquiryCommunication
 
-    /** Bulk source facts for this population, in the caller's snapshot. Absence means no activity. */
-    fun findAll(
+    /** One aggregate per inquiry with activity, reduced in PostgreSQL in the caller's snapshot. Absence means no activity. */
+    fun attentionFor(
         transaction: Transaction,
         inquiryIds: Collection<InquiryId>,
-    ): Map<InquiryId, List<InquiryCommunication>>
+    ): Map<InquiryId, InquiryCommunicationAttention>
 }

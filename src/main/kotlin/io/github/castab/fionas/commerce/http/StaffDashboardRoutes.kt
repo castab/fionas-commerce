@@ -60,6 +60,9 @@ enum class StaffAttentionReasonResponse {
 }
 
 @Serializable
+enum class DashboardTotalQualifierResponse { EXACT, FROM }
+
+@Serializable
 data class StaffWorkQueueResponse(
     @ApiProperty(
         description =
@@ -81,6 +84,12 @@ data class StaffDashboardItemResponse(
     val version: Int,
     @ApiProperty(description = "Latest canonical financial stage: ESTIMATE, QUOTE, or INVOICE.") val financialStage: String,
     @ApiProperty(description = "Exact decimal current document total, in currency.") val total: String,
+    @ApiProperty(
+        description =
+            "FROM means the current Estimate is based on a minimum guest count. " +
+                "Quote and Invoice totals are EXACT. No currency formatting is implied.",
+    )
+    val totalQualifier: DashboardTotalQualifierResponse,
     @ApiProperty(description = "Exact decimal current reconciliation balance, in currency; may be negative.") val balance: String,
     @ApiProperty(description = "ISO 4217 currency of total and balance.") val currency: String,
     @ApiProperty(format = "date-time") val inquiryCreatedAt: String,
@@ -125,6 +134,7 @@ private fun StaffDashboardItem.toResponse(): StaffDashboardItemResponse {
             is FinancialDocument.Invoice -> "INVOICE"
         },
         document.total.decimal(),
+        DashboardTotalQualifierResponse.valueOf(totalQualifier.name),
         balance.decimal(),
         document.currency.currencyCode,
         inquiryCreatedAt.toString(),
@@ -147,9 +157,11 @@ internal fun readStaffDashboardRoute(
         description = "One coherent unlocked REPEATABLE READ snapshot of all inquiries, canonical financial facts, customers and events. " +
             "Requires BOTH `${FionaPermissions.InquiriesRead.value}` and `${CommercePermissions.FinancialDocumentRead.value}` " +
             "for USER sessions or SERVICE tokens. Queues sort by attentionSince then lexical inquiry UUID and may overlap. " +
-            "Needs reply = customer email after the latest staff reply or acknowledgement; needs quote = REQUESTED. " +
+            "Needs reply = customer email durably recorded after the latest staff reply or acknowledgement; needs quote = REQUESTED. " +
             "Resolution reasons are QUOTE_STALE (3 days since latest Quote version or inbound/staff-sent email), " +
-            "EVENT_DATE_PASSED_UNSERVED (BOOKED after event date in the Clock zone), SERVED_WITH_BALANCE_DUE (positive), " +
+            "EVENT_DATE_PASSED_UNSERVED (BOOKED after event date in Fiona's configured event calendar zone, " +
+            "default America/Los_Angeles), " +
+            "SERVED_WITH_BALANCE_DUE (positive), " +
             "and READY_TO_CLOSE (SERVED with exactly zero canonical Invoice balance). Acknowledgement does not reset quote inactivity. " +
             "Served resolution attention starts at served time; negative overpayment is not ready to close. Reads never promote booking. " +
             "All items are returned without pagination. Successful responses use Cache-Control: no-store."
