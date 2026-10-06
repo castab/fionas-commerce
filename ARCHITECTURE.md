@@ -10,7 +10,9 @@ This repository is **not** a second commerce platform.
 
 Its primary architectural responsibility is to translate Fiona's business requirements into application-owned behavior while preserving the boundaries established by `commerce-domain` and `commerce-runtime`.
 
-This document defines those application-level boundaries.
+This document records durable architectural decisions and application-level boundaries.
+[`AGENTS.md`](AGENTS.md) defines the current concrete contributor and implementation
+contract. Cross-link to those rules rather than duplicating their mechanics here.
 
 ---
 
@@ -311,75 +313,36 @@ Persist something only when it represents an independent Fiona business fact or 
 
 ## Atomic canonical proposal publication
 
-Fiona publishes its canonical `INITIAL_ESTIMATE` Quote only through `IssueInquiryProposal`:
-Estimate -> immutable Quote + active deposit approved against that exact Quote + append-only
-`InquiryProposal` issuance commit together. Staff explicitly supplies shared `DepositTerms`;
-`FIONAS_DEFAULT_DEPOSIT_TERMS` proposes 20% and never writes an implicit approval. RELATED
-lineages retain their standalone shared financial behavior.
+Fiona owns customer-facing proposal publication and its approval policy. Shared commerce
+continues to own generic financial documents, deposit requirements and payments.
 
-Fiona V14 `inquiry_proposals` stores only publication UUID, inquiry/lineage identities,
-Quote version, deposit revision, issuance kind, microsecond Clock time and USER/SERVICE
-provenance. Its composite FK references Fiona's association, with no new runtime-table FK.
-An exact pair is unique; one INITIAL publication per inquiry is unique. Durable identity
-ordering follows the association lock, independent of Clock timestamps. Re-sending a pair
-is a future communication action, not another proposal. No amounts, terms, totals, stages,
-mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
+A published proposal durably binds an immutable Quote snapshot to an active deposit
+requirement approved against that exact Quote. Staff explicitly approves the terms;
+a suggestion does not constitute approval. Quote, deposit approval and publication commit
+atomically, as do subsequent republications. Publication is an independent Fiona business
+fact, beyond the financial stage derived from shared commerce history.
 
-`recorded_order` orders proposal history within an inquiry. Sequence allocation does not
-prove global commit order across concurrent inquiries. A future dispatcher must not treat
-a high-water mark as proof every lower event committed and was observed; it needs explicit
-delivery/claim semantics or another appropriate durable dispatch design.
+Changing either the Quote or deposit terms requires republication and supersedes the
+earlier customer proposal. Only the latest proposal matching the authoritative Quote and
+deposit pair can be payable. Ordinary revision is a pre-payment workflow: payment
+allocation ends it, and refunds do not reopen it. Future customer payment acceptance must
+validate proposal currentness and record money as one atomic unit so republication cannot
+race acceptance.
 
-`IssueInquiryProposal`, `ReviseInquiryQuoteProposal`, and `ReviseInquiryProposalDeposit`
-own one READ COMMITTED transaction each. `InquiryProposals` composes transaction-taking
-financial helpers and runtime ledger calls under the existing association row lock, acquired
-before reviewed-token checks. Quote revision uses current-catalog `FionasPricing` and the
-existing no-op change-order rule, appends a same-stage Quote, then replaces the deposit
-against the new Quote even if terms remain 20%. Deposit-only revision keeps the Quote
-version and rejects numerically equivalent same-form terms; changing percentage to fixed
-is meaningful even if the resolved amount is equal. Both require exact reviewed Quote and
-deposit revision tokens. Any historical `grossAllocated > 0` blocks both revisions, even
-when refunds unwind all applied value. Deposit satisfaction by existing payment/allocation
-operations still atomically promotes Quote -> Invoice/BOOKED; refunds never demote it.
+Once published, the canonical deposit cannot change independently of its proposal.
+Before payment, changes require atomic republication; after booking, the accepted deposit
+requirement is immutable historical acceptance evidence. Booking makes the proposal
+non-payable while preserving its exact accepted Quote/deposit pair. Later Invoice financial
+change orders remain separate from that acceptance history; other financial lineages
+retain shared standalone semantics.
 
-Every publication is the exact `(documentId, documentVersion, depositRequirementRevision)`.
-`IsCurrentPayableInquiryProposal` reads one REPEATABLE READ snapshot: only the latest
-publication whose exact Quote and active approval/revision still match is payable. Every
-reissue supersedes all earlier ids; Invoice makes all publication targets non-payable.
-Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
-contact collection, cancellation, or post-payment adjustment workflow is introduced.
+Communications react to durable proposal issuance outside the financial transaction.
+Publication does not imply message delivery, and resending a proposal is a communication
+action rather than another financial publication. Reusable dispatch capabilities belong
+to shared commerce when needed.
 
-`IsCurrentPayableInquiryProposal` is only a read/query seam. Future customer payment
-acceptance must lock/revalidate the exact proposal currentness and record/allocate money
-in one atomic transaction. A query followed by a separate payment transaction would race
-proposal reissuance.
-
-The durable proposal row is the business event for future at-least-once integrations.
-It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
-Actual delivery alone may append communication activity. A future generic durable dispatch
-capability belongs upstream when needed; no after-commit crash-window publisher exists here.
-
-POST `/staff/requests/{inquiryId}/proposals` (`issueInquiryProposal`), its `/quote-revisions`
-child (`reviseInquiryQuoteProposal`) and `/deposit-revisions` child
-(`reviseInquiryProposalDeposit`) derive the document from the inquiry. All require BOTH
-`commerce.financial-document.create` and `commerce.deposit-requirement.manage`, existing
-USER/SERVICE AccessControl and unsafe-cookie Origin policy; no new permission/bootstrap grant.
-Responses are 200 with `{proposal, financial, depositRequirement}` and no-store.
-
-Standalone canonical Quote issuance and Quote change orders reject with illegal_transition.
-Standalone deposit set/replace/reactivate/withdraw also reject whenever the lineage is
-canonical and proposal history exists, regardless of current financial stage. Both check
-`InquiryProposalRepository.latest` in the caller's transaction after locking the association.
-Unpaid Quote deposit changes use atomic proposal reissuance. After Invoice/BOOKED, the
-accepted deposit requirement/history is immutable. Canonical Estimate and booked Invoice
-change orders and RELATED deposit behavior remain supported; manual canonical Invoice
-issuance remains forbidden.
-`GET /staff/requests/{inquiryId}` keeps one unlocked REPEATABLE READ and its existing read
-permissions, adding `suggestedDepositTerms`, optional latest `proposal`, and authoritative
-`depositRequirement`. Missing/mismatched published Quote pairs fail internally. After booking,
-the latest proposal is historical Quote/deposit context and its approval/revision must still
-match the immutable accepted deposit. Pre-slice development Quotes receive
-no compatibility shim, invented publication, or backfill.
+See [the proposal contract in `AGENTS.md`](AGENTS.md#atomic-canonical-proposal-publication)
+for the current concrete API, persistence, locking, concurrency and read-model rules.
 
 ## Inquiry lifecycle projection and booking policy
 

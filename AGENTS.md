@@ -16,6 +16,13 @@ deciding whether a concept belongs here or upstream; this file defines the concr
 repository invariants, contracts, workflows, and implementation rules that make those
 principles specific.
 
+`ARCHITECTURE.md` records durable architectural decisions; `AGENTS.md` records the current
+concrete implementation contract. Do not duplicate implementation details across both.
+If changing an endpoint, class, table, migration, permission, error mapping or locking
+mechanism would make a statement stale, it normally belongs only in `AGENTS.md`. When
+both documents need updating, state the architectural principle once in `ARCHITECTURE.md`
+and keep the concrete mechanics here, cross-linking instead of copying prose.
+
 Read `ARCHITECTURE.md` before making a change that affects any of the following:
 
 - ownership between `fionas-commerce`, `commerce-runtime`, and `commerce-domain`;
