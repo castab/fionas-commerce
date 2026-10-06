@@ -325,7 +325,7 @@ fact, beyond the financial stage derived from shared commerce history.
 Changing either the Quote or deposit terms requires republication and supersedes the
 earlier customer proposal. Only the latest proposal matching the authoritative Quote and
 deposit pair can be payable. Ordinary revision is a pre-payment workflow: payment
-allocation ends it, and refunds do not reopen it. Future customer payment acceptance must
+allocation ends it, and refunds do not reopen it. Customer payment acceptance must
 validate proposal currentness and record money as one atomic unit so republication cannot
 race acceptance.
 
@@ -359,12 +359,15 @@ five-state status.
 | Invoice, served and not closed | SERVED |
 | Invoice, served and closed | CLOSED |
 
-Issuing the canonical Quote is the firm proposal boundary. A positive active deposit is
-required for booking. `RecordDocumentPayment` and `AllocatePayment` apply one Fiona policy after their mutation: read the runtime's
-authoritative `FinancialLineageView`; if the canonical Quote's active deposit is satisfied,
-issue its Invoice and copy optional legacy pricing metadata in the same transaction.
-Promotion failure rolls back the triggering mutation. Partial deposit payment leaves it quoted. Manual canonical Invoice issuance is rejected. Manual
-issuance on RELATED lineages remains available. No zero-deposit booking path exists.
+Issuing the canonical Quote is the firm proposal boundary. Booking requires acceptance of
+the currently published proposal through one complete, exact deposit payment. Fiona treats
+a deposit as indivisible: partial accumulation and folding extra money into that payment
+are forbidden. Staff negotiates and republishes changed terms before acceptance; additional
+money belongs to a distinct payment after booking. Acceptance, payment application and
+canonical Invoice promotion form one atomic unit serialized with proposal revision.
+Manual canonical Invoice issuance is rejected; RELATED lineages retain standalone semantics.
+See [the payment contract in `AGENTS.md`](AGENTS.md#atomic-canonical-proposal-publication)
+for concrete identities, validation, locking and HTTP mechanics.
 
 Invoice is the durable booking fact. Refunds may reverse deposit satisfaction but do not
 demote Invoice or erase booking. Invoice change orders retain BOOKED/SERVED/CLOSED
@@ -382,7 +385,7 @@ overpayment blocks closure. Repeated actions conflict without rewriting provenan
 is no unserve or reopen. Later ledger activity after closure is allowed; eligibility is
 evaluated at the close command. Internally impossible fulfillment before Invoice fails loudly.
 
-Both payment booking triggers and fulfillment actions serialize on the existing canonical
+Deposit acceptance and fulfillment actions serialize on the existing canonical
 association row. They use READ COMMITTED so waiters observe the preceding committed
 allocations before applying booking policy. While that row is locked, Fiona cannot change
 the document, its allocations or deposit terms. Refunds do not take that lock; the runtime

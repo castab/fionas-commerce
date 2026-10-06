@@ -252,6 +252,7 @@ class FinancialDocumentAtomicitySpec :
                     associations,
                     failing,
                     testClock,
+                    JdbiInquiryProposalRepository(),
                     newPaymentId = { paymentId },
                     newAllocationId = { allocationId },
                 )

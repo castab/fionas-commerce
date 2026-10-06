@@ -9,6 +9,7 @@ import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.proposalId
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.http4k.core.Method
@@ -58,7 +59,13 @@ class InquiryLifecycleRoutesSpec :
                     "/financial-documents/$document/deposit-requirement",
                     """{"expectedDocumentVersion":2,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
                 ).status shouldBe Status.CONFLICT
-            val paid = app.adminPost("/financial-documents/$document/payments", """{"documentVersion":2,"amount":"50","method":"CARD"}""")
+            val paid =
+                app.adminPost(
+                    "/financial-documents/$document/payments",
+                    """{"documentVersion":2,"amount":"50","method":"CARD","expectedProposalId":"${app.proposalId(
+                        UUID.fromString(document),
+                    )!!.value}"}""",
+                )
             paid.status shouldBe Status.CREATED
             detail().lifecycle.stage shouldBe InquiryStageResponse.BOOKED
             app

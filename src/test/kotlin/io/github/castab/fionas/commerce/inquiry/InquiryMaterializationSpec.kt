@@ -26,6 +26,7 @@ import io.github.castab.fionas.commerce.financial.InquiryDocumentPurpose
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
@@ -353,7 +354,8 @@ class InquiryMaterializationSpec :
                     )
                 }
             changed.lineItems shouldBe initial.lineItems + custom
-            val quote = application.issueProposal(inquiry.id, version = 2).financial
+            val issued = application.issueProposal(inquiry.id, version = 2)
+            val quote = issued.financial
             quote.latest.document.lineItems shouldBe changed.lineItems
             quote.latest.pricing.shouldBeNull()
             val payment =
@@ -363,7 +365,8 @@ class InquiryMaterializationSpec :
                     associations,
                     sources,
                     testClock,
-                )(RecordDocumentPayment.Command(id, Version.of(3), BigDecimal("50.00"), PaymentMethod.CARD, null, null))
+                    JdbiInquiryProposalRepository(),
+                )(RecordDocumentPayment.Command(id, Version.of(3), BigDecimal("50.00"), PaymentMethod.CARD, null, null, issued.proposal.id))
             payment.document.latest.document.version shouldBe Version.of(4)
             payment.document.latest.document.lineItems shouldBe changed.lineItems
             payment.document.latest.pricing

@@ -31,6 +31,7 @@ import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
+import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.requestedPricing
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
@@ -43,7 +44,6 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 
 class InquiryLifecycleSpec :
     FunSpec({
@@ -78,7 +78,14 @@ class InquiryLifecycleSpec :
             amount: String,
             sources: FinancialDocumentPricingRepository = pricing,
             associations: InquiryFinancialDocumentRepository = owners,
-        ) = RecordDocumentPayment(app.transactor, app.context.financialLedger, associations, sources, testClock)(
+        ) = RecordDocumentPayment(
+            app.transactor,
+            app.context.financialLedger,
+            associations,
+            sources,
+            testClock,
+            JdbiInquiryProposalRepository(),
+        )(
             RecordDocumentPayment.Command(
                 id,
                 app.context.financialLedger
@@ -88,6 +95,7 @@ class InquiryLifecycleSpec :
                 PaymentMethod.CARD,
                 null,
                 null,
+                app.proposalId(id),
             ),
         )
 
@@ -140,12 +148,11 @@ class InquiryLifecycleSpec :
             shouldThrow<CommerceFailure.IllegalTransition> {
                 IssueInvoice(app.transactor, app.context.financialLedger, owners, pricing)(document, Version.of(2))
             }
-            pay(document, "10") // Partial deposit: still Quote.
-            read(inquiry).stage shouldBe InquiryStage.QUOTED
-            val partial = pay(document, "39.99")
-            partial.document.latest.document
-                .shouldBeInstanceOf<FinancialDocument.Quote>()
-            val final = pay(document, "0.01")
+            listOf("10", "39.99", "0.01", "51").forEach { amount ->
+                shouldThrow<CommerceFailure.ValidationFailed> { pay(document, amount) }
+                read(inquiry).stage shouldBe InquiryStage.QUOTED
+            }
+            val final = pay(document, "50")
             final.document.latest.document
                 .shouldBeInstanceOf<FinancialDocument.Invoice>()
             final.allocation.financialDocumentReference.version shouldBe Version.of(2)
@@ -201,7 +208,7 @@ class InquiryLifecycleSpec :
             read(inquiry).fulfillment!!.served shouldBe served.fulfillment.served
         }
 
-        test("cumulative standalone allocations cross the deposit and return the Invoice, with legacy metadata copied unchanged") {
+        test("standalone allocations reject canonical deposits; exact receipt books and Invoice allocations preserve metadata") {
             val (inquiry, id) = quote()
             val inputs = requestedPricing()
             app.transactor.inTransaction {
@@ -215,22 +222,24 @@ class InquiryLifecycleSpec :
             }
             val payment = standalone("80")
             val allocate = AllocatePayment(app.transactor, app.context.financialLedger, owners, pricing, testClock)
-            allocate(
-                AllocatePayment.Command(payment.id, id, Version.of(2), BigDecimal("20")),
-            ).document.latest.document.shouldBeInstanceOf<FinancialDocument.Quote>()
-            val result = allocate(AllocatePayment.Command(payment.id, id, Version.of(2), BigDecimal("60")))
+            shouldThrow<CommerceFailure.IllegalTransition> {
+                allocate(AllocatePayment.Command(payment.id, id, Version.of(2), BigDecimal("50")))
+            }
+            read(inquiry).stage shouldBe InquiryStage.QUOTED
+            val result = pay(id, "50")
             result.document.latest.document
                 .shouldBeInstanceOf<FinancialDocument.Invoice>()
             result.document.latest.pricing shouldBe inputs
             read(inquiry).stage shouldBe InquiryStage.BOOKED
-            shouldThrow<CommerceFailure.Conflict> { allocate(AllocatePayment.Command(payment.id, id, Version.of(2), BigDecimal("1"))) }
+            allocate(AllocatePayment.Command(payment.id, id, Version.of(3), BigDecimal("20")))
+            allocate(AllocatePayment.Command(payment.id, id, Version.of(3), BigDecimal("60")))
         }
 
-        test("standalone canonical deposit changes are rejected after payment; RELATED manual invoicing remains financial only") {
+        test("standalone canonical deposit changes reject before acceptance; RELATED manual invoicing remains financial only") {
             listOf(false, true).forEach { replacing ->
                 val (inquiry, id) = requested()
                 app.issueProposal(inquiry, "100")
-                pay(id, "75")
+                shouldThrow<CommerceFailure.ValidationFailed> { pay(id, "75") }
                 shouldThrow<CommerceFailure.IllegalTransition> {
                     SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing, JdbiInquiryProposalRepository())(
                         SetDepositRequirement.Command(
@@ -275,106 +284,36 @@ class InquiryLifecycleSpec :
             read(inquiry).stage shouldBe InquiryStage.REQUESTED
         }
 
-        listOf("payment", "allocation").forEach { trigger ->
-            test("Invoice promotion failure rolls back triggering $trigger and its cross-schema writes") {
-                val (inquiry, id) = quote()
-                val failing =
-                    object : FinancialDocumentPricingRepository by pricing {
-                        override fun copy(
-                            transaction: Transaction,
-                            from: FinancialDocumentReference,
-                            to: FinancialDocumentReference,
-                        ) {
-                            app.context.financialLedger
-                                .latest(transaction, id)
-                                .shouldBeInstanceOf<FinancialDocument.Invoice>()
-                            error("Failure after Invoice insert")
-                        }
-                    }
-                val standalone = if (trigger == "allocation") standalone("50") else null
-                val before =
-                    app.database.strings(
-                        "SELECT count(*) FROM commerce.payment_records UNION ALL SELECT count(*) FROM commerce.payment_allocations UNION ALL SELECT count(*) FROM commerce.deposit_requirement_revisions",
-                    )
-                shouldThrow<IllegalStateException> {
-                    when (trigger) {
-                        "payment" -> pay(id, "50", failing)
-                        "allocation" ->
-                            AllocatePayment(app.transactor, app.context.financialLedger, owners, failing, testClock)(
-                                AllocatePayment.Command(standalone!!.id, id, Version.of(2), BigDecimal("50")),
-                            )
-                        else -> error("Unexpected trigger")
+        test("Invoice promotion failure rolls back exact payment and its cross-schema writes") {
+            val (inquiry, id) = quote()
+            val failing =
+                object : FinancialDocumentPricingRepository by pricing {
+                    override fun copy(
+                        transaction: Transaction,
+                        from: FinancialDocumentReference,
+                        to: FinancialDocumentReference,
+                    ) {
+                        app.context.financialLedger
+                            .latest(transaction, id)
+                            .shouldBeInstanceOf<FinancialDocument.Invoice>()
+                        error("Failure after Invoice insert")
                     }
                 }
+            val before =
                 app.database.strings(
                     "SELECT count(*) FROM commerce.payment_records UNION ALL SELECT count(*) FROM commerce.payment_allocations UNION ALL SELECT count(*) FROM commerce.deposit_requirement_revisions",
-                ) shouldBe
-                    before
-                app.context.financialLedger
-                    .history(id)
-                    .size shouldBe 2
-                read(inquiry).stage shouldBe InquiryStage.QUOTED
+                )
+            shouldThrow<IllegalStateException> {
+                pay(id, "50", failing)
             }
-        }
-
-        test("waiting concurrent payments observe preceding partial allocation and jointly promote exactly one Invoice") {
-            val (inquiry, id) = quote()
-            val held = CountDownLatch(1)
-            val release = CountDownLatch(1)
-            val pid = AtomicInteger()
-            val firstOwners =
-                object : InquiryFinancialDocumentRepository by owners {
-                    override fun lockInquiryOf(
-                        transaction: Transaction,
-                        documentId: UUID,
-                    ): InquiryId? {
-                        val owner = owners.lockInquiryOf(transaction, documentId)
-                        held.countDown()
-                        check(release.await(30, TimeUnit.SECONDS))
-                        return owner
-                    }
-                }
-            val secondOwners =
-                object : InquiryFinancialDocumentRepository by owners {
-                    override fun lockInquiryOf(
-                        transaction: Transaction,
-                        documentId: UUID,
-                    ): InquiryId? {
-                        pid.set(
-                            transaction.handle
-                                .createQuery("SELECT pg_backend_pid()")
-                                .mapTo(Int::class.java)
-                                .one(),
-                        )
-                        return owners.lockInquiryOf(transaction, documentId)
-                    }
-                }
-            val first = CompletableFuture.supplyAsync { pay(id, "25", associations = firstOwners) }
-            check(held.await(30, TimeUnit.SECONDS))
-            val second = CompletableFuture.supplyAsync { pay(id, "25", associations = secondOwners) }
-            try {
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-                while (pid.get() == 0 ||
-                    app.database.strings("SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pid.get()}").singleOrNull() != "Lock"
-                ) {
-                    check(System.nanoTime() < deadline) { "Second payment did not wait on association lock" }
-                    Thread.yield()
-                }
-            } finally {
-                release.countDown()
-            }
-            first
-                .get(15, TimeUnit.SECONDS)
-                .document.latest.document
-                .shouldBeInstanceOf<FinancialDocument.Quote>()
-            second
-                .get(15, TimeUnit.SECONDS)
-                .document.latest.document
-                .shouldBeInstanceOf<FinancialDocument.Invoice>()
-            read(inquiry).stage shouldBe InquiryStage.BOOKED
+            app.database.strings(
+                "SELECT count(*) FROM commerce.payment_records UNION ALL SELECT count(*) FROM commerce.payment_allocations UNION ALL SELECT count(*) FROM commerce.deposit_requirement_revisions",
+            ) shouldBe
+                before
             app.context.financialLedger
                 .history(id)
-                .size shouldBe 3
+                .size shouldBe 2
+            read(inquiry).stage shouldBe InquiryStage.QUOTED
         }
 
         test("staff detail uses one snapshot when booking and service commit between its financial and fulfillment reads") {

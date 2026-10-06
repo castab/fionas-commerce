@@ -9,10 +9,12 @@ import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.RoleKey
+import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -95,6 +97,143 @@ class FinancialDocumentPaymentsSpec :
             revision = application.createAcceptanceCatalog()
         }
         afterSpec { application.close() }
+
+        test(
+            "canonical deposits reject missing identity, partial and excess amounts with zero writes; exact payment books before separate Invoice receipts",
+        ) {
+            val inquiryId = InquiryId(UUID.fromString(application.createInquiry()))
+            val issued = application.issueProposal(inquiryId, "300")
+            val document = issued.proposal.documentReference.id
+            val path = "/financial-documents/$document/payments"
+            val token = issued.proposal.id.value
+
+            fun unchanged(
+                body: String,
+                status: Status,
+                code: String,
+            ) {
+                val counts =
+                    listOf(
+                        "commerce.payment_records",
+                        "commerce.payment_allocations",
+                        "commerce.financial_document_snapshots",
+                        "commerce.deposit_requirement_revisions",
+                        "fionas.inquiry_proposals",
+                    ).map(application.database::count)
+                val before = application.adminGet("/staff/requests/${inquiryId.value}").bodyString()
+                val rejected = application.adminPost(path, body)
+                rejected.status shouldBe status
+                CommerceJson.asA(rejected.bodyString(), ErrorResponse.serializer()).code shouldBe code
+                listOf(
+                    "commerce.payment_records",
+                    "commerce.payment_allocations",
+                    "commerce.financial_document_snapshots",
+                    "commerce.deposit_requirement_revisions",
+                    "fionas.inquiry_proposals",
+                ).map(application.database::count) shouldBe counts
+                application.adminGet("/staff/requests/${inquiryId.value}").bodyString() shouldBe before
+            }
+            listOf("100", "200", "299.99", "300.01", "400").forEach { amount ->
+                unchanged(
+                    """{"documentVersion":2,"amount":"$amount","method":"CASH","expectedProposalId":"$token"}""",
+                    Status.UNPROCESSABLE_ENTITY,
+                    "validation_failed",
+                )
+            }
+            unchanged("""{"documentVersion":2,"amount":"300","method":"CASH"}""", Status.UNPROCESSABLE_ENTITY, "validation_failed")
+            unchanged(
+                """{"documentVersion":2,"amount":"300","method":"CASH","expectedProposalId":"${UUID.randomUUID()}"}""",
+                Status.CONFLICT,
+                "conflict",
+            )
+            unchanged(
+                """{"documentVersion":2,"amount":"300","method":"CASH","expectedProposalId":"bad-uuid"}""",
+                Status.BAD_REQUEST,
+                "malformed_request",
+            )
+            val payment =
+                application.adminPost(
+                    path,
+                    """{"documentVersion":2,"amount":"300.00","method":"CHECK","expectedProposalId":"$token"}""",
+                )
+            payment.status shouldBe Status.CREATED
+            val staff =
+                CommerceJson.asA(
+                    application.adminGet("/staff/requests/${inquiryId.value}").bodyString(),
+                    StaffRequestResponse.serializer(),
+                )
+            staff.inquiry.lifecycle.stage shouldBe InquiryStageResponse.BOOKED
+            staff.financial.stage shouldBe "INVOICE"
+            staff.financial.version shouldBe 3
+            staff.proposal!!.id shouldBe token.toString()
+            payments(document.toString())
+                .payments
+                .single()
+                .allocations
+                .single()
+                .documentVersion shouldBe 2
+            listOf("100", "50").forEach { amount ->
+                application.adminPost(path, """{"documentVersion":3,"amount":"$amount","method":"CASH"}""").status shouldBe Status.CREATED
+            }
+            payments(document.toString()).payments.size shouldBe 3
+            application.context.financialLedger
+                .reconcileLatest(document)
+                .netApplied.amount
+                .compareTo(BigDecimal("450")) shouldBe 0
+        }
+
+        test("generic allocation cannot fund canonical Quote; its unapplied payment remains available for the booked Invoice") {
+            val inquiryId = InquiryId(UUID.fromString(application.createInquiry()))
+            val issued = application.issueProposal(inquiryId, "300")
+            val document = issued.proposal.documentReference.id
+            val standalone = record("400")
+            val before = application.context.financialLedger.reconcilePayment(UUID.fromString(standalone))
+            val response =
+                application.adminPost(
+                    "/payments/$standalone/allocations",
+                    """{"documentId":"$document","documentVersion":2,"amount":"300"}""",
+                )
+            response.status shouldBe Status.CONFLICT
+            CommerceJson.asA(response.bodyString(), ErrorResponse.serializer()).code shouldBe "illegal_transition"
+            application.context.financialLedger.reconcilePayment(UUID.fromString(standalone)) shouldBe before
+            payments(document.toString()).payments.shouldBeEmpty()
+            application.context.financialLedger
+                .latest(document)
+                .let { (it is FinancialDocument.Quote) shouldBe true }
+            application
+                .adminPost(
+                    "/financial-documents/$document/payments",
+                    """{"documentVersion":2,"amount":"300","method":"CASH","expectedProposalId":"${issued.proposal.id.value}"}""",
+                ).status shouldBe Status.CREATED
+            allocate(standalone, document.toString(), "100", 3).status shouldBe Status.CREATED
+            payments(document.toString()).payments.size shouldBe 2
+        }
+
+        test("deposit-only republication rejects the previous token at unchanged Quote version through HTTP") {
+            val inquiryId = InquiryId(UUID.fromString(application.createInquiry()))
+            val issued = application.issueProposal(inquiryId, "300")
+            val document = issued.proposal.documentReference.id
+            val revised =
+                application.adminPost(
+                    "/staff/requests/${inquiryId.value}/proposals/deposit-revisions",
+                    """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,"terms":{"type":"FIXED","amount":"200","currency":"USD"}}""",
+                )
+            revised.status shouldBe Status.OK
+            val proposal = CommerceJson.asA(revised.bodyString(), IssuedInquiryProposalResponse.serializer()).proposal
+            proposal.documentVersion shouldBe 2
+            val stale =
+                application.adminPost(
+                    "/financial-documents/$document/payments",
+                    """{"documentVersion":2,"amount":"200","method":"CASH","expectedProposalId":"${issued.proposal.id.value}"}""",
+                )
+            stale.status shouldBe Status.CONFLICT
+            payments(document.toString()).payments.shouldBeEmpty()
+            application
+                .adminPost(
+                    "/financial-documents/$document/payments",
+                    """{"documentVersion":2,"amount":"200","method":"CASH","expectedProposalId":"${proposal.id}"}""",
+                ).status shouldBe Status.CREATED
+        }
 
         test("a document that never received a payment has an empty list") {
             val quote = create("QUOTE")

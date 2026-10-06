@@ -1,8 +1,10 @@
 package io.github.castab.fionas.commerce.financial
 
+import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentAllocation
 import io.github.castab.commerce.runtime.financial.FinancialLedger
+import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.math.BigDecimal
 import java.time.Clock
@@ -39,6 +41,9 @@ class AllocatePayment(
             val current = documents.expectLatest(transaction, command.documentId, command.documentVersion)
             val document = current.document
             document.requirePaymentDestination()
+            if (document is FinancialDocument.Quote && documents.isCanonical(transaction, current)) {
+                throw CommerceFailure.IllegalTransition("Canonical deposits require one exact payment against the current proposal")
+            }
             val amount = paymentMoney(command.amount, document.currency)
             val allocation =
                 ledger.allocatePayment(transaction, command.paymentId, newAllocationId(), document.reference, amount, now)

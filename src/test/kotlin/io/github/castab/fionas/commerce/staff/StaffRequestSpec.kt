@@ -29,6 +29,7 @@ import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.requestedPricing
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -242,7 +243,9 @@ class StaffRequestSpec :
                         app
                             .adminPost(
                                 "/financial-documents/$document/payments",
-                                """{"documentVersion":2,"amount":"50.00","method":"CASH"}""",
+                                """{"documentVersion":2,"amount":"100.00","method":"CASH","expectedProposalId":"${app.proposalId(
+                                    document,
+                                )!!.value}"}""",
                             ).status
                     }
                 writer.get(30, TimeUnit.SECONDS) shouldBe Status.CREATED
@@ -259,13 +262,14 @@ class StaffRequestSpec :
             before.financial.reconciliation.netApplied.amount
                 .signum() shouldBe 0
             val after = reader()(id)
-            after.inquiry.lifecycle.stage shouldBe InquiryStage.QUOTED
-            after.financial.latest.document.version shouldBe Version.of(2)
-            after.proposal!!.documentReference shouldBe after.financial.latest.document.reference
+            after.inquiry.lifecycle.stage shouldBe InquiryStage.BOOKED
+            after.financial.latest.document.version shouldBe Version.of(3)
+            after.proposal!!.documentReference.id shouldBe after.financial.latest.document.id
+            after.proposal.documentReference.version shouldBe Version.of(2)
             val active = after.deposit.depositRequirement!!.requirement as DepositRequirement.Active
             active.approvalReference shouldBe after.proposal.documentReference
             active.revision shouldBe after.proposal.depositRequirementRevision
             after.financial.reconciliation.netApplied.amount
-                .compareTo(BigDecimal("50")) shouldBe 0
+                .compareTo(BigDecimal("100")) shouldBe 0
         }
     })

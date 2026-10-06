@@ -16,6 +16,7 @@ import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
@@ -29,10 +30,13 @@ import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
+import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import org.http4k.core.Status
 import org.jdbi.v3.core.statement.SqlLogger
 import org.jdbi.v3.core.statement.SqlStatements
 import org.jdbi.v3.core.statement.StatementContext
@@ -48,6 +52,7 @@ import java.util.concurrent.TimeUnit
 class InquiryOperationalStatesSpec :
     FunSpec({
         lateinit var app: TestApplication
+        var catalogRevision = 0
         val inquiries = JdbiInquiryRepository()
         val owners = JdbiInquiryFinancialDocumentRepository()
         val facts = JdbiInquiryFulfillmentRepository()
@@ -83,7 +88,7 @@ class InquiryOperationalStatesSpec :
         fun pay(
             id: UUID,
             amount: BigDecimal,
-        ) = RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, pricing, testClock)(
+        ) = RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, pricing, testClock, JdbiInquiryProposalRepository())(
             RecordDocumentPayment.Command(
                 id,
                 app.context.financialLedger
@@ -93,6 +98,7 @@ class InquiryOperationalStatesSpec :
                 PaymentMethod.CARD,
                 null,
                 null,
+                app.proposalId(id),
             ),
         )
 
@@ -131,7 +137,7 @@ class InquiryOperationalStatesSpec :
 
         beforeTest {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
+            catalogRevision = app.createAcceptanceCatalog()
         }
         afterTest { app.close() }
 
@@ -297,7 +303,13 @@ class InquiryOperationalStatesSpec :
 
         test("quote and Invoice revisions preserve lifecycle; refunds do not demote durable booking") {
             val pair = quote()
-            addCharge(pair.second)
+            app
+                .adminPost(
+                    "/staff/requests/${pair.first.value}/proposals/quote-revisions",
+                    """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,
+                    "pricingInputs":${pricingBody(catalogRevision, guests = 100)},
+                    "terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
+                ).status shouldBe Status.OK
             read()
                 .states
                 .single()

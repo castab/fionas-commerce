@@ -90,7 +90,7 @@ class InquiryProposalRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/${c.proposal.documentId}/payments",
-                    """{"documentVersion":3,"amount":"300.00","method":"CHECK"}""",
+                    """{"documentVersion":3,"amount":"300.00","method":"CHECK","expectedProposalId":"${c.proposal.id}"}""",
                 ).status shouldBe
                 Status.CREATED
             val booked = read()
@@ -122,7 +122,9 @@ class InquiryProposalRoutesSpec :
                     pricingBody(revision, guests = 80, expectedVersion = 1),
                 ).status shouldBe
                 Status.OK
-            app.adminPost(path(id), initial.replace(":1", ":2")).status shouldBe Status.OK
+            val publication =
+                response(app.adminPost(path(id), initial.replace(":1", ":2")).also { it.status shouldBe Status.OK }.bodyString())
+            val approvedAmount = (publication.depositRequirement as CurrentDepositRequirementResponse.Active).requiredAmount.amount
             val snapshots = app.database.count("commerce.financial_document_snapshots")
             app
                 .adminPost(
@@ -149,7 +151,7 @@ class InquiryProposalRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$document/payments",
-                    """{"documentVersion":3,"amount":"500.00","method":"CASH"}""",
+                    """{"documentVersion":3,"amount":"$approvedAmount","method":"CASH","expectedProposalId":"${publication.proposal.id}"}""",
                 ).status shouldBe
                 Status.CREATED
             app
@@ -210,7 +212,7 @@ class InquiryProposalRoutesSpec :
                 app
                     .adminPost(
                         "/financial-documents/$document/payments",
-                        """{"documentVersion":2,"amount":"$amount","method":"CHECK"}""",
+                        """{"documentVersion":2,"amount":"$amount","method":"CHECK","expectedProposalId":"${accepted.proposal.id}"}""",
                     ).status shouldBe Status.CREATED
 
                 fun read() = CommerceJson.asA(app.adminGet("/staff/requests/$id").bodyString(), StaffRequestResponse.serializer())

@@ -22,6 +22,7 @@ import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.perGuest
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -482,7 +483,9 @@ class FinancialDocumentRoutesSpec :
                 fresh
                     .adminPost(
                         "/financial-documents/$document/payments",
-                        """{"documentVersion":2,"amount":"50","method":"CARD"}""",
+                        """{"documentVersion":2,"amount":"50","method":"CARD","expectedProposalId":"${fresh.proposalId(
+                            UUID.fromString(document),
+                        )!!.value}"}""",
                     ).let {
                         it.status shouldBe Status.CREATED
                         it.payment().documentVersion shouldBe 2

@@ -1057,8 +1057,8 @@ against the new Quote even if terms remain 20%. Deposit-only revision keeps the 
 version and rejects numerically equivalent same-form terms; changing percentage to fixed
 is meaningful even if the resolved amount is equal. Both require exact reviewed Quote and
 deposit revision tokens. Any historical `grossAllocated > 0` blocks both revisions, even
-when refunds unwind all applied value. Deposit satisfaction by existing payment/allocation
-operations still atomically promotes Quote -> Invoice/BOOKED; refunds never demote it.
+when refunds unwind all applied value. Exact complete deposit receipt atomically promotes Quote -> Invoice/BOOKED; refunds never
+demote it. Standalone allocations cannot fund canonical deposits.
 
 Every publication is the exact `(documentId, documentVersion, depositRequirementRevision)`.
 `IsCurrentPayableInquiryProposal` reads one REPEATABLE READ snapshot: only the latest
@@ -1067,10 +1067,10 @@ reissue supersedes all earlier ids; Invoice makes all publication targets non-pa
 Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
 contact collection, cancellation, or post-payment adjustment workflow is introduced.
 
-`IsCurrentPayableInquiryProposal` is only a read/query seam. Future customer payment
-acceptance must lock/revalidate the exact proposal currentness and record/allocate money
-in one atomic transaction. A query followed by a separate payment transaction would race
-proposal reissuance.
+`IsCurrentPayableInquiryProposal` is only a read/query seam. `RecordDocumentPayment` validates
+the expected proposal id and exact frozen deposit amount under the association lock, then
+records and allocates the receipt and books in that same transaction. A separate currentness
+query never authorizes acceptance.
 
 The durable proposal row is the business event for future at-least-once integrations.
 It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
@@ -1147,16 +1147,20 @@ reads inquiry, canonical latest stage and operational facts in one REPEATABLE RE
 | Invoice, served, not closed | SERVED |
 | Invoice, served and closed | CLOSED |
 
-Issuing Quote is the firm proposal boundary. Booking requires a positive active deposit:
-`RecordDocumentPayment` and `AllocatePayment` promote the canonical
-Quote to Invoice when runtime `FinancialLineageView.depositSatisfied` is true. Promotion
-and optional legacy pricing metadata copy share the triggering mutation's transaction;
-failure rolls back all writes. Partial deposits remain QUOTED.
-Canonical deposit mutation after payment requires a future adjustment workflow. Application
-operation results contain the new current Invoice. HTTP payment/allocation responses retain
-their allocation references and return current settlement; the deposit endpoint retains its
-deposit union response. Document/detail/bulk reads expose the new current Invoice version.
-The allocation still names the exact Quote version it paid. Stale expected versions conflict.
+Issuing Quote is the firm proposal boundary. Booking requires one complete, exact deposit
+payment naming the current proposal through `RecordDocumentPayment`. Partial and excessive
+deposit payments reject without writes; standalone `AllocatePayment` cannot fund a canonical
+Quote. Fiona validates the publication and runtime frozen deposit amount under the association
+lock, then records/allocates the whole payment and promotes Quote to Invoice atomically.
+Promotion or metadata-copy failure rolls back everything. Old proposal ids conflict even when
+deposit-only republication keeps the Quote version and amount. Historical allocation blocks
+acceptance even after refunds unwind all applied value.
+
+If a customer can pay less, staff first negotiates and publishes revised deposit terms. Extra
+money requires two explicit receipts: exact deposit against Quote, then a separate ordinary
+Invoice payment. Invoice partial payments remain supported. Application results return the
+current Invoice; HTTP receipts retain the allocation's accepted Quote reference and current
+settlement. Read document/detail/bulk views for the Invoice. Refunds never undo booking.
 
 `POST /financial-documents/{documentId}/invoice` (`issueInvoice`) rejects canonical
 INITIAL_ESTIMATE lineages with `409 illegal_transition`. It remains available for RELATED
@@ -1435,7 +1439,7 @@ are optional. The runtime rejects duplicate provider/reference pairs.
 {"documentId":"...","documentVersion":3,"amount":"150.00"}
 ```
 
-Fiona requires that version to remain latest and be a Quote or Invoice, locks its lineage,
+Fiona requires that version to remain latest and be a RELATED Quote or any Invoice, locks its lineage,
 and derives currency from that snapshot. The runtime locks the payment and enforces its
 allocation history, including currency agreement and the maximum allocatable amount.
 The response contains the allocation fact and reconciliation for the exact document
@@ -1527,12 +1531,16 @@ payment, and all of it is for this document":
 
 ```json
 {"documentVersion": 3, "amount": "300.00", "method": "CARD",
+ "expectedProposalId": "34b41196-38b8-4e27-a48d-e2aaf896f570",
  "receivedAt": "2026-09-27T17:05:00Z",
  "externalReference": {"provider": "square", "reference": "pay_7Q2Rk9"}}
 ```
 
 - `documentVersion` must be the latest version, and it must be a quote (a deposit) or an
   invoice; an estimate is `422 invariant_violated`.
+- `expectedProposalId` is required for a canonical Quote and must identify the exact current
+  payable proposal; missing identity is `422 validation_failed`, stale identity is `409 conflict`.
+  Invoice and RELATED payments need no proposal identity.
 - `amount` is a positive exact decimal string with at most the currency's minor-unit digits;
   JSON numbers are never accepted. The currency is the document's.
 - `method` is `CASH`, `CHECK`, `CARD`, `BANK_TRANSFER`, `DIGITAL_WALLET`, or `OTHER`.
@@ -1544,7 +1552,8 @@ payment, and all of it is for this document":
 The runtime records the `PaymentRecord` and one `PaymentAllocation` of the whole amount to
 that exact version. The allocation stays attached to it as the document advances: a deposit
 on quote `D/v3` still counts when invoice `D/v5` is reconciled, whose balance is `D/v5`'s
-total minus the net applied. Over-application is allowed; the balance is then negative. The
+total minus the net applied. Over-application remains allowed for Invoices/RELATED payments;
+canonical Quote receipts must equal the complete deposit exactly. The balance may be negative. The
 response names the payment, the allocation, the exact version, and the settlement after it.
 The two facts are committed atomically. All payment amounts remain exact decimal strings,
 never JSON floating-point numbers. Provider SDKs, webhooks, stored payment status,
@@ -2185,11 +2194,11 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested pricing inputs round trip in order; an inquiry cannot commit without them |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer, inquiry and requested inputs roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec` | New customer + inquiry + initial Estimate together, customer reuse, requested pricing inputs recorded as submitted and pinned to their revision, rejected inputs record nothing, atomic failure (inquiry or pricing inputs), not found |
-| `InquiryLifecycleSpec` | Canonical projection; deposit booking by payment and allocation; RELATED isolation; canonical bypass rejection; metadata preservation; triggering mutations rolling back with Invoice failure; forced concurrent payments; refund stability; served/closed provenance, exact-zero closeout and change orders |
+| `InquiryLifecycleSpec` | Canonical projection; exact deposit booking and canonical allocation rejection; RELATED isolation; canonical bypass rejection; metadata preservation; receipt rollback with Invoice failure; refund stability; served/closed provenance, exact-zero closeout and change orders |
 | `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; three overlapping attention queues and exact onset/UUID ordering; durable-order clearing/provenance with both PostgreSQL contention directions; SQL/pure projection parity and 1,800-row reduction; EXACT/FROM qualifiers; stale-quote boundaries, explicit application event-zone/DST boundaries and invalid configuration, exact balance signs/scales; ten set-based SQL reads for one/many inquiries; concurrent financial/enrichment/communication snapshot coherence; integrity failures; live USER/SERVICE permissions and acknowledgement; final reason/schema shape and no-store |
 | `InquiryLifecycleRoutesSpec` | Detail and explicit actions through the full handler; USER/SERVICE provenance, live manage permission, authentication, Origin policy, malformed/missing inquiries, repeated transitions and no arbitrary PATCH |
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after proposal issuance, RELATED exclusion, strict integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, shared nested DTO contracts, both live USER/SERVICE read permissions, no-store and reviewed document input |
-| `InquiryProposalsSpec` | Exact immutable pairs and frozen terms; Quote/deposit-only revisions; gross-allocation guard after refunds; rollback at late financial/publication writes; observed PostgreSQL association contention; ordered history and USER/SERVICE provenance; currentness and unlocked repeatable snapshots; immutable booked acceptance across Invoice change orders and corruption detection |
+| `InquiryProposalsSpec` | Exact full deposit acceptance, zero-write partial/excess/stale rejection, equal-amount deposit republication, negotiated terms, Invoice partial payments and both deterministic acceptance/revision race outcomes; exact immutable pairs and frozen terms; Quote/deposit-only revisions; gross-allocation guard after refunds; rollback at late financial/publication writes; observed PostgreSQL association contention; ordered history and USER/SERVICE provenance; currentness and unlocked repeatable snapshots; immutable booked acceptance across Invoice change orders and corruption detection |
 | `InquiryProposalRoutesSpec` | Initial/default staff projection, both revision paths and booking; canonical deposit mutation rejected before/after booking with unchanged history/projection; pre-publication Estimate validation, booked Invoice change orders and RELATED Invoice deposit behavior preserved; live USER/SERVICE permission intersection, trusted Origin, malformed/stale/no-op mappings and corrupt-pair internal failures |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
@@ -2204,7 +2213,7 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `AuthRoutesSpec` | Fresh bootstrap (with the financial grants, never changed by a later startup), generic login failures, session lifecycle, live Offerings grants, runtime administration, credential provisioning, and Origin checks |
 | `UnappliedPaymentsSpec` | Standalone receipt discovery with no inquiry, runtime ordering including ties, partial/full allocation, unapplied refunds and unavailable payment exclusion, payment-record authorization, and malformed allocation `documentId` body metadata |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: preview records nothing; `D/v1` estimate priced as the preview; change order `D/v2`; quote `D/v3`; `$300` deposit allocated to `D/v3`; invoice `D/v4`; invoice change order `D/v5`; final payment; latest view, history with pricing sources, and inquiry listing. Also: no client-supplied totals; change orders at every stage; no-change rejection; stale catalog rejection and refreshed success; stale versions; illegal transitions; payment policy, validation, and duplicate external references; non-Fiona documents not found; permissions and Origin |
-| `FinancialDocumentPaymentsSpec` | `GET /financial-documents/{documentId}/payments` through the complete handler: `[]` without payments; `404` for a lineage only the runtime ledger holds; `401`/`403` unless `commerce.financial-document.read` (payment and refund writes do not grant it); a payment, its allocation, a refund, and its unwind rediscovered after their responses are gone and reused for a second refund; a fully unwound allocation still listed; a split payment whole from either document with whole-payment reconciliation; unapplied payments not listed; commerce-runtime's ordering kept, ids breaking only timestamp ties |
+| `FinancialDocumentPaymentsSpec` | Canonical full deposit HTTP acceptance, missing/malformed/stale identity and partial/excess zero-write rejection, canonical allocation prohibition and separate Invoice payments; `GET /financial-documents/{documentId}/payments` through the complete handler: `[]` without payments; `404` for a lineage only the runtime ledger holds; `401`/`403` unless `commerce.financial-document.read` (payment and refund writes do not grant it); a payment, its allocation, a refund, and its unwind rediscovered after their responses are gone and reused for a second refund; a fully unwound allocation still listed; a split payment whole from either document with whole-payment reconciliation; unapplied payments not listed; commerce-runtime's ordering kept, ids breaking only timestamp ties |
 | `FinancialDocumentAtomicitySpec` | Fiona's cross-boundary writes roll back together: first-snapshot Estimate, Quote, and Invoice creation, change orders, combined payments, and standalone allocations do not leave partial ledger or Fiona facts on failure |
 | `FinancialLedgerExpansionSpec` | Direct first-snapshot stages and transitions; standalone receipt validation and persistence; partial, repeated, and split allocations; runtime limits and Fiona stage/version policy; concurrent allocations against one payment |
 | `FinancialDocumentRepositoriesSpec` | The inquiry association and pricing-source repositories on PostgreSQL: several lineages per inquiry, one inquiry per lineage, ordered round trips with an empty category, copies to a successor, and foreign keys to the runtime's exact snapshots |

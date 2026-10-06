@@ -18,6 +18,7 @@ import io.github.castab.fionas.commerce.financial.AllocatedPayment
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
+import io.github.castab.fionas.commerce.financial.InquiryProposalId
 import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
@@ -161,6 +162,13 @@ data class RecordPaymentRequest(
                 "reference already recorded for another payment is `409 conflict`.",
     )
     val externalReference: PaymentExternalReference? = null,
+    @ApiProperty(
+        description =
+            "Required for a canonical Quote: the exact current payable proposal id. " +
+                "Invoice and RELATED payments need no proposal id.",
+        format = "uuid",
+    )
+    val expectedProposalId: String? = null,
 )
 
 /** Records money received without assigning it to a document yet. */
@@ -683,6 +691,7 @@ private val examplePayment =
         method = "CARD",
         receivedAt = "2026-09-27T17:05:00Z",
         externalReference = PaymentExternalReference("square", "pay_7Q2Rk9"),
+        expectedProposalId = "34b41196-38b8-4e27-a48d-e2aaf896f570",
     )
 
 private val exampleRecordedPayment =
@@ -1172,21 +1181,26 @@ fun recordPaymentRoute(
             "Records a payment and applies the whole of it to the exact version named, which must be the document's " +
             "latest version, a quote (for example a deposit) or an invoice. The allocation stays attached to that " +
             "version when the document later advances, and still counts toward its settlement. The payment's currency " +
-            "is the document's. Satisfying an ACTIVE deposit on the canonical INITIAL_ESTIMATE Quote atomically " +
-            "issues its Invoice. The response retains the original Quote allocation and returns current settlement; " +
+            "is the document's. A canonical INITIAL_ESTIMATE Quote requires expectedProposalId naming the current " +
+            "payable proposal and one payment exactly equal to its complete approved deposit, with no historical " +
+            "allocation. Partial and excessive deposits reject without writes. Exact acceptance atomically issues " +
+            "the Invoice; extra money requires a distinct subsequent Invoice payment. Invoice partial payments " +
+            "remain allowed. The response retains the original Quote allocation and returns current settlement; " +
             "GET the document or inquiry detail to read the new current Invoice. " +
             "RELATED lineages never automatically advance. Payment status is never stored: settlement is derived. Requires " +
             "`commerce.payment.record`."
         tags += payments
         receiving(recordPaymentRequest to examplePayment)
         returning(Status.CREATED, recordedPaymentResponse to exampleRecordedPayment, "The recorded payment and the settlement after it.")
-        malformed("`documentId`")
+        malformed("`documentId` or body `expectedProposalId`")
         returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
         returningError(
             ErrorCategory.CONFLICT,
-            "one of two conflicts: `documentVersion` is no longer the document's latest version (reload the " +
+            "`expectedProposalId` is no longer the current payable proposal; " +
+                "`documentVersion` is no longer the document's latest version (reload the " +
                 "document before retrying against its current version); or the external provider and reference pair " +
-                "is already recorded for another payment (reloading does not resolve it).",
+                "is already recorded for another payment (reloading does not resolve it). " +
+                "Historical applied payment rejects with `illegal_transition` at the same status.",
             STALE_DOCUMENT,
         )
         returningError(
@@ -1194,7 +1208,7 @@ fun recordPaymentRoute(
             "a value is invalid: an amount that is not a positive exact decimal with at most the currency's minor-unit " +
                 "digits, an unknown method, or a `receivedAt` that is not RFC 3339. A latest version that is an " +
                 "estimate answers the same status with code `invariant_violated`: payments are accepted against a " +
-                "quote or an invoice.",
+                "quote or an invoice. A canonical Quote also requires expectedProposalId and an exact complete deposit amount.",
             "Payment amount must be an exact decimal string, for example 300.00",
         )
         financialErrors(CommercePermissions.PaymentRecord, unsafe = true)
@@ -1202,6 +1216,7 @@ fun recordPaymentRoute(
         access.requirePermission(CommercePermissions.PaymentRecord).then { request: Request ->
             val documentId = uuidIn(id, documentIdPath)
             val body = recordPaymentRequest(request)
+            val expectedProposalId = body.expectedProposalId?.let { InquiryProposalId(proposalPaymentId(it)) }
             val command =
                 validating {
                     RecordDocumentPayment.Command(
@@ -1212,6 +1227,7 @@ fun recordPaymentRoute(
                         receivedAt = body.receivedAt?.let(::receivedAt),
                         externalReference =
                             body.externalReference?.let { ExternalPaymentReference(it.provider.trim(), it.reference.trim()) },
+                        expectedProposalId = expectedProposalId,
                     )
                 }
             Response(Status.CREATED).with(recordedPaymentResponse of recordPayment(command).toResponse())
@@ -1333,9 +1349,9 @@ fun allocatePaymentRoute(
         description =
             "Applies part of an existing payment to the specified latest Quote or Invoice snapshot of a Fiona-owned " +
             "lineage. The allocation remains attached to that version; settlement is derived from allocation " +
-            "history. Satisfying an ACTIVE deposit on the canonical INITIAL_ESTIMATE Quote atomically issues its " +
-            "Invoice. The response returns current settlement and the allocation's original Quote reference; " +
-            "GET the document or inquiry detail to read the new current Invoice. " +
+            "history. Canonical INITIAL_ESTIMATE Quotes reject standalone allocations: their deposits require " +
+            "one exact payment naming the current proposal through the document payment operation. " +
+            "Invoices retain ordinary partial allocations. " +
             "RELATED lineages never automatically advance. Requires `commerce.payment.record`."
         tags += payments
         receiving(allocatePaymentRequest to exampleAllocatePayment)
@@ -1350,7 +1366,9 @@ fun allocatePaymentRoute(
             "the payment or Fiona-owned document does not exist.",
             "Payment $EXAMPLE_DOCUMENT was not found",
         )
-        staleVersion("")
+        staleVersion(
+            " A canonical Quote also answers this status with `illegal_transition`: standalone allocation cannot fund its deposit.",
+        )
         returningError(
             ErrorCategory.VALIDATION_FAILED,
             "the amount or version is invalid, currencies differ, the payment would be over-allocated, or the latest " +
@@ -1503,6 +1521,13 @@ private fun allocationDocumentId(value: String): UUID =
         UUID.fromString(value)
     } catch (e: IllegalArgumentException) {
         throw LensFailure(Invalid(allocationDocumentIdBodyMeta), cause = e)
+    }
+
+private fun proposalPaymentId(value: String): UUID =
+    try {
+        UUID.fromString(value)
+    } catch (e: IllegalArgumentException) {
+        throw LensFailure(Invalid(recordPaymentRequest.metas.single().copy(name = "expectedProposalId")), cause = e)
     }
 
 private fun InquiryFinancialDocumentHistory.toResponse() =

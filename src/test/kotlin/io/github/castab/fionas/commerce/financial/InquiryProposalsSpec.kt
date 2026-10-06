@@ -144,13 +144,35 @@ class InquiryProposalsSpec :
                     .depositRequirementHistory(lineage)
                     .map { it.requirement to it.createdAt }
             val publications = persisted(id)
+            val payments = app.context.financialLedger.paymentHistoriesForLineage(lineage)
+            val counts = listOf("commerce.payment_records", "commerce.payment_allocations").map(app.database::count)
             action()
+            app.context.financialLedger.paymentHistoriesForLineage(lineage) shouldBe payments
+            listOf("commerce.payment_records", "commerce.payment_allocations").map(app.database::count) shouldBe counts
             app.context.financialLedger.history(lineage) shouldBe before
             app.context.financialLedger
                 .depositRequirementHistory(lineage)
                 .map { it.requirement to it.createdAt } shouldBe deposits
             persisted(id) shouldBe publications
         }
+
+        fun payProposal(
+            accepted: InquiryProposal,
+            amount: String,
+            associations: InquiryFinancialDocumentRepository = owners,
+            repository: InquiryProposalRepository = history,
+        ) = RecordDocumentPayment(app.transactor, app.context.financialLedger, associations, sources, testClock, repository)(
+            RecordDocumentPayment.Command(
+                accepted.documentReference.id,
+                accepted.documentReference.version,
+                BigDecimal(amount),
+                PaymentMethod.CASH,
+                null,
+                null,
+                accepted.id,
+            ),
+        )
+
         beforeSpec {
             app = TestApplication.create()
             revision = app.createAcceptanceCatalog()
@@ -317,12 +339,35 @@ class InquiryProposalsSpec :
             val a = issue(id)
             val document = a.proposal.documentReference.id
             val paid =
-                RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock)(
-                    RecordDocumentPayment.Command(document, Version.of(2), BigDecimal("1.00"), PaymentMethod.CASH, null, null),
-                )
+                app.transactor.inTransaction { transaction ->
+                    val payment =
+                        io.github.castab.commerce.payment.PaymentRecord(
+                            UUID.randomUUID(),
+                            Money(BigDecimal("1.00"), Currency.getInstance("USD")),
+                            PaymentMethod.CASH,
+                            STORED_INSTANT,
+                            null,
+                        )
+                    val allocation =
+                        app.context.financialLedger.recordPaymentAgainstDocument(
+                            transaction,
+                            payment,
+                            UUID.randomUUID(),
+                            a.proposal.documentReference,
+                            payment.amount,
+                            STORED_INSTANT,
+                        )
+                    payment to allocation
+                }
 
             fun blocked() {
                 unchanged(id) {
+                    shouldThrow<CommerceFailure.IllegalTransition> {
+                        payProposal(
+                            a.proposal,
+                            (a.deposit.depositRequirement!!.requirement as DepositRequirement.Active).requiredAmount.amount.toPlainString(),
+                        )
+                    }
                     shouldThrow<CommerceFailure.IllegalTransition> { quote(id) }
                     shouldThrow<CommerceFailure.IllegalTransition> { deposit(id, 2, 1, fixed("300")) }
                 }
@@ -330,13 +375,13 @@ class InquiryProposalsSpec :
             blocked()
             RecordRefund(app.transactor, app.context.financialLedger, testClock)(
                 RecordRefund.Command(
-                    paid.payment.id,
+                    paid.first.id,
                     BigDecimal("1.00"),
                     Currency.getInstance("USD"),
                     PaymentMethod.CASH,
                     null,
                     null,
-                    listOf(RecordRefund.AllocationCommand(paid.allocation.id, BigDecimal("1.00"))),
+                    listOf(RecordRefund.AllocationCommand(paid.second.id, BigDecimal("1.00"))),
                 ),
             )
             app.context.financialLedger
@@ -345,12 +390,199 @@ class InquiryProposalsSpec :
                 .signum() shouldBe 0
             blocked()
         }
+        test("a deposit is one exact receipt; partial and excessive attempts cannot accumulate; Invoice payments remain partial") {
+            val id = newInquiry()
+            val a = issue(id, fixed("300"))
+            val document = a.proposal.documentReference.id
+            listOf("100", "200", "299.99", "300.01", "400").forEach { amount ->
+                unchanged(id) { shouldThrow<CommerceFailure.ValidationFailed> { payProposal(a.proposal, amount) } }
+            }
+            unchanged(id) {
+                shouldThrow<CommerceFailure.ValidationFailed> {
+                    RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock, history)(
+                        RecordDocumentPayment.Command(document, Version.of(2), BigDecimal("300"), PaymentMethod.CASH, null, null),
+                    )
+                }
+            }
+            val paid = payProposal(a.proposal, "300.00")
+            paid.document.latest.document
+                .shouldBeInstanceOf<FinancialDocument.Invoice>()
+            paid.allocation.financialDocumentReference shouldBe a.proposal.documentReference
+            paid.allocation.amount.amount
+                .compareTo(BigDecimal("300")) shouldBe 0
+            paid.payment.amount shouldBe paid.allocation.amount
+            persisted(id) shouldBe listOf(a.proposal)
+            app.context.financialLedger
+                .financialLineages(listOf(document))
+                .single()
+                .depositSatisfied shouldBe true
+            val invoice = paid.document.latest.document
+            listOf("100", "50").forEach { amount ->
+                RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock, history)(
+                    RecordDocumentPayment.Command(document, invoice.version, BigDecimal(amount), PaymentMethod.CASH, null, null),
+                )
+            }
+            val payments = app.context.financialLedger.paymentHistoriesForLineage(document)
+            payments.size shouldBe 3
+            payments.map { it.payment.id }.toSet().size shouldBe 3
+            payments
+                .single { it.payment.id == paid.payment.id }
+                .allocations
+                .single()
+                .financialDocumentReference shouldBe a.proposal.documentReference
+            app.context.financialLedger
+                .reconcileLatest(document)
+                .netApplied.amount
+                .compareTo(BigDecimal("450")) shouldBe 0
+        }
+
+        test("deposit-only republication invalidates the old id even when the resolved amount and Quote version are identical") {
+            val id = newInquiry()
+            val a = issue(id)
+            val amount = (a.deposit.depositRequirement!!.requirement as DepositRequirement.Active).requiredAmount.amount.toPlainString()
+            val b = deposit(id, 2, 1, fixed(amount))
+            b.proposal.documentReference shouldBe a.proposal.documentReference
+            unchanged(id) { shouldThrow<CommerceFailure.Conflict> { payProposal(a.proposal, amount) } }
+            payProposal(b.proposal, amount)
+                .document.latest.document
+                .shouldBeInstanceOf<FinancialDocument.Invoice>()
+        }
+
+        test("a negotiated smaller deposit and a revised Quote each require their newly published proposal") {
+            val id = newInquiry()
+            val a = issue(id, fixed("300"))
+            unchanged(id) { shouldThrow<CommerceFailure.ValidationFailed> { payProposal(a.proposal, "200") } }
+            val b = deposit(id, 2, 1, fixed("200"))
+            unchanged(id) { shouldThrow<CommerceFailure.Conflict> { payProposal(a.proposal, "300") } }
+            payProposal(b.proposal, "200")
+                .document.latest.document
+                .shouldBeInstanceOf<FinancialDocument.Invoice>()
+            val other = newInquiry()
+            val old = issue(other, fixed("300"))
+            val revised = quote(other)
+            unchanged(other) { shouldThrow<CommerceFailure.Conflict> { payProposal(old.proposal, "300") } }
+            val amount =
+                (revised.deposit.depositRequirement!!.requirement as DepositRequirement.Active)
+                    .requiredAmount.amount
+                    .toPlainString()
+            payProposal(revised.proposal, amount)
+                .document.latest.document
+                .shouldBeInstanceOf<FinancialDocument.Invoice>()
+        }
+
+        test("proposal republication wins the association lock before a waiting exact payment; stale money never commits") {
+            val id = newInquiry()
+            val a = issue(id)
+            val amount = (a.deposit.depositRequirement!!.requirement as DepositRequirement.Active).requiredAmount.amount.toPlainString()
+            val entered = CountDownLatch(1)
+            val resume = CountDownLatch(1)
+            val pausing =
+                object : InquiryProposalRepository by history {
+                    override fun append(
+                        transaction: Transaction,
+                        proposal: InquiryProposal,
+                    ) {
+                        history.append(transaction, proposal)
+                        entered.countDown()
+                        check(resume.await(30, TimeUnit.SECONDS))
+                    }
+                }
+            val first =
+                CompletableFuture.supplyAsync {
+                    ReviseInquiryProposalDeposit(app.transactor, core(pausing))(
+                        ReviseInquiryProposalDeposit.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, fixed(amount), actor),
+                    )
+                }
+            try {
+                entered.await(30, TimeUnit.SECONDS) shouldBe true
+                val pid = AtomicInteger()
+                val second =
+                    CompletableFuture.supplyAsync {
+                        runCatching { payProposal(a.proposal, amount, observedOwners(pid)) }.exceptionOrNull()
+                    }
+                awaitAssociationWait(pid)
+                second.isDone shouldBe false
+                resume.countDown()
+                val b = first.get(30, TimeUnit.SECONDS)
+                second.get(30, TimeUnit.SECONDS).shouldBeInstanceOf<CommerceFailure.Conflict>()
+                app.context.financialLedger.paymentHistoriesForLineage(a.proposal.documentReference.id) shouldBe emptyList()
+                payProposal(b.proposal, amount)
+                    .document.latest.document
+                    .shouldBeInstanceOf<FinancialDocument.Invoice>()
+            } finally {
+                resume.countDown()
+            }
+        }
+
+        test("exact payment wins the association lock; a waiting proposal revision sees the booked Invoice") {
+            val id = newInquiry()
+            val a = issue(id, fixed("300"))
+            val entered = CountDownLatch(1)
+            val resume = CountDownLatch(1)
+            val observing =
+                object : InquiryProposalRepository by history {
+                    override fun latest(
+                        transaction: Transaction,
+                        inquiryId: InquiryId,
+                    ): InquiryProposal? {
+                        transaction.handle
+                            .createQuery("SHOW transaction_isolation")
+                            .mapTo(String::class.java)
+                            .one() shouldBe "read committed"
+                        entered.countDown()
+                        check(resume.await(30, TimeUnit.SECONDS))
+                        return history.latest(transaction, inquiryId)
+                    }
+                }
+            val first = CompletableFuture.supplyAsync { payProposal(a.proposal, "300", repository = observing) }
+            try {
+                entered.await(30, TimeUnit.SECONDS) shouldBe true
+                val pid = AtomicInteger()
+                val second =
+                    CompletableFuture.supplyAsync {
+                        runCatching {
+                            ReviseInquiryProposalDeposit(app.transactor, core(associations = observedOwners(pid)))(
+                                ReviseInquiryProposalDeposit.Command(
+                                    id,
+                                    Version.of(2),
+                                    DepositRequirementRevision.INITIAL,
+                                    fixed("200"),
+                                    actor,
+                                ),
+                            )
+                        }.exceptionOrNull()
+                    }
+                awaitAssociationWait(pid)
+                second.isDone shouldBe false
+                resume.countDown()
+                first
+                    .get(30, TimeUnit.SECONDS)
+                    .document.latest.document
+                    .shouldBeInstanceOf<FinancialDocument.Invoice>()
+                second.get(30, TimeUnit.SECONDS).shouldBeInstanceOf<CommerceFailure.Conflict>()
+                persisted(id) shouldBe listOf(a.proposal)
+                app.context.financialLedger
+                    .paymentHistoriesForLineage(a.proposal.documentReference.id)
+                    .size shouldBe 1
+            } finally {
+                resume.countDown()
+            }
+        }
+
         test("deposit satisfaction books atomically while publication remains historical and non-payable") {
             val id = newInquiry()
             val a = issue(id)
             val amount = (a.deposit.depositRequirement!!.requirement as DepositRequirement.Active).requiredAmount.amount
-            RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock)(
-                RecordDocumentPayment.Command(a.proposal.documentReference.id, Version.of(2), amount, PaymentMethod.CHECK, null, null),
+            RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock, JdbiInquiryProposalRepository())(
+                RecordDocumentPayment.Command(
+                    a.proposal.documentReference.id,
+                    Version.of(2),
+                    amount,
+                    PaymentMethod.CHECK,
+                    null,
+                    null,
+                    a.proposal.id,
+                ),
             ).document.latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
             current(a.proposal.id) shouldBe false
             persisted(id) shouldBe listOf(a.proposal)
@@ -362,8 +594,16 @@ class InquiryProposalsSpec :
             quote(id)
             val accepted = deposit(id, 3, 2, fixed("300"))
             val document = accepted.proposal.documentReference.id
-            RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock)(
-                RecordDocumentPayment.Command(document, Version.of(3), BigDecimal("300"), PaymentMethod.CHECK, null, null),
+            RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock, JdbiInquiryProposalRepository())(
+                RecordDocumentPayment.Command(
+                    document,
+                    Version.of(3),
+                    BigDecimal("300"),
+                    PaymentMethod.CHECK,
+                    null,
+                    null,
+                    accepted.proposal.id,
+                ),
             ).document.latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
 
             var lockedTransaction: Transaction? = null
@@ -437,8 +677,15 @@ class InquiryProposalsSpec :
                 val accepted = issue(id)
                 val document = accepted.proposal.documentReference.id
                 val amount = (accepted.deposit.depositRequirement!!.requirement as DepositRequirement.Active).requiredAmount.amount
-                RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock)(
-                    RecordDocumentPayment.Command(document, Version.of(2), amount, PaymentMethod.CHECK, null, null),
+                RecordDocumentPayment(
+                    app.transactor,
+                    app.context.financialLedger,
+                    owners,
+                    sources,
+                    testClock,
+                    JdbiInquiryProposalRepository(),
+                )(
+                    RecordDocumentPayment.Command(document, Version.of(2), amount, PaymentMethod.CHECK, null, null, accepted.proposal.id),
                 )
                 app.transactor.inTransaction { transaction ->
                     if (withdraw) {
