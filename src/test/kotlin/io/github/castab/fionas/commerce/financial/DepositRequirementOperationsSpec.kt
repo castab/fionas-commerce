@@ -99,11 +99,11 @@ class DepositRequirementOperationsSpec :
             sql.any { it.contains("commerce.financial_document_snapshots") && it.contains("LIMIT 1") } shouldBe true
             val writes = sql.withIndex().filter { it.value.startsWith("INSERT INTO commerce.deposit_requirement_revisions") }
             writes.size shouldBe 1
-            // Canonical identity and all four runtime projection queries use the observed handle after its own write.
+            // Canonical eligibility is checked before approval; all four response queries observe its own write.
+            sql.take(writes.single().index).any { it.contains("purpose = 'INITIAL_ESTIMATE'") } shouldBe true
             val projection = sql.drop(writes.single().index + 1)
-            projection.size shouldBe 5
-            projection.first().contains("purpose = 'INITIAL_ESTIMATE'") shouldBe true
-            projection[1].contains("SELECT DISTINCT ON (document_id)") shouldBe true
+            projection.size shouldBe 4
+            projection.first().contains("SELECT DISTINCT ON (document_id)") shouldBe true
             projection.last().contains("WHERE r.document_id IN") shouldBe true
             result.depositRequirement!!.requirement.revision shouldBe DepositRequirementRevision.INITIAL
             result.depositRequirement!!.createdAt shouldBe result.activity.latestDepositRequirementAt

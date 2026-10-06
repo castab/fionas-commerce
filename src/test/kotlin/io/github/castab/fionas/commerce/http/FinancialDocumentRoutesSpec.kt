@@ -466,8 +466,10 @@ class FinancialDocumentRoutesSpec :
                 fresh.database.count("fionas.financial_document_pricing") shouldBe 0
                 fresh.adminGet("/financial-documents/$document").document().total shouldBe "681.25"
                 fresh
-                    .adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""")
-                    .status shouldBe Status.OK
+                    .adminPost(
+                        "/staff/requests/$inquiry/proposals",
+                        """{"expectedDocumentVersion":1,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
+                    ).status shouldBe Status.OK
                 fresh
                     .adminPost("/financial-documents/$document/invoice", """{"expectedVersion":2}""")
                     .status shouldBe Status.CONFLICT
@@ -476,7 +478,7 @@ class FinancialDocumentRoutesSpec :
                         Method.PUT,
                         "/financial-documents/$document/deposit-requirement",
                         """{"expectedDocumentVersion":2,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
-                    ).status shouldBe Status.OK
+                    ).status shouldBe Status.CONFLICT
                 fresh
                     .adminPost(
                         "/financial-documents/$document/payments",

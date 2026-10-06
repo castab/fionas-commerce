@@ -844,6 +844,7 @@ after runtime-owned migrations.
   `V12` adds `inquiry_fulfillment`, keyed by inquiry, with served timestamp and USER/SERVICE
   provenance plus optional complete closed timestamp/provenance. Served is mandatory in
   every row; closed fields must be all absent or all present. No stage, amount or backfill.
+  `V14` adds append-only canonical proposal issuance with exact pair uniqueness and Fiona association integrity.
   `V13` adds Fiona-only append-only inquiry communication facts, database-generated durable
   record order and an inquiry/order covering index. The still-unmerged V13 was corrected
   in place before release; no externally immutable migration was affected.
@@ -1200,7 +1201,8 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
 5. **Transitions never reprice**; canonical Invoice issuance is exclusively deposit-driven; they go through `issueQuote` and `issueInvoice`, and the
    runtime reports a transition the stage does not have (`IllegalTransition`). There is no
    estimate-to-invoice shortcut.
-6. **The existing staff change-order route replaces the line set.** It removes every current line and adds every
+6. **Change orders replace the line set.** Canonical Quotes use `ReviseInquiryQuoteProposal`;
+   the standalone route permits canonical Estimates/Invoices and RELATED lineages. It removes every current line and adds every
    repriced line in the engine's order (`repricing`); it never matches lines by
    description or position, and keeps the stage. Inputs that reproduce the current charges
    (ignoring line ids) are rejected as no financial change. A change to non-financial
@@ -1270,7 +1272,7 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
     drives REQUESTED (Estimate), QUOTED (Quote), BOOKED (Invoice without served), SERVED
     (Invoice with served, without closed), CLOSED (Invoice with served and closed).
     RELATED lineages never drive it. No separate Booking aggregate or stored status exists.
-    `RecordDocumentPayment`, `AllocatePayment`, and `SetDepositRequirement` use the shared
+    `RecordDocumentPayment` and `AllocatePayment` use the shared
     transaction-taking `FionaFinancialDocuments.bookIfDepositSatisfied` policy after mutation.
     Only an active positive deposit satisfied according to runtime `FinancialLineageView`
     promotes the canonical Quote to Invoice, atomically with that mutation and optional
@@ -1295,11 +1297,67 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
     Fiona writers. Runtime reads refund unwinds in one statement against those stable facts.
     No runtime-table SQL, nested transactions, JVM locks or automatic retry loops.
 
+## Atomic canonical proposal publication
+
+Fiona publishes its canonical `INITIAL_ESTIMATE` Quote only through `IssueInquiryProposal`:
+Estimate -> immutable Quote + active deposit approved against that exact Quote + append-only
+`InquiryProposal` issuance commit together. Staff explicitly supplies shared `DepositTerms`;
+`FIONAS_DEFAULT_DEPOSIT_TERMS` proposes 20% and never writes an implicit approval. RELATED
+lineages retain their standalone shared financial behavior.
+
+Fiona V14 `inquiry_proposals` stores only publication UUID, inquiry/lineage identities,
+Quote version, deposit revision, issuance kind, microsecond Clock time and USER/SERVICE
+provenance. Its composite FK references Fiona's association, with no new runtime-table FK.
+An exact pair is unique; one INITIAL publication per inquiry is unique. Durable identity
+ordering follows the association lock, independent of Clock timestamps. Re-sending a pair
+is a future communication action, not another proposal. No amounts, terms, totals, stages,
+mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
+
+`IssueInquiryProposal`, `ReviseInquiryQuoteProposal`, and `ReviseInquiryProposalDeposit`
+own one READ COMMITTED transaction each. `InquiryProposals` composes transaction-taking
+financial helpers and runtime ledger calls under the existing association row lock, acquired
+before reviewed-token checks. Quote revision uses current-catalog `FionasPricing` and the
+existing no-op change-order rule, appends a same-stage Quote, then replaces the deposit
+against the new Quote even if terms remain 20%. Deposit-only revision keeps the Quote
+version and rejects numerically equivalent same-form terms; changing percentage to fixed
+is meaningful even if the resolved amount is equal. Both require exact reviewed Quote and
+deposit revision tokens. Any historical `grossAllocated > 0` blocks both revisions, even
+when refunds unwind all applied value. Deposit satisfaction by existing payment/allocation
+operations still atomically promotes Quote -> Invoice/BOOKED; refunds never demote it.
+
+Every publication is the exact `(documentId, documentVersion, depositRequirementRevision)`.
+`IsCurrentPayableInquiryProposal` reads one REPEATABLE READ snapshot: only the latest
+publication whose exact Quote and active approval/revision still match is payable. Every
+reissue supersedes all earlier ids; Invoice makes all publication targets non-payable.
+Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
+contact collection, cancellation, or post-payment adjustment workflow is introduced.
+
+The durable proposal row is the business event for future at-least-once integrations.
+It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
+Actual delivery alone may append communication activity. A future generic durable dispatch
+capability belongs upstream when needed; no after-commit crash-window publisher exists here.
+
+POST `/staff/requests/{inquiryId}/proposals` (`issueInquiryProposal`), its `/quote-revisions`
+child (`reviseInquiryQuoteProposal`) and `/deposit-revisions` child
+(`reviseInquiryProposalDeposit`) derive the document from the inquiry. All require BOTH
+`commerce.financial-document.create` and `commerce.deposit-requirement.manage`, existing
+USER/SERVICE AccessControl and unsafe-cookie Origin policy; no new permission/bootstrap grant.
+Responses are 200 with `{proposal, financial, depositRequirement}` and no-store.
+
+Standalone canonical Quote issuance, Quote change orders, deposit set/replace and withdrawal
+reject with illegal_transition. Canonical Estimate change orders, booked Invoice mutations,
+and RELATED behavior remain supported; manual canonical Invoice issuance remains forbidden.
+`GET /staff/requests/{inquiryId}` keeps one unlocked REPEATABLE READ and its existing read
+permissions, adding `suggestedDepositTerms`, optional latest `proposal`, and authoritative
+`depositRequirement`. Missing/mismatched published Quote pairs fail internally. After booking,
+the latest proposal is historical Quote/deposit context. Pre-slice development Quotes receive
+no compatibility shim, invented publication, or backfill.
+
 ## Deposit requirements and bulk financial lineages
 
 - `ReadStaffRequest` is a derived, read-only application projection in `staff`, not a new
   aggregate or persisted workspace. `GET /staff/requests/{inquiryId}` (`readStaffRequest`)
-  returns `{inquiry: InquiryResponse, financial: FinancialDocumentResponse}` through shared
+  returns inquiry, financial, suggestedDepositTerms, optional proposal and depositRequirement through shared
   HTTP mappings. One unlocked REPEATABLE READ transaction composes the transaction-taking
   cores of `GetInquiry` and `GetFinancialDocument`. The lifecycle's explicit INITIAL_ESTIMATE
   relationship selects the canonical lineage; RELATED lineages never participate. Financial
@@ -1310,8 +1368,8 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
   access or repricing. `financial.reconciliation` is always present on this endpoint.
   BOTH `fionas.inquiries.read` and `commerce.financial-document.read` are required through the
   existing USER/SERVICE authentication. Safe GET requires no trusted Origin; success is no-store.
-  `financial.id` and `financial.version` supply the existing Quote transition's documentId and
-  expectedVersion. Reads never issue/send Quotes or record communication. Existing standalone
+  `financial.version` supplies expectedDocumentVersion for atomic proposal issuance by inquiryId.
+  Reads never issue/send Quotes or record communication. Existing standalone
   inquiry and financial reads and Quote concurrency semantics remain first-class.
 
 - `ReadInquiryOperationalStates` derives the complete operational population in one unlocked
@@ -1424,7 +1482,7 @@ event dates remain LocalDate. Event calendar interpretation never derives from `
 - PUT `/financial-documents/{documentId}/deposit-requirement` approves, replaces or
   reactivates with `DepositRequirementManage`, never document-create. One transaction uses
   `FionaFinancialDocuments.expectLatest` to lock ownership and check expectedDocumentVersion,
-  applies the shared Quote/Invoice payment eligibility policy, and calls transaction-taking
+  rejects canonical Quotes, applies shared Quote/Invoice payment eligibility, and calls transaction-taking
   `activateDepositRequirement`. Null/absent expectedRequirementRevision expects no history;
   otherwise it must name the exact latest revision. Never reinterpret null as don't-care.
 - Terms are a strict `type` union: FIXED has exact decimal amount and explicit ISO currency;
@@ -1433,7 +1491,7 @@ event dates remain LocalDate. Event calendar interpretation never derives from `
   and positive resolved amount. No Double, percentage rounding, defaults, conversion or
   clamping. Original terms and frozen amounts survive later document changes.
 - DELETE at that path takes only expectedRequirementRevision, locks ownership and calls
-  transaction-taking withdrawal, with no document-version or stage check. Return the new
+  transaction-taking withdrawal, rejecting canonical Quotes, with no document-version check for other lineages. Return the new
   WITHDRAWN revision (`200`); never delete history or copy prior terms. Missing history is
   `404`, stale tokens/runtime NOWAIT conflicts are `409 conflict`, already withdrawn is
   the existing `409 illegal_transition`, and invalid values/Estimate approval are `422`.
@@ -1520,7 +1578,7 @@ real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
-webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, event publishing,
+webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, event dispatch beyond durable proposal issuance,
 outbox, NATS, persisted financial projections, CQRS, separate Booking aggregates,
 cancellation, decline, archive, reopen, unserve, zero-deposit booking, email provider integration and broader communication workflows,
 a generic line-source identity, stored balances or payment statuses, tax,

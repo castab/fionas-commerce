@@ -7,7 +7,7 @@ import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
 /**
- * Issues the latest estimate of a Fiona lineage as a quote, without repricing: the quote is
+ * Issues the latest estimate of a RELATED Fiona lineage as a quote, without repricing: the quote is
  * a new immutable snapshot with the same concrete lines. Fiona copies optional legacy
  * pricing metadata when present; the transition does not require it.
  *
@@ -30,8 +30,10 @@ class IssueQuote(
     ): InquiryFinancialDocument =
         transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, documentId, expectedVersion)
-            val quote = ledger.issueQuote(transaction, documentId)
-            pricingSources.copy(transaction, current.document.reference, quote.reference)
+            if (documents.isCanonical(transaction, current)) {
+                throw CommerceFailure.IllegalTransition("Canonical Quote issuance requires POST /staff/requests/{inquiryId}/proposals")
+            }
+            documents.quote(transaction, current)
             documents.describeLocked(transaction, current.inquiryId, documentId)
         }
 }

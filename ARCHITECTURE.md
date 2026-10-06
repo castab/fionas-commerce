@@ -309,6 +309,62 @@ A derived response field is not automatically a persistent application field.
 
 Persist something only when it represents an independent Fiona business fact or decision.
 
+## Atomic canonical proposal publication
+
+Fiona publishes its canonical `INITIAL_ESTIMATE` Quote only through `IssueInquiryProposal`:
+Estimate -> immutable Quote + active deposit approved against that exact Quote + append-only
+`InquiryProposal` issuance commit together. Staff explicitly supplies shared `DepositTerms`;
+`FIONAS_DEFAULT_DEPOSIT_TERMS` proposes 20% and never writes an implicit approval. RELATED
+lineages retain their standalone shared financial behavior.
+
+Fiona V14 `inquiry_proposals` stores only publication UUID, inquiry/lineage identities,
+Quote version, deposit revision, issuance kind, microsecond Clock time and USER/SERVICE
+provenance. Its composite FK references Fiona's association, with no new runtime-table FK.
+An exact pair is unique; one INITIAL publication per inquiry is unique. Durable identity
+ordering follows the association lock, independent of Clock timestamps. Re-sending a pair
+is a future communication action, not another proposal. No amounts, terms, totals, stages,
+mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
+
+`IssueInquiryProposal`, `ReviseInquiryQuoteProposal`, and `ReviseInquiryProposalDeposit`
+own one READ COMMITTED transaction each. `InquiryProposals` composes transaction-taking
+financial helpers and runtime ledger calls under the existing association row lock, acquired
+before reviewed-token checks. Quote revision uses current-catalog `FionasPricing` and the
+existing no-op change-order rule, appends a same-stage Quote, then replaces the deposit
+against the new Quote even if terms remain 20%. Deposit-only revision keeps the Quote
+version and rejects numerically equivalent same-form terms; changing percentage to fixed
+is meaningful even if the resolved amount is equal. Both require exact reviewed Quote and
+deposit revision tokens. Any historical `grossAllocated > 0` blocks both revisions, even
+when refunds unwind all applied value. Deposit satisfaction by existing payment/allocation
+operations still atomically promotes Quote -> Invoice/BOOKED; refunds never demote it.
+
+Every publication is the exact `(documentId, documentVersion, depositRequirementRevision)`.
+`IsCurrentPayableInquiryProposal` reads one REPEATABLE READ snapshot: only the latest
+publication whose exact Quote and active approval/revision still match is payable. Every
+reissue supersedes all earlier ids; Invoice makes all publication targets non-payable.
+Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
+contact collection, cancellation, or post-payment adjustment workflow is introduced.
+
+The durable proposal row is the business event for future at-least-once integrations.
+It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
+Actual delivery alone may append communication activity. A future generic durable dispatch
+capability belongs upstream when needed; no after-commit crash-window publisher exists here.
+
+POST `/staff/requests/{inquiryId}/proposals` (`issueInquiryProposal`), its `/quote-revisions`
+child (`reviseInquiryQuoteProposal`) and `/deposit-revisions` child
+(`reviseInquiryProposalDeposit`) derive the document from the inquiry. All require BOTH
+`commerce.financial-document.create` and `commerce.deposit-requirement.manage`, existing
+USER/SERVICE AccessControl and unsafe-cookie Origin policy; no new permission/bootstrap grant.
+Responses are 200 with `{proposal, financial, depositRequirement}` and no-store.
+
+Standalone canonical Quote issuance, Quote change orders, deposit set/replace and withdrawal
+reject with illegal_transition. Canonical Estimate change orders, booked Invoice mutations,
+and RELATED behavior remain supported; manual canonical Invoice issuance remains forbidden.
+`GET /staff/requests/{inquiryId}` keeps one unlocked REPEATABLE READ and its existing read
+permissions, adding `suggestedDepositTerms`, optional latest `proposal`, and authoritative
+`depositRequirement`. Missing/mismatched published Quote pairs fail internally. After booking,
+the latest proposal is historical Quote/deposit context. Pre-slice development Quotes receive
+no compatibility shim, invented publication, or backfill.
+
 ## Inquiry lifecycle projection and booking policy
 
 The inquiry's unique `INITIAL_ESTIMATE` lineage drives its operational lifecycle. Other
@@ -325,12 +381,10 @@ five-state status.
 | Invoice, served and closed | CLOSED |
 
 Issuing the canonical Quote is the firm proposal boundary. A positive active deposit is
-required for booking. `RecordDocumentPayment`, `AllocatePayment`, and
-`SetDepositRequirement` apply one Fiona policy after their mutation: read the runtime's
+required for booking. `RecordDocumentPayment` and `AllocatePayment` apply one Fiona policy after their mutation: read the runtime's
 authoritative `FinancialLineageView`; if the canonical Quote's active deposit is satisfied,
 issue its Invoice and copy optional legacy pricing metadata in the same transaction.
-Promotion failure rolls back the triggering mutation. Partial payment and money without
-active terms leave it quoted. Manual canonical Invoice issuance is rejected. Manual
+Promotion failure rolls back the triggering mutation. Partial deposit payment leaves it quoted. Manual canonical Invoice issuance is rejected. Manual
 issuance on RELATED lineages remains available. No zero-deposit booking path exists.
 
 Invoice is the durable booking fact. Refunds may reverse deposit satisfaction but do not
@@ -349,7 +403,7 @@ overpayment blocks closure. Repeated actions conflict without rewriting provenan
 is no unserve or reopen. Later ledger activity after closure is allowed; eligibility is
 evaluated at the close command. Internally impossible fulfillment before Invoice fails loudly.
 
-All three booking triggers and fulfillment actions serialize on the existing canonical
+Both payment booking triggers and fulfillment actions serialize on the existing canonical
 association row. They use READ COMMITTED so waiters observe the preceding committed
 allocations before applying booking policy. While that row is locked, Fiona cannot change
 the document, its allocations or deposit terms. Refunds do not take that lock; the runtime

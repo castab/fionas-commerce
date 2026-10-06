@@ -19,10 +19,13 @@ import io.github.castab.fionas.commerce.financial.GetDepositRequirement
 import io.github.castab.fionas.commerce.financial.GetDepositRequirementHistory
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
+import io.github.castab.fionas.commerce.financial.InquiryProposals
+import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.IssueInvoice
 import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
@@ -30,6 +33,8 @@ import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
+import io.github.castab.fionas.commerce.financial.ReviseInquiryProposalDeposit
+import io.github.castab.fionas.commerce.financial.ReviseInquiryQuoteProposal
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.http.BrowserOrigin
@@ -182,9 +187,20 @@ fun fionaApplication(
                 )
             val getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)
             val getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)
+            val proposalHistory = JdbiInquiryProposalRepository()
+            val proposals = InquiryProposals(ledger, documentOwners, pricingSources, proposalHistory, pricing, clock)
             val operations =
                 FionaOperations(
-                    readStaffRequest = ReadStaffRequest(context.transactor, getInquiry, getFinancialDocument)::invoke,
+                    readStaffRequest = ReadStaffRequest(
+                        context.transactor,
+                        getInquiry,
+                        getFinancialDocument,
+                        ledger,
+                        proposalHistory,
+                    )::invoke,
+                    issueInquiryProposal = IssueInquiryProposal(context.transactor, proposals)::invoke,
+                    reviseInquiryQuoteProposal = ReviseInquiryQuoteProposal(context.transactor, proposals)::invoke,
+                    reviseInquiryProposalDeposit = ReviseInquiryProposalDeposit(context.transactor, proposals)::invoke,
                     readStaffDashboard = ReadStaffDashboard(
                         context.transactor,
                         ReadInquiryOperationalStates(context.transactor, inquiries, documentOwners, ledger, fulfillment),

@@ -61,6 +61,9 @@ private val notInvoked =
     FionaOperations(
         acknowledgeInquiryCommunication = { error("not called while rendering") },
         readStaffRequest = { error("not called while rendering") },
+        issueInquiryProposal = { error("not called while rendering") },
+        reviseInquiryQuoteProposal = { error("not called while rendering") },
+        reviseInquiryProposalDeposit = { error("not called while rendering") },
         readStaffDashboard = { error("not called while rendering") },
         markInquiryServed = { error("Rendering never serves an inquiry") },
         closeInquiry = { error("Rendering never closes an inquiry") },

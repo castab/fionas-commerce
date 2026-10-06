@@ -8,8 +8,10 @@ import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
@@ -113,6 +115,7 @@ class ArchitectureSpec :
                 InquirySubmissionRepository::class.java,
                 CredentialRepository::class.java,
                 InquiryFinancialDocumentRepository::class.java,
+                InquiryProposalRepository::class.java,
                 FinancialDocumentPricingRepository::class.java,
             ).forEach { repository ->
                 repository.declaredMethods.forEach { method ->
@@ -130,6 +133,7 @@ class ArchitectureSpec :
                 JdbiInquirySubmissionRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
+                JdbiInquiryProposalRepository::class.java,
                 JdbiFinancialDocumentPricingRepository::class.java,
             ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
@@ -142,7 +146,8 @@ class ArchitectureSpec :
             // Approval and its multi-query response must not gain an inner transaction or a second projection.
             val approval = File(mainSources, "financial/SetDepositRequirement.kt").codeWithoutComments()
             Regex("inTransaction").findAll(approval).count() shouldBe 1
-            Regex("bookIfDepositSatisfied").findAll(approval).count() shouldBe 1
+            approval.contains("rejectCanonicalQuoteMutation(transaction, current)") shouldBe true
+            Regex("bookIfDepositSatisfied").findAll(approval).count() shouldBe 0
             val operational = File(mainSources, "inquiry/ReadInquiryOperationalStates.kt").codeWithoutComments()
             Regex("inTransaction").findAll(operational).count() shouldBe 1
             operational.contains("inTransaction(TransactionIsolation.REPEATABLE_READ)") shouldBe true
@@ -171,6 +176,10 @@ class ArchitectureSpec :
                     "financial/CreateInquiryFinancialDocument.kt: inTransaction",
                     "financial/CreateChangeOrder.kt: inTransaction",
                     "financial/IssueQuote.kt: inTransaction",
+                    "financial/IssueInquiryProposal.kt: inTransaction",
+                    "financial/ReviseInquiryQuoteProposal.kt: inTransaction",
+                    "financial/ReviseInquiryProposalDeposit.kt: inTransaction",
+                    "financial/IsCurrentPayableInquiryProposal.kt: inTransaction",
                     "financial/IssueInvoice.kt: inTransaction",
                     "financial/RecordDocumentPayment.kt: inTransaction",
                     "financial/RecordPayment.kt: inTransaction",
@@ -264,6 +273,9 @@ class ArchitectureSpec :
                         withdrawDepositRequirement = { error("not called while rendering") },
                         queryFinancialLineages = { error("not called while rendering") },
                         issueQuote = { _, _ -> error("not called") },
+                        issueInquiryProposal = { error("not called") },
+                        reviseInquiryQuoteProposal = { error("not called") },
+                        reviseInquiryProposalDeposit = { error("not called") },
                         issueInvoice = { _, _ -> error("not called") },
                         createChangeOrder = { _, _, _ -> error("not called") },
                         recordPayment = { error("not called") },

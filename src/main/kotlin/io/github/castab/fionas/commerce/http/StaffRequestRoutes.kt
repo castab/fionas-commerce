@@ -4,6 +4,7 @@ import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.fionas.commerce.financial.FIONAS_DEFAULT_DEPOSIT_TERMS
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.StaffRequest
@@ -30,6 +31,10 @@ data class StaffRequestResponse(
                 "financial.reconciliation is always present and describes current derived settlement.",
     )
     val financial: FinancialDocumentResponse,
+    @ApiProperty(description = "Latest exact published Quote/deposit pair; absent before issuance, historical context after booking.")
+    val proposal: InquiryProposalResponse? = null,
+    val suggestedDepositTerms: DepositTermsRequest,
+    val depositRequirement: CurrentDepositRequirementResponse,
 )
 
 internal fun readStaffRequestRoute(
@@ -47,11 +52,22 @@ internal fun readStaffRequestRoute(
             "RELATED lineages are excluded. Requires BOTH `${FionaPermissions.InquiriesRead.value}` and " +
             "`${CommercePermissions.FinancialDocumentRead.value}` for USER sessions or SERVICE tokens. " +
             "Financial lines and totals are authoritative; requested pricing inputs remain inquiry history. " +
-            "Use financial.id and financial.version as documentId and expectedVersion for the existing Quote transition; " +
+            "Use inquiryId and financial.version with the atomic staff proposal issuance operation and explicit deposit terms; " +
+            "proposal identifies the exact published Quote/deposit pair; " +
+            "missing or mismatched canonical proposal state fails internally. " +
             "stale versions conflict and require reload. This read changes no state. Successful responses use Cache-Control: no-store."
         tags += Tag("Staff requests", "Coherent inquiry and canonical financial detail for staff request review.")
         principalAuthentication()
-        returning(Status.OK, body to StaffRequestResponse(exampleInquiry, financial))
+        returning(
+            Status.OK,
+            body to
+                StaffRequestResponse(
+                    exampleInquiry,
+                    financial,
+                    suggestedDepositTerms = FIONAS_DEFAULT_DEPOSIT_TERMS.toResponse(),
+                    depositRequirement = CurrentDepositRequirementResponse.None(financial.id),
+                ),
+        )
         returningError(ErrorCategory.MALFORMED_REQUEST, "`inquiryId` is not a UUID.", "Malformed request: path 'inquiryId'")
         returningError(ErrorCategory.NOT_FOUND, "No inquiry has this id.", "Inquiry ${exampleInquiry.id} was not found")
         returningError(
@@ -72,7 +88,16 @@ internal fun readStaffRequestRoute(
                 val request = read(inquiryId(id))
                 Response(Status.OK)
                     .header("Cache-Control", "no-store")
-                    .with(body of StaffRequestResponse(request.inquiry.toResponse(), request.financial.toResponse()))
+                    .with(
+                        body of
+                            StaffRequestResponse(
+                                request.inquiry.toResponse(),
+                                request.financial.toResponse(),
+                                request.proposal?.toResponse(),
+                                request.suggestedDepositTerms.toResponse(),
+                                request.deposit.currentDepositResponse(),
+                            ),
+                    )
             }
     }
 }

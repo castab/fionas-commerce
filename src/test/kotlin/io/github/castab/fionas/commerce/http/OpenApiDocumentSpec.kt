@@ -99,10 +99,63 @@ class OpenApiDocumentSpec :
             route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/StaffRequestResponse"
             val response = schema("StaffRequestResponse")
-            response.strings("required") shouldContainExactly listOf("inquiry", "financial")
+            response.strings("required") shouldContainExactly listOf("inquiry", "financial", "suggestedDepositTerms", "depositRequirement")
             response.text("properties", "inquiry", "\$ref") shouldBe "#/components/schemas/InquiryResponse"
             response.text("properties", "financial", "\$ref") shouldBe "#/components/schemas/FinancialDocumentResponse"
             response.text("properties", "financial", "description") shouldContain "financial.reconciliation is always present"
+        }
+
+        test("proposal operations expose explicit tokens, shared terms/pricing schemas and exact publication identities") {
+            schema("IssueInquiryProposalRequest").strings("required") shouldContainExactly listOf("expectedDocumentVersion", "terms")
+            schema("ReviseInquiryQuoteProposalRequest").strings("required") shouldContainExactly
+                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "pricingInputs", "terms")
+            schema("ReviseInquiryProposalDepositRequest").strings("required") shouldContainExactly
+                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "terms")
+            schema("ReviseInquiryQuoteProposalRequest").text("properties", "pricingInputs", "\$ref") shouldBe
+                "#/components/schemas/CreateInquiryEstimateRequest"
+            val requests =
+                listOf("IssueInquiryProposalRequest", "ReviseInquiryQuoteProposalRequest", "ReviseInquiryProposalDepositRequest")
+            requests.forEach { name ->
+                schema(name).text("properties", "terms", "\$ref") shouldBe "#/components/schemas/DepositTermsRequest"
+                schema(name).at("properties").jsonObject.containsKey("documentId") shouldBe false
+                schema(name).text("properties", "expectedDocumentVersion", "format") shouldBe "int32"
+            }
+            schema("IssuedInquiryProposalResponse").strings("required") shouldContainExactly
+                listOf("proposal", "financial", "depositRequirement")
+            schema("InquiryProposalResponse").strings("required") shouldContainExactly
+                listOf(
+                    "id",
+                    "inquiryId",
+                    "documentId",
+                    "documentVersion",
+                    "depositRequirementRevision",
+                    "issuedAt",
+                    "principalKind",
+                    "principalId",
+                    "issuanceKind",
+                )
+            schema("StaffRequestResponse").text("properties", "proposal", "\$ref") shouldBe "#/components/schemas/InquiryProposalResponse"
+            val issuances =
+                listOf(
+                    Triple("", 2, "INITIAL"),
+                    Triple("/quote-revisions", 3, "QUOTE_REVISED"),
+                    Triple("/deposit-revisions", 2, "DEPOSIT_REVISED"),
+                )
+            issuances.forEach { (suffix, version, kind) ->
+                val example =
+                    operation("/staff/requests/{inquiryId}/proposals$suffix", "post")
+                        .at("responses", "200", "content", "application/json", "example")
+                val revision = if (kind == "INITIAL") 1 else 2
+                example.text("proposal", "issuanceKind") shouldBe kind
+                example.at("proposal", "documentVersion").jsonPrimitive.int shouldBe version
+                example.at("financial", "version").jsonPrimitive.int shouldBe version
+                example.at("proposal", "depositRequirementRevision").jsonPrimitive.int shouldBe revision
+                example.at("depositRequirement", "revision").jsonPrimitive.int shouldBe revision
+                example.at("depositRequirement", "approvalDocumentVersion").jsonPrimitive.int shouldBe version
+            }
+            operation("/staff/requests/{inquiryId}", "get").text("description") shouldNotContain "existing Quote transition"
+            operation("/financial-documents/{documentId}/quote", "post").text("description") shouldContain
+                "/staff/requests/{inquiryId}/proposals"
         }
 
         test("staff dashboard schemas describe attention reasons, enrichment and both live permissions") {
@@ -177,6 +230,12 @@ class OpenApiDocumentSpec :
                     listOf("204", "400", "401", "403", "404", "500"),
                 Triple("/staff/dashboard", "get", "readStaffDashboard") to listOf("200", "401", "403", "500"),
                 Triple("/staff/requests/{inquiryId}", "get", "readStaffRequest") to listOf("200", "400", "401", "403", "404", "500"),
+                Triple("/staff/requests/{inquiryId}/proposals", "post", "issueInquiryProposal") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/proposals/quote-revisions", "post", "reviseInquiryQuoteProposal") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/proposals/deposit-revisions", "post", "reviseInquiryProposalDeposit") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "403", "404", "500"),
                 Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
@@ -238,6 +297,9 @@ class OpenApiDocumentSpec :
             mapOf(
                 "readStaffDashboard" to "Staff dashboard",
                 "readStaffRequest" to "Staff requests",
+                "issueInquiryProposal" to "Staff proposals",
+                "reviseInquiryQuoteProposal" to "Staff proposals",
+                "reviseInquiryProposalDeposit" to "Staff proposals",
                 "acknowledgeInquiryCommunication" to "Inquiries",
                 "getInquiryForm" to "Inquiries",
                 "createInquiry" to "Inquiries",
@@ -336,6 +398,11 @@ class OpenApiDocumentSpec :
             listOf(
                 "StaffDashboardResponse",
                 "StaffRequestResponse",
+                "InquiryProposalResponse",
+                "IssuedInquiryProposalResponse",
+                "IssueInquiryProposalRequest",
+                "ReviseInquiryQuoteProposalRequest",
+                "ReviseInquiryProposalDepositRequest",
                 "StaffDashboardSummaryResponse",
                 "StaffDashboardWorkQueueResponse",
                 "StaffWorkQueueResponse",
@@ -465,6 +532,7 @@ class OpenApiDocumentSpec :
                 listOf(
                     "Staff dashboard",
                     "Staff requests",
+                    "Staff proposals",
                     "Inquiries",
                     "Estimates",
                     "Financial documents",

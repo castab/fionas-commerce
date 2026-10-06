@@ -29,6 +29,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.requestedPricing
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
@@ -67,17 +68,9 @@ class InquiryLifecycleSpec :
 
         fun quote(): Pair<InquiryId, UUID> {
             val result = requested()
-            IssueQuote(app.transactor, app.context.financialLedger, owners, pricing)(result.second, Version.INITIAL)
+            app.issueProposal(result.first)
             return result
         }
-
-        fun deposit(
-            id: UUID,
-            amount: String = "50.00",
-            sources: FinancialDocumentPricingRepository = pricing,
-        ) = SetDepositRequirement(app.transactor, app.context.financialLedger, owners, sources)(
-            SetDepositRequirement.Command(id, Version.of(2), null, DepositTerms.Fixed(money(amount))),
-        )
 
         fun pay(
             id: UUID,
@@ -140,15 +133,14 @@ class InquiryLifecycleSpec :
             app.database.execute("UPDATE fionas.inquiries SET event_date = '2000-01-01' WHERE id = '${inquiry.value}'")
             read(inquiry).stage shouldBe InquiryStage.REQUESTED
             shouldThrow<CommerceFailure.IllegalTransition> { commands().markServed(ManageInquiryFulfillment.Command(inquiry, actor)) }
-            IssueQuote(app.transactor, app.context.financialLedger, owners, pricing)(document, Version.INITIAL)
+            app.issueProposal(inquiry)
             read(inquiry).stage shouldBe InquiryStage.QUOTED
             shouldThrow<CommerceFailure.IllegalTransition> { commands().markServed(ManageInquiryFulfillment.Command(inquiry, actor)) }
             shouldThrow<CommerceFailure.IllegalTransition> {
                 IssueInvoice(app.transactor, app.context.financialLedger, owners, pricing)(document, Version.of(2))
             }
-            pay(document, "10") // No requirement: still Quote.
+            pay(document, "10") // Partial deposit: still Quote.
             read(inquiry).stage shouldBe InquiryStage.QUOTED
-            deposit(document)
             val partial = pay(document, "39.99")
             partial.document.latest.document
                 .shouldBeInstanceOf<FinancialDocument.Quote>()
@@ -220,7 +212,6 @@ class InquiryLifecycleSpec :
                     inputs,
                 )
             }
-            deposit(id)
             val payment = standalone("80")
             val allocate = AllocatePayment(app.transactor, app.context.financialLedger, owners, pricing, testClock)
             allocate(
@@ -234,12 +225,12 @@ class InquiryLifecycleSpec :
             shouldThrow<CommerceFailure.Conflict> { allocate(AllocatePayment.Command(payment.id, id, Version.of(2), BigDecimal("1"))) }
         }
 
-        test("activation and replacement of already satisfied terms book immediately; RELATED manual invoicing remains financial only") {
+        test("standalone canonical deposit changes are rejected after payment; RELATED manual invoicing remains financial only") {
             listOf(false, true).forEach { replacing ->
-                val (inquiry, id) = quote()
-                if (replacing) deposit(id, "100")
+                val (inquiry, id) = requested()
+                app.issueProposal(inquiry, "100")
                 pay(id, "75")
-                val view =
+                shouldThrow<CommerceFailure.IllegalTransition> {
                     SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing)(
                         SetDepositRequirement.Command(
                             id,
@@ -248,8 +239,8 @@ class InquiryLifecycleSpec :
                             DepositTerms.Fixed(money("50")),
                         ),
                     )
-                view.latestVersion.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
-                read(inquiry).stage shouldBe InquiryStage.BOOKED
+                }
+                read(inquiry).stage shouldBe InquiryStage.QUOTED
             }
             val (inquiry, _) = requested()
             val related =
@@ -283,7 +274,7 @@ class InquiryLifecycleSpec :
             read(inquiry).stage shouldBe InquiryStage.REQUESTED
         }
 
-        listOf("payment", "allocation", "deposit").forEach { trigger ->
+        listOf("payment", "allocation").forEach { trigger ->
             test("Invoice promotion failure rolls back triggering $trigger and its cross-schema writes") {
                 val (inquiry, id) = quote()
                 val failing =
@@ -299,9 +290,7 @@ class InquiryLifecycleSpec :
                             error("Failure after Invoice insert")
                         }
                     }
-                if (trigger != "deposit") deposit(id)
                 val standalone = if (trigger == "allocation") standalone("50") else null
-                if (trigger == "deposit") pay(id, "50")
                 val before =
                     app.database.strings(
                         "SELECT count(*) FROM commerce.payment_records UNION ALL SELECT count(*) FROM commerce.payment_allocations UNION ALL SELECT count(*) FROM commerce.deposit_requirement_revisions",
@@ -313,7 +302,7 @@ class InquiryLifecycleSpec :
                             AllocatePayment(app.transactor, app.context.financialLedger, owners, failing, testClock)(
                                 AllocatePayment.Command(standalone!!.id, id, Version.of(2), BigDecimal("50")),
                             )
-                        else -> deposit(id, sources = failing)
+                        else -> error("Unexpected trigger")
                     }
                 }
                 app.database.strings(
@@ -329,7 +318,6 @@ class InquiryLifecycleSpec :
 
         test("waiting concurrent payments observe preceding partial allocation and jointly promote exactly one Invoice") {
             val (inquiry, id) = quote()
-            deposit(id)
             val held = CountDownLatch(1)
             val release = CountDownLatch(1)
             val pid = AtomicInteger()
@@ -413,8 +401,7 @@ class InquiryLifecycleSpec :
             val pending = CompletableFuture.supplyAsync { detail(inquiry) }
             try {
                 check(observed.await(30, TimeUnit.SECONDS))
-                IssueQuote(app.transactor, app.context.financialLedger, owners, pricing)(id, Version.INITIAL)
-                deposit(id)
+                app.issueProposal(inquiry)
                 pay(id, "50")
                 commands().markServed(ManageInquiryFulfillment.Command(inquiry, actor))
             } finally {

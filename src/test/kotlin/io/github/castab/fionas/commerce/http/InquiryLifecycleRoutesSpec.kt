@@ -44,7 +44,12 @@ class InquiryLifecycleRoutesSpec :
                 app.http(Request(Method.POST, "/inquiries/$id/$action").header("Cookie", app.adminCookie)).status shouldBe Status.FORBIDDEN
                 service(action).status shouldBe Status.CONFLICT
             }
-            app.adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
+            app
+                .adminPost(
+                    "/staff/requests/$id/proposals",
+                    """{"expectedDocumentVersion":1,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
+                ).status shouldBe
+                Status.OK
             detail().lifecycle.stage shouldBe InquiryStageResponse.QUOTED
             app.adminPost("/financial-documents/$document/invoice", """{"expectedVersion":2}""").status shouldBe Status.CONFLICT
             app
@@ -52,7 +57,7 @@ class InquiryLifecycleRoutesSpec :
                     Method.PUT,
                     "/financial-documents/$document/deposit-requirement",
                     """{"expectedDocumentVersion":2,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
-                ).status shouldBe Status.OK
+                ).status shouldBe Status.CONFLICT
             val paid = app.adminPost("/financial-documents/$document/payments", """{"documentVersion":2,"amount":"50","method":"CARD"}""")
             paid.status shouldBe Status.CREATED
             detail().lifecycle.stage shouldBe InquiryStageResponse.BOOKED

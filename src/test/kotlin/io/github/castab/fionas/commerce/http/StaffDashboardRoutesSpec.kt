@@ -14,6 +14,7 @@ import io.github.castab.fionas.commerce.testing.communicationHistory
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -161,7 +162,7 @@ class StaffDashboardRoutesSpec :
                     "attentionSince",
                     "reasons",
                 )
-            app.adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
+            app.issueProposal(InquiryId(UUID.fromString(id)))
             RecordInquiryCommunication(app.transactor, JdbiInquiryCommunicationRepository(), testClock)
                 .customerEmailReceived(InquiryId(UUID.fromString(id)), STORED_INSTANT)
             val quote =

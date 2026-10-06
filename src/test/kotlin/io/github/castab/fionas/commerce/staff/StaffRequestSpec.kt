@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.staff
 
+import io.github.castab.commerce.deposit.DepositRequirement
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Version
@@ -12,9 +13,9 @@ import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
-import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryStage
@@ -26,6 +27,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.requestedPricing
 import io.kotest.assertions.throwables.shouldThrow
@@ -60,6 +62,8 @@ class StaffRequestSpec :
                 ReadInquiryLifecycle(app.context.financialLedger, associations, JdbiInquiryFulfillmentRepository()),
             ),
             GetFinancialDocument(app.transactor, app.context.financialLedger, associations, pricing),
+            app.context.financialLedger,
+            JdbiInquiryProposalRepository(),
         )
 
         fun submitted(): Pair<InquiryId, UUID> {
@@ -130,8 +134,8 @@ class StaffRequestSpec :
             initial.financial.latest.document.id shouldBe document
             val related = app.transactor.inTransaction { owners.documentsOf(it, id).single { lineage -> lineage != document } }
             val alternate = GetFinancialDocument(app.transactor, app.context.financialLedger, owners, sources)(related)
-            shouldThrow<IllegalStateException> { StaffRequest(initial.inquiry, alternate) }
-            val quote = IssueQuote(app.transactor, app.context.financialLedger, owners, sources)(document, Version.INITIAL)
+            shouldThrow<IllegalStateException> { StaffRequest(initial.inquiry, alternate, initial.proposal, initial.deposit) }
+            val quote = app.issueProposal(id, "100.00").financial
             val request = reader()(id)
             request.inquiry.lifecycle.stage shouldBe InquiryStage.QUOTED
             request.inquiry.lifecycle.documentId shouldBe document
@@ -234,7 +238,7 @@ class StaffRequestSpec :
                 paused.await(30, TimeUnit.SECONDS) shouldBe true
                 val writer =
                     CompletableFuture.supplyAsync {
-                        app.adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
+                        app.issueProposal(id, "100.00")
                         app
                             .adminPost(
                                 "/financial-documents/$document/payments",
@@ -250,11 +254,17 @@ class StaffRequestSpec :
             seen.size shouldBe 1
             before.inquiry.lifecycle.stage shouldBe InquiryStage.REQUESTED
             before.financial.latest.document.version shouldBe Version.INITIAL
+            before.proposal shouldBe null
+            before.deposit.depositRequirement shouldBe null
             before.financial.reconciliation.netApplied.amount
                 .signum() shouldBe 0
             val after = reader()(id)
             after.inquiry.lifecycle.stage shouldBe InquiryStage.QUOTED
             after.financial.latest.document.version shouldBe Version.of(2)
+            after.proposal!!.documentReference shouldBe after.financial.latest.document.reference
+            val active = after.deposit.depositRequirement!!.requirement as DepositRequirement.Active
+            active.approvalReference shouldBe after.proposal.documentReference
+            active.revision shouldBe after.proposal.depositRequirementRevision
             after.financial.reconciliation.netApplied.amount
                 .compareTo(BigDecimal("50")) shouldBe 0
         }

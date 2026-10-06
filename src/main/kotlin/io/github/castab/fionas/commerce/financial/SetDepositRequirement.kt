@@ -8,7 +8,7 @@ import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
-/** Approves terms and atomically books a canonical Quote whose active positive deposit is satisfied. */
+/** Standalone approval for RELATED lineages and canonical Invoices; canonical Quotes require proposal reissuance. */
 class SetDepositRequirement(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
@@ -27,18 +27,8 @@ class SetDepositRequirement(
     operator fun invoke(command: Command): FinancialLineageView =
         transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, command.documentId, command.expectedDocumentVersion)
-            current.document.requirePaymentDestination()
-            if (command.terms is DepositTerms.Fixed) {
-                paymentMoney(command.terms.amount.amount, command.terms.amount.currency)
-            }
-            ledger.activateDepositRequirement(
-                transaction,
-                command.documentId,
-                command.expectedDocumentVersion,
-                command.terms,
-                command.expectedRequirementRevision,
-            )
-            documents.bookIfDepositSatisfied(transaction, current)
-                ?: ledger.financialLineages(transaction, listOf(command.documentId)).single()
+            documents.rejectCanonicalQuoteMutation(transaction, current)
+            documents.approveDeposit(transaction, current.document, command.terms, command.expectedRequirementRevision)
+            ledger.financialLineages(transaction, listOf(command.documentId)).single()
         }
 }
