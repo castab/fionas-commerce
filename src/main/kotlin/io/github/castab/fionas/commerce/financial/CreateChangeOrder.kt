@@ -19,7 +19,7 @@ import java.util.UUID
  * Fiona's existing staff replacement action: materializes new lines from explicitly supplied
  * commercial inputs and replaces the prior snapshot's concrete line set. It never reads old
  * pricing inputs to reconstruct old lines. Appends a same-stage successor, whether an estimate, a
- * quote, or an invoice.
+ * RELATED quote, or an invoice. Canonical Quotes require atomic proposal revision.
  *
  * In one runtime transaction: the lineage must belong to an inquiry, its latest version must
  * be the one the caller acted on ([CommerceFailure.Conflict] otherwise), the catalog revision
@@ -43,9 +43,8 @@ class CreateChangeOrder(
     ): InquiryFinancialDocument =
         transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, documentId, expectedVersion)
-            val revised = pricing.price(transaction, inputs).lineItems
-            val next = ledger.changeOrder(transaction, documentId, repricing(current.document.lineItems, revised))
-            pricingSources.insert(transaction, next.reference, inputs)
+            documents.rejectCanonicalQuoteMutation(transaction, current)
+            documents.reprice(transaction, current, inputs, pricing)
             documents.describeLocked(transaction, current.inquiryId, documentId)
         }
 }

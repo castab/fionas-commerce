@@ -7,12 +7,15 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
-/** Retraction is allowed after any document change; the runtime appends an immutable withdrawal. */
+/** Retraction appends a withdrawal only outside canonical published proposal history, which remains immutable after booking. */
 class WithdrawDepositRequirement(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
     private val associations: InquiryFinancialDocumentRepository,
+    proposals: InquiryProposalRepository,
 ) {
+    private val proposalDeposits = CanonicalProposalDepositPolicy(associations, proposals)
+
     data class Command(
         val documentId: UUID,
         val expectedRequirementRevision: DepositRequirementRevision,
@@ -20,8 +23,10 @@ class WithdrawDepositRequirement(
 
     operator fun invoke(command: Command): DepositRequirementVersion =
         transactor.inTransaction { transaction ->
-            associations.lockInquiryOf(transaction, command.documentId)
-                ?: throw CommerceFailure.NotFound("Financial document ${command.documentId} was not found")
+            val inquiryId =
+                associations.lockInquiryOf(transaction, command.documentId)
+                    ?: throw CommerceFailure.NotFound("Financial document ${command.documentId} was not found")
+            proposalDeposits.rejectStandaloneMutation(transaction, inquiryId, command.documentId)
             ledger.withdrawDepositRequirement(transaction, command.documentId, command.expectedRequirementRevision)
         }
 }

@@ -31,7 +31,7 @@ class StaffRequestRoutesSpec :
         }
         afterSpec { app.close() }
 
-        test("composed response reuses exact inquiry and financial contracts and supplies existing Quote concurrency input") {
+        test("composed response reuses exact contracts and supplies atomic proposal concurrency input") {
             val id = app.createInquiry()
             val document = app.initialEstimateOf(id)
             val path = "/staff/requests/$id"
@@ -39,7 +39,7 @@ class StaffRequestRoutesSpec :
             response.status shouldBe Status.OK
             response.header("Cache-Control") shouldBe "no-store"
             val json = Json.parseToJsonElement(response.bodyString()).jsonObject
-            json.keys shouldBe setOf("inquiry", "financial")
+            json.keys shouldBe setOf("inquiry", "financial", "suggestedDepositTerms", "depositRequirement")
             json.getValue("inquiry") shouldBe Json.parseToJsonElement(app.adminGet("/inquiries/$id").bodyString())
             json.getValue("financial") shouldBe Json.parseToJsonElement(app.adminGet("/financial-documents/$document").bodyString())
             val view = CommerceJson.asA(response.bodyString(), StaffRequestResponse.serializer())
@@ -51,8 +51,8 @@ class StaffRequestRoutesSpec :
             view.financial.version shouldBe 1
             app
                 .adminPost(
-                    "/financial-documents/${view.financial.id}/quote",
-                    """{"expectedVersion":${view.financial.version}}""",
+                    "/staff/requests/$id/proposals",
+                    """{"expectedDocumentVersion":${view.financial.version},"terms":{"type":"PERCENTAGE","percentage":"20"}}""",
                 ).status shouldBe
                 Status.OK
             val quoted = CommerceJson.asA(app.adminGet(path).bodyString(), StaffRequestResponse.serializer())

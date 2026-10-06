@@ -22,12 +22,16 @@ import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryFinancialLineage
+import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
+import io.github.castab.fionas.commerce.financial.IssuedInquiryProposal
 import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
 import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.RecordedPayment
+import io.github.castab.fionas.commerce.financial.ReviseInquiryProposalDeposit
+import io.github.castab.fionas.commerce.financial.ReviseInquiryQuoteProposal
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
@@ -72,6 +76,9 @@ const val API_DOCS_PATH = "/docs"
 class FionaOperations(
     val acknowledgeInquiryCommunication: (RecordInquiryCommunication.Acknowledge) -> Unit,
     val readStaffRequest: (InquiryId) -> StaffRequest,
+    val issueInquiryProposal: (IssueInquiryProposal.Command) -> IssuedInquiryProposal,
+    val reviseInquiryQuoteProposal: (ReviseInquiryQuoteProposal.Command) -> IssuedInquiryProposal,
+    val reviseInquiryProposalDeposit: (ReviseInquiryProposalDeposit.Command) -> IssuedInquiryProposal,
     val readStaffDashboard: () -> StaffDashboard,
     val createInquiry: (CreateInquiry.Command) -> Inquiry,
     val listInquiries: (ListInquiries.Command) -> InquiryPage,
@@ -124,6 +131,9 @@ fun fionaApiRoutes(
     listOf(
         acknowledgeInquiryCommunicationRoute(operations.acknowledgeInquiryCommunication, auth.access),
         readStaffRequestRoute(operations.readStaffRequest, auth.access),
+        issueInquiryProposalRoute(operations.issueInquiryProposal, auth.access),
+        reviseInquiryQuoteProposalRoute(operations.reviseInquiryQuoteProposal, auth.access),
+        reviseInquiryProposalDepositRoute(operations.reviseInquiryProposalDeposit, auth.access),
         readStaffDashboardRoute(operations.readStaffDashboard, auth.access),
         getInquiryFormRoute(operations.getInquiryForm, auth.access),
         createInquiryRoute(operations.createInquiry, auth.access),

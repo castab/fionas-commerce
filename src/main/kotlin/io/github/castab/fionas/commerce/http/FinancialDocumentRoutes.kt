@@ -673,7 +673,7 @@ private fun unpaid(total: String) = DocumentReconciliation("0.00", "0.00", total
 
 internal val exampleEstimate = exampleDocument(1, "ESTIMATE", 75, unpaid("681.25"))
 private val exampleChangedEstimate = exampleDocument(2, "ESTIMATE", 100, unpaid("825.00"))
-private val exampleQuote = exampleDocument(3, "QUOTE", 100, unpaid("825.00"))
+internal val exampleQuote = exampleDocument(3, "QUOTE", 100, unpaid("825.00"))
 private val exampleInvoice = exampleDocument(4, "INVOICE", 100, DocumentReconciliation("300.00", "300.00", "525.00", "USD"))
 
 private val examplePayment =
@@ -1044,7 +1044,8 @@ fun issueQuoteRoute(
         summary = "Issue an estimate as a quote",
         description =
             "Issues the latest version, an estimate, as a quote: a new immutable snapshot with the same lines and the " +
-                "legacy pricing metadata when present, never repriced.",
+                "legacy pricing metadata when present, never repriced. Only RELATED lineages support this standalone action. " +
+                "Canonical INITIAL_ESTIMATE issuance requires POST /staff/requests/{inquiryId}/proposals with explicit deposit terms.",
         from = "an estimate",
         example = exampleQuote,
         transition = issueQuote,
@@ -1120,7 +1121,9 @@ fun createChangeOrderRoute(
             "and appends the result as a new version in the same stage, whether estimate, quote, or invoice, with the " +
             "revised inputs as its pricing source. The new lines replace the current ones; lines, amounts, and totals " +
             "are never accepted from the caller. Inputs that price exactly as the current version does are no " +
-            "financial change and are rejected. Requires `commerce.financial-document.create`."
+            "financial change and are rejected. Requires `commerce.financial-document.create`. " +
+            "Canonical Quote change orders are rejected with illegal_transition; use atomic staff proposal quote-revisions. " +
+            "Canonical Estimate and Invoice change orders and RELATED lineages retain this operation."
         tags += financialDocuments
         receiving(changeOrderRequest to exampleChangeOrder)
         returning(Status.OK, documentResponse to exampleChangedEstimate, "The new latest snapshot.")

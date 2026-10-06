@@ -93,17 +93,24 @@ class DepositRequirementOperationsSpec :
                         return owners.lockInquiryOf(transaction, documentId)
                     }
                 }
-            val result = SetDepositRequirement(app.transactor, app.context.financialLedger, observing, pricing)(command(id))
+            val result =
+                SetDepositRequirement(
+                    app.transactor,
+                    app.context.financialLedger,
+                    observing,
+                    pricing,
+                    JdbiInquiryProposalRepository(),
+                )(command(id))
             ownershipCalls shouldBe 1
             sql.first().contains("fionas.inquiry_financial_documents") shouldBe true
             sql.any { it.contains("commerce.financial_document_snapshots") && it.contains("LIMIT 1") } shouldBe true
             val writes = sql.withIndex().filter { it.value.startsWith("INSERT INTO commerce.deposit_requirement_revisions") }
             writes.size shouldBe 1
-            // Canonical identity and all four runtime projection queries use the observed handle after its own write.
+            // Canonical eligibility is checked before approval; all four response queries observe its own write.
+            sql.take(writes.single().index).any { it.contains("purpose = 'INITIAL_ESTIMATE'") } shouldBe true
             val projection = sql.drop(writes.single().index + 1)
-            projection.size shouldBe 5
-            projection.first().contains("purpose = 'INITIAL_ESTIMATE'") shouldBe true
-            projection[1].contains("SELECT DISTINCT ON (document_id)") shouldBe true
+            projection.size shouldBe 4
+            projection.first().contains("SELECT DISTINCT ON (document_id)") shouldBe true
             projection.last().contains("WHERE r.document_id IN") shouldBe true
             result.depositRequirement!!.requirement.revision shouldBe DepositRequirementRevision.INITIAL
             result.depositRequirement!!.createdAt shouldBe result.activity.latestDepositRequirementAt
@@ -215,7 +222,13 @@ class DepositRequirementOperationsSpec :
                 paused.await(30, TimeUnit.SECONDS) shouldBe true
                 CompletableFuture
                     .supplyAsync {
-                        SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing)(command(id))
+                        SetDepositRequirement(
+                            app.transactor,
+                            app.context.financialLedger,
+                            owners,
+                            pricing,
+                            JdbiInquiryProposalRepository(),
+                        )(command(id))
                     }.get(10, TimeUnit.SECONDS)
                     .depositRequirement!!
                     .requirement.revision shouldBe DepositRequirementRevision.INITIAL
@@ -287,6 +300,7 @@ class DepositRequirementOperationsSpec :
                                 app.context.financialLedger,
                                 observing,
                                 pricing,
+                                JdbiInquiryProposalRepository(),
                             )(command(id))
                         }.exceptionOrNull()
                     }.get(5, TimeUnit.SECONDS)
@@ -323,6 +337,7 @@ class DepositRequirementOperationsSpec :
                 app.transactor,
                 app.context.financialLedger,
                 observing,
+                JdbiInquiryProposalRepository(),
             )(WithdrawDepositRequirement.Command(id, DepositRequirementRevision.INITIAL)).requirement.revision.number shouldBe
                 2
             locked shouldBe true

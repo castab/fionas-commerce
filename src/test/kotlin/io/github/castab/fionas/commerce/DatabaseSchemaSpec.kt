@@ -52,6 +52,7 @@ class DatabaseSchemaSpec :
                     "inquiries",
                     "inquiry_fulfillment",
                     "inquiry_communications",
+                    "inquiry_proposals",
                     "inquiry_submissions",
                     "user_credentials",
                     "inquiry_financial_documents",
@@ -77,6 +78,36 @@ class DatabaseSchemaSpec :
                 WHERE con.contype = 'f' AND con.conrelid = 'fionas.$table'::regclass
                 """.trimIndent(),
             )
+
+        test("proposal publication stores only exact identities and provenance with unique pairs and Fiona association integrity") {
+            application.database.foreignKeys("inquiry_proposals") shouldContainExactly
+                listOf(
+                    "inquiry_id, document_id → fionas.inquiry_financial_documents(inquiry_id, document_id)",
+                )
+            application.database.strings(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' AND table_name = 'inquiry_proposals' ORDER BY ordinal_position",
+            ) shouldContainExactly
+                listOf(
+                    "id",
+                    "recorded_order",
+                    "inquiry_id",
+                    "document_id",
+                    "document_version",
+                    "deposit_requirement_revision",
+                    "kind",
+                    "issued_at",
+                    "principal_kind",
+                    "principal_id",
+                )
+            application.database
+                .strings(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' AND table_name = 'inquiry_proposals' AND is_nullable = 'YES'",
+                ).shouldBeEmpty()
+            application.database.strings(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_proposals'::regclass AND contype = 'u'",
+            ) shouldContainExactlyInAnyOrder
+                listOf("UNIQUE (recorded_order)", "UNIQUE (document_id, document_version, deposit_requirement_revision)")
+        }
 
         test("submission identity has non-null results, unique keys/inquiries and a deferred Fiona-only foreign key") {
             application.database.foreignKeys("inquiry_submissions") shouldContainExactly
@@ -108,12 +139,14 @@ class DatabaseSchemaSpec :
                 SELECT pg_get_constraintdef(oid) FROM pg_constraint
                 WHERE conrelid = 'fionas.inquiry_financial_documents'::regclass AND contype IN ('p', 'u')
                 """.trimIndent(),
-            ) shouldContainExactly listOf("PRIMARY KEY (document_id)")
+            ) shouldContainExactlyInAnyOrder listOf("PRIMARY KEY (document_id)", "UNIQUE (inquiry_id, document_id)")
             application.database.strings(
                 "SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas' AND tablename = 'inquiry_financial_documents' " +
                     "AND indexname <> 'inquiry_financial_documents_pkey'",
             ) shouldContainExactlyInAnyOrder
                 listOf(
+                    "CREATE UNIQUE INDEX inquiry_financial_documents_inquiry_document_key ON fionas.inquiry_financial_documents " +
+                        "USING btree (inquiry_id, document_id)",
                     "CREATE INDEX inquiry_financial_documents_inquiry_id_idx ON fionas.inquiry_financial_documents " +
                         "USING btree (inquiry_id, created_at)",
                     "CREATE UNIQUE INDEX inquiry_financial_documents_initial_estimate_idx ON fionas.inquiry_financial_documents " +

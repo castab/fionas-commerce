@@ -69,7 +69,7 @@ sealed interface DepositTermsRequest {
 }
 
 /** Strict union shapes even though ordinary CommerceJson requests accept additive fields. */
-private object StrictDepositTerms : KSerializer<DepositTermsRequest> {
+internal object StrictDepositTerms : KSerializer<DepositTermsRequest> {
     private val delegate = DepositTermsRequest.serializer()
     override val descriptor = delegate.descriptor
 
@@ -334,7 +334,7 @@ fun setDepositRequirementRoute(
         operationId = "setFinancialDocumentDepositRequirement"
         summary = "Approve, replace, or reactivate deposit terms"
         description =
-            "Requires commerce.deposit-requirement.manage. Only the exact latest Quote/Invoice is eligible. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen. If already-applied value satisfies these active terms on the canonical INITIAL_ESTIMATE Quote, the same transaction issues Invoice and books the inquiry. RELATED lineages do not book inquiries."
+            "Requires commerce.deposit-requirement.manage. The exact latest Quote/Invoice must match the expected version. Canonical lineages with proposal history reject standalone approval, replacement or reactivation with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain standalone behavior. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen."
         tags += depositTag
         receiving(setDepositBody to SetDepositRequirementRequest(2, null, exampleTerms))
         returning(Status.OK, currentDepositBody to exampleActive)
@@ -369,7 +369,7 @@ fun withdrawDepositRequirementRoute(
         operationId = "withdrawFinancialDocumentDepositRequirement"
         summary = "Withdraw approved deposit terms"
         description =
-            "Requires commerce.deposit-requirement.manage. Appends WITHDRAWN from an exact active requirement revision, even after document stage/version changes. No document version or stage eligibility check; history is retained."
+            "Requires commerce.deposit-requirement.manage. Appends WITHDRAWN from an exact active requirement revision. Canonical lineages with proposal history reject standalone withdrawal with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain withdrawal after document stage/version changes. History is retained."
         tags += depositTag
         receiving(withdrawDepositBody to WithdrawDepositRequirementRequest(1))
         returning(Status.OK, currentDepositBody to exampleWithdrawn)
@@ -437,13 +437,13 @@ private fun depositDecimal(value: String): BigDecimal {
     return BigDecimal(value)
 }
 
-private fun DepositTermsRequest.domain(): DepositTerms =
+internal fun DepositTermsRequest.domain(): DepositTerms =
     when (this) {
         is DepositTermsRequest.Fixed -> DepositTerms.Fixed(Money(depositDecimal(amount), Currency.getInstance(currency)))
         is DepositTermsRequest.Percentage -> DepositTerms.Percentage(depositDecimal(percentage))
     }
 
-private fun DepositTerms.toResponse(): DepositTermsRequest =
+internal fun DepositTerms.toResponse(): DepositTermsRequest =
     when (this) {
         is DepositTerms.Fixed -> DepositTermsRequest.Fixed(amount.amount.toPlainString(), amount.currency.currencyCode)
         is DepositTerms.Percentage -> DepositTermsRequest.Percentage(percentage.toPlainString())

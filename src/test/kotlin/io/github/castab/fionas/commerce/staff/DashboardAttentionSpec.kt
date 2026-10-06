@@ -22,12 +22,12 @@ import io.github.castab.fionas.commerce.testing.communicationHistory
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
-import org.http4k.core.Method
 import org.http4k.core.Status
 import java.math.BigDecimal
 import java.time.Clock
@@ -73,17 +73,11 @@ class DashboardAttentionSpec :
         fun document(id: InquiryId) = app.initialEstimateOf(id.value.toString())
 
         fun quote(id: InquiryId) {
-            app.adminPost("/financial-documents/${document(id)}/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
+            app.issueProposal(id)
         }
 
         fun book(id: InquiryId) {
             quote(id)
-            app
-                .adminRequest(
-                    Method.PUT,
-                    "/financial-documents/${document(id)}/deposit-requirement",
-                    """{"expectedDocumentVersion":2,"terms":{"type":"FIXED","amount":"50.00","currency":"USD"}}""",
-                ).status shouldBe Status.OK
             app
                 .adminPost(
                     "/financial-documents/${document(id)}/payments",
@@ -238,12 +232,6 @@ class DashboardAttentionSpec :
                 .single()
                 .attentionSince shouldBe
                 sentAt.plus(Duration.ofDays(3))
-            app
-                .adminRequest(
-                    Method.PUT,
-                    "/financial-documents/${document(id)}/deposit-requirement",
-                    """{"expectedDocumentVersion":2,"terms":{"type":"FIXED","amount":"50.00","currency":"USD"}}""",
-                ).status shouldBe Status.OK
             app
                 .adminPost(
                     "/financial-documents/${document(id)}/payments",

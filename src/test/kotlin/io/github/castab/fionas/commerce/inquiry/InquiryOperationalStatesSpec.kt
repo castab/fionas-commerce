@@ -1,6 +1,5 @@
 package io.github.castab.fionas.commerce.inquiry
 
-import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
@@ -15,12 +14,10 @@ import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
-import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
-import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.http.StaffDashboardSummaryResponse
 import io.github.castab.fionas.commerce.staff.DashboardAttentionPolicy
@@ -31,6 +28,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -79,7 +77,7 @@ class InquiryOperationalStatesSpec :
 
         fun quote(): Pair<InquiryId, UUID> =
             requested().also {
-                IssueQuote(app.transactor, app.context.financialLedger, owners, pricing)(it.second, Version.INITIAL)
+                app.issueProposal(it.first)
             }
 
         fun pay(
@@ -99,16 +97,6 @@ class InquiryOperationalStatesSpec :
         )
 
         fun book(pair: Pair<InquiryId, UUID>): Pair<InquiryId, UUID> {
-            SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing)(
-                SetDepositRequirement.Command(
-                    pair.second,
-                    app.context.financialLedger
-                        .latest(pair.second)
-                        .version,
-                    null,
-                    DepositTerms.Fixed(money("50.00")),
-                ),
-            )
             pay(pair.second, BigDecimal("50.00"))
             return pair
         }
@@ -315,9 +303,6 @@ class InquiryOperationalStatesSpec :
                 .single()
                 .lifecycle.stage shouldBe InquiryStage.QUOTED
             read().counts shouldBe InquiryOperationalCounts(0, 1, 0, 0)
-            SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing)(
-                SetDepositRequirement.Command(pair.second, Version.of(3), null, DepositTerms.Fixed(money("50.00"))),
-            )
             val payment = pay(pair.second, BigDecimal("50.00"))
             addCharge(pair.second)
             read()

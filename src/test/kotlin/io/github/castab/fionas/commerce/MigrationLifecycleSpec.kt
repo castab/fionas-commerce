@@ -104,7 +104,7 @@ class MigrationLifecycleSpec :
 
                 // Both streams have a version 1; neither numbers its migrations after the other's.
                 database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14")
                 database.history(FIONA_MIGRATION_SCHEMA)[0] shouldContain "V1__customers_and_inquiries.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[1] shouldContain "V2__user_credentials.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[2] shouldContain "V3__financial_document_context.sql"
@@ -118,6 +118,7 @@ class MigrationLifecycleSpec :
                 database.history(FIONA_MIGRATION_SCHEMA)[10] shouldContain "V11__aggregate_pricing_inputs.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[11] shouldContain "V12__inquiry_fulfillment.sql"
                 database.history(FIONA_MIGRATION_SCHEMA)[12] shouldContain "V13__inquiry_communications.sql"
+                database.history(FIONA_MIGRATION_SCHEMA)[13] shouldContain "V14__inquiry_proposals.sql"
                 database.count("commerce.users") shouldBe 0
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
                 database.history("commerce").map { it.substringBefore(' ') } shouldContain "7"

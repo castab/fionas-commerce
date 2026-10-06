@@ -1,6 +1,8 @@
 package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.deposit.DepositRequirement
+import io.github.castab.commerce.deposit.DepositRequirementRevision
+import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.FinancialDocumentReconciliation
@@ -12,6 +14,7 @@ import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.time.Instant
 import java.util.UUID
@@ -154,6 +157,48 @@ internal class FionaFinancialDocuments(
         transaction: Transaction,
         current: Current,
     ): Boolean = associations.initialEstimateOf(transaction, current.inquiryId) == current.document.id
+
+    /** Caller holds the association lock; runtime owns the actual financial transition. */
+    fun quote(
+        transaction: Transaction,
+        current: Current,
+    ): FinancialDocument.Quote =
+        ledger.issueQuote(transaction, current.document.id).also {
+            pricingSources.copy(transaction, current.document.reference, it.reference)
+        }
+
+    fun reprice(
+        transaction: Transaction,
+        current: Current,
+        inputs: FionasPricingInputs,
+        pricing: FionasPricing,
+    ): FinancialDocument =
+        ledger
+            .changeOrder(
+                transaction,
+                current.document.id,
+                repricing(current.document.lineItems, pricing.price(transaction, inputs).lineItems),
+            ).also { pricingSources.insert(transaction, it.reference, inputs) }
+
+    fun approveDeposit(
+        transaction: Transaction,
+        document: FinancialDocument,
+        terms: DepositTerms,
+        expected: DepositRequirementRevision?,
+    ) {
+        document.requirePaymentDestination()
+        if (terms is DepositTerms.Fixed) paymentMoney(terms.amount.amount, terms.amount.currency)
+        ledger.activateDepositRequirement(transaction, document.id, document.version, terms, expected)
+    }
+
+    fun rejectCanonicalQuoteMutation(
+        transaction: Transaction,
+        current: Current,
+    ) {
+        if (current.document is FinancialDocument.Quote && isCanonical(transaction, current)) {
+            throw CommerceFailure.IllegalTransition("Canonical Quote changes require the atomic staff proposal workflow")
+        }
+    }
 
     /** Shared Invoice mechanics; callers own the association lock and transition policy. */
     fun invoice(

@@ -1,6 +1,5 @@
 package io.github.castab.fionas.commerce.inquiry
 
-import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
@@ -25,13 +24,11 @@ import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.InquiryDocumentPurpose
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
-import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
-import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
 import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
@@ -41,6 +38,7 @@ import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.addOffering
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.perGuest
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
@@ -316,7 +314,7 @@ class InquiryMaterializationSpec :
 
         test("catalog changes cannot reinterpret the estimate; reads, custom evolution, quote and invoice need no pricing source") {
             val id = UUID.randomUUID()
-            create(id)(command())
+            val inquiry = create(id)(command())
             val initial = application.context.financialLedger.latest(id)
             val updated =
                 application.adminRequest(
@@ -355,12 +353,9 @@ class InquiryMaterializationSpec :
                     )
                 }
             changed.lineItems shouldBe initial.lineItems + custom
-            val quote = IssueQuote(application.transactor, application.context.financialLedger, associations, sources)(id, Version.of(2))
+            val quote = application.issueProposal(inquiry.id, version = 2).financial
             quote.latest.document.lineItems shouldBe changed.lineItems
             quote.latest.pricing.shouldBeNull()
-            SetDepositRequirement(application.transactor, application.context.financialLedger, associations, sources)(
-                SetDepositRequirement.Command(id, Version.of(3), null, DepositTerms.Fixed(Money(BigDecimal("50.00"), initial.currency))),
-            )
             val payment =
                 RecordDocumentPayment(
                     application.transactor,
