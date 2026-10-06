@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.financial
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
@@ -25,8 +26,16 @@ class ListFinancialDocumentPaymentHistories(
 ) {
     operator fun invoke(documentId: UUID): List<PaymentHistory> =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
-            associations.inquiryOf(transaction, documentId)
-                ?: throw CommerceFailure.NotFound("Financial document $documentId was not found")
-            ledger.paymentHistoriesForLineage(transaction, documentId)
+            read(transaction, documentId)
         }
+
+    /** Composes the same complete histories in the caller's REPEATABLE_READ snapshot, without locking. */
+    internal fun read(
+        transaction: Transaction,
+        documentId: UUID,
+    ): List<PaymentHistory> {
+        associations.inquiryOf(transaction, documentId)
+            ?: throw CommerceFailure.NotFound("Financial document $documentId was not found")
+        return ledger.paymentHistoriesForLineage(transaction, documentId)
+    }
 }

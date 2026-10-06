@@ -1186,7 +1186,7 @@ fun recordPaymentRoute(
             "allocation. Partial and excessive deposits reject without writes. Exact acceptance atomically issues " +
             "the Invoice; extra money requires a distinct subsequent Invoice payment. Invoice partial payments " +
             "remain allowed. The response retains the original Quote allocation and returns current settlement; " +
-            "GET the document or inquiry detail to read the new current Invoice. " +
+            "GET /staff/requests/{inquiryId} to reload the Invoice, BOOKED lifecycle, satisfied deposit and payment histories. " +
             "RELATED lineages never automatically advance. Payment status is never stored: settlement is derived. Requires " +
             "`commerce.payment.record`."
         tags += payments
@@ -1593,7 +1593,7 @@ private fun ReconciledRefund.toResponse() =
     )
 
 // Every fact of the history, in commerce-runtime's order; nothing is filtered, re-sorted, or recomputed.
-private fun PaymentHistory.toResponse() =
+internal fun PaymentHistory.toResponse() =
     PaymentHistoryResponse(
         payment = payment.toResponse(),
         allocations =

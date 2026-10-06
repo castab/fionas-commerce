@@ -187,6 +187,7 @@ fun fionaApplication(
                 )
             val getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)
             val getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)
+            val paymentHistories = ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)
             val proposalHistory = JdbiInquiryProposalRepository()
             val proposals = InquiryProposals(ledger, documentOwners, pricingSources, proposalHistory, pricing, clock)
             val operations =
@@ -197,6 +198,7 @@ fun fionaApplication(
                         getFinancialDocument,
                         ledger,
                         proposalHistory,
+                        paymentHistories,
                     )::invoke,
                     issueInquiryProposal = IssueInquiryProposal(context.transactor, proposals)::invoke,
                     reviseInquiryQuoteProposal = ReviseInquiryQuoteProposal(context.transactor, proposals)::invoke,
@@ -276,7 +278,7 @@ fun fionaApplication(
                         proposalHistory,
                     )::invoke,
                     listFinancialDocumentPayments =
-                        ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)::invoke,
+                        paymentHistories::invoke,
                     listUnappliedPayments = ledger::unappliedPayments,
                     recordStandalonePayment = RecordPayment(context.transactor, ledger, clock)::invoke,
                     allocatePayment = AllocatePayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,

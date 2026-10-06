@@ -1412,9 +1412,18 @@ no compatibility shim, invented publication, or backfill.
 
 - `ReadStaffRequest` is a derived, read-only application projection in `staff`, not a new
   aggregate or persisted workspace. `GET /staff/requests/{inquiryId}` (`readStaffRequest`)
-  returns inquiry, financial, suggestedDepositTerms, optional proposal and depositRequirement through shared
+  returns inquiry, financial, suggestedDepositTerms, optional proposal, depositRequirement and
+  required `payments` (empty array when none) through shared
   HTTP mappings. One unlocked REPEATABLE READ transaction composes the transaction-taking
-  cores of `GetInquiry` and `GetFinancialDocument`. The lifecycle's explicit INITIAL_ESTIMATE
+  cores of `GetInquiry`, `GetFinancialDocument` and `ListFinancialDocumentPaymentHistories`.
+  Payment histories use the same runtime capability and `PaymentHistoryResponse` mapping as
+  the standalone document history route: whole payments, including other-lineage allocations,
+  refund facts and fully unwound historical allocations, in runtime order with derived reconciliation.
+  Accepted deposit allocations remain on the published Quote after Invoice promotion; later
+  Invoice receipts appear separately. Unbooked canonical histories with allocations, or booked
+  histories missing their unique exact accepted Quote receipt, fail internally. Refunds may
+  reduce satisfaction after booking without invalidating the immutable receipt or lifecycle.
+  The lifecycle's explicit INITIAL_ESTIMATE
   relationship selects the canonical lineage; RELATED lineages never participate. Financial
   ownership and lifecycle document identity must agree. Unknown inquiries are 404; missing
   canonical/customer data or disagreement fails internally, never as nullable financial state.
@@ -1849,7 +1858,11 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
 - Keep `StaffRequestSpec` and `StaffRequestRoutesSpec`: canonical-only detail, customer/event
   intent, Quote evolution, integrity errors, shared transaction identity and paused-snapshot
   coherence during concurrent Quote/payment commits, nested response parity, USER/SERVICE
-  permission intersection, safe GET Origin behavior, and no-store. OpenAPI must describe the
+  permission intersection, safe GET Origin behavior, and no-store. Include a paused published
+  Quote read while exact acceptance commits before payment-history discovery: the old snapshot
+  remains QUOTED/Quote/unsatisfied/empty and a reload is BOOKED/Invoice/satisfied with the
+  historical Quote allocation. Cover separate excess-money Invoice receipts, whole split histories,
+  refunds and explicit empty payments without requiring payment mutation permission. OpenAPI must describe the
   mounted request route and reuse the existing inquiry and financial schemas.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
 - Node.js 20 or newer must be on PATH for `ReplaceCatalogSpec`, which runs the actual
