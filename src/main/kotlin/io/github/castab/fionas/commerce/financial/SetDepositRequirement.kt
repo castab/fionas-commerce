@@ -8,12 +8,13 @@ import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
-/** Standalone approval for RELATED lineages and canonical Invoices; canonical Quotes require proposal reissuance. */
+/** Standalone approval rejects canonical lineages with proposal history; booked acceptance deposits remain immutable. */
 class SetDepositRequirement(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
     pricingSources: FinancialDocumentPricingRepository,
+    proposals: InquiryProposalRepository,
 ) {
     data class Command(
         val documentId: UUID,
@@ -23,11 +24,12 @@ class SetDepositRequirement(
     )
 
     private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val proposalDeposits = CanonicalProposalDepositPolicy(associations, proposals)
 
     operator fun invoke(command: Command): FinancialLineageView =
         transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, command.documentId, command.expectedDocumentVersion)
-            documents.rejectCanonicalQuoteMutation(transaction, current)
+            proposalDeposits.rejectStandaloneMutation(transaction, current.inquiryId, command.documentId)
             documents.approveDeposit(transaction, current.document, command.terms, command.expectedRequirementRevision)
             ledger.financialLineages(transaction, listOf(command.documentId)).single()
         }

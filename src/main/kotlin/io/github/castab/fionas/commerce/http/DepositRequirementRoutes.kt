@@ -334,7 +334,7 @@ fun setDepositRequirementRoute(
         operationId = "setFinancialDocumentDepositRequirement"
         summary = "Approve, replace, or reactivate deposit terms"
         description =
-            "Requires commerce.deposit-requirement.manage. Only the exact latest Quote/Invoice is eligible. Canonical Quotes reject standalone mutations with illegal_transition; use atomic staff proposal deposit-revisions. RELATED lineages and canonical Invoices remain eligible. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen."
+            "Requires commerce.deposit-requirement.manage. The exact latest Quote/Invoice must match the expected version. Canonical lineages with proposal history reject standalone approval, replacement or reactivation with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain standalone behavior. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen."
         tags += depositTag
         receiving(setDepositBody to SetDepositRequirementRequest(2, null, exampleTerms))
         returning(Status.OK, currentDepositBody to exampleActive)
@@ -369,7 +369,7 @@ fun withdrawDepositRequirementRoute(
         operationId = "withdrawFinancialDocumentDepositRequirement"
         summary = "Withdraw approved deposit terms"
         description =
-            "Requires commerce.deposit-requirement.manage. Appends WITHDRAWN from an exact active requirement revision, even after document stage/version changes. Canonical Quotes reject withdrawal with illegal_transition because no cancellation workflow exists. RELATED lineages and canonical Invoices retain withdrawal. History is retained."
+            "Requires commerce.deposit-requirement.manage. Appends WITHDRAWN from an exact active requirement revision. Canonical lineages with proposal history reject standalone withdrawal with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain withdrawal after document stage/version changes. History is retained."
         tags += depositTag
         receiving(withdrawDepositBody to WithdrawDepositRequirementRequest(1))
         returning(Status.OK, currentDepositBody to exampleWithdrawn)

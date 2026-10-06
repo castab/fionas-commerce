@@ -3,6 +3,11 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.fionas.commerce.financial.InquiryProposalId
+import io.github.castab.fionas.commerce.financial.IsCurrentPayableInquiryProposal
+import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
+import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
@@ -96,6 +101,20 @@ class InquiryProposalRoutesSpec :
         test("canonical bypasses reject while Estimate and booked Invoice change orders and RELATED paths remain supported") {
             val id = app.createInquiry()
             val document = app.initialEstimateOf(id)
+            val requested = app.adminGet("/staff/requests/$id").bodyString()
+            app
+                .adminRequest(
+                    Method.PUT,
+                    "/financial-documents/$document/deposit-requirement",
+                    """{"expectedDocumentVersion":1,"terms":{"type":"FIXED","amount":"50.00","currency":"USD"}}""",
+                ).status shouldBe Status.UNPROCESSABLE_ENTITY
+            app
+                .adminRequest(
+                    Method.DELETE,
+                    "/financial-documents/$document/deposit-requirement",
+                    """{"expectedRequirementRevision":1}""",
+                ).status shouldBe Status.NOT_FOUND
+            app.adminGet("/staff/requests/$id").bodyString() shouldBe requested
             app.adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""").status shouldBe Status.CONFLICT
             app
                 .adminPost(
@@ -162,6 +181,83 @@ class InquiryProposalRoutesSpec :
                     """{"expectedRequirementRevision":1}""",
                 ).status shouldBe
                 Status.OK
+            app.adminPost("/financial-documents/$relatedId/invoice", """{"expectedVersion":3}""").status shouldBe Status.OK
+            app
+                .adminRequest(
+                    Method.PUT,
+                    "/financial-documents/$relatedId/deposit-requirement",
+                    """{"expectedDocumentVersion":4,"expectedRequirementRevision":2,"terms":{"type":"FIXED","amount":"125.00","currency":"USD"}}""",
+                ).status shouldBe Status.OK
+            app
+                .adminRequest(
+                    Method.PUT,
+                    "/financial-documents/$relatedId/deposit-requirement",
+                    """{"expectedDocumentVersion":4,"expectedRequirementRevision":3,"terms":{"type":"FIXED","amount":"150.00","currency":"USD"}}""",
+                ).status shouldBe Status.OK
+            app
+                .adminRequest(
+                    Method.DELETE,
+                    "/financial-documents/$relatedId/deposit-requirement",
+                    """{"expectedRequirementRevision":4}""",
+                ).status shouldBe Status.OK
+        }
+        listOf(Method.PUT, Method.DELETE).forEach { method ->
+            test("booked canonical $method deposit mutation rejects without changing acceptance or staff projection") {
+                val id = app.createInquiry()
+                val accepted = response(issue(id).bodyString())
+                val document = UUID.fromString(accepted.proposal.documentId)
+                val amount = (accepted.depositRequirement as CurrentDepositRequirementResponse.Active).requiredAmount.amount
+                app
+                    .adminPost(
+                        "/financial-documents/$document/payments",
+                        """{"documentVersion":2,"amount":"$amount","method":"CHECK"}""",
+                    ).status shouldBe Status.CREATED
+
+                fun read() = CommerceJson.asA(app.adminGet("/staff/requests/$id").bodyString(), StaffRequestResponse.serializer())
+                val booked = read()
+                booked.inquiry.lifecycle.stage shouldBe InquiryStageResponse.BOOKED
+                booked.financial.stage shouldBe "INVOICE"
+                booked.proposal shouldBe accepted.proposal
+                val deposit = booked.depositRequirement as CurrentDepositRequirementResponse.Active
+                deposit.revision shouldBe accepted.proposal.depositRequirementRevision
+                deposit.approvalDocumentVersion shouldBe accepted.proposal.documentVersion
+                val deposits =
+                    app.context.financialLedger
+                        .depositRequirementHistory(document)
+                        .map { it.requirement to it.createdAt }
+                val snapshots = app.context.financialLedger.history(document)
+                val proposals = JdbiInquiryProposalRepository()
+                val inquiry = InquiryId(UUID.fromString(id))
+                val publications = app.transactor.inTransaction { proposals.history(it, inquiry) }
+                val body =
+                    if (method == Method.PUT) {
+                        """{"expectedDocumentVersion":3,"expectedRequirementRevision":1,"terms":{"type":"FIXED","amount":"50.00","currency":"USD"}}"""
+                    } else {
+                        """{"expectedRequirementRevision":1}"""
+                    }
+                val rejected = app.adminRequest(method, "/financial-documents/$document/deposit-requirement", body)
+                rejected.status shouldBe Status.CONFLICT
+                Json
+                    .parseToJsonElement(rejected.bodyString())
+                    .jsonObject
+                    .getValue("code")
+                    .jsonPrimitive.content shouldBe
+                    "illegal_transition"
+                app.context.financialLedger
+                    .depositRequirementHistory(document)
+                    .map { it.requirement to it.createdAt } shouldBe deposits
+                app.context.financialLedger.history(document) shouldBe snapshots
+                app.transactor.inTransaction { proposals.history(it, inquiry) } shouldBe publications
+                read() shouldBe booked
+                IsCurrentPayableInquiryProposal(
+                    app.transactor,
+                    app.context.financialLedger,
+                    JdbiInquiryFinancialDocumentRepository(),
+                    proposals,
+                )(
+                    InquiryProposalId(UUID.fromString(accepted.proposal.id)),
+                ) shouldBe false
+            }
         }
         test("all mutations require the permission intersection for USER and SERVICE, trusted cookie Origin and authenticated provenance") {
             val id = app.createInquiry()

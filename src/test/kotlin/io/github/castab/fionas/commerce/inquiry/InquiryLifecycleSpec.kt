@@ -20,6 +20,7 @@ import io.github.castab.fionas.commerce.financial.IssueInvoice
 import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
@@ -231,7 +232,7 @@ class InquiryLifecycleSpec :
                 app.issueProposal(inquiry, "100")
                 pay(id, "75")
                 shouldThrow<CommerceFailure.IllegalTransition> {
-                    SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing)(
+                    SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing, JdbiInquiryProposalRepository())(
                         SetDepositRequirement.Command(
                             id,
                             Version.of(2),
@@ -255,7 +256,7 @@ class InquiryLifecycleSpec :
             pay(related.id, "50")
                 .document.latest.document
                 .shouldBeInstanceOf<FinancialDocument.Quote>()
-            SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing)(
+            SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing, JdbiInquiryProposalRepository())(
                 SetDepositRequirement.Command(related.id, Version.INITIAL, null, DepositTerms.Fixed(money("50"))),
             ).latestVersion.document.shouldBeInstanceOf<FinancialDocument.Quote>()
             pay(related.id, "1")

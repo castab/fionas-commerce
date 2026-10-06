@@ -93,7 +93,14 @@ class DepositRequirementOperationsSpec :
                         return owners.lockInquiryOf(transaction, documentId)
                     }
                 }
-            val result = SetDepositRequirement(app.transactor, app.context.financialLedger, observing, pricing)(command(id))
+            val result =
+                SetDepositRequirement(
+                    app.transactor,
+                    app.context.financialLedger,
+                    observing,
+                    pricing,
+                    JdbiInquiryProposalRepository(),
+                )(command(id))
             ownershipCalls shouldBe 1
             sql.first().contains("fionas.inquiry_financial_documents") shouldBe true
             sql.any { it.contains("commerce.financial_document_snapshots") && it.contains("LIMIT 1") } shouldBe true
@@ -215,7 +222,13 @@ class DepositRequirementOperationsSpec :
                 paused.await(30, TimeUnit.SECONDS) shouldBe true
                 CompletableFuture
                     .supplyAsync {
-                        SetDepositRequirement(app.transactor, app.context.financialLedger, owners, pricing)(command(id))
+                        SetDepositRequirement(
+                            app.transactor,
+                            app.context.financialLedger,
+                            owners,
+                            pricing,
+                            JdbiInquiryProposalRepository(),
+                        )(command(id))
                     }.get(10, TimeUnit.SECONDS)
                     .depositRequirement!!
                     .requirement.revision shouldBe DepositRequirementRevision.INITIAL
@@ -287,6 +300,7 @@ class DepositRequirementOperationsSpec :
                                 app.context.financialLedger,
                                 observing,
                                 pricing,
+                                JdbiInquiryProposalRepository(),
                             )(command(id))
                         }.exceptionOrNull()
                     }.get(5, TimeUnit.SECONDS)
@@ -323,6 +337,7 @@ class DepositRequirementOperationsSpec :
                 app.transactor,
                 app.context.financialLedger,
                 observing,
+                JdbiInquiryProposalRepository(),
             )(WithdrawDepositRequirement.Command(id, DepositRequirementRevision.INITIAL)).requirement.revision.number shouldBe
                 2
             locked shouldBe true

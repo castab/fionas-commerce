@@ -42,6 +42,11 @@ timestamp and USER/SERVICE principal provenance. A composite FK references Fiona
 The exact pair and one INITIAL issuance per inquiry are unique. Identity ordering determines
 history/latest under the association lock, independently of timestamps.
 
+`recorded_order` is useful for deterministic history within an inquiry. Identity allocation
+does not establish global commit order across concurrent inquiries. A future dispatcher must
+not assume every event below a high-water mark has committed and been safely observed;
+explicit delivery/claim semantics or another durable dispatch design are required.
+
 The row is the durable business event for a future listener. Publication does not record
 communication delivery. No after-commit publisher, dispatcher or mutable superseded flag exists.
 
@@ -50,6 +55,10 @@ current only when it is the latest issuance and its exact Quote reference and ac
 approval/revision match authoritative facts. Any reissue supersedes all previous ids. Invoice
 booking makes all proposal targets non-payable while preserving their historical identities.
 This is a backend seam; proposal UUIDs are business identities rather than bearer credentials.
+
+This query is not a payment acceptance transaction. A future customer payment flow must
+lock/revalidate exact proposal currentness and record/allocate payment in the same atomic
+transaction. Querying first and recording money separately would race proposal reissuance.
 
 ## HTTP and staff reads
 
@@ -76,10 +85,17 @@ context. OpenAPI schemas and route descriptions describe the new workflow and ex
 
 Standalone canonical Quote issuance, Quote change orders, deposit activation/replacement and
 withdrawal now reject. Manual canonical Invoice issuance remains forbidden. Canonical Estimate
-change orders, booked Invoice operations and RELATED standalone Quote/deposit/change-order
-behavior remain supported.
+change orders, booked Invoice change orders and RELATED standalone Quote/deposit/change-order
+behavior remain supported. Standalone canonical deposit mutation is forbidden once proposal
+history exists, including after Invoice/BOOKED. `CanonicalProposalDepositPolicy` checks
+canonical association and `InquiryProposalRepository.latest` under the caller's association
+lock in the same transaction. Before publication, Estimate deposit eligibility remains shared
+validation; unpaid Quote deposits change only through atomic proposal reissuance. After booking,
+the accepted deposit requirement/history is immutable, including across later Invoice versions.
+Staff reads validate that the active approval reference/revision still matches the historical
+accepted Quote/deposit pair; they never equate that Quote version with the Invoice version.
 
-## Validation
+## Initial validation
 
 - `./gradlew.bat ktlintFormat --console=plain`: passed (4 seconds).
 - `./gradlew.bat ktlintCheck test build --console=plain`: passed (5 minutes 26 seconds).
@@ -102,7 +118,7 @@ behavior remain supported.
 Validation evidence is retained under the ignored `build/proposal-validation/` directory:
 `final.log`, `full-suite-summary.json` and `artifact-summary.json`.
 
-## Changed files
+## Initial implementation files
 
 The 44 changed files include production, migrations, contracts, regression fixtures and documentation.
 
@@ -150,3 +166,78 @@ The 44 changed files include production, migrations, contracts, regression fixtu
 - `src/test/kotlin/io/github/castab/fionas/commerce/staff/DashboardAttentionSpec.kt`
 - `src/test/kotlin/io/github/castab/fionas/commerce/staff/StaffRequestSpec.kt`
 - `src/test/kotlin/io/github/castab/fionas/commerce/testing/Proposals.kt`
+
+## PR #16 corrective pass: immutable accepted deposits
+
+Verified remote base `d6949325e17b762644c45c2cd9526c372f62274a` and reviewed PR head
+`3a9567342589b1a5add9e17fd897bead1b6a881e` before this pass; the working branch matched
+and needed no rebase. No new migration, dependency, permission or shared-runtime gap is involved.
+
+`CanonicalProposalDepositPolicy` detects canonical published lineages with the existing
+association and `InquiryProposalRepository.latest`. Set and Withdraw hold the association
+row lock first, then perform that history check inside their existing mutation transaction.
+They reject with `CommerceFailure.IllegalTransition` independently of financial stage.
+No stored publication flag or second transaction is introduced.
+
+| Lineage state | Standalone Set/Withdraw behavior |
+| --- | --- |
+| Canonical Estimate before publication | Shared Estimate validation remains; no deposit/proposal flow is added. |
+| Canonical published unpaid Quote | Reject; use atomic proposal reissuance. |
+| Canonical Invoice/BOOKED or later fulfillment | Reject; accepted deposit history is immutable. |
+| RELATED Quote/Invoice | Preserve approval, replacement, reactivation and withdrawal. |
+
+Booked Invoice change orders, pre-publication Estimate change orders, payments, allocations,
+refunds and the manual canonical Invoice-transition restriction retain their existing behavior.
+Booked staff reads retain the historical Quote identity and validate its exact active deposit
+approval/revision across later Invoice versions. Those proposal targets remain non-payable.
+
+New operation coverage rejects approval/reactivation and withdrawal on canonical Invoice v4
+and v5, verifies the history reads share the locked READ COMMITTED transaction, and proves
+financial/deposit/publication history and staff responses remain unchanged. New HTTP PUT and
+DELETE regressions verify `409 illegal_transition`, BOOKED/INVOICE projection, historical
+accepted identity and false current-payable evaluation. RELATED Invoice reactivation,
+replacement and withdrawal remain covered alongside canonical Invoice change orders.
+Corrupt booked acceptance changed through direct runtime test calls fails internally.
+
+The future payment acceptance transaction and the limits of sequence dispatch ordering are
+documented above; no payment-link or dispatcher implementation is added. No deviation from
+the corrective directions.
+
+### Corrective validation
+
+- `./gradlew.bat ktlintFormat --console=plain` passed.
+- `./gradlew.bat ktlintCheck test build --console=plain` passed in 5m 36s:
+  560 tests across 53 suites, zero failures, errors or skips.
+- Fresh PostgreSQL migration/schema validation passed, including all 6 migration lifecycle
+  and 20 database schema cases. No corrective migration was needed.
+- All 15 proposal operation tests and 7 proposal route tests passed, including existing
+  contention/rollback cases and the new booked deposit immutability regressions. Preserved
+  Invoice change orders, RELATED mutations, payment booking and refund guards passed.
+- OpenAPI generation and all 57 OpenAPI contract tests passed. Inspected generated PUT/DELETE
+  deposit descriptions for proposal-history detection, Invoice/BOOKED rejection, immutable
+  accepted deposits and RELATED behavior; all three proposal paths remain present.
+- Inspected the deployable JAR for the new policy, Set/Withdraw operations and V14 migration.
+  Packaged V14 SHA-256 matches source:
+  `4692ef60c8f69801630730288294aedeafca9251faad20cd51b3acc6299ff546`.
+- `git diff --check` passed. Rechecked remote base/head before publication: unchanged from
+  the verified hashes above, so no rebase was necessary.
+
+### Corrective changed files
+
+- `AGENTS.md`
+- `ARCHITECTURE.md`
+- `README.md`
+- `docs/atomic-proposal-issuance-implementation.md`
+- `src/main/kotlin/io/github/castab/fionas/commerce/FionaApplication.kt`
+- `src/main/kotlin/io/github/castab/fionas/commerce/financial/CanonicalProposalDepositPolicy.kt`
+- `src/main/kotlin/io/github/castab/fionas/commerce/financial/InquiryProposal.kt`
+- `src/main/kotlin/io/github/castab/fionas/commerce/financial/IsCurrentPayableInquiryProposal.kt`
+- `src/main/kotlin/io/github/castab/fionas/commerce/financial/SetDepositRequirement.kt`
+- `src/main/kotlin/io/github/castab/fionas/commerce/financial/WithdrawDepositRequirement.kt`
+- `src/main/kotlin/io/github/castab/fionas/commerce/http/DepositRequirementRoutes.kt`
+- `src/test/kotlin/io/github/castab/fionas/commerce/ArchitectureSpec.kt`
+- `src/test/kotlin/io/github/castab/fionas/commerce/financial/DepositRequirementOperationsSpec.kt`
+- `src/test/kotlin/io/github/castab/fionas/commerce/financial/InquiryProposalsSpec.kt`
+- `src/test/kotlin/io/github/castab/fionas/commerce/http/InquiryProposalRoutesSpec.kt`
+- `src/test/kotlin/io/github/castab/fionas/commerce/http/OpenApiDocumentSpec.kt`
+- `src/test/kotlin/io/github/castab/fionas/commerce/inquiry/InquiryLifecycleSpec.kt`

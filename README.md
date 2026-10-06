@@ -194,14 +194,17 @@ union. For example:
 }
 ```
 
-The exact latest RELATED Quote or any Invoice must match the expected version; canonical
-Quotes reject standalone deposit mutation with `409 illegal_transition`. Estimates reject activation
+The exact latest Quote/Invoice must match the expected version. Canonical lineages with
+published proposal history reject standalone approval, replacement, reactivation and withdrawal
+with `409 illegal_transition`, including Invoice/BOOKED. RELATED Quote/Invoice behavior remains
+unchanged. Estimates reject activation
 with `422 invariant_violated`. Null (or absent) requirement revision expects no history at all,
 including no withdrawal history. A non-null revision must equal the latest requirement revision;
 it is never a don't-care token. Replacement and reactivation use this same PUT.
 Ownership/document checks, activation and returned financial-lineage projection share one
-READ COMMITTED transaction under the association lock. Canonical Quote deposit changes use
-the atomic staff proposal workflow before payment.
+READ COMMITTED transaction under the association lock. Canonical published-lineage detection
+reads proposal history in that same transaction. Unpaid Quote deposit changes use atomic
+proposal reissuance; after booking the accepted requirement/history is immutable.
 
 Terms accept exactly `FIXED` amount/currency or `PERCENTAGE` percentage, for example
 `{"type":"PERCENTAGE","percentage":"25.125"}`. Unknown discriminators and mixed/missing fields
@@ -221,7 +224,7 @@ History returns only `ACTIVE`/`WITHDRAWN`, oldest first, preserving timestamps, 
 original terms and frozen amounts. It has no historical satisfaction or synthetic `NONE` entry.
 
 DELETE takes only `{"expectedRequirementRevision":2}`. It intentionally has no expected document
-version; canonical Quotes reject it because no cancellation workflow exists. Other lineages
+version; canonical lineages with proposal history reject it even after booking. RELATED lineages
 remain eligible after document stage/version changes. It appends history without
 copying prior terms. Missing history is `404`; stale tokens and runtime contention are
 `409 conflict`; already withdrawn is the existing `409 illegal_transition`. Other invalid
@@ -1040,6 +1043,11 @@ ordering follows the association lock, independent of Clock timestamps. Re-sendi
 is a future communication action, not another proposal. No amounts, terms, totals, stages,
 mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
 
+`recorded_order` orders proposal history within an inquiry. Sequence allocation does not
+prove global commit order across concurrent inquiries. A future dispatcher must not treat
+a high-water mark as proof every lower event committed and was observed; it needs explicit
+delivery/claim semantics or another appropriate durable dispatch design.
+
 `IssueInquiryProposal`, `ReviseInquiryQuoteProposal`, and `ReviseInquiryProposalDeposit`
 own one READ COMMITTED transaction each. `InquiryProposals` composes transaction-taking
 financial helpers and runtime ledger calls under the existing association row lock, acquired
@@ -1059,6 +1067,11 @@ reissue supersedes all earlier ids; Invoice makes all publication targets non-pa
 Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
 contact collection, cancellation, or post-payment adjustment workflow is introduced.
 
+`IsCurrentPayableInquiryProposal` is only a read/query seam. Future customer payment
+acceptance must lock/revalidate the exact proposal currentness and record/allocate money
+in one atomic transaction. A query followed by a separate payment transaction would race
+proposal reissuance.
+
 The durable proposal row is the business event for future at-least-once integrations.
 It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
 Actual delivery alone may append communication activity. A future generic durable dispatch
@@ -1071,13 +1084,19 @@ child (`reviseInquiryQuoteProposal`) and `/deposit-revisions` child
 USER/SERVICE AccessControl and unsafe-cookie Origin policy; no new permission/bootstrap grant.
 Responses are 200 with `{proposal, financial, depositRequirement}` and no-store.
 
-Standalone canonical Quote issuance, Quote change orders, deposit set/replace and withdrawal
-reject with illegal_transition. Canonical Estimate change orders, booked Invoice mutations,
-and RELATED behavior remain supported; manual canonical Invoice issuance remains forbidden.
+Standalone canonical Quote issuance and Quote change orders reject with illegal_transition.
+Standalone deposit set/replace/reactivate/withdraw also reject whenever the lineage is
+canonical and proposal history exists, regardless of current financial stage. Both check
+`InquiryProposalRepository.latest` in the caller's transaction after locking the association.
+Unpaid Quote deposit changes use atomic proposal reissuance. After Invoice/BOOKED, the
+accepted deposit requirement/history is immutable. Canonical Estimate and booked Invoice
+change orders and RELATED deposit behavior remain supported; manual canonical Invoice
+issuance remains forbidden.
 `GET /staff/requests/{inquiryId}` keeps one unlocked REPEATABLE READ and its existing read
 permissions, adding `suggestedDepositTerms`, optional latest `proposal`, and authoritative
 `depositRequirement`. Missing/mismatched published Quote pairs fail internally. After booking,
-the latest proposal is historical Quote/deposit context. Pre-slice development Quotes receive
+the latest proposal is historical Quote/deposit context and its approval/revision must still
+match the immutable accepted deposit. Pre-slice development Quotes receive
 no compatibility shim, invented publication, or backfill.
 
 ## Financial documents and payments
@@ -2170,8 +2189,8 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; three overlapping attention queues and exact onset/UUID ordering; durable-order clearing/provenance with both PostgreSQL contention directions; SQL/pure projection parity and 1,800-row reduction; EXACT/FROM qualifiers; stale-quote boundaries, explicit application event-zone/DST boundaries and invalid configuration, exact balance signs/scales; ten set-based SQL reads for one/many inquiries; concurrent financial/enrichment/communication snapshot coherence; integrity failures; live USER/SERVICE permissions and acknowledgement; final reason/schema shape and no-store |
 | `InquiryLifecycleRoutesSpec` | Detail and explicit actions through the full handler; USER/SERVICE provenance, live manage permission, authentication, Origin policy, malformed/missing inquiries, repeated transitions and no arbitrary PATCH |
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after proposal issuance, RELATED exclusion, strict integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, shared nested DTO contracts, both live USER/SERVICE read permissions, no-store and reviewed document input |
-| `InquiryProposalsSpec` | Exact immutable pairs and frozen terms; Quote/deposit-only revisions; gross-allocation guard after refunds; rollback at late financial/publication writes; observed PostgreSQL association contention; ordered history and USER/SERVICE provenance; currentness and unlocked repeatable snapshots |
-| `InquiryProposalRoutesSpec` | Initial/default staff projection, both revision paths and booking; canonical bypass prevention with Estimate/Invoice/RELATED behavior retained; live USER/SERVICE permission intersection, trusted Origin, malformed/stale/no-op mappings and corrupt-pair internal failures |
+| `InquiryProposalsSpec` | Exact immutable pairs and frozen terms; Quote/deposit-only revisions; gross-allocation guard after refunds; rollback at late financial/publication writes; observed PostgreSQL association contention; ordered history and USER/SERVICE provenance; currentness and unlocked repeatable snapshots; immutable booked acceptance across Invoice change orders and corruption detection |
+| `InquiryProposalRoutesSpec` | Initial/default staff projection, both revision paths and booking; canonical deposit mutation rejected before/after booking with unchanged history/projection; pre-publication Estimate validation, booked Invoice change orders and RELATED Invoice deposit behavior preserved; live USER/SERVICE permission intersection, trusted Origin, malformed/stale/no-op mappings and corrupt-pair internal failures |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
 | `InquiryIdempotencyRoutesSpec` | Full-handler replay with exact receipts, no second inquiry/Estimate/association; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |

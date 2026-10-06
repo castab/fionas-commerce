@@ -73,5 +73,13 @@ internal fun requireCoherentProposal(
         check(proposal.isCurrentPayable(proposal, view)) { "Canonical Quote and proposal deposit identities disagree" }
     } else {
         check(proposal.documentReference.version.number < document.version.number) { "Invoice must follow its issued Quote" }
+        val accepted = view.depositRequirement?.requirement as? DepositRequirement.Active
+        check(
+            accepted != null &&
+                accepted.approvalReference == proposal.documentReference &&
+                accepted.revision == proposal.depositRequirementRevision,
+        ) {
+            "Booked lineage and accepted proposal deposit identities disagree"
+        }
     }
 }

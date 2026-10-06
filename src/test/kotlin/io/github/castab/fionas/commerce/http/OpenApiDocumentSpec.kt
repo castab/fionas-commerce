@@ -1232,6 +1232,15 @@ class OpenApiDocumentSpec :
                     if (method == "get") "commerce.financial-document.read" else "commerce.deposit-requirement.manage"
             }
             operation("/financial-documents/query", "post").text("description") shouldContain "preserved request order"
+            listOf("put", "delete").forEach { method ->
+                val description = operation("/financial-documents/{documentId}/deposit-requirement", method).text("description")
+                description shouldContain "Canonical lineages with proposal history"
+                description shouldContain "Invoice/BOOKED"
+                description shouldContain "accepted deposit history is immutable"
+                description shouldContain "RELATED lineages retain"
+                description shouldNotContain "canonical Invoices remain eligible"
+                description shouldNotContain "canonical Invoices retain withdrawal"
+            }
         }
 
         test("inquiry form inputs have an explicit type union with distinct required discriminator values") {

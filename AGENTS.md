@@ -1313,6 +1313,11 @@ ordering follows the association lock, independent of Clock timestamps. Re-sendi
 is a future communication action, not another proposal. No amounts, terms, totals, stages,
 mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
 
+`recorded_order` orders proposal history within an inquiry. Sequence allocation does not
+prove global commit order across concurrent inquiries. A future dispatcher must not treat
+a high-water mark as proof every lower event committed and was observed; it needs explicit
+delivery/claim semantics or another appropriate durable dispatch design.
+
 `IssueInquiryProposal`, `ReviseInquiryQuoteProposal`, and `ReviseInquiryProposalDeposit`
 own one READ COMMITTED transaction each. `InquiryProposals` composes transaction-taking
 financial helpers and runtime ledger calls under the existing association row lock, acquired
@@ -1332,6 +1337,11 @@ reissue supersedes all earlier ids; Invoice makes all publication targets non-pa
 Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
 contact collection, cancellation, or post-payment adjustment workflow is introduced.
 
+`IsCurrentPayableInquiryProposal` is only a read/query seam. Future customer payment
+acceptance must lock/revalidate the exact proposal currentness and record/allocate money
+in one atomic transaction. A query followed by a separate payment transaction would race
+proposal reissuance.
+
 The durable proposal row is the business event for future at-least-once integrations.
 It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
 Actual delivery alone may append communication activity. A future generic durable dispatch
@@ -1344,13 +1354,19 @@ child (`reviseInquiryQuoteProposal`) and `/deposit-revisions` child
 USER/SERVICE AccessControl and unsafe-cookie Origin policy; no new permission/bootstrap grant.
 Responses are 200 with `{proposal, financial, depositRequirement}` and no-store.
 
-Standalone canonical Quote issuance, Quote change orders, deposit set/replace and withdrawal
-reject with illegal_transition. Canonical Estimate change orders, booked Invoice mutations,
-and RELATED behavior remain supported; manual canonical Invoice issuance remains forbidden.
+Standalone canonical Quote issuance and Quote change orders reject with illegal_transition.
+Standalone deposit set/replace/reactivate/withdraw also reject whenever the lineage is
+canonical and proposal history exists, regardless of current financial stage. Both check
+`InquiryProposalRepository.latest` in the caller's transaction after locking the association.
+Unpaid Quote deposit changes use atomic proposal reissuance. After Invoice/BOOKED, the
+accepted deposit requirement/history is immutable. Canonical Estimate and booked Invoice
+change orders and RELATED deposit behavior remain supported; manual canonical Invoice
+issuance remains forbidden.
 `GET /staff/requests/{inquiryId}` keeps one unlocked REPEATABLE READ and its existing read
 permissions, adding `suggestedDepositTerms`, optional latest `proposal`, and authoritative
 `depositRequirement`. Missing/mismatched published Quote pairs fail internally. After booking,
-the latest proposal is historical Quote/deposit context. Pre-slice development Quotes receive
+the latest proposal is historical Quote/deposit context and its approval/revision must still
+match the immutable accepted deposit. Pre-slice development Quotes receive
 no compatibility shim, invented publication, or backfill.
 
 ## Deposit requirements and bulk financial lineages
@@ -1482,7 +1498,9 @@ event dates remain LocalDate. Event calendar interpretation never derives from `
 - PUT `/financial-documents/{documentId}/deposit-requirement` approves, replaces or
   reactivates with `DepositRequirementManage`, never document-create. One transaction uses
   `FionaFinancialDocuments.expectLatest` to lock ownership and check expectedDocumentVersion,
-  rejects canonical Quotes, applies shared Quote/Invoice payment eligibility, and calls transaction-taking
+  rejects canonical lineages with proposal history through `CanonicalProposalDepositPolicy`
+  and `InquiryProposalRepository.latest` in that same transaction, including Invoice/BOOKED,
+  applies shared Quote/Invoice payment eligibility for remaining lineages, and calls transaction-taking
   `activateDepositRequirement`. Null/absent expectedRequirementRevision expects no history;
   otherwise it must name the exact latest revision. Never reinterpret null as don't-care.
 - Terms are a strict `type` union: FIXED has exact decimal amount and explicit ISO currency;
@@ -1491,7 +1509,8 @@ event dates remain LocalDate. Event calendar interpretation never derives from `
   and positive resolved amount. No Double, percentage rounding, defaults, conversion or
   clamping. Original terms and frozen amounts survive later document changes.
 - DELETE at that path takes only expectedRequirementRevision, locks ownership and calls
-  transaction-taking withdrawal, rejecting canonical Quotes, with no document-version check for other lineages. Return the new
+  transaction-taking withdrawal, rejecting canonical lineages with proposal history under
+  the same association lock regardless of stage, with no document-version check for other lineages. Return the new
   WITHDRAWN revision (`200`); never delete history or copy prior terms. Missing history is
   `404`, stale tokens/runtime NOWAIT conflicts are `409 conflict`, already withdrawn is
   the existing `409 illegal_transition`, and invalid values/Estimate approval are `422`.

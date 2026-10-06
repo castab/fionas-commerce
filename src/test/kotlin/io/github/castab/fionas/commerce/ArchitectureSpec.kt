@@ -146,8 +146,11 @@ class ArchitectureSpec :
             // Approval and its multi-query response must not gain an inner transaction or a second projection.
             val approval = File(mainSources, "financial/SetDepositRequirement.kt").codeWithoutComments()
             Regex("inTransaction").findAll(approval).count() shouldBe 1
-            approval.contains("rejectCanonicalQuoteMutation(transaction, current)") shouldBe true
+            approval.contains("proposalDeposits.rejectStandaloneMutation(transaction, current.inquiryId, command.documentId)") shouldBe true
             Regex("bookIfDepositSatisfied").findAll(approval).count() shouldBe 0
+            val withdrawal = File(mainSources, "financial/WithdrawDepositRequirement.kt").codeWithoutComments()
+            Regex("inTransaction").findAll(withdrawal).count() shouldBe 1
+            withdrawal.contains("proposalDeposits.rejectStandaloneMutation(transaction, inquiryId, command.documentId)") shouldBe true
             val operational = File(mainSources, "inquiry/ReadInquiryOperationalStates.kt").codeWithoutComments()
             Regex("inTransaction").findAll(operational).count() shouldBe 1
             operational.contains("inTransaction(TransactionIsolation.REPEATABLE_READ)") shouldBe true

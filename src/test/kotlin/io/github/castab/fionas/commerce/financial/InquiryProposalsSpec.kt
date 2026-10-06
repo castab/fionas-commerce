@@ -356,6 +356,107 @@ class InquiryProposalsSpec :
             persisted(id) shouldBe listOf(a.proposal)
             app.adminGet("/staff/requests/${id.value}").status shouldBe Status.OK
         }
+        test("booked acceptance rejects standalone approval and withdrawal across later Invoice change orders") {
+            val id = newInquiry()
+            issue(id)
+            quote(id)
+            val accepted = deposit(id, 3, 2, fixed("300"))
+            val document = accepted.proposal.documentReference.id
+            RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock)(
+                RecordDocumentPayment.Command(document, Version.of(3), BigDecimal("300"), PaymentMethod.CHECK, null, null),
+            ).document.latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
+
+            var lockedTransaction: Transaction? = null
+            val observingOwners =
+                object : InquiryFinancialDocumentRepository by owners {
+                    override fun lockInquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? = owners.lockInquiryOf(transaction, documentId).also { lockedTransaction = transaction }
+                }
+            var historyReads = 0
+            val observingHistory =
+                object : InquiryProposalRepository by history {
+                    override fun latest(
+                        transaction: Transaction,
+                        inquiryId: InquiryId,
+                    ): InquiryProposal? {
+                        transaction shouldBe lockedTransaction
+                        transaction.handle
+                            .createQuery("SHOW transaction_isolation")
+                            .mapTo(String::class.java)
+                            .one() shouldBe "read committed"
+                        historyReads++
+                        return history.latest(transaction, inquiryId)
+                    }
+                }
+
+            fun forbidden(version: Int) {
+                val staff = app.adminGet("/staff/requests/${id.value}").bodyString()
+                unchanged(id) {
+                    listOf(null, accepted.proposal.depositRequirementRevision).forEach { reviewed ->
+                        shouldThrow<CommerceFailure.IllegalTransition> {
+                            SetDepositRequirement(app.transactor, app.context.financialLedger, observingOwners, sources, observingHistory)(
+                                SetDepositRequirement.Command(document, Version.of(version), reviewed, fixed("50")),
+                            )
+                        }
+                    }
+                    shouldThrow<CommerceFailure.IllegalTransition> {
+                        WithdrawDepositRequirement(app.transactor, app.context.financialLedger, observingOwners, observingHistory)(
+                            WithdrawDepositRequirement.Command(document, accepted.proposal.depositRequirementRevision),
+                        )
+                    }
+                }
+                app.adminGet("/staff/requests/${id.value}").bodyString() shouldBe staff
+                current(accepted.proposal.id) shouldBe false
+            }
+            forbidden(4)
+            val inputs =
+                app.transactor
+                    .inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
+                    .copy(context = FionasOfferingsContext(125, false, Duration.ofMinutes(120)))
+            CreateChangeOrder(
+                app.transactor,
+                app.context.financialLedger,
+                owners,
+                sources,
+                FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), app.context.offeringsSnapshotRepository::retrieveLatestVersion),
+            )(document, Version.of(4), inputs).latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
+            forbidden(5)
+            historyReads shouldBe 6
+            val requirement =
+                app.context.financialLedger
+                    .latestDepositRequirement(document)!!
+                    .requirement as DepositRequirement.Active
+            requirement.approvalReference shouldBe accepted.proposal.documentReference
+            requirement.revision shouldBe accepted.proposal.depositRequirementRevision
+        }
+        test("booked staff reads fail internally if authoritative acceptance is replaced or withdrawn outside Fiona") {
+            listOf(false, true).forEach { withdraw ->
+                val id = newInquiry()
+                val accepted = issue(id)
+                val document = accepted.proposal.documentReference.id
+                val amount = (accepted.deposit.depositRequirement!!.requirement as DepositRequirement.Active).requiredAmount.amount
+                RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock)(
+                    RecordDocumentPayment.Command(document, Version.of(2), amount, PaymentMethod.CHECK, null, null),
+                )
+                app.transactor.inTransaction { transaction ->
+                    if (withdraw) {
+                        app.context.financialLedger.withdrawDepositRequirement(transaction, document, DepositRequirementRevision.INITIAL)
+                    } else {
+                        app.context.financialLedger.activateDepositRequirement(
+                            transaction,
+                            document,
+                            Version.of(3),
+                            fixed("50"),
+                            DepositRequirementRevision.INITIAL,
+                        )
+                    }
+                }
+                app.adminGet("/staff/requests/${id.value}").status shouldBe Status.INTERNAL_SERVER_ERROR
+                shouldThrow<IllegalStateException> { current(accepted.proposal.id) }
+            }
+        }
         test("same-lineage contention observes preceding commit and cannot issue two initial proposals") {
             val id = newInquiry()
             val entered = CountDownLatch(1)

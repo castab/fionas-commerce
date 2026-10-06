@@ -4,7 +4,11 @@ import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 
-/** Future payment-link resolution seam; ids identify business facts, never bearer secrets. */
+/**
+ * Read/query seam; ids identify business facts, never bearer secrets. A future customer payment
+ * must lock/revalidate this exact proposal and record/allocate money in one transaction.
+ * Calling this query then recording money in a separate transaction would race reissuance.
+ */
 class IsCurrentPayableInquiryProposal(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
