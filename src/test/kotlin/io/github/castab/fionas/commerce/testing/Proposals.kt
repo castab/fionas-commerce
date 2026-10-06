@@ -4,6 +4,7 @@ import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.financial.InquiryProposalId
 import io.github.castab.fionas.commerce.financial.InquiryProposals
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
@@ -40,3 +41,11 @@ fun TestApplication.issueProposal(
         UserId(UUID.randomUUID()),
     ),
 )
+
+/** Reviewed fixture identity, obtained before invoking a payment operation. */
+fun TestApplication.proposalId(documentId: UUID): InquiryProposalId? =
+    transactor.inTransaction { transaction ->
+        JdbiInquiryFinancialDocumentRepository().inquiryOf(transaction, documentId)?.let {
+            JdbiInquiryProposalRepository().latest(transaction, it)?.id
+        }
+    }

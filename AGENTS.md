@@ -1228,12 +1228,14 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
 8. **Receipt and allocation are separate immutable facts.** Standalone `RecordPayment`
    records money received through `ledger.recordPayment` with an explicit currency and no
    destination; it may remain unapplied. `AllocatePayment` assigns part or all of an
-   existing payment to an exact, currently latest Quote or Invoice snapshot through
+   existing payment to an exact, currently latest RELATED Quote or any Invoice snapshot through
    `ledger.allocatePayment`. Fiona locks the document lineage and checks its version and
    stage; the runtime locks payment history and enforces existence, currency agreement,
    and allocation limits. Separate allocations can apply one payment to several eligible
    documents. The combined `RecordDocumentPayment` operation remains atomic: it records
-   and allocates the entire payment to one latest Quote or Invoice in one transaction.
+   and allocates the entire payment to one latest Quote or Invoice in one transaction. Canonical
+   published Quotes require the exact current `InquiryProposalId` and one complete deposit
+   payment; standalone allocation cannot fund them (see below).
    Amounts are exact decimals limited by currency minor units. External-reference
    uniqueness is the runtime's conflict policy. Allocations stay attached to their exact
    snapshot, while the latest lineage reconciliation counts them all.
@@ -1279,8 +1281,9 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
     drives REQUESTED (Estimate), QUOTED (Quote), BOOKED (Invoice without served), SERVED
     (Invoice with served, without closed), CLOSED (Invoice with served and closed).
     RELATED lineages never drive it. No separate Booking aggregate or stored status exists.
-    `RecordDocumentPayment` and `AllocatePayment` use the shared
-    transaction-taking `FionaFinancialDocuments.bookIfDepositSatisfied` policy after mutation.
+    `RecordDocumentPayment` validates canonical deposit acceptance before any money write and
+    uses transaction-taking `FionaFinancialDocuments.bookIfDepositSatisfied` after mutation.
+    Standalone `AllocatePayment` rejects canonical Quotes; Invoice/RELATED behavior is unchanged.
     Only an active positive deposit satisfied according to runtime `FinancialLineageView`
     promotes the canonical Quote to Invoice, atomically with that mutation and optional
     legacy metadata copy. Failure rolls everything back. Manual `IssueInvoice` rejects
@@ -1334,8 +1337,9 @@ against the new Quote even if terms remain 20%. Deposit-only revision keeps the 
 version and rejects numerically equivalent same-form terms; changing percentage to fixed
 is meaningful even if the resolved amount is equal. Both require exact reviewed Quote and
 deposit revision tokens. Any historical `grossAllocated > 0` blocks both revisions, even
-when refunds unwind all applied value. Deposit satisfaction by existing payment/allocation
-operations still atomically promotes Quote -> Invoice/BOOKED; refunds never demote it.
+when refunds unwind all applied value. Deposit satisfaction by the exact payment
+operation atomically promotes Quote -> Invoice/BOOKED only after one exact canonical
+deposit receipt; refunds never demote it.
 
 Every publication is the exact `(documentId, documentVersion, depositRequirementRevision)`.
 `IsCurrentPayableInquiryProposal` reads one REPEATABLE READ snapshot: only the latest
@@ -1344,10 +1348,38 @@ reissue supersedes all earlier ids; Invoice makes all publication targets non-pa
 Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
 contact collection, cancellation, or post-payment adjustment workflow is introduced.
 
-`IsCurrentPayableInquiryProposal` is only a read/query seam. Future customer payment
-acceptance must lock/revalidate the exact proposal currentness and record/allocate money
-in one atomic transaction. A query followed by a separate payment transaction would race
-proposal reissuance.
+`IsCurrentPayableInquiryProposal` remains only a read/query seam. Canonical payment
+acceptance uses `CanonicalInquiryDepositPaymentPolicy` inside `RecordDocumentPayment`'s
+existing READ COMMITTED transaction after `expectLatest` locks the association. It reads
+runtime `FinancialLineageView` and the latest publication, applies `requireCoherentProposal`,
+and requires `Command.expectedProposalId` to name that exact current payable proposal.
+Deposit-only republication invalidates old ids even at the same Quote version/amount.
+Missing identity is `422 validation_failed`; stale identity/version is `409 conflict`.
+Missing or incoherent canonical publication fails internally, with no compatibility repair.
+
+A canonical deposit is indivisible: one distinct `PaymentRecord` must exactly equal the
+runtime Active requirement's frozen `requiredAmount` (scale-independent decimal comparison)
+and be fully allocated to its exact approved Quote snapshot. No Fiona deposit arithmetic,
+terms negotiation, splitting, or new payment/deposit persistence exists. Partial/excess
+amounts reject with `422 validation_failed` before writes. Any historical `grossAllocated > 0`
+rejects with `409 illegal_transition`, including after a full refund unwind; deposits cannot
+accumulate or top up. Staff must negotiate and publish new approved terms before accepting
+a smaller full deposit. Extra money requires an exact deposit receipt followed by a distinct
+ordinary Invoice payment. Invoice partial/full/overpayments and RELATED behavior stay supported.
+
+`AllocatePayment` rejects canonical Quotes with `409 illegal_transition`; unapplied receipts
+cannot fund their deposits. Acceptance invokes `bookIfDepositSatisfied` and verifies a
+satisfied canonical Invoice with coherent historical proposal context before commit. Payment,
+allocation, Invoice promotion and optional legacy pricing copy roll back together. The
+allocation remains on the accepted Quote; the returned application financial state is Invoice
+and inquiry lifecycle is BOOKED. Refunds never demote/reopen booking. Proposal revision and
+acceptance serialize on the same association row; no query-then-pay gap or new transaction.
+
+POST `/financial-documents/{documentId}/payments` accepts optional UUID `expectedProposalId`
+(required by policy only for canonical Quotes), parsed as body input (`400 malformed_request`
+for unreadable UUID). Existing `commerce.payment.record`, USER/SERVICE and Origin policy,
+operationId and receipt shape remain unchanged. No inquiry-scoped deposit endpoint or
+frontend workflow is introduced in this slice.
 
 The durable proposal row is the business event for future at-least-once integrations.
 It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.

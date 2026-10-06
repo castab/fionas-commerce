@@ -1451,6 +1451,8 @@ class OpenApiDocumentSpec :
                 it.text("properties", "amount", "type") shouldBe "string"
                 it.text("properties", "receivedAt", "format") shouldBe "date-time"
                 it.text("properties", "externalReference", "\$ref") shouldBe "#/components/schemas/PaymentExternalReference"
+                it.text("properties", "expectedProposalId", "format") shouldBe "uuid"
+                it.text("properties", "expectedProposalId", "description").contains("canonical Quote") shouldBe true
             }
             schema("PaymentExternalReference").strings("required") shouldContainExactly listOf("provider", "reference")
             schema("RecordStandalonePaymentRequest").let {
@@ -1636,6 +1638,20 @@ class OpenApiDocumentSpec :
             listOf("receivedAt", "allocatedAt").forEach {
                 schema("RecordedPaymentResponse").text("properties", it, "format") shouldBe "date-time"
             }
+        }
+
+        test("documents exact canonical deposit acceptance and the standalone allocation prohibition") {
+            val payment = operation("/financial-documents/{documentId}/payments", "post")
+            listOf("expectedProposalId", "exactly equal", "Partial and excessive", "distinct subsequent Invoice payment").forEach {
+                payment.text("description").contains(it) shouldBe true
+            }
+            payment.text("responses", "422", "description").contains("exact complete deposit") shouldBe true
+            payment.text("responses", "409", "description").contains("current payable proposal") shouldBe true
+            operation(
+                "/payments/{paymentId}/allocations",
+                "post",
+            ).text("description").contains("Quotes reject standalone allocations") shouldBe
+                true
         }
 
         test("documents both payment conflicts: a stale document version, and an external reference already recorded") {

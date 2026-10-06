@@ -24,8 +24,10 @@ import java.util.UUID
  *   [CommerceFailure.Conflict], so money never lands on a snapshot its caller never saw.
  * - Only a quote (a deposit) or an invoice accepts a payment, never an estimate
  *   ([CommerceFailure.InvariantViolated]).
- * - The payment's currency is the document's, and its amount has at most the currency's
- *   minor-unit digits. Over-application is allowed: a negative balance is a derived fact.
+ * - Canonical Quotes require the current proposal identity and one exact full deposit receipt,
+ *   with no historical allocation. Successful acceptance immediately books the inquiry.
+ * - The payment's currency is the document's, with at most its minor-unit digits. Invoice
+ *   and RELATED payments retain partial and excessive amounts; a negative balance is derived.
  *
  * In one runtime transaction, commerce-runtime's ledger records the `PaymentRecord` and its
  * `PaymentAllocation` to that exact snapshot, and the lineage's settlement is derived again.
@@ -38,10 +40,12 @@ class RecordDocumentPayment(
     associations: InquiryFinancialDocumentRepository,
     pricingSources: FinancialDocumentPricingRepository,
     private val clock: Clock,
+    proposals: InquiryProposalRepository,
     private val newPaymentId: () -> UUID = UUID::randomUUID,
     private val newAllocationId: () -> UUID = UUID::randomUUID,
 ) {
     private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val deposits = CanonicalInquiryDepositPaymentPolicy(ledger, documents, proposals)
 
     /**
      * A payment to record against [documentId] at [documentVersion]. [receivedAt] defaults to
@@ -54,6 +58,7 @@ class RecordDocumentPayment(
         val method: PaymentMethod,
         val receivedAt: Instant?,
         val externalReference: ExternalPaymentReference?,
+        val expectedProposalId: InquiryProposalId? = null,
     )
 
     operator fun invoke(command: Command): RecordedPayment {
@@ -63,11 +68,13 @@ class RecordDocumentPayment(
             val document = current.document
             document.requirePaymentDestination()
             val amount = paymentMoney(command.amount, document.currency)
+            val accepted = deposits.validate(transaction, current, command.expectedProposalId, amount)
             val payment =
                 validating { PaymentRecord(newPaymentId(), amount, command.method, command.receivedAt ?: now, command.externalReference) }
             val allocation =
                 ledger.recordPaymentAgainstDocument(transaction, payment, newAllocationId(), document.reference, payment.amount, now)
             val view = documents.bookIfDepositSatisfied(transaction, current)
+            accepted?.let { deposits.requireBooked(it, view) }
             val result =
                 view?.let { documents.describeLocked(transaction, current.inquiryId, it) }
                     ?: documents.describeLocked(transaction, current.inquiryId, document.id)

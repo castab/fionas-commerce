@@ -267,7 +267,14 @@ fun fionaApplication(
                     issueQuote = IssueQuote(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     createChangeOrder = CreateChangeOrder(context.transactor, ledger, documentOwners, pricingSources, pricing)::invoke,
-                    recordPayment = RecordDocumentPayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
+                    recordPayment = RecordDocumentPayment(
+                        context.transactor,
+                        ledger,
+                        documentOwners,
+                        pricingSources,
+                        clock,
+                        proposalHistory,
+                    )::invoke,
                     listFinancialDocumentPayments =
                         ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)::invoke,
                     listUnappliedPayments = ledger::unappliedPayments,

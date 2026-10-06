@@ -24,6 +24,7 @@ import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -81,7 +82,9 @@ class DashboardAttentionSpec :
             app
                 .adminPost(
                     "/financial-documents/${document(id)}/payments",
-                    """{"documentVersion":2,"amount":"50.00","method":"CARD"}""",
+                    """{"documentVersion":2,"amount":"50.00","method":"CARD","expectedProposalId":"${app.proposalId(
+                        UUID.fromString(document(id)),
+                    )!!.value}"}""",
                 ).status shouldBe Status.CREATED
         }
 
@@ -235,7 +238,9 @@ class DashboardAttentionSpec :
             app
                 .adminPost(
                     "/financial-documents/${document(id)}/payments",
-                    """{"documentVersion":2,"amount":"50.00","method":"CARD"}""",
+                    """{"documentVersion":2,"amount":"50.00","method":"CARD","expectedProposalId":"${app.proposalId(
+                        UUID.fromString(document(id)),
+                    )!!.value}"}""",
                 ).status shouldBe Status.CREATED
             read(sentAt.plus(Duration.ofDays(10))).workQueue.needsResolution.items shouldBe emptyList()
         }
