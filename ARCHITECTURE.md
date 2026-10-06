@@ -311,6 +311,12 @@ A derived response field is not automatically a persistent application field.
 
 Persist something only when it represents an independent Fiona business fact or decision.
 
+The staff request workspace is one unlocked REPEATABLE READ projection spanning inquiry
+and lifecycle, canonical financial state, proposal/deposit state, and complete canonical-lineage
+payment histories. Concurrent booking commits cannot mix before and after facts in that
+workspace. Financial and payment reconciliation remain authoritative shared ledger reads;
+the workspace adds no persisted projection. See [the staff read contract in `AGENTS.md`](AGENTS.md#deposit-requirements-and-bulk-financial-lineages).
+
 ## Atomic canonical proposal publication
 
 Fiona owns customer-facing proposal publication and its approval policy. Shared commerce

@@ -35,6 +35,14 @@ data class StaffRequestResponse(
     val proposal: InquiryProposalResponse? = null,
     val suggestedDepositTerms: DepositTermsRequest,
     val depositRequirement: CurrentDepositRequirementResponse,
+    @ApiProperty(
+        description =
+            "Complete payment histories ever associated with the canonical lineage, including historical document versions " +
+                "and allocations to other lineages, refunds and refund allocations. After booking the deposit allocation " +
+                "still references the accepted Quote version. Reconciliation is derived from the complete ledger facts. " +
+                "An empty collection means no payments have been associated with this lineage.",
+    )
+    val payments: List<PaymentHistoryResponse>,
 )
 
 internal fun readStaffRequestRoute(
@@ -47,13 +55,18 @@ internal fun readStaffRequestRoute(
         operationId = "readStaffRequest"
         summary = "Read a staff request"
         description = "One unlocked REPEATABLE_READ snapshot of inquiry, durable customer, event facts, requested pricing intent, " +
-            "canonical lifecycle and the latest immutable INITIAL_ESTIMATE financial lineage. " +
+            "canonical lifecycle, the latest immutable INITIAL_ESTIMATE financial lineage, " +
+            "proposal/deposit state and complete payment histories. " +
             "financial.reconciliation is always present and describes current derived settlement. " +
             "RELATED lineages are excluded. Requires BOTH `${FionaPermissions.InquiriesRead.value}` and " +
             "`${CommercePermissions.FinancialDocumentRead.value}` for USER sessions or SERVICE tokens. " +
             "Financial lines and totals are authoritative; requested pricing inputs remain inquiry history. " +
             "Use inquiryId and financial.version with the atomic staff proposal issuance operation and explicit deposit terms; " +
             "proposal identifies the exact published Quote/deposit pair; " +
+            "financial.id, financial.version, proposal.id and depositRequirement.requiredAmount " +
+            "supply the canonical deposit payment inputs " +
+            "for POST /financial-documents/{documentId}/payments. Payments retain the accepted Quote allocation after booking " +
+            "and include subsequent Invoice receipts, with the same complete histories as the document payment-history endpoint. " +
             "missing or mismatched canonical proposal state fails internally. " +
             "stale versions conflict and require reload. This read changes no state. Successful responses use Cache-Control: no-store."
         tags += Tag("Staff requests", "Coherent inquiry and canonical financial detail for staff request review.")
@@ -66,6 +79,7 @@ internal fun readStaffRequestRoute(
                     financial,
                     suggestedDepositTerms = FIONAS_DEFAULT_DEPOSIT_TERMS.toResponse(),
                     depositRequirement = CurrentDepositRequirementResponse.None(financial.id),
+                    payments = emptyList(),
                 ),
         )
         returningError(ErrorCategory.MALFORMED_REQUEST, "`inquiryId` is not a UUID.", "Malformed request: path 'inquiryId'")
@@ -96,6 +110,7 @@ internal fun readStaffRequestRoute(
                                 request.proposal?.toResponse(),
                                 request.suggestedDepositTerms.toResponse(),
                                 request.deposit.currentDepositResponse(),
+                                request.payments.map { it.toResponse() },
                             ),
                     )
             }

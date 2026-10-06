@@ -3,6 +3,8 @@ package io.github.castab.fionas.commerce.http
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.payment.PaymentMethod
+import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.staff.CommercePermissions
@@ -221,18 +223,86 @@ class FinancialDocumentPaymentsSpec :
             revised.status shouldBe Status.OK
             val proposal = CommerceJson.asA(revised.bodyString(), IssuedInquiryProposalResponse.serializer()).proposal
             proposal.documentVersion shouldBe 2
+            val workspace = application.adminGet("/staff/requests/${inquiryId.value}").bodyString()
+            val tables =
+                listOf(
+                    "commerce.payment_records",
+                    "commerce.payment_allocations",
+                    "commerce.financial_document_snapshots",
+                    "fionas.inquiry_proposals",
+                )
+            val counts = tables.map(application.database::count)
             val stale =
                 application.adminPost(
                     "/financial-documents/$document/payments",
                     """{"documentVersion":2,"amount":"200","method":"CASH","expectedProposalId":"${issued.proposal.id.value}"}""",
                 )
             stale.status shouldBe Status.CONFLICT
+            stale.error().code shouldBe "conflict"
+            tables.map(application.database::count) shouldBe counts
+            application.adminGet("/staff/requests/${inquiryId.value}").bodyString() shouldBe workspace
             payments(document.toString()).payments.shouldBeEmpty()
             application
                 .adminPost(
                     "/financial-documents/$document/payments",
                     """{"documentVersion":2,"amount":"200","method":"CASH","expectedProposalId":"${proposal.id}"}""",
                 ).status shouldBe Status.CREATED
+        }
+
+        test("historical Quote allocation blocks deposit HTTP acceptance even after full refund unwind") {
+            val inquiryId = InquiryId(UUID.fromString(application.createInquiry()))
+            val issued = application.issueProposal(inquiryId, "300")
+            val document = issued.proposal.documentReference.id
+            // Deliberately corrupt canonical acceptance history through the supported ledger API.
+            val payment = PaymentRecord(UUID.randomUUID(), usd("1.00"), PaymentMethod.CASH, STORED_INSTANT, null)
+            val allocation =
+                application.transactor.inTransaction { transaction ->
+                    application.context.financialLedger.recordPaymentAgainstDocument(
+                        transaction,
+                        payment,
+                        UUID.randomUUID(),
+                        issued.proposal.documentReference,
+                        payment.amount,
+                        STORED_INSTANT,
+                    )
+                }
+
+            fun blocked() {
+                val tables =
+                    listOf(
+                        "commerce.payment_records",
+                        "commerce.payment_allocations",
+                        "commerce.financial_document_snapshots",
+                        "commerce.deposit_requirement_revisions",
+                        "fionas.inquiry_proposals",
+                    )
+                val counts = tables.map(application.database::count)
+                val histories = payments(document.toString())
+                val response =
+                    application.adminPost(
+                        "/financial-documents/$document/payments",
+                        """{"documentVersion":2,"amount":"300","method":"CASH","expectedProposalId":"${issued.proposal.id.value}"}""",
+                    )
+                response.status shouldBe Status.CONFLICT
+                response.error().code shouldBe "illegal_transition"
+                tables.map(application.database::count) shouldBe counts
+                payments(document.toString()) shouldBe histories
+                application.context.financialLedger
+                    .latest(document)
+                    .version.number shouldBe 2
+                // A misleading unbooked workspace with historical payment facts is an internal failure.
+                application.adminGet("/staff/requests/${inquiryId.value}").let {
+                    it.status shouldBe Status.INTERNAL_SERVER_ERROR
+                    it.error() shouldBe ErrorResponse("internal_failure", "The request could not be completed")
+                }
+            }
+            blocked()
+            refund(payment.id.toString(), "1.00", listOf(allocation.id.toString() to "1.00"))
+            application.context.financialLedger
+                .reconcileLatest(document)
+                .netApplied.amount
+                .signum() shouldBe 0
+            blocked()
         }
 
         test("a document that never received a payment has an empty list") {

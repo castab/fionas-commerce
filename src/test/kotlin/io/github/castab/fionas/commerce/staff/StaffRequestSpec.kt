@@ -13,9 +13,12 @@ import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.InquiryProposal
+import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
+import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryStage
@@ -54,6 +57,7 @@ class StaffRequestSpec :
             associations: InquiryFinancialDocumentRepository = owners,
             people: CustomerRepository = customers,
             pricing: FinancialDocumentPricingRepository = sources,
+            proposals: InquiryProposalRepository = JdbiInquiryProposalRepository(),
         ) = ReadStaffRequest(
             app.transactor,
             GetInquiry(
@@ -64,7 +68,8 @@ class StaffRequestSpec :
             ),
             GetFinancialDocument(app.transactor, app.context.financialLedger, associations, pricing),
             app.context.financialLedger,
-            JdbiInquiryProposalRepository(),
+            proposals,
+            ListFinancialDocumentPaymentHistories(app.transactor, app.context.financialLedger, associations),
         )
 
         fun submitted(): Pair<InquiryId, UUID> {
@@ -135,7 +140,15 @@ class StaffRequestSpec :
             initial.financial.latest.document.id shouldBe document
             val related = app.transactor.inTransaction { owners.documentsOf(it, id).single { lineage -> lineage != document } }
             val alternate = GetFinancialDocument(app.transactor, app.context.financialLedger, owners, sources)(related)
-            shouldThrow<IllegalStateException> { StaffRequest(initial.inquiry, alternate, initial.proposal, initial.deposit) }
+            shouldThrow<IllegalStateException> {
+                StaffRequest(
+                    initial.inquiry,
+                    alternate,
+                    initial.proposal,
+                    initial.deposit,
+                    initial.payments,
+                )
+            }
             val quote = app.issueProposal(id, "100.00").financial
             val request = reader()(id)
             request.inquiry.lifecycle.stage shouldBe InquiryStage.QUOTED
@@ -259,6 +272,7 @@ class StaffRequestSpec :
             before.financial.latest.document.version shouldBe Version.INITIAL
             before.proposal shouldBe null
             before.deposit.depositRequirement shouldBe null
+            before.payments shouldBe emptyList()
             before.financial.reconciliation.netApplied.amount
                 .signum() shouldBe 0
             val after = reader()(id)
@@ -269,7 +283,98 @@ class StaffRequestSpec :
             val active = after.deposit.depositRequirement!!.requirement as DepositRequirement.Active
             active.approvalReference shouldBe after.proposal.documentReference
             active.revision shouldBe after.proposal.depositRequirementRevision
+            after.deposit.depositSatisfied shouldBe true
+            after.payments
+                .single()
+                .allocations
+                .single()
+                .financialDocumentReference shouldBe after.proposal.documentReference
             after.financial.reconciliation.netApplied.amount
                 .compareTo(BigDecimal("100")) shouldBe 0
+        }
+
+        test("deposit commits between proposal and payment-history reads without tearing the quoted workspace") {
+            val (id, document) = submitted()
+            val issued = app.issueProposal(id, "300.00")
+            val paused = CountDownLatch(1)
+            val resume = CountDownLatch(1)
+            val seen = mutableSetOf<Transaction>()
+            val proposals = JdbiInquiryProposalRepository()
+            val pausing =
+                object : InquiryProposalRepository by proposals {
+                    override fun latest(
+                        transaction: Transaction,
+                        inquiryId: InquiryId,
+                    ): InquiryProposal? {
+                        seen += transaction
+                        transaction.handle
+                            .createQuery("SHOW transaction_isolation")
+                            .mapTo(String::class.java)
+                            .one() shouldBe "repeatable read"
+                        val result = proposals.latest(transaction, inquiryId)
+                        paused.countDown()
+                        check(resume.await(30, TimeUnit.SECONDS)) { "Reader was not resumed" }
+                        return result
+                    }
+                }
+            val unlocked =
+                object : InquiryFinancialDocumentRepository by owners {
+                    override fun inquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? {
+                        seen += transaction
+                        return owners.inquiryOf(transaction, documentId)
+                    }
+
+                    override fun lockInquiryOf(
+                        transaction: Transaction,
+                        documentId: UUID,
+                    ): InquiryId? = error("Read must not lock ownership")
+                }
+            val read = CompletableFuture.supplyAsync { reader(associations = unlocked, proposals = pausing)(id) }
+            try {
+                paused.await(30, TimeUnit.SECONDS) shouldBe true
+                CompletableFuture
+                    .supplyAsync {
+                        app
+                            .adminPost(
+                                "/financial-documents/$document/payments",
+                                """{"documentVersion":2,"amount":"300","method":"CASH","expectedProposalId":"${issued.proposal.id.value}"}""",
+                            ).status
+                    }.get(30, TimeUnit.SECONDS) shouldBe Status.CREATED
+                read.isDone shouldBe false
+            } finally {
+                resume.countDown()
+            }
+            val before = read.get(30, TimeUnit.SECONDS)
+            seen.size shouldBe 1
+            before.inquiry.lifecycle.stage shouldBe InquiryStage.QUOTED
+            before.financial.latest.document
+                .shouldBeInstanceOf<FinancialDocument.Quote>()
+                .version shouldBe Version.of(2)
+            before.proposal shouldBe issued.proposal
+            val required = before.deposit.depositRequirement!!.requirement as DepositRequirement.Active
+            required.approvalReference shouldBe before.proposal!!.documentReference
+            required.revision shouldBe before.proposal.depositRequirementRevision
+            required.requiredAmount.amount.compareTo(BigDecimal("300")) shouldBe 0
+            before.deposit.depositSatisfied shouldBe false
+            before.payments shouldBe emptyList()
+            val after = reader()(id)
+            after.inquiry.lifecycle.stage shouldBe InquiryStage.BOOKED
+            after.financial.latest.document
+                .shouldBeInstanceOf<FinancialDocument.Invoice>()
+                .version shouldBe Version.of(3)
+            after.proposal shouldBe issued.proposal
+            after.deposit.depositSatisfied shouldBe true
+            after.payments
+                .single()
+                .allocations
+                .single()
+                .financialDocumentReference shouldBe issued.proposal.documentReference
+            after.financial.reconciliation.netApplied.amount
+                .compareTo(BigDecimal("300")) shouldBe 0
+            shouldThrow<IllegalStateException> { after.copy(payments = emptyList()) }
+            shouldThrow<IllegalStateException> { before.copy(payments = after.payments) }
         }
     })

@@ -99,10 +99,21 @@ class OpenApiDocumentSpec :
             route.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/StaffRequestResponse"
             val response = schema("StaffRequestResponse")
-            response.strings("required") shouldContainExactly listOf("inquiry", "financial", "suggestedDepositTerms", "depositRequirement")
+            response.strings("required") shouldContainExactly
+                listOf("inquiry", "financial", "suggestedDepositTerms", "depositRequirement", "payments")
             response.text("properties", "inquiry", "\$ref") shouldBe "#/components/schemas/InquiryResponse"
             response.text("properties", "financial", "\$ref") shouldBe "#/components/schemas/FinancialDocumentResponse"
             response.text("properties", "financial", "description") shouldContain "financial.reconciliation is always present"
+            response.text("properties", "payments", "type") shouldBe "array"
+            response.text("properties", "payments", "items", "\$ref") shouldBe "#/components/schemas/PaymentHistoryResponse"
+            listOf(
+                "historical document versions",
+                "allocations to other lineages",
+                "accepted Quote version",
+                "Reconciliation is derived",
+                "empty collection",
+            ).forEach { response.text("properties", "payments", "description") shouldContain it }
+            route.text("description") shouldContain "REPEATABLE_READ"
         }
 
         test("proposal operations expose explicit tokens, shared terms/pricing schemas and exact publication identities") {
