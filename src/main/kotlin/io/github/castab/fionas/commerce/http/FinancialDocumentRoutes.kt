@@ -1132,7 +1132,9 @@ fun createChangeOrderRoute(
             "are never accepted from the caller. Inputs that price exactly as the current version does are no " +
             "financial change and are rejected. Requires `commerce.financial-document.create`. " +
             "Canonical Quote change orders are rejected with illegal_transition; use atomic staff proposal quote-revisions. " +
-            "Canonical Estimate and Invoice change orders and RELATED lineages retain this operation."
+            "Canonical Estimate and Invoice change orders and RELATED lineages retain this operation, except that " +
+            "a CLOSED canonical Invoice rejects ordinary change orders with illegal_transition. " +
+            "The resulting document total must be nonnegative; zero totals and negative reconciliation balances are allowed."
         tags += financialDocuments
         receiving(changeOrderRequest to exampleChangeOrder)
         returning(Status.OK, documentResponse to exampleChangedEstimate, "The new latest snapshot.")
@@ -1145,7 +1147,7 @@ fun createChangeOrderRoute(
         catalogRevisionConflict(" `conflict`: expectedVersion is no longer latest; reload the document and retry.")
         returningError(
             ErrorCategory.VALIDATION_FAILED,
-            "$PRICING_REJECTED Inputs that produce exactly the current lines are rejected as no financial change.",
+            "$PRICING_REJECTED Inputs that produce exactly the current lines or a negative document total are rejected.",
             "The revised pricing produces no financial change",
         )
         financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)

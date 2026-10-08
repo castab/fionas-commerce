@@ -268,7 +268,14 @@ fun fionaApplication(
                     queryFinancialLineages = QueryFinancialLineages(context.transactor, ledger, documentOwners)::invoke,
                     issueQuote = IssueQuote(context.transactor, ledger, documentOwners, pricingSources)::invoke,
                     issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, pricingSources)::invoke,
-                    createChangeOrder = CreateChangeOrder(context.transactor, ledger, documentOwners, pricingSources, pricing)::invoke,
+                    createChangeOrder = CreateChangeOrder(
+                        context.transactor,
+                        ledger,
+                        documentOwners,
+                        pricingSources,
+                        pricing,
+                        fulfillment,
+                    )::invoke,
                     recordPayment = RecordDocumentPayment(
                         context.transactor,
                         ledger,

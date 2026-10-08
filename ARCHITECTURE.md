@@ -376,8 +376,14 @@ See [the payment contract in `AGENTS.md`](AGENTS.md#atomic-canonical-proposal-pu
 for concrete identities, validation, locking and HTTP mechanics.
 
 Invoice is the durable booking fact. Refunds may reverse deposit satisfaction but do not
-demote Invoice or erase booking. Invoice change orders retain BOOKED/SERVED/CLOSED
-projection while changing runtime reconciliation. Event date never advances lifecycle.
+demote Invoice or erase booking. Ordinary Invoice change orders preserve BOOKED/SERVED
+projection while changing runtime reconciliation. CLOSED canonical financial adjustments
+require a separate post-close workflow; ordinary change orders are ineligible. Event date never advances lifecycle.
+
+Fiona permits negative adjustment lines but requires change orders to produce a nonnegative
+document total. This is application policy, not a universal restriction on shared commerce
+money or documents. Overpayment may legitimately produce a negative derived balance; an
+adjustment never itself changes payment history or implies a refund.
 
 Fiona V12 stores only operational facts in `inquiry_fulfillment`: served timestamp and
 acting principal kind/identity, plus optional complete closed provenance. A row requires

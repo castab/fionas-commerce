@@ -172,13 +172,13 @@ internal class FionaFinancialDocuments(
         current: Current,
         inputs: FionasPricingInputs,
         pricing: FionasPricing,
-    ): FinancialDocument =
-        ledger
-            .changeOrder(
-                transaction,
-                current.document.id,
-                repricing(current.document.lineItems, pricing.price(transaction, inputs).lineItems),
-            ).also { pricingSources.insert(transaction, it.reference, inputs) }
+    ): FinancialDocument {
+        val changes = repricing(current.document.lineItems, pricing.price(transaction, inputs).lineItems)
+        validateChangeOrder(current.document, changes)
+        return ledger
+            .changeOrder(transaction, current.document.id, changes)
+            .also { pricingSources.insert(transaction, it.reference, inputs) }
+    }
 
     fun approveDeposit(
         transaction: Transaction,

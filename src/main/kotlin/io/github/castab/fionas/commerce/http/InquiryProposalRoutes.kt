@@ -232,7 +232,7 @@ internal fun reviseInquiryQuoteProposalRoute(
         operationId = "reviseInquiryQuoteProposal"
         summary = "Reprice and reissue an unpaid inquiry proposal"
         description =
-            "Exact current Quote/deposit tokens are required. Reprices the current catalog, rejects no-op charges, appends a same-stage Quote and a replacement deposit approved against that new version even when terms are unchanged, then records QUOTE_REVISED issuance atomically. Supersedes every prior payment-link target. Any historical gross allocation blocks revision, including fully refunded payments. Cache-Control: no-store."
+            "Exact current Quote/deposit tokens are required. Reprices the current catalog, rejects no-op charges and negative resulting document totals, appends a same-stage Quote and a replacement deposit approved against that new version even when terms are unchanged, then records QUOTE_REVISED issuance atomically. Supersedes every prior payment-link target. Any historical gross allocation blocks revision, including fully refunded payments. A zero-total Quote cannot publish a positive deposit; the complete revision rolls back. Cache-Control: no-store."
         receiving(
             quoteRevisionBody to
                 ReviseInquiryQuoteProposalRequest(

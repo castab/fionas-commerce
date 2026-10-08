@@ -1215,6 +1215,19 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
    (ignoring line ids) are rejected as no financial change. A change to non-financial
    details is not a change order. A generic line-source identity is future work, decided
    from real need.
+   Before ledger persistence, `FionaFinancialDocuments.reprice` calls `validateChangeOrder`
+   on the reviewed snapshot under its association lock. This uses the domain's own ordered
+   change application and derived total, then rejects `total.amount.signum() < 0` with
+   `CommerceFailure.ValidationFailed` (`422 validation_failed`). Negative lines are allowed;
+   zero document totals and negative reconciliation balances are distinct, valid facts.
+   No payment or refund is implied. Both standalone repricing and atomic Quote revision use
+   this seam before snapshot/pricing/deposit/publication writes. A zero canonical Quote still
+   cannot publish a positive deposit; its combined operation rolls back without weakening
+   deposit rules. Future targeted commands must reuse this validation under the same lock.
+   Complete repricing discards unrelated manual adjustments and replaces all line identities;
+   it is not the future granular editing contract. Commerce 0.0.22 already supports ordered
+   add/replace/remove, identity-preserving replacement, immutable snapshots and cross-version
+   reconciliation. See [the foundation audit](docs/change-order-foundation-audit.md).
 7. **Every document-snapshot mutation names the version it acts on** (`expectedVersion`, an
    allocation's `documentVersion`); a lineage that has moved on is `Conflict`. Mutations lock the
    lineage's association row, and the runtime's `(document_id, previous_version)` uniqueness
@@ -1294,7 +1307,10 @@ fionas-commerce     inquiry → document relationship, Fiona pricing inputs and 
     Closed cannot exist without served. `ManageInquiryFulfillment.markServed` requires BOOKED;
     `close` requires SERVED and authoritative current Invoice balance exactly zero. Positive
     and negative balances reject close. Repeated/stale actions are illegal transitions,
-    never provenance rewrites. No automatic close, unserve, reopen or post-close ledger ban.
+    never provenance rewrites. `CreateChangeOrder` rejects ordinary changes to a CLOSED
+    canonical lineage with `409 illegal_transition`, reading fulfillment under the same
+    association lock before pricing. RELATED lineages remain eligible. No automatic close,
+    unserve, reopen or blanket post-close ledger ban; payments/refunds keep their existing policy.
     Impossible fulfillment before Invoice fails internally. The injected Clock uses microseconds.
     Staff detail reads the canonical projection in REPEATABLE READ with `InquiriesRead`.
     POST `/inquiries/{inquiryId}/served` (`markInquiryServed`) and `/close` (`closeInquiry`)
