@@ -8,6 +8,8 @@ import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentMethod
+import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.UserId
@@ -25,12 +27,15 @@ import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
+import io.github.castab.fionas.commerce.financial.validateChangeOrder
+import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
+import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.requestedPricing
 import io.github.castab.fionas.commerce.testing.testClock
@@ -38,6 +43,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
+import org.http4k.core.Status
 import java.math.BigDecimal
 import java.util.Currency
 import java.util.UUID
@@ -206,6 +212,93 @@ class InquiryLifecycleSpec :
             shouldThrow<CommerceFailure.IllegalTransition> { commands().close(ManageInquiryFulfillment.Command(inquiry, actor)) }
             shouldThrow<CommerceFailure.IllegalTransition> { commands().markServed(ManageInquiryFulfillment.Command(inquiry, actor)) }
             read(inquiry).fulfillment!!.served shouldBe served.fulfillment.served
+        }
+
+        test("ordinary Invoice changes preserve booking and service; a credit enables closure and CLOSED rejects repricing") {
+            val (inquiry, document) = quote()
+            val deposit = pay(document, "50")
+            val ledger = app.context.financialLedger
+            val accepted = ledger.depositRequirementHistory(document).map { it.requirement to it.createdAt }
+            val payment = ledger.paymentHistory(deposit.payment.id)
+            val publication = app.proposalId(document)
+            val revision =
+                app.context.offeringsSnapshotRepository.let { repository ->
+                    app.transactor.inTransaction {
+                        repository
+                            .retrieveLatestVersion(
+                                it,
+                                FIONA_OFFERINGS_CATALOG_ID,
+                            )!!
+                            .revision.number
+                    }
+                }
+
+            fun reprice(guests: Int) =
+                app.adminPost(
+                    "/financial-documents/$document/change-orders",
+                    pricingBody(revision, guests = guests, expectedVersion = ledger.latest(document).version.number),
+                )
+
+            reprice(100).status shouldBe Status.OK
+            read(inquiry).stage shouldBe InquiryStage.BOOKED
+            val served = commands().markServed(ManageInquiryFulfillment.Command(inquiry, actor))
+            reprice(125).status shouldBe Status.OK
+            read(inquiry).stage shouldBe InquiryStage.SERVED
+            read(inquiry).fulfillment shouldBe served.fulfillment
+            ledger.depositRequirementHistory(document).map { it.requirement to it.createdAt } shouldBe accepted
+            ledger.paymentHistory(deposit.payment.id).allocations shouldBe payment.allocations
+            app.proposalId(document) shouldBe publication
+
+            // Exercise the future targeted credit using the shared ledger and Fiona's validation seam.
+            app.transactor.inTransaction { transaction ->
+                owners.lockInquiryOf(transaction, document) shouldBe inquiry
+                val current = ledger.latest(transaction, document)
+                val remaining = ledger.reconcile(transaction, current.reference).balance
+                val credit =
+                    LineItem(
+                        UUID.randomUUID(),
+                        "Service credit",
+                        quantity = null,
+                        price = Money(remaining.amount.negate(), remaining.currency),
+                        taxAmount = money("0.00"),
+                    )
+                val changes = ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(credit)))
+                validateChangeOrder(current, changes)
+                ledger.changeOrder(transaction, document, changes)
+            }
+            ledger
+                .reconcileLatest(document)
+                .balance.amount
+                .signum() shouldBe 0
+            read(inquiry).stage shouldBe InquiryStage.SERVED
+            commands().close(ManageInquiryFulfillment.Command(inquiry, actor)).stage shouldBe InquiryStage.CLOSED
+            val before = ledger.versionHistory(document).map { it.document to it.createdAt }
+            val metadata = app.transactor.inTransaction { pricing.findAll(it, document) }
+            val closed = read(inquiry).fulfillment
+            val rejected = reprice(150)
+            rejected.status shouldBe Status.CONFLICT
+            CommerceJson.asA(rejected.bodyString(), ErrorResponse.serializer()).code shouldBe "illegal_transition"
+            ledger.versionHistory(document).map { it.document to it.createdAt } shouldBe before
+            app.transactor.inTransaction { pricing.findAll(it, document) } shouldBe metadata
+            read(inquiry).fulfillment shouldBe closed
+            ledger.depositRequirementHistory(document).map { it.requirement to it.createdAt } shouldBe accepted
+            ledger.paymentHistory(deposit.payment.id).refunds shouldBe emptyList()
+            val related =
+                FinancialDocument.Invoice.create(
+                    UUID.randomUUID(),
+                    listOf(
+                        LineItem(UUID.randomUUID(), "Related service", quantity = null, price = money("20"), taxAmount = money("0")),
+                    ),
+                )
+            app.transactor.inTransaction {
+                ledger.create(it, related)
+                owners.associate(it, InquiryDocumentAssociation(inquiry, related.id, STORED_INSTANT))
+            }
+            app
+                .adminPost("/financial-documents/${related.id}/change-orders", pricingBody(revision, guests = 150, expectedVersion = 1))
+                .status shouldBe Status.OK
+            read(inquiry).stage shouldBe InquiryStage.CLOSED
+            read(inquiry).fulfillment shouldBe closed
         }
 
         test("standalone allocations reject canonical deposits; exact receipt books and Invoice allocations preserve metadata") {

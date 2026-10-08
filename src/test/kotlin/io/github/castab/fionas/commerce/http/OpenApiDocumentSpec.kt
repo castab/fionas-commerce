@@ -52,6 +52,17 @@ class OpenApiDocumentSpec :
 
         fun schema(name: String) = document.at("components", "schemas", name).jsonObject
 
+        test("change-order contract documents total policy and CLOSED canonical exclusion") {
+            val operation = document.at("paths", "/financial-documents/{documentId}/change-orders", "post")
+            operation.text("description") shouldContain "nonnegative"
+            operation.text("description") shouldContain "CLOSED canonical Invoice"
+            operation.at("responses").jsonObject shouldContainKey "422"
+            operation.at("responses").jsonObject shouldContainKey "409"
+            val quoteRevision = document.at("paths", "/staff/requests/{inquiryId}/proposals/quote-revisions", "post")
+            quoteRevision.text("description") shouldContain "negative resulting document totals"
+            quoteRevision.text("description") shouldContain "zero-total Quote"
+        }
+
         // Only schema-bearing keywords are traversed. Examples, defaults, constants, enums,
         // and extensions are application data even when they contain a field named format.
         fun checkSchemaFormats(value: JsonElement) {

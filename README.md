@@ -1166,7 +1166,18 @@ settlement. Read document/detail/bulk views for the Invoice. Refunds never undo 
 INITIAL_ESTIMATE lineages with `409 illegal_transition`. It remains available for RELATED
 Quotes, whose Invoices do not book inquiries. First-snapshot RELATED Invoices likewise
 leave the canonical lifecycle unchanged. Invoice is the durable booking fact: later refunds
-may make deposit satisfaction false without demotion. Invoice change orders retain lifecycle.
+may make deposit satisfaction false without demotion. Invoice change orders retain BOOKED or
+SERVED and preserve fulfillment provenance. Ordinary change orders on a CLOSED canonical
+Invoice return `409 illegal_transition`; a separate post-close correction workflow is deferred.
+RELATED financial lineages and existing payment/refund operations retain their eligibility.
+
+Fiona change orders allow negative lines but reject a negative resulting document total
+before persistence (`422 validation_failed`). Zero Invoice totals are valid. A negative
+balance means overpayment and is permitted; refunds require explicit refund/allocation-unwind
+operations. Zero canonical Quotes cannot satisfy the existing positive-deposit publication
+policy. The current staff action still replaces all lines by catalog repricing, so it would
+discard manual adjustments; granular editing is not implemented. See the
+[capability assessment, upstream gap report and next-slice requirements](docs/change-order-foundation-audit.md).
 There is no zero-deposit booking, separate Booking aggregate or stored five-state status.
 
 | Action | operationId | Eligibility |

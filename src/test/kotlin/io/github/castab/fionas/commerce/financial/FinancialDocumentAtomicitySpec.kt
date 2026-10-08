@@ -10,6 +10,7 @@ import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
@@ -215,7 +216,14 @@ class FinancialDocumentAtomicitySpec :
                 }
 
             shouldThrow<IllegalStateException> {
-                CreateChangeOrder(application.transactor, application.context.financialLedger, associations, failing, pricing())(
+                CreateChangeOrder(
+                    application.transactor,
+                    application.context.financialLedger,
+                    associations,
+                    failing,
+                    pricing(),
+                    JdbiInquiryFulfillmentRepository(),
+                )(
                     estimate.id,
                     Version.INITIAL,
                     inputs(guests = 100),

@@ -13,6 +13,7 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
 import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
@@ -661,6 +662,7 @@ class InquiryProposalsSpec :
                 owners,
                 sources,
                 FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), app.context.offeringsSnapshotRepository::retrieveLatestVersion),
+                JdbiInquiryFulfillmentRepository(),
             )(document, Version.of(4), inputs).latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
             forbidden(5)
             historyReads shouldBe 6

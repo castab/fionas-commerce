@@ -6,6 +6,7 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.math.BigDecimal
@@ -33,6 +34,7 @@ class CreateChangeOrder(
     associations: InquiryFinancialDocumentRepository,
     private val pricingSources: FinancialDocumentPricingRepository,
     private val pricing: FionasPricing,
+    private val fulfillment: InquiryFulfillmentRepository,
 ) {
     private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
 
@@ -44,6 +46,9 @@ class CreateChangeOrder(
         transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, documentId, expectedVersion)
             documents.rejectCanonicalQuoteMutation(transaction, current)
+            if (documents.isCanonical(transaction, current) && fulfillment.find(transaction, current.inquiryId)?.closed != null) {
+                throw CommerceFailure.IllegalTransition("A closed inquiry requires a separate post-close adjustment workflow")
+            }
             documents.reprice(transaction, current, inputs, pricing)
             documents.describeLocked(transaction, current.inquiryId, documentId)
         }
