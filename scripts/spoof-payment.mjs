@@ -1,5 +1,8 @@
 // Local HTTP smoke test: Invoice, two partial payments, partial refund, final settlement.
-// Requires a running Fiona application and an already seeded Offerings catalog.
+// Requires a running Fiona application, the bootstrap administrator's password, and the credential
+// of a SERVICE principal holding fionas.inquiries.create (the public pricing authority, as the web
+// server's service is provisioned through /admin/access). Fiona has no catalog: this script plays
+// the pricing authority itself and submits already-priced lines.
 //
 // It also proves that payment facts survive a reload: every mutation response below is
 // validated and then dropped. The refund is prepared only from
@@ -11,7 +14,10 @@ const baseUrl = process.env.FIONAS_BASE_URL ?? "http://localhost:8080";
 const origin = process.env.FIONAS_ORIGIN ?? "http://localhost:8080";
 const username = process.env.FIONAS_ADMIN_USERNAME ?? "admin";
 const password = process.env.FIONAS_ADMIN_PASSWORD;
+const serviceId = process.env.FIONAS_WEB_SERVICE_ID;
+const serviceSecret = process.env.FIONAS_WEB_SERVICE_SECRET;
 let sessionCookie;
+let serviceToken;
 
 class HttpFailure extends Error {
   constructor(method, path, status, body) {
@@ -24,16 +30,13 @@ function urlFor(path) {
   return new URL(path.replace(/^\//, ""), `${baseUrl.replace(/\/+$/, "")}/`);
 }
 
-async function request(method, path, { body, authenticated = false, expectedStatus } = {}) {
+async function request(method, path, { body, authenticated = false, asService = false, expectedStatus } = {}) {
   const headers = new Headers();
   if (body !== undefined) headers.set("Content-Type", "application/json");
-  // Customer operations need their Fiona permissions. The real web frontend holds them as a SERVICE
-  // principal with a short-lived access token; this local script acts as the bootstrap administrator,
-  // whose session holds the same permissions.
-  const customerRoute = (method === "GET" && path === "/inquiry-form") ||
-    (method === "POST" && ["/estimate-preview", "/inquiries"].includes(path));
-  if (authenticated || customerRoute || path === "/auth/login") headers.set("Origin", origin);
-  if (authenticated || customerRoute) headers.set("Cookie", sessionCookie);
+  // Priced inquiry submission is the pricing authority's: a SERVICE access token, never a staff session.
+  if (asService) headers.set("Authorization", `Bearer ${serviceToken}`);
+  if (authenticated || path === "/auth/login") headers.set("Origin", origin);
+  if (authenticated) headers.set("Cookie", sessionCookie);
   // One logical submission per call; fetch is not retried here, so a fresh key per call is safe.
   if (method === "POST" && path === "/inquiries") headers.set("Idempotency-Key", crypto.randomUUID());
 
@@ -113,6 +116,9 @@ async function main() {
   if (!password?.trim()) {
     throw new Error("Set FIONAS_ADMIN_PASSWORD to your local bootstrap admin password, then run: node scripts/spoof-payment.mjs");
   }
+  if (!serviceId?.trim() || !serviceSecret?.trim()) {
+    throw new Error("Set FIONAS_WEB_SERVICE_ID and FIONAS_WEB_SERVICE_SECRET to a service credential holding fionas.inquiries.create");
+  }
   if (Number(process.versions.node.split(".")[0]) < 20 || typeof fetch !== "function") {
     throw new Error("This script needs Node.js 20 or newer with built-in fetch");
   }
@@ -127,37 +133,24 @@ async function main() {
   if (!sessionCookie) throw new Error("POST /auth/login succeeded but returned no __Host-fionas_session cookie");
   console.log("Logged in as local administrator");
 
-  let catalog;
-  try {
-    catalog = (await request("GET", "/offering-catalog", { expectedStatus: 200 })).data;
-  } catch (error) {
-    if (error instanceof HttpFailure && error.status === 404) {
-      throw new Error("No Fiona Offerings catalog exists. Run node scripts/replace-catalog.mjs against this endpoint first.");
-    }
-    throw error;
-  }
-  check(Number.isInteger(catalog?.revision) && catalog.revision >= 1, "catalog revision must be a positive integer");
-  const catalogRevision = catalog.revision;
-  console.log(`Using catalog revision ${catalogRevision}`);
+  const token = (await request("POST", "/auth/service/token", {
+    body: { serviceId, secret: serviceSecret }, expectedStatus: 200,
+  })).data;
+  check(typeof token?.accessToken === "string" && token.accessToken.length > 0, "service token must be issued");
+  serviceToken = token.accessToken;
+  console.log("Obtained a pricing-authority service token");
 
-  // Every inquiry is a request for configured service; staff price the same configuration below.
-  const configuration = {
-    catalogRevision,
-    guestCount: 75,
-    guestCountIsMinimum: false,
-    durationMinutes: 120,
-    selections: [
-      { category: "soft-serve-flavor", offerings: ["vanilla", "horchata"] },
-      ...(catalog.categories.some(({ key }) => key === "hand-scooped-flavor") ? [{
-        category: "hand-scooped-flavor",
-        offerings: ["hand-scooped-chocolate-chip", "hand-scooped-chocolate", "hand-scooped-vanilla-bean", "hand-scooped-strawberry"],
-      }] : []),
-      { category: "topping", offerings: ["sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough"] },
-      { category: "cone-option", offerings: ["waffle-cone"] },
-    ],
-  };
+  // The pricing authority decides these amounts; Fiona records them exactly and derives the totals.
+  const lines = [
+    { description: "Base service", subDescription: "2 hours · setup, staff & local travel", unitPrice: "250.00", taxAmount: "0.00", currency: "USD" },
+    { description: "Ice cream service", subDescription: "75 guests", quantity: "75", unitPrice: "4.00", taxAmount: "0.00", currency: "USD" },
+    { description: "Horchata", subDescription: "Premium soft serve", quantity: "75", unitPrice: "0.50", taxAmount: "0.00", currency: "USD" },
+    { description: "Waffle cones", quantity: "75", unitPrice: "0.75", taxAmount: "0.00", currency: "USD" },
+    { description: "Extra toppings (2)", subDescription: "4 toppings included; each extra is charged per guest", quantity: "150", unitPrice: "0.25", taxAmount: "0.00", currency: "USD" },
+  ];
 
   const inquiry = (await request("POST", "/inquiries", {
+    asService: true,
     body: {
       name: "Local Payment Smoke Test",
       email: "payment-smoke@example.com",
@@ -165,7 +158,8 @@ async function main() {
       eventDate: "2026-12-05",
       eventType: "CORPORATE",
       message: "Local developer smoke test: partial payments, refund, and final settlement.",
-      pricingInputs: configuration,
+      requestedService: { guestCount: 75, durationMinutes: 120, items: [{ label: "Vanilla and horchata soft serve" }] },
+      lines,
     },
     expectedStatus: 201,
   })).data;
@@ -175,17 +169,17 @@ async function main() {
 
   const document = (await request("POST", `/inquiries/${inquiryId}/financial-documents`, {
     authenticated: true,
-    body: { stage: "INVOICE", ...configuration },
+    body: { stage: "INVOICE", lines },
     expectedStatus: 201,
   })).data;
   checkId(document?.id, "document id");
   check(document.inquiryId === inquiryId, "document must belong to the new inquiry");
   check(document.stage === "INVOICE", "document stage must be INVOICE");
   check(document.version === 1 && document.previousVersion == null, "Invoice must begin at v1 with no predecessor");
-  check(document.pricing?.catalogRevision === catalogRevision, "Invoice must use the selected catalog revision");
+  check(document.linesAuthoredBy?.principalKind === "USER", "Invoice lines must be authored by the staff user");
   check(typeof document.currency === "string" && document.currency.length > 0, "document currency must be present");
   check(decimal(document.total, "document total") !== "0", "document total must be positive");
-  check(Array.isArray(document.lines) && document.lines.length > 0, "document lines must be server-derived");
+  check(Array.isArray(document.lines) && document.lines.length === lines.length, "document lines must be exactly those committed");
   checkReconciliation(document.reconciliation, document.total, document.currency, false);
   const { id: documentId, version: documentVersion, total: documentTotal, currency: documentCurrency } = document;
   console.log(`Created Invoice ${documentId} v${documentVersion}: ${money(documentTotal, documentCurrency)}`);
@@ -202,7 +196,7 @@ async function main() {
       "Invoice must remain the original v1 snapshot");
     checkAmount(current.total, documentTotal, "Invoice total");
     check(current.currency === documentCurrency, "Invoice currency must be unchanged");
-    check(JSON.stringify(current.pricing) === JSON.stringify(document.pricing), "pricing inputs must be unchanged");
+    check(JSON.stringify(current.linesAuthoredBy) === JSON.stringify(document.linesAuthoredBy), "line authorship must be unchanged");
     check(JSON.stringify(current.lines) === JSON.stringify(document.lines), "Invoice lines must be unchanged");
     check(current.subtotal === document.subtotal && current.taxAmount === document.taxAmount,
       "Invoice subtotal and tax must be unchanged");

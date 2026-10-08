@@ -23,7 +23,7 @@ import org.http4k.core.with
 
 @Serializable
 data class StaffRequestResponse(
-    @ApiProperty(description = "Authoritative inquiry detail, including customer, event, pinned requested pricing intent and lifecycle.")
+    @ApiProperty(description = "Authoritative inquiry detail, including customer, event, the requested service and lifecycle.")
     val inquiry: InquiryResponse,
     @ApiProperty(
         description =
@@ -45,9 +45,9 @@ data class StaffRequestResponse(
     val payments: List<PaymentHistoryResponse>,
     @ApiProperty(
         description =
-            "The immutable approved service plan of the published Quote (proposal.documentVersion): promised service, " +
-                "reviewed catalog names and why each Quote line exists. Absent before issuance, for a Quote issued without a " +
-                "composition, and after a later Quote revision until a revision slice records one; never invented.",
+            "The immutable approved service plan of the published Quote (proposal.documentVersion): the service staff " +
+                "approved and their line notes. Absent before issuance, for a Quote published without one (including a " +
+                "deposit-only revision); never invented.",
     )
     val servicePlan: ServicePlanResponse? = null,
 )
@@ -57,17 +57,21 @@ internal fun readStaffRequestRoute(
     access: AccessControl,
 ): ContractRoute {
     val body = jsonBody(StaffRequestResponse.serializer())
-    val financial = exampleEstimate.copy(id = exampleInquiry.lifecycle.documentId, pricing = null)
+    val financial =
+        exampleEstimate.copy(
+            id = exampleInquiry.lifecycle.documentId,
+            linesAuthoredBy = LineAuthorshipResponse("SERVICE", "d2a7c9e4-61f0-4b8e-9c3a-5f1e2d4b6a80", "2026-09-26T21:19:39.321012Z"),
+        )
     return "/staff/requests" / inquiryDetailIdPath meta {
         operationId = "readStaffRequest"
         summary = "Read a staff request"
-        description = "One unlocked REPEATABLE_READ snapshot of inquiry, durable customer, event facts, requested pricing intent, " +
+        description = "One unlocked REPEATABLE_READ snapshot of inquiry, durable customer, event facts, the requested service, " +
             "canonical lifecycle, the latest immutable INITIAL_ESTIMATE financial lineage, " +
             "proposal/deposit state and complete payment histories. " +
             "financial.reconciliation is always present and describes current derived settlement. " +
             "RELATED lineages are excluded. Requires BOTH `${FionaPermissions.InquiriesRead.value}` and " +
             "`${CommercePermissions.FinancialDocumentRead.value}` for USER sessions or SERVICE tokens. " +
-            "Financial lines and totals are authoritative; requested pricing inputs remain inquiry history. " +
+            "Financial lines and totals are authoritative; the requested service remains descriptive inquiry history. " +
             "Use inquiryId and financial.version with the atomic staff proposal issuance operation and explicit deposit terms; " +
             "proposal identifies the exact published Quote/deposit pair; " +
             "financial.id, financial.version, proposal.id and depositRequirement.requiredAmount " +

@@ -5,7 +5,7 @@ import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.inquiry
-import io.github.castab.fionas.commerce.testing.requestedPricing
+import io.github.castab.fionas.commerce.testing.requestedService
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldBeNull
@@ -32,7 +32,7 @@ class RuntimeTransactionSpec :
                 shouldThrow<IllegalStateException> {
                     application.transactor.inTransaction { transaction ->
                         customers.insert(transaction, customer)
-                        inquiries.insert(transaction, inquiry, requestedPricing())
+                        inquiries.insert(transaction, inquiry, requestedService())
                         // Both writes are visible inside the transaction...
                         customers.findById(transaction, customer.id) shouldBe customer
                         inquiries.findById(transaction, inquiry.id) shouldBe inquiry
@@ -56,7 +56,7 @@ class RuntimeTransactionSpec :
 
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry, requestedPricing())
+                inquiries.insert(transaction, inquiry, requestedService())
                 // A repository that auto-committed or used its own transaction would already
                 // have made these rows visible to another connection.
                 application.database.count("fionas.customers") shouldBe customersBefore

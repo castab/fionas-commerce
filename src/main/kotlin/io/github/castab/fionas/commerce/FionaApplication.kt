@@ -5,8 +5,6 @@ import io.github.castab.commerce.runtime.authorization.authorizationAdministrati
 import io.github.castab.commerce.runtime.authorization.currentPrincipalHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.authentication
-import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
-import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
 import io.github.castab.commerce.runtime.session.SessionAuthenticator
@@ -20,11 +18,10 @@ import io.github.castab.fionas.commerce.financial.GetDepositRequirementHistory
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryProposals
-import io.github.castab.fionas.commerce.financial.InquiryQuoteComposition
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.IssueInvoice
 import io.github.castab.fionas.commerce.financial.IssueQuote
-import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryServicePlanRepository
@@ -52,22 +49,15 @@ import io.github.castab.fionas.commerce.http.fionaServiceAuthentication
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
-import io.github.castab.fionas.commerce.inquiry.GetInquiryForm
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
-import io.github.castab.fionas.commerce.inquiry.PublicInquiryPricing
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
-import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
-import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
-import io.github.castab.fionas.commerce.offering.FionasPricing
-import io.github.castab.fionas.commerce.offering.PreviewEstimate
-import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.BootstrapFirstAdmin
 import io.github.castab.fionas.commerce.staff.FionaPermissions
@@ -107,18 +97,17 @@ fun fionaEventCalendarZone(environment: Map<String, String> = System.getenv()): 
  *
  * This is the application's composition root. Repositories and operations are built here
  * with ordinary Kotlin from the runtime's `CommerceRuntimeContext`, so every Fiona write
- * goes through the runtime's single `Transactor`. Fiona's Offerings catalog is
- * commerce-runtime's Offerings capability bound to Fiona's catalog; its contract routes join
- * the same API contract as Fiona's own, as do the runtime's authorization administration
- * (which serves the permission catalog) and current-principal capabilities, all bound to one
- * `AccessControl` over `context.authorization`. Estimate previews read the current catalog
- * through the runtime's own `GetOfferingsCatalog`, reject stale inputs, and price it with Fiona's
- * [FionasOfferingsEngine]. Persisted financial documents are commerce-runtime's
- * `FinancialLedger`, called with the caller's transaction; Fiona's own repositories store
- * only which inquiry owns each lineage and the pricing inputs of each snapshot, and the
- * operations that write them price from the runtime's snapshot read in that same transaction.
- * An inquiry's requested pricing inputs are checked with the same pricing, in the transaction
- * that records the inquiry.
+ * goes through the runtime's single `Transactor`. The runtime's authorization administration
+ * (which serves the permission catalog), current-principal and service-token capabilities
+ * join the same API contract as Fiona's own routes, all bound to one `AccessControl` over
+ * `context.authorization`.
+ *
+ * Fiona owns no product catalog and no pricing policy. Financial documents are
+ * commerce-runtime's `FinancialLedger`, called with the caller's transaction and the exact
+ * version the caller reviewed; the lines they record are committed by an authorized actor: the
+ * web server's SERVICE principal for a public inquiry's Estimate, a verified staff USER for
+ * negotiated terms. Fiona's own repositories store which inquiry owns each lineage, who
+ * authored each snapshot's lines, proposals and approved service plans.
  *
  * Every protected route uses one `AccessControl`. It authenticates a staff browser session
  * first and otherwise a SERVICE principal's short-lived access token (both runtime-owned
@@ -165,38 +154,23 @@ fun fionaApplication(
                 )
             val access = AccessControl(origin.filter.then(authenticate), context.authorization)
             val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, loginRateLimit)
-            // Fiona's pricing, over the current catalog read in the caller's transaction.
-            val pricing =
-                FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), context.offeringsSnapshotRepository::retrieveLatestVersion)
             // Generic financial persistence is commerce-runtime's ledger; Fiona stores only its context.
             val ledger = context.financialLedger
             val documentOwners = JdbiInquiryFinancialDocumentRepository()
-            val pricingSources = JdbiFinancialDocumentPricingRepository()
+            val authorship = JdbiFinancialDocumentAuthorshipRepository()
             val communications = JdbiInquiryCommunicationRepository()
             val fulfillment = JdbiInquiryFulfillmentRepository()
             val lifecycle = ReadInquiryLifecycle(ledger, documentOwners, fulfillment)
             val manageFulfillment = ManageInquiryFulfillment(context.transactor, inquiries, documentOwners, ledger, fulfillment, clock)
-            val materialize = MaterializeInquiryFinancialDocument(ledger, documentOwners, clock)
+            val materialize = MaterializeInquiryFinancialDocument(ledger, documentOwners, authorship)
             val createDocument =
-                CreateInquiryFinancialDocument(
-                    context.transactor,
-                    inquiries,
-                    ledger,
-                    documentOwners,
-                    pricingSources,
-                    pricing,
-                    clock,
-                    materialize = materialize,
-                )
+                CreateInquiryFinancialDocument(context.transactor, inquiries, ledger, documentOwners, authorship, materialize, clock)
             val getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)
-            val getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)
+            val getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, authorship)
             val paymentHistories = ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)
             val proposalHistory = JdbiInquiryProposalRepository()
             val servicePlans = JdbiInquiryServicePlanRepository()
-            // One quote composition core for the write-free preview and the atomic initial issuance.
-            val quoteComposition = InquiryQuoteComposition(inquiries, pricingSources, pricing)
-            val proposals =
-                InquiryProposals(ledger, documentOwners, pricingSources, proposalHistory, servicePlans, quoteComposition, pricing, clock)
+            val proposals = InquiryProposals(ledger, documentOwners, authorship, proposalHistory, servicePlans, clock)
             val operations =
                 FionaOperations(
                     readStaffRequest = ReadStaffRequest(
@@ -209,13 +183,7 @@ fun fionaApplication(
                         servicePlans,
                     )::invoke,
                     issueInquiryProposal = IssueInquiryProposal(context.transactor, proposals)::invoke,
-                    previewInquiryQuote = PreviewInquiryQuote(
-                        context.transactor,
-                        ledger,
-                        documentOwners,
-                        proposalHistory,
-                        quoteComposition,
-                    )::invoke,
+                    previewInquiryQuote = PreviewInquiryQuote(context.transactor, ledger, documentOwners, proposalHistory)::invoke,
                     reviseInquiryQuoteProposal = ReviseInquiryQuoteProposal(context.transactor, proposals)::invoke,
                     reviseInquiryProposalDeposit = ReviseInquiryProposalDeposit(context.transactor, proposals)::invoke,
                     readStaffDashboard = ReadStaffDashboard(
@@ -232,7 +200,6 @@ fun fionaApplication(
                         customers,
                         inquiries,
                         JdbiInquirySubmissionRepository(),
-                        PublicInquiryPricing(pricing),
                         clock,
                         materialize,
                     )::invoke,
@@ -245,33 +212,20 @@ fun fionaApplication(
                     )::acknowledge,
                     markInquiryServed = manageFulfillment::markServed,
                     closeInquiry = manageFulfillment::close,
-                    getInquiryForm = GetInquiryForm(
-                        GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)::invoke,
-                    )::invoke,
-                    previewEstimate =
-                        PreviewEstimate(
-                            getCatalog = GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)::invoke,
-                            pricing = pricing,
-                        )::invoke,
-                    createInquiryEstimate =
-                        { inquiryId, inputs ->
-                            createDocument(
-                                CreateInquiryFinancialDocument.Command(inquiryId, CreateInquiryFinancialDocument.Stage.ESTIMATE, inputs),
-                            )
-                        },
+                    createInquiryEstimate = createDocument::invoke,
                     createInquiryFinancialDocument = createDocument::invoke,
                     listInquiryFinancialDocuments =
-                        ListInquiryFinancialDocuments(context.transactor, inquiries, ledger, documentOwners, pricingSources)::invoke,
+                        ListInquiryFinancialDocuments(context.transactor, inquiries, ledger, documentOwners, authorship)::invoke,
                     getFinancialDocument = getFinancialDocument::invoke,
                     getFinancialDocumentHistory =
-                        GetFinancialDocumentHistory(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                        GetFinancialDocumentHistory(context.transactor, ledger, documentOwners, authorship)::invoke,
                     getDepositRequirement = GetDepositRequirement(context.transactor, ledger, documentOwners)::invoke,
                     getDepositRequirementHistory = GetDepositRequirementHistory(context.transactor, ledger, documentOwners)::invoke,
                     setDepositRequirement = SetDepositRequirement(
                         context.transactor,
                         ledger,
                         documentOwners,
-                        pricingSources,
+                        authorship,
                         proposalHistory,
                     )::invoke,
                     withdrawDepositRequirement = WithdrawDepositRequirement(
@@ -281,21 +235,21 @@ fun fionaApplication(
                         proposalHistory,
                     )::invoke,
                     queryFinancialLineages = QueryFinancialLineages(context.transactor, ledger, documentOwners)::invoke,
-                    issueQuote = IssueQuote(context.transactor, ledger, documentOwners, pricingSources)::invoke,
-                    issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, pricingSources)::invoke,
+                    issueQuote = IssueQuote(context.transactor, ledger, documentOwners, authorship)::invoke,
+                    issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, authorship)::invoke,
                     createChangeOrder = CreateChangeOrder(
                         context.transactor,
                         ledger,
                         documentOwners,
-                        pricingSources,
-                        pricing,
+                        authorship,
                         fulfillment,
+                        clock,
                     )::invoke,
                     recordPayment = RecordDocumentPayment(
                         context.transactor,
                         ledger,
                         documentOwners,
-                        pricingSources,
+                        authorship,
                         clock,
                         proposalHistory,
                     )::invoke,
@@ -303,7 +257,7 @@ fun fionaApplication(
                         paymentHistories::invoke,
                     listUnappliedPayments = ledger::unappliedPayments,
                     recordStandalonePayment = RecordPayment(context.transactor, ledger, clock)::invoke,
-                    allocatePayment = AllocatePayment(context.transactor, ledger, documentOwners, pricingSources, clock)::invoke,
+                    allocatePayment = AllocatePayment(context.transactor, ledger, documentOwners, authorship, clock)::invoke,
                     recordRefund = RecordRefund(context.transactor, ledger, clock)::invoke,
                     login = Login(
                         StaffPasswordAuthenticator(context.authorization, context.transactor, credentials, hasher),
@@ -313,16 +267,15 @@ fun fionaApplication(
                     currentPermissions = context.authorization.permissionResolver::permissionsFor,
                     setStaffPassword = SetStaffPassword(context.authorization, context.transactor, credentials, hasher, clock)::invoke,
                 )
-            val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(access))
             val authorizationAdmin =
                 authorizationAdministrationHttpCapability(context, access, "/admin/access", setOf(staffAdministrationTag))
             // The request's principal, USER or SERVICE, resolved through the same AccessControl and catalog.
             // The permission catalog is served once, by the administration capability: commerce-runtime
-            // 0.0.22's standalone catalog route has the same fixed operationId, so it is not also mounted.
+            // 0.0.23's standalone catalog route has the same fixed operationId, so it is not also mounted.
             val currentPrincipal = currentPrincipalHttpCapability(access, "/authorization/me", setOf(authorizationTag))
             val serviceAuthentication = fionaServiceAuthentication(context)
             listOf(
-                fionaApi(operations, offerings, authorizationAdmin, currentPrincipal, serviceAuthentication, fionaVersion(), auth),
+                fionaApi(operations, authorizationAdmin, currentPrincipal, serviceAuthentication, fionaVersion(), auth),
                 apiDocs(),
             )
         },

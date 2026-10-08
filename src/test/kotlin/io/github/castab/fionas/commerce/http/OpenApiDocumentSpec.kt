@@ -36,9 +36,8 @@ import kotlinx.serialization.json.jsonPrimitive
  * generates it (no database). [OpenApiRoutesSpec] proves the running application serves the
  * same document. An API change that changes these expectations is an API contract change.
  *
- * The Offerings catalog's routes and schemas are commerce-runtime's, and its suite covers
- * them; these specs prove only that Fiona composed them: where they are served, their
- * operationIds, and that the runtime's price union survives Fiona's renderer.
+ * Fiona serves no product catalog and no pricing endpoint: financial lines are already priced by
+ * the authorized actor that commits them, and the document says so.
  */
 class OpenApiDocumentSpec :
     FunSpec({
@@ -59,8 +58,8 @@ class OpenApiDocumentSpec :
             operation.at("responses").jsonObject shouldContainKey "422"
             operation.at("responses").jsonObject shouldContainKey "409"
             val quoteRevision = document.at("paths", "/staff/requests/{inquiryId}/proposals/quote-revisions", "post")
-            quoteRevision.text("description") shouldContain "negative resulting document totals"
-            quoteRevision.text("description") shouldContain "zero-total Quote"
+            quoteRevision.text("description") shouldContain "negative or zero totals"
+            quoteRevision.text("description") shouldContain "No catalog or pricing policy is consulted"
         }
 
         // Only schema-bearing keywords are traversed. Examples, defaults, constants, enums,
@@ -130,11 +129,13 @@ class OpenApiDocumentSpec :
         test("proposal operations expose explicit tokens, shared terms/pricing schemas and exact publication identities") {
             schema("IssueInquiryProposalRequest").strings("required") shouldContainExactly listOf("expectedDocumentVersion", "terms")
             schema("ReviseInquiryQuoteProposalRequest").strings("required") shouldContainExactly
-                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "pricingInputs", "terms")
+                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "lines", "terms")
             schema("ReviseInquiryProposalDepositRequest").strings("required") shouldContainExactly
                 listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "terms")
-            schema("ReviseInquiryQuoteProposalRequest").text("properties", "pricingInputs", "\$ref") shouldBe
-                "#/components/schemas/CreateInquiryEstimateRequest"
+            schema("ReviseInquiryQuoteProposalRequest").text("properties", "lines", "items", "\$ref") shouldBe
+                "#/components/schemas/ProposedLineRequest"
+            schema("ReviseInquiryQuoteProposalRequest").text("properties", "servicePlan", "\$ref") shouldBe
+                "#/components/schemas/ServicePlanRequest"
             val requests =
                 listOf("IssueInquiryProposalRequest", "ReviseInquiryQuoteProposalRequest", "ReviseInquiryProposalDepositRequest")
             requests.forEach { name ->
@@ -152,14 +153,14 @@ class OpenApiDocumentSpec :
                     "documentVersion",
                     "depositRequirementRevision",
                     "issuedAt",
-                    "principalKind",
-                    "principalId",
+                    "issuedBy",
                     "issuanceKind",
                 )
             schema("StaffRequestResponse").text("properties", "proposal", "\$ref") shouldBe "#/components/schemas/InquiryProposalResponse"
             val issuances =
                 listOf(
-                    Triple("", 2, "INITIAL"),
+                    // The composed churro example: Estimate v2 holds the staff lines, Quote v3 is published.
+                    Triple("", 3, "INITIAL"),
                     Triple("/quote-revisions", 3, "QUOTE_REVISED"),
                     Triple("/deposit-revisions", 2, "DEPOSIT_REVISED"),
                 )
@@ -260,15 +261,13 @@ class OpenApiDocumentSpec :
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/staff/requests/{inquiryId}/proposals/deposit-revisions", "post", "reviseInquiryProposalDeposit") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
-                Triple("/inquiry-form", "get", "getInquiryForm") to listOf("200", "401", "403", "404", "500"),
-                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/inquiries", "post", "createInquiry") to listOf("201", "400", "401", "403", "409", "422", "500"),
                 Triple("/inquiries", "get", "listInquiries") to listOf("200", "400", "401", "403", "422", "500"),
                 Triple("/inquiries/{inquiryId}", "get", "getInquiry") to listOf("200", "400", "401", "403", "404", "500"),
-                Triple("/estimate-preview", "post", "previewEstimate") to listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}/estimates", "post", "createInquiryEstimate") to
-                    listOf("201", "400", "401", "403", "404", "409", "422", "500"),
+                    listOf("201", "400", "401", "403", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "post", "createInquiryFinancialDocument") to
-                    listOf("201", "400", "401", "403", "404", "409", "422", "500"),
+                    listOf("201", "400", "401", "403", "404", "422", "500"),
                 Triple("/inquiries/{inquiryId}/served", "post", "markInquiryServed") to
                     listOf("200", "400", "401", "403", "404", "409", "500"),
                 Triple("/inquiries/{inquiryId}/close", "post", "closeInquiry") to
@@ -326,13 +325,11 @@ class OpenApiDocumentSpec :
                 "reviseInquiryQuoteProposal" to "Staff proposals",
                 "reviseInquiryProposalDeposit" to "Staff proposals",
                 "acknowledgeInquiryCommunication" to "Inquiries",
-                "getInquiryForm" to "Inquiries",
                 "createInquiry" to "Inquiries",
                 "listInquiries" to "Inquiries",
                 "getInquiry" to "Inquiries",
                 "markInquiryServed" to "Inquiries",
                 "closeInquiry" to "Inquiries",
-                "previewEstimate" to "Estimates",
                 "createInquiryEstimate" to "Financial documents",
                 "createInquiryFinancialDocument" to "Financial documents",
                 "listInquiryFinancialDocuments" to "Financial documents",
@@ -356,28 +353,6 @@ class OpenApiDocumentSpec :
                 "logout" to "Authentication",
                 "getCurrentUser" to "Authentication",
                 "setStaffPassword" to "Staff administration",
-            )
-
-        // commerce-runtime's Offerings operations, where Fiona binds them and as Fiona's prefix names them.
-        val offeringOperations =
-            listOf(
-                Triple("/offering-catalog", "get", "fionasOfferingsGetCatalog"),
-                Triple("/offering-catalog", "post", "fionasOfferingsCreateCatalog"),
-                Triple("/offering-catalog/categories", "get", "fionasOfferingsListCategories"),
-                Triple("/offering-catalog/categories", "post", "fionasOfferingsAddCategory"),
-                Triple("/offering-catalog/categories/{categoryKey}", "get", "fionasOfferingsGetCategory"),
-                Triple("/offering-catalog/categories/{categoryKey}", "put", "fionasOfferingsUpdateCategory"),
-                Triple("/offering-catalog/categories/{categoryKey}", "delete", "fionasOfferingsRetireCategory"),
-                Triple("/offering-catalog/categories/{categoryKey}/restore", "post", "fionasOfferingsRestoreCategory"),
-                Triple("/offering-catalog/categories/{categoryKey}/offerings", "get", "fionasOfferingsListCategoryOfferings"),
-                Triple("/offering-catalog/offerings", "get", "fionasOfferingsListOfferings"),
-                Triple("/offering-catalog/offerings", "post", "fionasOfferingsAddOfferings"),
-                Triple("/offering-catalog/offerings/{offeringKey}", "get", "fionasOfferingsGetOffering"),
-                Triple("/offering-catalog/offerings", "put", "fionasOfferingsUpdateOfferings"),
-                Triple("/offering-catalog/offerings/retire", "post", "fionasOfferingsRetireOfferings"),
-                Triple("/offering-catalog/offerings/restore", "post", "fionasOfferingsRestoreOfferings"),
-                Triple("/offering-catalog/retired/offerings", "get", "fionasOfferingsListRetiredOfferings"),
-                Triple("/offering-catalog/retired/categories", "get", "fionasOfferingsListRetiredCategories"),
             )
 
         // commerce-runtime's service token endpoint, mounted by Fiona.
@@ -429,37 +404,17 @@ class OpenApiDocumentSpec :
                 "ReviseInquiryQuoteProposalRequest",
                 "ReviseInquiryProposalDepositRequest",
                 "PreviewInquiryQuoteRequest",
-                "QuoteCompositionRequest",
-                "QuotePricingRequest",
-                "QuotePricingRequest_KEEP_ESTIMATE",
-                "QuotePricingRequest_REVISE_SERVICE_SELECTIONS",
-                "QuotePricingRequest_REPRICE_CONFIGURATION",
-                "QuoteOverrideRequest",
-                "QuoteOverrideTargetRequest",
-                "QuoteOverrideTargetRequest_EXISTING_LINE",
-                "QuoteOverrideTargetRequest_BASE_SERVICE",
-                "QuoteOverrideTargetRequest_ICE_CREAM_SERVICE",
-                "QuoteOverrideTargetRequest_EXTRA_TOPPINGS",
-                "QuoteOverrideTargetRequest_SELECTED_OFFERING",
-                "QuoteAdjustmentRequest",
                 "InquiryQuotePreviewResponse",
                 "QuotePreviewLineResponse",
-                "QuoteLineOverrideResponse",
                 "QuoteDepositPreviewResponse",
-                "QuoteLineOriginResponse",
-                "QuoteLineOriginResponse_ESTIMATE_LINE",
-                "QuoteLineOriginResponse_GENERATED",
-                "QuoteLineOriginResponse_ADJUSTMENT",
-                "ChargeSourceResponse",
-                "ChargeSourceResponse_BASE_SERVICE",
-                "ChargeSourceResponse_ICE_CREAM_SERVICE",
-                "ChargeSourceResponse_EXTRA_TOPPINGS",
-                "ChargeSourceResponse_SELECTED_OFFERING",
-                "ServiceConfigurationResponse",
-                "ServicePlanCategoryResponse",
-                "ServicePlanOfferingResponse",
+                "ServicePlanPreviewResponse",
+                "ServicePlanRequest",
                 "ServicePlanResponse",
-                "ServicePlanLineResponse",
+                "ServicePlanLineNoteResponse",
+                "LineNoteRequest",
+                "PricedLineRequest",
+                "ProposedLineRequest",
+                "LineAuthorshipResponse",
                 "StaffDashboardSummaryResponse",
                 "StaffDashboardWorkQueueResponse",
                 "StaffWorkQueueResponse",
@@ -483,49 +438,24 @@ class OpenApiDocumentSpec :
                 "FinancialLineageResponse",
                 "FinancialLineageReconciliationResponse",
                 "FinancialLineageActivityResponse",
-                "InquiryFormResponse",
-                "InquiryFormSectionResponse",
-                "InquiryFormFieldResponse",
-                "InquiryFormPresentation",
-                "InquiryFormIntegerOption",
-                "InquiryFormStringOption",
-                "InquiryPricingPreviewResponse",
-                "InquiryDurationPricingResponse",
-                "InquiryDurationOfferingContributionResponse",
-                "InquiryToppingAdjustmentResponse",
-                "InquiryFormInputResponse",
-                "InquiryFormInputResponse_TEXT",
-                "InquiryFormInputResponse_EMAIL",
-                "InquiryFormInputResponse_INTEGER",
-                "InquiryFormInputResponse_BOOLEAN",
-                "InquiryFormInputResponse_INTEGER_CHOICE",
-                "InquiryFormInputResponse_DATE",
-                "InquiryFormInputResponse_STRING_CHOICE",
-                "InquiryFormInputResponse_OFFERING_CHOICE",
                 "CreateInquiryRequest",
-                "InquiryPricingInputs",
+                "RequestedServiceRequest",
+                "RequestedServiceItemRequest",
                 "InquiryReceiptResponse",
                 "InquiryResponse",
                 "InquiryLifecycleResponse",
                 "InquiryMilestoneResponse",
-                "InquiryRequestedPricing",
                 "InquiryListResponse",
                 "InquiryListItem",
-                "EstimatePreviewRequest",
-                "EstimatePreviewSelection",
-                "EstimatePreviewResponse",
-                "EstimatePreviewLine",
                 "CreateInquiryEstimateRequest",
                 "CreateInquiryFinancialDocumentRequest",
                 "ChangeOrderRequest",
-                "PricingSelection",
                 "StageTransitionRequest",
                 "RecordPaymentRequest",
                 "RecordStandalonePaymentRequest",
                 "AllocatePaymentRequest",
                 "PaymentExternalReference",
                 "FinancialDocumentResponse",
-                "DocumentPricing",
                 "FinancialDocumentLine",
                 "DocumentReconciliation",
                 "FinancialDocumentHistoryResponse",
@@ -591,14 +521,12 @@ class OpenApiDocumentSpec :
                     "Staff requests",
                     "Staff proposals",
                     "Inquiries",
-                    "Estimates",
                     "Financial documents",
                     "Deposit requirements",
                     "Payments",
                     "Authentication",
                     "Staff administration",
                     "Authorization",
-                    "Offerings catalog",
                 )
         }
 
@@ -619,6 +547,17 @@ class OpenApiDocumentSpec :
 
         val eitherTransport = listOf(setOf("staffSession"), setOf("serviceAccessToken"))
 
+        val staffTermsOperations =
+            setOf(
+                "createInquiryEstimate",
+                "createInquiryFinancialDocument",
+                "createChangeOrder",
+                "previewInquiryQuote",
+                "issueInquiryProposal",
+                "reviseInquiryQuoteProposal",
+                "reviseInquiryProposalDeposit",
+            )
+
         test("declares the two authentication transports: the staff session cookie and the service bearer token") {
             document.at("components", "securitySchemes").jsonObject.keys shouldBe setOf("staffSession", "serviceAccessToken")
             val session = document.at("components", "securitySchemes", "staffSession")
@@ -631,7 +570,7 @@ class OpenApiDocumentSpec :
             fionaOpenApiDocument() shouldNotContain "fionasUiApiKey"
         }
 
-        test("every Fiona route behind the shared AccessControl accepts a staff session OR a service token, never both together") {
+        test("each Fiona route documents exactly the transports its enforcement accepts, never both together") {
             operations.keys.forEach { (path, method, operationId) ->
                 withClue(operationId) {
                     requirements(path, method) shouldBe
@@ -641,13 +580,13 @@ class OpenApiDocumentSpec :
                             // Logout revokes browser sessions only and is idempotent cleanup without one:
                             // staffSession OR anonymous ({}). A service token is never advertised for it.
                             "logout" -> listOf(setOf("staffSession"), emptySet())
+                            // Priced submission is the pricing authority's: only its service token is accepted.
+                            "createInquiry" -> listOf(setOf("serviceAccessToken"))
+                            // Staff-negotiated amounts need a verified staff USER, and only a session authenticates one.
+                            in staffTermsOperations -> listOf(setOf("staffSession"))
                             else -> eitherTransport
                         }
                 }
-            }
-            // The customer routes are not service-only: a staff user holding the permission is accepted too.
-            listOf("/inquiry-form" to "get", "/estimate-preview" to "post", "/inquiries" to "post").forEach { (path, method) ->
-                requirements(path, method) shouldBe eitherTransport
             }
             // Representative staff routes: permissions decide, whichever principal kind holds them.
             listOf("/inquiries" to "get", "/payments" to "post", "/admin/users/{userId}/credentials/password" to "put")
@@ -672,33 +611,18 @@ class OpenApiDocumentSpec :
         }
 
         test("runtime capability routes carry no host security metadata yet, an upstream gap rather than a Fiona choice") {
-            // commerce-runtime 0.0.22 lets a host neither add security to its capability routes nor marks its public
-            // Offerings reads NoSecurity, so a contract-wide default would mislabel those reads. Its protected routes
+            // commerce-runtime 0.0.23 lets a host add no security to its capability routes. Its protected routes
             // still enforce Fiona's same AccessControl; this pins the gap so a runtime that closes it is noticed.
-            (offeringOperations + adminOperations + principalOperations).forEach { (path, method, operationId) ->
+            (adminOperations + principalOperations).forEach { (path, method, operationId) ->
                 withClue(operationId) { requirements(path, method) shouldBe emptyList() }
             }
         }
 
         test("describes exactly Fiona and bound runtime capability routes, excluding /health and /ready") {
             document.at("paths").jsonObject.mapValues { (_, methods) -> methods.jsonObject.keys } shouldBe
-                (operations.keys + offeringOperations + adminOperations + principalOperations + serviceAuthenticationOperations.keys)
+                (operations.keys + adminOperations + principalOperations + serviceAuthenticationOperations.keys)
                     .groupBy({ it.first }, { it.second })
                     .mapValues { it.value.toSet() }
-        }
-
-        test("serves commerce-runtime's Offerings operations under Fiona's base path and operationId prefix") {
-            offeringOperations.forEach { (path, method, operationId) ->
-                operation(path, method).text("operationId") shouldBe operationId
-                operation(path, method).strings("tags") shouldContainExactly listOf("Offerings catalog")
-            }
-            document
-                .at("paths")
-                .jsonObject
-                .filterKeys { it.startsWith("/offering-catalog") }
-                .values
-                .flatMap { methods -> methods.jsonObject.values.map { it.text("operationId") } }
-                .forEach { it shouldStartWith "fionasOfferings" }
         }
 
         test("mounts commerce-runtime's service token endpoint unchanged at /auth/service/token") {
@@ -736,7 +660,7 @@ class OpenApiDocumentSpec :
         }
 
         test("mounts one permission catalog route, so every operationId is unique") {
-            // commerce-runtime 0.0.22's standalone catalog capability reuses the administration route's
+            // commerce-runtime 0.0.23's standalone catalog capability reuses the administration route's
             // fixed authorizationListPermissions operationId, so only the administration route is mounted.
             document
                 .at("paths")
@@ -751,122 +675,12 @@ class OpenApiDocumentSpec :
             operationIds.size shouldBe operationIds.toSet().size
         }
 
-        test("Offerings add, update, and restore bodies retain required integer revisions and path-owned mutation keys") {
-            offeringOperations
-                .filter { (path, method) -> path != "/offering-catalog" && method in listOf("post", "put") }
-                .forEach { (path, method) ->
-                    val request = operation(path, method).at("requestBody", "content", "application/json", "schema")
-                    val body = schema(request.text("\$ref").substringAfterLast('/'))
-                    body.strings("required").contains("expectedRevision") shouldBe true
-                    body.text("properties", "expectedRevision", "type") shouldBe "integer"
-                    if (method == "put" || path.endsWith("/restore")) {
-                        body.at("properties").jsonObject.containsKey("key") shouldBe false
-                    }
-                }
-        }
-
-        test("offering batches expose runtime item keys, states, result arrays, and retirement keys") {
-            listOf(
-                "post" to "/offering-catalog/offerings",
-                "put" to "/offering-catalog/offerings",
-                "post" to "/offering-catalog/offerings/restore",
-            ).forEach { (method, path) ->
-                val operation = operation(path, method)
-                val request = operation.at("requestBody", "content", "application/json", "schema")
-                val body = schema(request.text("\$ref").substringAfterLast('/'))
-                body.strings("required") shouldContainExactlyInAnyOrder listOf("expectedRevision", "offerings")
-                body.text("properties", "offerings", "type") shouldBe "array"
-                body.text("properties", "offerings", "items", "\$ref") shouldBe "#/components/schemas/OfferingDto"
-                val result =
-                    operation.at(
-                        "responses",
-                        if (path.endsWith("/restore") || method == "put") "200" else "201",
-                        "content",
-                        "application/json",
-                        "schema",
-                    )
-                val resultBody = schema(result.text("\$ref").substringAfterLast('/'))
-                resultBody.strings("required") shouldContainExactlyInAnyOrder listOf("revision", "offerings")
-            }
-            val request =
-                operation("/offering-catalog/offerings/retire", "post")
-                    .at("requestBody", "content", "application/json", "schema")
-            schema(request.text("\$ref").substringAfterLast('/')).let {
-                it.strings("required") shouldContainExactlyInAnyOrder listOf("expectedRevision", "keys")
-                it.text("properties", "keys", "type") shouldBe "array"
-                it.text("properties", "keys", "items", "type") shouldBe "string"
-            }
-            document.at("paths").jsonObject.containsKey("/offering-catalog/revisions/{revision}") shouldBe false
-            document.at("paths").jsonObject.containsKey("/offering-catalog/offerings/{offeringKey}/restore") shouldBe false
-            document.at("paths", "/offering-catalog/offerings/{offeringKey}").jsonObject.keys shouldBe setOf("get")
-            schema("OfferingDto").strings("required") shouldContainExactlyInAnyOrder
-                listOf("key", "category", "displayName", "selectionState", "availability")
-            listOf("InquiryFormIntegerOption", "InquiryFormStringOption", "OfferingDto").forEach { name ->
-                val option = schema(name)
-                listOf("badge", "statusNote", "infoNote").forEach { property ->
-                    option.strings("required").contains(property) shouldBe false
-                    if (name == "OfferingDto") {
-                        option.strings("properties", property, "type") shouldContainExactly listOf("string", "null")
-                    } else {
-                        option.text("properties", property, "type") shouldBe "string"
-                    }
-                }
-            }
-        }
-
-        test("Category retirement retains the required integer expectedRevision query parameter") {
-            offeringOperations.filter { it.second == "delete" }.forEach { (path, method) ->
-                val revision = operation(path, method).at("parameters").jsonArray.single { it.text("name") == "expectedRevision" }
-                revision.text("in") shouldBe "query"
-                revision.at("required") shouldBe JsonPrimitive(true)
-                revision.text("schema", "type") shouldBe "integer"
-            }
-        }
-
-        test("Offerings management retains runtime mutation and retired-discovery error responses") {
-            offeringOperations
-                .filter { (path, method) -> path != "/offering-catalog" && method in listOf("post", "put", "delete") }
-                .forEach { (path, method) ->
-                    operation(path, method).at("responses").jsonObject.keys shouldContainExactlyInAnyOrder
-                        listOf(
-                            if (method == "post" &&
-                                !path.endsWith("/restore") &&
-                                !path.endsWith("/retire")
-                            ) {
-                                "201"
-                            } else {
-                                "200"
-                            },
-                            "400",
-                            "401",
-                            "403",
-                            "404",
-                            "409",
-                            "422",
-                        )
-                }
-            listOf("offerings", "categories").forEach { kind ->
-                operation("/offering-catalog/retired/$kind", "get").at("responses").jsonObject.keys shouldContainExactlyInAnyOrder
-                    listOf("200", "401", "403", "404")
-            }
-        }
-
         test("has no unnamed Swagger UI operation group") {
             document.at("paths").jsonObject.values.forEach { methods ->
                 methods.jsonObject.values.forEach { route ->
                     route.strings("tags").single().isNotBlank() shouldBe true
                 }
             }
-        }
-
-        test("keeps commerce-runtime's strict OfferingPrice union through Fiona's renderer") {
-            val price = schema("OfferingPriceDto")
-            price.at("oneOf").jsonArray.map { it.text("\$ref") } shouldContainExactly
-                listOf("FixedOfferingPrice", "PerQuantityOfferingPrice", "PerDurationOfferingPrice").map { "#/components/schemas/$it" }
-            price.text("discriminator", "propertyName") shouldBe "kind"
-            price.at("discriminator", "mapping").jsonObject.keys shouldContainExactlyInAnyOrder
-                listOf("FIXED", "PER_QUANTITY", "PER_DURATION")
-            schema("OfferingDto").text("properties", "price", "\$ref") shouldBe "#/components/schemas/OfferingPriceDto"
         }
 
         test("gives every operation its stable operationId and tag") {
@@ -892,16 +706,8 @@ class OpenApiDocumentSpec :
                     if (code == "rate_limited") {
                         (path to method) shouldBe ("/auth/login" to "post")
                         status shouldBe "429"
-                    } else if (code == "CATALOG_REVISION_STALE") {
-                        method shouldBe "post"
-                        listOf(
-                            "/inquiries",
-                            "/estimate-preview",
-                            "/inquiries/{inquiryId}/estimates",
-                            "/inquiries/{inquiryId}/financial-documents",
-                            "/financial-documents/{documentId}/change-orders",
-                            "/staff/requests/{inquiryId}/quote-preview",
-                        ).contains(path) shouldBe true
+                    } else if (code == "IDEMPOTENCY_KEY_REUSED") {
+                        (path to method) shouldBe ("/inquiries" to "post")
                         status shouldBe "409"
                     } else {
                         ErrorCategory.entries
@@ -982,21 +788,23 @@ class OpenApiDocumentSpec :
             schema("CurrentUserResponse").text("properties", "permissions", "items", "type") shouldBe "string"
         }
 
-        test("describes the create request: required name, email and pricing inputs, an optional message, and their limits") {
+        test("describes the create request: customer and event facts, a requested service, and exact already-priced lines") {
             val body = operation("/inquiries", "post").at("requestBody")
             body.at("required") shouldBe JsonPrimitive(true)
             body.text("content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/CreateInquiryRequest"
 
             val request = schema("CreateInquiryRequest")
             request.text("type") shouldBe "object"
-            request.strings("required") shouldContainExactly listOf("name", "email", "pricingInputs", "zipCode", "eventDate", "eventType")
+            request.strings("required") shouldContainExactly
+                listOf("name", "email", "requestedService", "lines", "zipCode", "eventDate", "eventType")
             val properties = request.at("properties").jsonObject
             properties.keys.toList() shouldContainExactly
-                listOf("name", "email", "message", "pricingInputs", "zipCode", "eventDate", "eventType")
-            properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryPricingInputs"
-            properties.getValue("pricingInputs").text("description") shouldContain "Required"
-            properties.getValue("pricingInputs").text("description") shouldNotContain "absent"
-            val text = properties - listOf("pricingInputs", "eventDate", "eventType")
+                listOf("name", "email", "message", "requestedService", "lines", "zipCode", "eventDate", "eventType")
+            properties.getValue("requestedService").text("\$ref") shouldBe "#/components/schemas/RequestedServiceRequest"
+            properties.getValue("lines").text("type") shouldBe "array"
+            properties.getValue("lines").text("items", "\$ref") shouldBe "#/components/schemas/PricedLineRequest"
+            properties.getValue("lines").text("description") shouldContain "without repricing or any catalog check"
+            val text = properties - listOf("requestedService", "lines", "eventDate", "eventType")
             text.values.forEach { it.text("type") shouldBe "string" }
             text.mapValues { (_, property) -> property.at("maxLength").jsonPrimitive.int } shouldBe
                 mapOf(
@@ -1010,22 +818,39 @@ class OpenApiDocumentSpec :
                 .getValue("email")
                 .jsonObject.keys
                 .contains("format") shouldBe false
+            // Amounts and quantities are exact decimal strings, never JSON numbers; no total is ever accepted.
+            val line = schema("PricedLineRequest")
+            line.strings("required") shouldContainExactly listOf("description", "unitPrice", "taxAmount", "currency")
+            listOf("quantity", "unitPrice", "taxAmount").forEach {
+                line.text("properties", it, "type") shouldBe "string"
+                line.text("properties", it, "pattern") shouldBe SIGNED_DECIMAL
+            }
+            listOf("CreateInquiryRequest", "PricedLineRequest", "RequestedServiceRequest").forEach { name ->
+                (schema(name).at("properties").jsonObject.keys intersect setOf("total", "subtotal", "catalogRevision")).isEmpty() shouldBe
+                    true
+            }
         }
 
-        test("documents public selection eligibility and the semantic stale conflict using the runtime envelope") {
+        test("the priced submission is SERVICE-only and the requested service is descriptive, never a pricing input") {
             val create = operation("/inquiries", "post")
-            create.text("description") shouldContain "current catalog revision observed"
-            create.text("description") shouldContain "public categories with enabled, available offerings"
-            create.text("responses", "409", "description") shouldContain "CATALOG_REVISION_STALE"
-            create.text("responses", "409", "description") shouldContain "IDEMPOTENCY_KEY_REUSED"
-            create.text("responses", "409", "description") shouldContain "never automatically resubmit"
-            create.text("responses", "409", "content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/ErrorResponse"
-            create.text("responses", "409", "content", "application/json", "example", "code") shouldBe "CATALOG_REVISION_STALE"
-            schema("InquiryPricingInputs").text("properties", "catalogRevision", "description") shouldContain "latest revision observed"
-            operation("/inquiry-form", "get").text("description") shouldContain "private, max-age=60, must-revalidate"
+            listOf("SERVICE principal", "never reprices", "catalog revision", "IDEMPOTENCY_KEY_REUSED").forEach {
+                (create.text("description") + create.text("responses", "409", "description")) shouldContain it
+            }
+            create.text("responses", "403", "description") shouldContain "not a SERVICE"
+            create.text("responses", "409", "content", "application/json", "example", "code") shouldBe "IDEMPOTENCY_KEY_REUSED"
+            val requested = schema("RequestedServiceRequest")
+            requested.strings("required") shouldContainExactly listOf("guestCount")
+            requested
+                .at("properties")
+                .jsonObject.keys
+                .toList() shouldContainExactly
+                listOf("guestCount", "guestCountIsMinimum", "durationMinutes", "items", "pricingReference")
+            requested.text("properties", "items", "items", "\$ref") shouldBe "#/components/schemas/RequestedServiceItemRequest"
+            requested.text("properties", "pricingReference", "description") shouldContain "never validates"
+            schema("RequestedServiceItemRequest").strings("required") shouldContainExactly listOf("label")
         }
 
-        test("documents the required bounded Idempotency-Key header and replay before catalog validation") {
+        test("documents the required bounded Idempotency-Key header and a replay that writes nothing") {
             val create = operation("/inquiries", "post")
             val key = create.at("parameters").jsonArray.single { it.text("name") == "Idempotency-Key" }
             key.text("in") shouldBe "header"
@@ -1035,7 +860,7 @@ class OpenApiDocumentSpec :
             key.at("schema", "maxLength").jsonPrimitive.int shouldBe 128
             key.text("schema", "pattern") shouldBe "^[A-Za-z0-9_-]{1,128}$"
             key.text("description") shouldContain "SAME key"
-            create.text("description") shouldContain "without catalog access or pricing"
+            create.text("description") shouldContain "without writing anything"
             create.text("description") shouldContain "Failed attempts do not consume keys"
             // Neither staff routes nor other public operations acquire this header.
             operations.keys.filter { (path, method) -> path != "/inquiries" || method != "post" }.forEach { (path, method) ->
@@ -1050,13 +875,12 @@ class OpenApiDocumentSpec :
         test("describes the public create response as a receipt of the new inquiry, naming no customer") {
             operation("/inquiries", "post").text("description") shouldContain "canonical initial Estimate"
             operation("/inquiries", "post").text("description").let {
-                it shouldContain "`pricingInputs` is required"
-                it shouldContain "exactly one canonical initial Estimate"
+                it shouldContain "exact already-priced lines"
                 it shouldContain "commit together or not at all"
-                it shouldContain "does not expose the initial Estimate"
+                it shouldContain "does not expose the Estimate"
                 it shouldNotContain "plain"
             }
-            operation("/inquiries", "post").text("responses", "400", "description") shouldContain "`pricingInputs`"
+            operation("/inquiries", "post").text("responses", "400", "description") shouldContain "`lines`"
             operation("/inquiries", "post").text("responses", "201", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/InquiryReceiptResponse"
 
@@ -1070,13 +894,24 @@ class OpenApiDocumentSpec :
             receipt.text("properties", "createdAt", "format") shouldBe "date-time"
         }
 
-        test("describes the staff inquiry response with its identifiers, timestamp formats, and requested pricing inputs") {
+        test("describes the staff inquiry response with its identifiers, timestamp formats, and requested service") {
             operation("/inquiries/{inquiryId}", "get").text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
                 "#/components/schemas/InquiryResponse"
 
             val response = schema("InquiryResponse")
             response.strings("required") shouldContainExactly
-                listOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType", "lifecycle")
+                listOf(
+                    "id",
+                    "customerId",
+                    "name",
+                    "email",
+                    "createdAt",
+                    "requestedService",
+                    "zipCode",
+                    "eventDate",
+                    "eventType",
+                    "lifecycle",
+                )
             val properties = response.at("properties").jsonObject
             properties.keys.toList() shouldContainExactly
                 listOf(
@@ -1086,15 +921,15 @@ class OpenApiDocumentSpec :
                     "email",
                     "message",
                     "createdAt",
-                    "pricingInputs",
+                    "requestedService",
                     "zipCode",
                     "eventDate",
                     "eventType",
                     "lifecycle",
                 )
-            properties.getValue("pricingInputs").text("\$ref") shouldBe "#/components/schemas/InquiryRequestedPricing"
+            properties.getValue("requestedService").text("\$ref") shouldBe "#/components/schemas/RequestedServiceRequest"
             properties.getValue("lifecycle").text("\$ref") shouldBe "#/components/schemas/InquiryLifecycleResponse"
-            (properties - "pricingInputs" - "lifecycle").values.forEach { it.text("type") shouldBe "string" }
+            (properties - "requestedService" - "lifecycle").values.forEach { it.text("type") shouldBe "string" }
             properties.filterValues { "format" in it.jsonObject }.mapValues { (_, property) -> property.text("format") } shouldBe
                 mapOf("id" to "uuid", "customerId" to "uuid", "createdAt" to "date-time", "eventDate" to "date")
         }
@@ -1120,28 +955,6 @@ class OpenApiDocumentSpec :
                 route.text("description") shouldContain "principal"
             }
             operation("/financial-documents/{documentId}/invoice", "post").text("description") shouldContain "RELATED"
-        }
-
-        test("describes an inquiry's pricing inputs as the estimate's commercial inputs: never amounts, and pinned to a revision") {
-            val commercialInputs = listOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
-            listOf("InquiryPricingInputs", "InquiryRequestedPricing").forEach { name ->
-                val inputs = schema(name)
-                inputs
-                    .at("properties")
-                    .jsonObject.keys
-                    .toList() shouldContainExactly commercialInputs
-                inputs.text("properties", "selections", "items", "\$ref") shouldBe "#/components/schemas/PricingSelection"
-                listOf("catalogRevision", "guestCount", "durationMinutes").forEach {
-                    inputs.text("properties", it, "type") shouldBe "integer"
-                }
-                inputs.text("properties", "guestCountIsMinimum", "type") shouldBe "boolean"
-            }
-            // Submitted as an estimate request takes them; read back as staff submit them to an estimate.
-            schema("InquiryPricingInputs").strings("required") shouldContainExactly
-                schema("CreateInquiryEstimateRequest").strings("required")
-            schema("InquiryPricingInputs").at("properties").jsonObject.keys shouldBe
-                schema("CreateInquiryEstimateRequest").at("properties").jsonObject.keys
-            schema("InquiryRequestedPricing").strings("required") shouldContainExactly commercialInputs
         }
 
         test("describes the staff inquiry list: an optional bounded limit, an opaque cursor, and the next page's cursor") {
@@ -1242,57 +1055,38 @@ class OpenApiDocumentSpec :
             }
         }
 
-        test("quote builder: closed composition unions, write-free preview, optional reviewed issuance and money-free plans") {
+        test("quote builder: write-free preview of staff lines, optional reviewed issuance, and money-free service plans") {
             val preview = operation("/staff/requests/{inquiryId}/quote-preview", "post")
             preview.text("operationId") shouldBe "previewInquiryQuote"
-            listOf("writes nothing", "REPEATABLE_READ", "reviewToken", "no-store", "commerce.deposit-requirement.manage").forEach {
+            listOf("writes nothing", "REPEATABLE_READ", "reviewToken", "no-store", "No catalog or pricing policy").forEach {
                 preview.text("description") shouldContain it
             }
             preview.text("responses", "409", "description").let {
-                it shouldContain "CATALOG_REVISION_STALE"
                 it shouldContain "`conflict`"
                 it shouldContain "`illegal_transition`"
+                it shouldNotContain "CATALOG"
             }
             preview.text("responses", "422", "description").let { description ->
-                listOf("OVERRIDE_TARGET_NOT_FOUND", "QUOTE_TOTAL_NOT_POSITIVE", "SERVICE_SELECTIONS_CHANGE_PRICING").forEach {
+                listOf("LINE_NOT_IN_REVIEWED_DOCUMENT", "QUOTE_TOTAL_NOT_POSITIVE", "SERVICE_PLAN_LINE_NOT_FOUND").forEach {
                     description shouldContain it
                 }
             }
             schema("PreviewInquiryQuoteRequest").strings("required") shouldContainExactly
-                listOf("expectedDocumentVersion", "composition", "terms")
+                listOf("expectedDocumentVersion", "lines", "terms")
             schema("PreviewInquiryQuoteRequest").text("properties", "terms", "\$ref") shouldBe "#/components/schemas/DepositTermsRequest"
-            schema("QuoteCompositionRequest").strings("required") shouldContainExactly listOf("pricing")
-            mapOf(
-                "QuotePricingRequest" to ("mode" to listOf("KEEP_ESTIMATE", "REVISE_SERVICE_SELECTIONS", "REPRICE_CONFIGURATION")),
-                "QuoteOverrideTargetRequest" to
-                    ("type" to listOf("EXISTING_LINE", "BASE_SERVICE", "ICE_CREAM_SERVICE", "EXTRA_TOPPINGS", "SELECTED_OFFERING")),
-            ).forEach { (name, union) ->
-                val (discriminator, tags) = union
-                schema(name).text("discriminator", "propertyName") shouldBe discriminator
-                schema(name).at("discriminator", "mapping").jsonObject.keys shouldContainExactlyInAnyOrder tags
-                tags.forEach { tag ->
-                    val variant = schema("${name}_$tag")
-                    variant.text("properties", discriminator, "const") shouldBe tag
-                    variant.at("additionalProperties") shouldBe JsonPrimitive(false)
-                }
+            schema("PreviewInquiryQuoteRequest").text("properties", "lines", "items", "\$ref") shouldBe
+                "#/components/schemas/ProposedLineRequest"
+            schema("ProposedLineRequest").let {
+                it.strings("required") shouldContainExactly listOf("description", "unitPrice", "taxAmount", "currency")
+                it.text("properties", "lineItemId", "format") shouldBe "uuid"
+                it.text("properties", "key", "pattern") shouldBe "^[A-Za-z0-9_-]{1,64}$"
+                listOf("quantity", "unitPrice", "taxAmount").forEach { amount -> it.text("properties", amount, "type") shouldBe "string" }
             }
-            schema("QuotePricingRequest_KEEP_ESTIMATE").at("properties").jsonObject.keys shouldContainExactly listOf("mode")
-            schema("QuotePricingRequest_REPRICE_CONFIGURATION").strings("required") shouldContainExactlyInAnyOrder
-                listOf("mode", "catalogRevision", "guestCount", "durationMinutes", "selections")
-            schema("QuoteOverrideTargetRequest_EXISTING_LINE").text("properties", "lineItemId", "format") shouldBe "uuid"
-            schema("QuoteOverrideRequest").strings("required") shouldContainExactly listOf("target", "finalAmount", "currency", "reason")
-            schema("QuoteAdjustmentRequest").strings("required") shouldContainExactly
-                listOf("clientKey", "kind", "description", "amount", "currency", "reason")
-            schema(
-                "QuoteAdjustmentRequest",
-            ).at("properties", "kind", "enum").jsonArray.map { it.jsonPrimitive.content } shouldContainExactly
-                listOf("CHARGE", "DISCOUNT", "CREDIT")
-            schema("QuoteAdjustmentRequest").at("properties", "reason", "maxLength") shouldBe JsonPrimitive(500)
-            // Issuance stays backward compatible: composition and reviewToken are additive and optional.
+            schema("ServicePlanRequest").strings("required") shouldContainExactly listOf("description")
+            schema("LineNoteRequest").strings("required") shouldContainExactly listOf("note")
+            // Issuance stays backward compatible: lines, service plan and reviewToken are additive and optional.
             schema("IssueInquiryProposalRequest").at("properties").jsonObject.keys shouldContainExactlyInAnyOrder
-                listOf("expectedDocumentVersion", "terms", "composition", "reviewToken")
-            schema("IssueInquiryProposalRequest").text("properties", "composition", "\$ref") shouldBe
-                "#/components/schemas/QuoteCompositionRequest"
+                listOf("expectedDocumentVersion", "terms", "lines", "servicePlan", "reviewToken")
             operation("/staff/requests/{inquiryId}/proposals", "post").text("responses", "409", "description") shouldContain
                 "QUOTE_REVIEW_STALE"
             listOf("IssuedInquiryProposalResponse", "StaffRequestResponse").forEach {
@@ -1300,13 +1094,16 @@ class OpenApiDocumentSpec :
                 schema(it).strings("required").contains("servicePlan") shouldBe false
             }
             // The plan carries no money; amounts stay on the ledger lines it names.
-            listOf("ServicePlanResponse", "ServicePlanLineResponse", "ServiceConfigurationResponse").forEach { name ->
+            val plans = listOf("ServicePlanResponse", "ServicePlanRequest", "ServicePlanPreviewResponse", "ServicePlanLineNoteResponse")
+            plans.forEach { name ->
                 schema(name)
                     .at("properties")
                     .jsonObject.keys
                     .none { Regex("(?i)amount|price|total|balance").containsMatchIn(it) } shouldBe true
             }
+            schema("ServicePlanResponse").text("properties", "approvedBy", "format") shouldBe "uuid"
             schema("InquiryQuotePreviewResponse").text("properties", "reviewToken", "pattern") shouldBe "^[0-9a-f]{64}$"
+            schema("QuotePreviewLineResponse").strings("required").contains("origin") shouldBe true
             // Inspect executable metadata before rendering can collapse duplicate status entries.
             val access = metadataAuth.access
             listOf(
@@ -1316,6 +1113,19 @@ class OpenApiDocumentSpec :
                 route.meta.responses
                     .map { it.message.status }
                     .shouldBeUnique()
+            }
+        }
+
+        test("every documented deposit terms example is the discriminated object clients send, never an array") {
+            listOf(
+                "/financial-documents/{documentId}/deposit-requirement" to "put",
+                "/staff/requests/{inquiryId}/quote-preview" to "post",
+                "/staff/requests/{inquiryId}/proposals" to "post",
+                "/staff/requests/{inquiryId}/proposals/quote-revisions" to "post",
+                "/staff/requests/{inquiryId}/proposals/deposit-revisions" to "post",
+            ).forEach { (path, method) ->
+                val terms = operation(path, method).at("requestBody", "content", "application/json", "example", "terms")
+                (terms is JsonObject && "type" in terms.jsonObject) shouldBe true
             }
         }
 
@@ -1378,83 +1188,7 @@ class OpenApiDocumentSpec :
             }
         }
 
-        test("inquiry form inputs have an explicit type union with distinct required discriminator values") {
-            operation("/inquiry-form", "get").text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
-                "#/components/schemas/InquiryFormResponse"
-            schema("InquiryFormResponse").strings("required") shouldContainExactly
-                listOf("definitionVersion", "catalogId", "catalogRevision", "sections", "pricingPreview")
-            schema("InquiryFormFieldResponse").text("properties", "input", "\$ref") shouldBe
-                "#/components/schemas/InquiryFormInputResponse"
-            val union = schema("InquiryFormInputResponse")
-            union.text("discriminator", "propertyName") shouldBe "type"
-            val tags = listOf("TEXT", "EMAIL", "INTEGER", "BOOLEAN", "INTEGER_CHOICE", "OFFERING_CHOICE", "DATE", "STRING_CHOICE")
-            union.at("oneOf").jsonArray.map { it.text("\$ref") } shouldContainExactlyInAnyOrder
-                tags.map { "#/components/schemas/InquiryFormInputResponse_$it" }
-            tags.forEach { tag ->
-                val name = "InquiryFormInputResponse_$tag"
-                union.text("discriminator", "mapping", tag) shouldBe "#/components/schemas/$name"
-                schema(name).text("properties", "type", "const") shouldBe tag
-                schema(name).strings("required").contains("type") shouldBe true
-            }
-            schema("InquiryFormInputResponse_INTEGER_CHOICE").text("properties", "options", "items", "\$ref") shouldBe
-                "#/components/schemas/InquiryFormIntegerOption"
-            schema("InquiryFormIntegerOption").text("properties", "value", "type") shouldBe "integer"
-            schema("InquiryFormInputResponse_OFFERING_CHOICE").let {
-                it.strings("required") shouldContainExactly listOf("category", "minSelections", "options", "type")
-                it.text("properties", "options", "items", "\$ref") shouldBe "#/components/schemas/OfferingDto"
-            }
-            schema("InquiryFormPresentation").strings("properties", "control", "enum") shouldContainExactly
-                listOf("TEXT", "TEXTAREA", "NUMBER", "CHECKBOX", "SELECT", "CARDS", "CHECKBOXES", "DATE", "CHIPS")
-        }
-
-        test("inquiry form v11 reuses required runtime state enums and documents public visibility and structural rejections") {
-            val form = operation("/inquiry-form", "get")
-            form.at("responses", "200", "content", "application/json", "example", "definitionVersion").jsonPrimitive.int shouldBe 11
-            form
-                .at("responses", "200", "content", "application/json", "example", "sections")
-                .jsonArray
-                .single { it.text("key") == "service" }
-                .at("optional") shouldBe JsonPrimitive(false)
-            val description = form.text("description")
-            description shouldContain "hand-scooped flavors"
-            val hand =
-                form
-                    .at("responses", "200", "content", "application/json", "example", "sections")
-                    .jsonArray
-                    .single { it.text("key") == "service" }
-                    .at("fields")
-                    .jsonArray
-                    .single { it.text("key") == "offering:hand-scooped-flavor" }
-            hand.text("submissionPointer") shouldBe "/pricingInputs/selections"
-            hand.text("presentation", "control") shouldBe "CHIPS"
-            hand.at("required") shouldBe JsonPrimitive(true)
-            hand.at("input", "minSelections") shouldBe JsonPrimitive(4)
-            hand.at("input", "maxSelections") shouldBe JsonPrimitive(4)
-            val returning = hand.at("input", "options").jsonArray.single { it.text("key") == "hand-scooped-new-york-cheesecake" }
-            returning.text("availability") shouldBe "UNAVAILABLE"
-            returning.text("badge") shouldBe "Returning soon"
-            returning.text("statusNote") shouldBe "Back on the menu this fall!"
-            description shouldContain "Service configuration is required"
-            description shouldNotContain "optional"
-            description shouldContain "selectionState=ENABLED"
-            description shouldContain "availability=UNAVAILABLE"
-            description shouldContain "unselectable"
-            description shouldContain "disabled"
-            description shouldContain "retired"
-            val offering = schema("OfferingDto")
-            offering.strings("required").containsAll(listOf("selectionState", "availability")) shouldBe true
-            offering.strings("properties", "selectionState", "enum") shouldContainExactly listOf("ENABLED", "DISABLED")
-            offering.strings("properties", "availability", "enum") shouldContainExactly listOf("AVAILABLE", "UNAVAILABLE")
-            schema("OfferingSelectionStateDto").strings("enum") shouldContainExactly listOf("ENABLED", "DISABLED")
-            schema("OfferingAvailabilityDto").strings("enum") shouldContainExactly listOf("AVAILABLE", "UNAVAILABLE")
-            listOf("/inquiries", "/estimate-preview").forEach { path ->
-                val validation = operation(path, "post").text("responses", "422", "description")
-                validation shouldContain "OFFERING_DISABLED"
-                validation shouldContain "OFFERING_UNAVAILABLE"
-            }
-        }
-
-        test("required event ZIP is constrained text and form text patterns are explicitly documented") {
+        test("required event ZIP is constrained text") {
             listOf("CreateInquiryRequest", "InquiryResponse", "InquiryListItem").forEach { name ->
                 val body = schema(name)
                 body.strings("required").contains("zipCode") shouldBe true
@@ -1462,9 +1196,6 @@ class OpenApiDocumentSpec :
                 body.text("properties", "zipCode", "pattern") shouldBe ZipCode.PATTERN
             }
             schema("CreateInquiryRequest").at("properties", "zipCode", "minLength").jsonPrimitive.int shouldBe ZipCode.LENGTH
-            val text = schema("InquiryFormInputResponse_TEXT")
-            text.text("properties", "pattern", "type") shouldBe "string"
-            text.strings("required").contains("pattern") shouldBe false
         }
 
         test("required event fields expose date format and exact enum values in submission and staff schemas") {
@@ -1476,110 +1207,34 @@ class OpenApiDocumentSpec :
                 body.text("properties", "eventDate", "format") shouldBe "date"
                 body.strings("properties", "eventType", "enum") shouldContainExactly values
             }
-            schema("InquiryFormInputResponse_STRING_CHOICE").text("properties", "options", "items", "\$ref") shouldBe
-                "#/components/schemas/InquiryFormStringOption"
-            schema("InquiryFormStringOption").text("properties", "value", "type") shouldBe "string"
-            schema("InquiryFormInputResponse_DATE").strings("required") shouldContainExactly listOf("format", "type")
         }
 
-        test("describes the estimate preview request from its serial descriptors: integers, a boolean, and nested lists") {
-            val body = operation("/estimate-preview", "post").at("requestBody")
-            body.text("content", "application/json", "schema", "\$ref") shouldBe "#/components/schemas/EstimatePreviewRequest"
-
-            val request = schema("EstimatePreviewRequest")
-            request.strings("required") shouldContainExactly listOf("catalogRevision", "guestCount", "durationMinutes", "selections")
-            val properties = request.at("properties").jsonObject
-            properties.keys.toList() shouldContainExactly
-                listOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
-            listOf("catalogRevision", "guestCount", "durationMinutes").forEach {
-                properties.getValue(it).text("type") shouldBe "integer"
-                properties.getValue(it).text("format") shouldBe "int32"
-            }
-            properties.getValue("guestCountIsMinimum").text("type") shouldBe "boolean"
-            properties.getValue("selections").text("type") shouldBe "array"
-            properties.getValue("selections").text("items", "\$ref") shouldBe "#/components/schemas/EstimatePreviewSelection"
-
-            val selection = schema("EstimatePreviewSelection")
-            selection.strings("required") shouldContainExactly listOf("category", "offerings")
-            selection.text("properties", "offerings", "type") shouldBe "array"
-            selection.text("properties", "offerings", "items", "type") shouldBe "string"
-        }
-
-        test("inquiry pricing preview is concrete arithmetic metadata with decimal strings and no client monetary authority") {
-            schema("InquiryFormResponse").text("properties", "pricingPreview", "\$ref") shouldBe
-                "#/components/schemas/InquiryPricingPreviewResponse"
-            schema("InquiryPricingPreviewResponse").let {
-                it.strings("required") shouldContainExactly
-                    listOf("currency", "guestQuantityDimension", "durationOptions", "perGuestAmount", "toppingAdjustment")
-                it.text("properties", "durationOptions", "items", "\$ref") shouldBe "#/components/schemas/InquiryDurationPricingResponse"
-                it.text("properties", "perGuestAmount", "type") shouldBe "string"
-                it.text("properties", "toppingAdjustment", "\$ref") shouldBe "#/components/schemas/InquiryToppingAdjustmentResponse"
-            }
-            schema("InquiryDurationPricingResponse").let {
-                it.strings("required") shouldContainExactly listOf("durationMinutes", "baseServiceAmount", "offeringContributions")
-                it.text("properties", "durationMinutes", "type") shouldBe "integer"
-                it.text("properties", "baseServiceAmount", "type") shouldBe "string"
-                it.text("properties", "offeringContributions", "items", "\$ref") shouldBe
-                    "#/components/schemas/InquiryDurationOfferingContributionResponse"
-            }
-            schema("InquiryDurationOfferingContributionResponse").let {
-                it.strings("required") shouldContainExactly listOf("offeringKey", "amount")
-                it.text("properties", "amount", "type") shouldBe "string"
-            }
-            schema("InquiryToppingAdjustmentResponse").let {
-                it.strings("required") shouldContainExactly listOf("category", "includedSelections", "additionalSelectionPerGuestAmount")
-                it.text("properties", "includedSelections", "type") shouldBe "integer"
-                it.text("properties", "additionalSelectionPerGuestAmount", "type") shouldBe "string"
-            }
-            listOf(
-                "CreateInquiryRequest",
-                "InquiryPricingInputs",
-                "EstimatePreviewRequest",
-                "CreateInquiryEstimateRequest",
-            ).forEach { name ->
-                val properties = schema(name).at("properties").jsonObject.keys
-                (properties intersect setOf("total", "amount", "lines", "pricingPreview")).isEmpty() shouldBe true
-            }
-        }
-
-        test("describes the estimate preview response: every amount an exact decimal string, quantity optional") {
-            operation("/estimate-preview", "post").text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
-                "#/components/schemas/EstimatePreviewResponse"
-
-            val response = schema("EstimatePreviewResponse")
-            response.strings("required") shouldContainExactly
-                listOf("catalogRevision", "guestCountIsMinimum", "lines", "subtotal", "taxAmount", "total", "currency")
-            response.text("properties", "lines", "items", "\$ref") shouldBe "#/components/schemas/EstimatePreviewLine"
-            listOf("subtotal", "taxAmount", "total").forEach { response.text("properties", it, "type") shouldBe "string" }
-
-            val line = schema("EstimatePreviewLine")
-            line.strings("required") shouldContainExactly listOf("description", "unitPrice", "subtotal", "taxAmount", "total", "currency")
-            line
-                .at("properties")
-                .jsonObject.values
-                .forEach { it.text("type") shouldBe "string" }
-        }
-
-        test("persisted financial documents take commercial inputs only: no request carries lines, amounts, or totals") {
-            listOf("CreateInquiryEstimateRequest", "CreateInquiryFinancialDocumentRequest", "ChangeOrderRequest").forEach { name ->
+        test("staff financial requests carry complete already-priced lines, never totals, and need a staff session") {
+            mapOf(
+                "CreateInquiryEstimateRequest" to listOf("lines"),
+                "CreateInquiryFinancialDocumentRequest" to listOf("stage", "lines"),
+                "ChangeOrderRequest" to listOf("expectedVersion", "lines"),
+            ).forEach { (name, required) ->
                 val request = schema(name)
-                request.at("properties").jsonObject.keys shouldBe
-                    (
-                        when (name) {
-                            "ChangeOrderRequest" -> setOf("expectedVersion")
-                            "CreateInquiryFinancialDocumentRequest" -> setOf("stage")
-                            else -> emptySet()
-                        }
-                    ) +
-                    setOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
-                request.text("properties", "selections", "items", "\$ref") shouldBe "#/components/schemas/PricingSelection"
+                request.at("properties").jsonObject.keys shouldBe required.toSet()
+                request.strings("required") shouldContainExactly required
             }
-            schema("CreateInquiryEstimateRequest").strings("required") shouldContainExactly
-                listOf("catalogRevision", "guestCount", "durationMinutes", "selections")
-            schema("CreateInquiryFinancialDocumentRequest").strings("required") shouldContainExactly
-                listOf("stage", "catalogRevision", "guestCount", "durationMinutes", "selections")
-            schema("ChangeOrderRequest").strings("required") shouldContainExactly
-                listOf("expectedVersion", "catalogRevision", "guestCount", "durationMinutes", "selections")
+            schema("CreateInquiryEstimateRequest").text("properties", "lines", "items", "\$ref") shouldBe
+                "#/components/schemas/PricedLineRequest"
+            schema("ChangeOrderRequest").text("properties", "lines", "items", "\$ref") shouldBe "#/components/schemas/ProposedLineRequest"
+            listOf(
+                "/inquiries/{inquiryId}/estimates",
+                "/inquiries/{inquiryId}/financial-documents",
+                "/financial-documents/{documentId}/change-orders",
+            ).forEach { path ->
+                val route = operation(path, "post")
+                route.text("description") shouldContain "fionas.financial-terms.manage"
+                route.text("responses", "403", "description") shouldContain "staff USER"
+            }
+            operation("/financial-documents/{documentId}/change-orders", "post").text("responses", "422", "description").let {
+                it shouldContain "NO_FINANCIAL_CHANGE"
+                it shouldContain "LINE_NOT_IN_REVIEWED_DOCUMENT"
+            }
             schema("StageTransitionRequest").strings("required") shouldContainExactly listOf("expectedVersion")
             schema("RecordPaymentRequest").let {
                 it.strings("required") shouldContainExactly listOf("documentVersion", "amount", "method")
@@ -1739,7 +1394,7 @@ class OpenApiDocumentSpec :
             example.text("reconciliation", "grossAllocated") shouldBe "350.00"
         }
 
-        test("describes a financial document as immutable ledger facts, pricing source, and derived settlement") {
+        test("describes a financial document as immutable ledger facts, line authorship, and derived settlement") {
             val document = schema("FinancialDocumentResponse")
             document.strings("required") shouldContainExactly
                 listOf("id", "version", "createdAt", "stage", "inquiryId", "lines", "subtotal", "taxAmount", "total", "currency")
@@ -1752,7 +1407,7 @@ class OpenApiDocumentSpec :
                     "previousVersion",
                     "stage",
                     "inquiryId",
-                    "pricing",
+                    "linesAuthoredBy",
                     "lines",
                     "subtotal",
                     "taxAmount",
@@ -1765,6 +1420,8 @@ class OpenApiDocumentSpec :
             listOf("version", "previousVersion").forEach { properties.getValue(it).text("format") shouldBe "int32" }
             listOf("subtotal", "taxAmount", "total").forEach { properties.getValue(it).text("type") shouldBe "string" }
             properties.getValue("reconciliation").text("\$ref") shouldBe "#/components/schemas/DocumentReconciliation"
+            properties.getValue("linesAuthoredBy").text("\$ref") shouldBe "#/components/schemas/LineAuthorshipResponse"
+            schema("LineAuthorshipResponse").strings("required") shouldContainExactly listOf("principalKind", "principalId", "recordedAt")
             schema("DocumentReconciliation").strings("required") shouldContainExactly
                 listOf("grossAllocated", "netApplied", "balance", "currency")
             schema("FinancialDocumentLine").text("properties", "id", "format") shouldBe "uuid"
@@ -1814,18 +1471,23 @@ class OpenApiDocumentSpec :
         test("resolves every reference, and holds only Fiona's and runtime capability schemas") {
             val schemas = document.at("components", "schemas").jsonObject
             references(document).forEach { schemas shouldContainKey it.removePrefix("#/components/schemas/") }
+            schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + serviceAuthenticationSchemas
+        }
 
-            // Every schema the Offerings routes reach, directly or through other schemas.
-            val offeringPaths = document.at("paths").jsonObject.filterKeys { it.startsWith("/offering-catalog") }
-            val reached = mutableSetOf<String>()
-            var frontier = references(JsonObject(offeringPaths)).map { it.substringAfterLast('/') }.toSet()
-            while (frontier.isNotEmpty()) {
-                reached += frontier
-                frontier = frontier.flatMap { references(schemas.getValue(it)) }.map { it.substringAfterLast('/') }.toSet() - reached
+        test("serves no product catalog, inquiry form, estimate preview, or catalog staleness contract") {
+            val paths = document.at("paths").jsonObject.keys
+            paths.none { it.startsWith("/offering-catalog") || it == "/inquiry-form" || it == "/estimate-preview" } shouldBe true
+            document
+                .at(
+                    "components",
+                    "schemas",
+                ).jsonObject.keys
+                .none { Regex("(?i)offering|catalog|pricinginput").containsMatchIn(it) } shouldBe
+                true
+            val text = fionaOpenApiDocument()
+            listOf("CATALOG_REVISION_STALE", "catalogRevision", "commerce.offerings.manage", "fionas.inquiry-form.read").forEach {
+                text.contains(it) shouldBe false
             }
-            // Runtime 0.0.20 emits these enum definitions as well as inline enums on offering properties.
-            val offeringStateSchemas = setOf("OfferingSelectionStateDto", "OfferingAvailabilityDto")
-            schemas.keys shouldBe fionaSchemas.toSet() + adminSchemas + serviceAuthenticationSchemas + reached + offeringStateSchemas
         }
 
         test("gives each body an example that satisfies its schema's required properties") {

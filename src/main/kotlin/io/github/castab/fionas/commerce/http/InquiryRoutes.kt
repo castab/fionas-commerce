@@ -8,6 +8,7 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
+import io.github.castab.fionas.commerce.financial.MAX_DOCUMENT_LINES
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.EventDate
 import io.github.castab.fionas.commerce.inquiry.EventType
@@ -21,8 +22,9 @@ import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.InquirySubmissionKey
 import io.github.castab.fionas.commerce.inquiry.InquirySummary
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
+import io.github.castab.fionas.commerce.inquiry.RequestedService
+import io.github.castab.fionas.commerce.inquiry.RequestedServiceItem
 import io.github.castab.fionas.commerce.inquiry.ZipCode
-import io.github.castab.fionas.commerce.offering.CatalogRevisionStale
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
@@ -78,15 +80,18 @@ data class CreateInquiryRequest(
     val message: String? = null,
     @ApiProperty(
         description =
-            "Required: the ice cream service the customer configured, as `POST /estimate-preview` takes it. Every " +
-                "inquiry is a request for configured service. The revision must still be current when validated, and " +
-                "selections must be exposed by the public inquiry form. Stale revisions fail with 409 " +
-                "CATALOG_REVISION_STALE; refresh the form and ask the customer to review before resubmission. Rejected " +
-                "inputs record nothing. Accepted inputs are priced exactly once, and their concrete lines materialize " +
-                "the inquiry's initial Estimate in the same transaction. Amounts are never accepted; the inquiry " +
-                "records customer intent and the ledger records financial lines.",
+            "Required: what the customer asked Fiona to serve, as the pricing authority recorded it. Descriptive request " +
+                "history for staff only: Fiona never prices, authorizes or validates the lines from it.",
     )
-    val pricingInputs: InquiryPricingInputs,
+    val requestedService: RequestedServiceRequest,
+    @ApiProperty(
+        description =
+            "Required: the exact already-priced lines of the inquiry's initial Estimate, in order, as the public pricing " +
+                "authority (the web server) committed them: 1 to $MAX_DOCUMENT_LINES lines in one currency with a " +
+                "nonnegative total. Fiona records them exactly, without repricing or any catalog check; the document " +
+                "total is derived from them. Callers never send a total.",
+    )
+    val lines: List<PricedLineRequest>,
     @ApiProperty(
         description =
             "Required event ZIP code for staff service-area/travel review; not the customer's home address. " +
@@ -116,23 +121,44 @@ enum class InquiryEventType {
     fun toDomain(): EventType = EventType.valueOf(name)
 }
 
-/** The commercial inputs a customer configured, submitted with an inquiry: never amounts, lines, or totals. */
+/** What the customer asked Fiona to serve: descriptive request history, never a price or pricing input. */
 @Serializable
-data class InquiryPricingInputs(
+data class RequestedServiceRequest(
+    @ApiProperty(description = "The guests the event is for: 1 to ${RequestedService.MAX_GUESTS}.")
+    val guestCount: Int,
+    @ApiProperty(description = "Whether `guestCount` is a lower bound (\"100+ guests\"); estimates then read \"from\". False when absent.")
+    val guestCountIsMinimum: Boolean = false,
+    @ApiProperty(description = "The requested service duration in minutes, when one was requested: 1 to 1440.")
+    val durationMinutes: Int? = null,
+    @ApiProperty(description = "What the customer chose or described, in presentation order; at most ${RequestedService.MAX_ITEMS}.")
+    val items: List<RequestedServiceItemRequest> = emptyList(),
     @ApiProperty(
         description =
-            "The catalogRevision returned by GET /inquiry-form. It must equal the latest revision observed during " +
-                "submission validation. It remains inquiry history and is never replaced. At least 1.",
+            "Optional documentary provenance of the prices, for example the web server's pricing policy version. Fiona " +
+                "records it and never validates or interprets it. At most 200 characters.",
+        maxLength = RequestedService.PRICING_REFERENCE_MAX_LENGTH,
     )
-    val catalogRevision: Int,
-    @ApiProperty(description = "The guests the event is for. At least 1.")
-    val guestCount: Int,
-    @ApiProperty(description = "Whether `guestCount` is a lower bound (\"100+ guests\"). False when absent.")
-    val guestCountIsMinimum: Boolean = false,
-    @ApiProperty(description = "The service duration in minutes: one of 90, 120, 150, or 180.")
-    val durationMinutes: Int,
-    @ApiProperty(description = "The chosen offerings, one entry per catalog category, in the order they are shown.")
-    val selections: List<PricingSelection>,
+    val pricingReference: String? = null,
+)
+
+/** One requested item, as people read it, with the web catalog's optional grouping and key. */
+@Serializable
+data class RequestedServiceItemRequest(
+    @ApiProperty(
+        description = "What was requested, for example `Horchata soft serve`. Trimmed; nonblank; at most 200 characters.",
+        maxLength = RequestedServiceItem.LABEL_MAX_LENGTH,
+    )
+    val label: String,
+    @ApiProperty(
+        description = "The web catalog's grouping, for example `Soft serve`; at most 120 characters.",
+        maxLength = RequestedServiceItem.GROUP_MAX_LENGTH,
+    )
+    val group: String? = null,
+    @ApiProperty(
+        description = "The web catalog's stable key; it identifies nothing in Fiona. At most 120 characters.",
+        maxLength = RequestedServiceItem.KEY_MAX_LENGTH,
+    )
+    val key: String? = null,
 )
 
 /** What `POST /inquiries` answers: the new inquiry's identity, and nothing of any stored customer. */
@@ -167,31 +193,16 @@ data class InquiryResponse(
     val createdAt: String,
     @ApiProperty(
         description =
-            "The configuration the customer submitted with the inquiry, exactly as recorded; every inquiry has one. " +
-                "Its properties are those `POST /inquiries/{inquiryId}/estimates` takes.",
+            "What the customer asked Fiona to serve, exactly as recorded with the inquiry: descriptive history, never " +
+                "the committed financial lines, which are the canonical Estimate's.",
     )
-    val pricingInputs: InquiryRequestedPricing,
+    val requestedService: RequestedServiceRequest,
     @ApiProperty(description = "The event's required ZIP code as recorded with this inquiry.", pattern = ZipCode.PATTERN)
     val zipCode: String,
     @ApiProperty(description = "The recorded event calendar date, without a time or time zone.", format = "date")
     val eventDate: String,
     val eventType: InquiryEventType,
     val lifecycle: InquiryLifecycleResponse,
-)
-
-/** The commercial inputs recorded with an inquiry, pinned to the catalog revision the customer chose from. */
-@Serializable
-data class InquiryRequestedPricing(
-    @ApiProperty(description = "The catalog revision the customer chose from, as submitted; never a later one.")
-    val catalogRevision: Int,
-    @ApiProperty(description = "The guests the event is for.")
-    val guestCount: Int,
-    @ApiProperty(description = "Whether the guest count is a lower bound.")
-    val guestCountIsMinimum: Boolean,
-    @ApiProperty(description = "The service duration in minutes.")
-    val durationMinutes: Int,
-    @ApiProperty(description = "The chosen offerings, in the order they were submitted.")
-    val selections: List<PricingSelection>,
 )
 
 /** One page of the newest-first inquiry list. */
@@ -234,14 +245,13 @@ data class InquiryListItem(
 
 private val createInquiryRequest = jsonBody(CreateInquiryRequest.serializer())
 private val inquiryConflictBody = jsonBody(ErrorResponse.serializer())
-internal const val CATALOG_REVISION_STALE = "CATALOG_REVISION_STALE"
 internal const val IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
 private val submissionKeyHeader =
     Header.required(
         "Idempotency-Key",
         "Opaque submission identity, 1–128 ASCII letters, digits, underscores or hyphens (UUIDs are supported). " +
             "Use the SAME key for every delivery/retry of one logical submission, including concurrent double delivery. " +
-            "Not a credential. A successful identical replay returns the original receipt before catalog validation; " +
+            "Not a credential. A successful identical replay returns the original receipt without writing anything; " +
             "changed intent with that key fails with 409 IDEMPOTENCY_KEY_REUSED. Keys do not expire.",
         mapOf(
             "schema" to
@@ -280,11 +290,17 @@ private val cursorQuery =
 
 internal val inquiries = Tag("Inquiries", "Configured service requests through quotation, booking, service and closeout.")
 
-private val exampleSelections =
-    listOf(
-        PricingSelection("soft-serve-flavor", listOf("vanilla", "horchata")),
-        PricingSelection("topping", listOf("sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough")),
-        PricingSelection("cone-option", listOf("waffle-cone")),
+internal val exampleRequestedService =
+    RequestedServiceRequest(
+        guestCount = 75,
+        durationMinutes = 120,
+        items =
+            listOf(
+                RequestedServiceItemRequest("Vanilla soft serve", "Soft serve", "vanilla"),
+                RequestedServiceItemRequest("Horchata soft serve", "Soft serve", "horchata"),
+                RequestedServiceItemRequest("Waffle cones", "Cones", "waffle-cone"),
+            ),
+        pricingReference = "fionas-web-pricing@2026-10-01",
     )
 
 private val exampleRequest =
@@ -292,8 +308,14 @@ private val exampleRequest =
         name = "Jane Doe",
         email = "jane@example.com",
         message = "Ice cream service for a birthday.",
-        pricingInputs =
-            InquiryPricingInputs(catalogRevision = 12, guestCount = 75, durationMinutes = 120, selections = exampleSelections),
+        requestedService = exampleRequestedService,
+        lines =
+            listOf(
+                PricedLineRequest("Base service", "2 hours · setup, staff & local travel", null, "250.00", "0.00", "USD"),
+                PricedLineRequest("Ice cream service", "75 guests", "75", "4.00", "0.00", "USD"),
+                PricedLineRequest("Horchata", "Premium soft serve", "75", "0.50", "0.00", "USD"),
+                PricedLineRequest("Waffle cones", null, "75", "0.75", "0.00", "USD"),
+            ),
         zipCode = "92626",
         eventDate = "2026-12-05",
         eventType = InquiryEventType.BIRTHDAY,
@@ -312,14 +334,7 @@ internal val exampleInquiry =
         zipCode = "92626",
         eventDate = "2026-12-05",
         eventType = InquiryEventType.BIRTHDAY,
-        pricingInputs =
-            InquiryRequestedPricing(
-                catalogRevision = 12,
-                guestCount = 75,
-                guestCountIsMinimum = false,
-                durationMinutes = 120,
-                selections = exampleSelections,
-            ),
+        requestedService = exampleRequestedService,
     )
 private val exampleList =
     InquiryListResponse(
@@ -347,11 +362,11 @@ private fun RouteMetaDsl.inquiryReadErrors() {
 }
 
 /**
- * `POST /inquiries`: records an inquiry, establishing its customer. Requires
- * `fionas.inquiries.create`, normally held by the web frontend's SERVICE principal. The route only
- * translates between transport and application values; [createInquiry] does the work, and
- * failures reach callers through commerce-runtime's error handling. The response is a
- * receipt of the new inquiry only: the caller never reads a stored customer back.
+ * `POST /inquiries`: records an inquiry, establishing its customer, with the exact already-priced
+ * lines of its initial Estimate. Only the public pricing authority may call it: a SERVICE
+ * principal holding `fionas.inquiries.create` (a staff USER holding it is still `403`). The route
+ * only translates between transport and application values; [createInquiry] does the work. The
+ * response is a receipt of the new inquiry only: the caller never reads a stored customer back.
  */
 fun createInquiryRoute(
     createInquiry: (CreateInquiry.Command) -> Inquiry,
@@ -362,65 +377,59 @@ fun createInquiryRoute(
         headers += submissionKeyHeader
         // The key is read by the handler, after authorization, so an unauthorized caller always gets `401` or `403`.
         preFlightExtraction = PreFlightExtraction.None
-        principalAccess(FionaPermissions.InquiriesCreate, UNTRUSTED_ORIGIN)
-        summary = "Record an inquiry"
+        principalAccess(
+            FionaPermissions.InquiriesCreate,
+            "or the authenticated principal is not a SERVICE (a staff session holding the permission is still refused)",
+        )
+        // Enforcement admits only the pricing authority's service token, so that is all the document advertises.
+        security = serviceTokenSecurity
+        summary = "Record a service-priced inquiry"
         description =
-            "Records a prospective customer's inquiry. Idempotency-Key is required: a successful same-key/same-intent " +
-            "replay returns the original 201 receipt and Location without catalog access or pricing, even after publication. " +
-            "A successful key reused for changed intent fails with 409 IDEMPOTENCY_KEY_REUSED. Failed attempts do not consume keys. " +
-            "Every inquiry is a request for configured ice cream service, so `pricingInputs` is required. " +
-            "For new submissions, pricing inputs must name the current catalog revision observed " +
-            "during validation and use only public categories with enabled, available offerings. Disabled offerings are " +
-            "hidden from GET /inquiry-form; unavailable options stay visible but cannot be selected. " +
-            "A stale revision fails with 409 CATALOG_REVISION_STALE and records nothing; fetch a fresh form and ask " +
-            "the customer to review updated selections/pricing before resubmission. Every accepted inquiry is " +
-            "priced authoritatively exactly once and atomically materializes exactly one canonical initial Estimate " +
-            "(version 1) with self-contained financial lines; the inquiry and its Estimate commit together or not at all. " +
-            "Requested pricing inputs remain inquiry history, not dependencies of the financial snapshot. The " +
-            "customer is found by normalized email, or created with the inquiry in the same transaction; an existing " +
-            "customer's stored name is never changed. The response is a receipt of the new inquiry alone: it " +
-            "describes no stored customer and does not expose the initial Estimate. The `Location` response header " +
-            "holds the new inquiry's path, `/inquiries/{inquiryId}`, which staff read. " +
-            "Requires `${FionaPermissions.InquiriesCreate.value}`."
+            "Records a prospective customer's inquiry together with the exact already-priced lines of its canonical " +
+            "initial Estimate (version 1). Only the public pricing authority, the web server's SERVICE principal holding " +
+            "`${FionaPermissions.InquiriesCreate.value}`, may call it: it owns the public catalog, selection rules, " +
+            "availability and prices, evaluates the customer's untrusted choices server-side, and submits final lines. " +
+            "Fiona records those lines exactly; it never reprices them, requests a catalog revision, checks option " +
+            "eligibility, or infers a price from the guest count or requested items. `requestedService` is descriptive " +
+            "history for staff. Lines must form a valid document: 1 to $MAX_DOCUMENT_LINES lines, one currency, exact " +
+            "decimal strings with at most the currency's minor-unit digits, and a nonnegative total, which Fiona derives. " +
+            "Idempotency-Key is required: a successful same-key/same-intent replay returns the original 201 receipt and " +
+            "Location without writing anything. The fingerprint binds every value, including each line's amounts and " +
+            "order; a successful key reused for different intent fails with 409 IDEMPOTENCY_KEY_REUSED. Failed attempts " +
+            "do not consume keys. Customer, inquiry, requested service, Estimate v1, its association and line authorship " +
+            "commit together or not at all. The customer is found by normalized email, or created; an existing " +
+            "customer's stored name is never changed. The response is a receipt of the new inquiry alone: it describes " +
+            "no stored customer and does not expose the Estimate. `Location` holds `/inquiries/{inquiryId}`."
         tags += inquiries
         receiving(createInquiryRequest to exampleRequest)
         returning(Status.CREATED, inquiryReceiptResponse to exampleReceipt, "The recorded inquiry's receipt. `Location` holds its path.")
         returningError(
             ErrorCategory.MALFORMED_REQUEST,
-            "Idempotency-Key is missing, repeated or invalid, or the body is not JSON, " +
-                "lacks (or nulls) a required name, email, ZIP, event date or type, or `pricingInputs`, " +
-                "has an unknown event type, or a field has the wrong type.",
+            "Idempotency-Key is missing, repeated or invalid, or the body is not JSON, lacks (or nulls) a required name, " +
+                "email, ZIP, event date or type, `requestedService` or `lines`, has an unknown event type, or a field has " +
+                "the wrong JSON type (amounts are strings, never numbers).",
             "Malformed request: body 'body'",
         )
         returningError(
-            ErrorCategory.NOT_FOUND,
-            "Fiona's catalog has not been initialized, or `pricingInputs` names a catalog revision that does not exist.",
-            "Offerings catalog revision r12 was not found",
-        )
-        returningError(
             ErrorCategory.VALIDATION_FAILED,
-            "a value is invalid: a blank name, an email without `@`, a ZIP code without five digits, an invalid event date, " +
-                "or `pricingInputs` cannot " +
-                "be priced: they do not fit the catalog revision (for example `TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`, " +
-                "`OFFERING_DISABLED`, `OFFERING_UNAVAILABLE`) " +
-                "or Fiona's pricing (for example `INVALID_GUEST_COUNT`, `UNSUPPORTED_DURATION`), or a category is not " +
-                "publicly selectable (`PUBLIC_INQUIRY_CATEGORY_NOT_ALLOWED`). Optional `violations` " +
-                "expose stable codes; the message is diagnostic.",
-            "Email must contain exactly one @ after a non-empty local part",
+            "a value is invalid: a blank name, an email without `@`, a ZIP code without five digits, an invalid event " +
+                "date, an invalid requested service, no lines or too many, a line with a blank description, a malformed " +
+                "or overlong decimal, more fraction digits than the currency allows, an inexact subtotal, mixed " +
+                "currencies, or a negative document total. Nothing is written.",
+            "A line's unit price in USD has at most 2 decimal places",
         )
         returning(
             Status.CONFLICT,
             inquiryConflictBody to
-                ErrorResponse(CATALOG_REVISION_STALE, "The inquiry form changed; fetch the current form and review before resubmitting"),
-            "`CATALOG_REVISION_STALE`: the submitted revision is older than the current revision observed during " +
-                "validation. Refresh GET /inquiry-form and ask the customer to review; never automatically resubmit. " +
-                "`IDEMPOTENCY_KEY_REUSED`: this key already belongs to a different successful inquiry command; use a new " +
-                "key for different intent. Both conflicts have no-store. An identical successful replay returns 201 instead. " +
-                "The same runtime envelope uses `conflict` if a concurrent request created the customer first; retry that request.",
+                ErrorResponse(IDEMPOTENCY_KEY_REUSED, "This key already represents a different successful inquiry submission"),
+            "`IDEMPOTENCY_KEY_REUSED`: this key already belongs to a different successful inquiry command (including " +
+                "different line amounts or order); use a new key for different intent. No-store. An identical successful " +
+                "replay returns 201 instead. The runtime envelope uses `conflict` if a concurrent request created the " +
+                "customer first; retry that request.",
         )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
     } bindContract Method.POST to
-        access.requirePermission(FionaPermissions.InquiriesCreate).then { request: Request ->
+        access.requirePermission(FionaPermissions.InquiriesCreate).then(requireService).then { request: Request ->
             val submissionKey = submissionKey(request)
             val body = createInquiryRequest(request)
             val command =
@@ -429,18 +438,13 @@ fun createInquiryRoute(
                         name = CustomerName.of(body.name),
                         email = Email.of(body.email),
                         message = InquiryMessage.ofOptional(body.message),
+                        requestedService = body.requestedService.domain(),
+                        lines = body.lines.domain(),
                         zipCode = ZipCode.of(body.zipCode),
                         eventDate = EventDate.of(body.eventDate),
                         eventType = body.eventType.toDomain(),
                         submissionKey = submissionKey,
-                        pricingInputs =
-                            pricingInputs(
-                                body.pricingInputs.catalogRevision,
-                                body.pricingInputs.guestCount,
-                                body.pricingInputs.guestCountIsMinimum,
-                                body.pricingInputs.durationMinutes,
-                                body.pricingInputs.selections.map { it.category to it.offerings },
-                            ),
+                        submittedBy = servicePrincipal(request),
                     )
                 }
             try {
@@ -449,14 +453,9 @@ fun createInquiryRoute(
                     .header("Location", "/inquiries/${created.id.value}")
                     .with(inquiryReceiptResponse of InquiryReceiptResponse(created.id.value.toString(), created.createdAt.toString()))
             } catch (failure: CommerceFailure.Conflict) {
-                val code =
-                    when (failure.cause) {
-                        is CatalogRevisionStale -> CATALOG_REVISION_STALE
-                        is IdempotencyKeyReused -> IDEMPOTENCY_KEY_REUSED
-                        else -> throw failure
-                    }
+                if (failure.cause !is IdempotencyKeyReused) throw failure
                 Response(Status.CONFLICT)
-                    .with(inquiryConflictBody of ErrorResponse(code, failure.message!!))
+                    .with(inquiryConflictBody of ErrorResponse(IDEMPOTENCY_KEY_REUSED, failure.message!!))
                     .header("Cache-Control", "no-store")
             }
         }
@@ -521,8 +520,8 @@ fun getInquiryRoute(
         operationId = "getInquiry"
         summary = "Read an inquiry"
         description =
-            "The persisted inquiry, the customer who made it, and the configuration submitted with it, which a staff " +
-            "estimate can start from, and its lifecycle projected from the canonical INITIAL_ESTIMATE lineage plus " +
+            "The persisted inquiry, the customer who made it, the service requested with it, and its lifecycle projected " +
+            "from the canonical INITIAL_ESTIMATE lineage plus " +
             "served/closed facts in one REPEATABLE_READ snapshot. RELATED documents and event date never advance it. " +
             "Requires `${FionaPermissions.InquiriesRead.value}`."
         tags += inquiries
@@ -582,4 +581,22 @@ private fun InquirySummary.toResponse() =
         zipCode = inquiry.zipCode.value,
         eventDate = inquiry.eventDate.value.toString(),
         eventType = InquiryEventType.valueOf(inquiry.eventType.name),
+    )
+
+internal fun RequestedServiceRequest.domain(): RequestedService =
+    RequestedService(
+        guestCount = guestCount,
+        guestCountIsMinimum = guestCountIsMinimum,
+        durationMinutes = durationMinutes,
+        items = items.map { RequestedServiceItem.of(it.label, it.group, it.key) },
+        pricingReference = pricingReference?.trim()?.takeIf { it.isNotEmpty() },
+    )
+
+internal fun RequestedService.toResponse() =
+    RequestedServiceRequest(
+        guestCount = guestCount,
+        guestCountIsMinimum = guestCountIsMinimum,
+        durationMinutes = durationMinutes,
+        items = items.map { RequestedServiceItemRequest(it.label, it.group, it.key) },
+        pricingReference = pricingReference,
     )

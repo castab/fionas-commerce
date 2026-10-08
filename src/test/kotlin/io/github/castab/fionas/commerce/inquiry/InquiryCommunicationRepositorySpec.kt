@@ -7,7 +7,6 @@ import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.communicationHistory
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
@@ -27,7 +26,6 @@ class InquiryCommunicationRepositorySpec :
         val repository = JdbiInquiryCommunicationRepository()
         beforeTest {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
         }
         afterTest { app.close() }
 

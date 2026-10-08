@@ -14,11 +14,17 @@ import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.staff.FionaPermissions
+import io.github.castab.fionas.commerce.testing.CHURROS
 import io.github.castab.fionas.commerce.testing.FIONAS_WEB_PERMISSIONS
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.TestService
 import io.github.castab.fionas.commerce.testing.asFionasWeb
+import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.inquiryBody
+import io.github.castab.fionas.commerce.testing.linesJson
+import io.github.castab.fionas.commerce.testing.proposalJson
 import io.github.castab.fionas.commerce.testing.withBearer
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.core.spec.style.FunSpec
@@ -52,22 +58,17 @@ class ServicePrincipalAuthSpec :
 
         fun Response.json() = CommerceJson.parse(bodyString()).jsonObject
 
-        // Each route with a body its own validation rejects, so authorization success is observable
-        // as the route's existing downstream answer without the application state changing.
+        // The one customer route, with a body its own validation rejects, so authorization success is
+        // observable as the route's downstream answer without the application state changing.
         val customerRoutes =
             listOf(
-                Triple(FionaPermissions.InquiryFormRead, Request(Method.GET, "/inquiry-form"), Status.NOT_FOUND),
-                Triple(
-                    FionaPermissions.EstimatePreviewCreate,
-                    Request(Method.POST, "/estimate-preview").header("Content-Type", "application/json").body("not JSON"),
-                    Status.BAD_REQUEST,
-                ),
                 Triple(
                     FionaPermissions.InquiriesCreate,
                     Request(Method.POST, "/inquiries").withSubmissionKey().header("Content-Type", "application/json").body("not JSON"),
                     Status.BAD_REQUEST,
                 ),
             )
+        val (_, submitProbe, submitReached) = customerRoutes.single()
 
         fun tampered(token: String): String {
             val signature = token.substringAfterLast('.')
@@ -154,26 +155,14 @@ class ServicePrincipalAuthSpec :
                             request.withBearer("deterministic-test-ui-key"),
                             request.query("access_token", app.webToken),
                         )
-
-                    // The form's failures are never cached.
-                    fun Response.noStoreIfForm() =
-                        if (request.uri.path ==
-                            "/inquiry-form"
-                        ) {
-                            header("Cache-Control") shouldBe "no-store"
-                        } else {
-                            Unit
-                        }
                     invalid.forEach { attempt ->
                         val response = app.http(attempt)
                         response.status shouldBe Status.UNAUTHORIZED
                         response.error() shouldBe unauthenticated
-                        response.noStoreIfForm()
                     }
                     app.http(request.withBearer(unprivileged)).let {
                         it.status shouldBe Status.FORBIDDEN
                         it.error() shouldBe forbidden
-                        it.noStoreIfForm()
                     }
                     // Exactly the one permission authorizes the route, through the web frontend's role.
                     (permission in FIONAS_WEB_PERMISSIONS) shouldBe true
@@ -188,15 +177,12 @@ class ServicePrincipalAuthSpec :
             }
         }
 
-        test("permissions are independent and live: the same token changes with role grants, never with a new token") {
+        test("permissions are live: the same token changes with role grants, never with a new token") {
             TestApplication.create().use { app ->
-                val service = app.provisionService("form-reader", setOf(FionaPermissions.InquiryFormRead))
+                val service = app.provisionService("submitter", emptySet())
                 val token = app.serviceToken(service)
-                val (_, form, formAuthorized) = customerRoutes[0]
-                val (_, preview, previewAuthorized) = customerRoutes[1]
-                val (_, submit, submitAuthorized) = customerRoutes[2]
 
-                fun status(request: Request) = app.http(request.withBearer(token)).status
+                fun status() = app.http(submitProbe.withBearer(token)).status
 
                 fun grant(permissions: List<PermissionKey>) {
                     val keys = JsonArray(permissions.map { JsonPrimitive(it.value) })
@@ -204,32 +190,87 @@ class ServicePrincipalAuthSpec :
                         .adminRequest(Method.PUT, "/admin/access/roles/${service.role.value}/permissions", """{"permissions":$keys}""")
                         .status shouldBe Status.OK
                 }
+                app.authorization.createRole(RoleDefinition(service.role, "Submitter", null, emptySet()))
+                app.authorization.assignRole(service.id, service.role)
+                status() shouldBe Status.FORBIDDEN
 
-                status(form) shouldBe formAuthorized
-                status(preview) shouldBe Status.FORBIDDEN
-                status(submit) shouldBe Status.FORBIDDEN
+                grant(listOf(FionaPermissions.InquiriesCreate))
+                status() shouldBe submitReached
 
-                grant(listOf(FionaPermissions.InquiryFormRead, FionaPermissions.EstimatePreviewCreate))
-                status(preview) shouldBe previewAuthorized
-                status(submit) shouldBe Status.FORBIDDEN
+                grant(listOf(FionaPermissions.InquiriesRead))
+                status() shouldBe Status.FORBIDDEN
 
-                grant(listOf(FionaPermissions.InquiryFormRead, FionaPermissions.EstimatePreviewCreate, FionaPermissions.InquiriesCreate))
-                status(submit) shouldBe submitAuthorized
-
-                grant(listOf(FionaPermissions.InquiryFormRead))
-                status(form) shouldBe formAuthorized
-                status(preview) shouldBe Status.FORBIDDEN
-                status(submit) shouldBe Status.FORBIDDEN
-
+                grant(listOf(FionaPermissions.InquiriesCreate))
                 app.authorization.unassignRole(service.id, service.role)
-                status(form) shouldBe Status.FORBIDDEN
+                status() shouldBe Status.FORBIDDEN
 
                 // Disabling the service suspends its tokens on the very next request.
                 app.authorization.assignRole(service.id, service.role)
                 app.authorization.setStatus(service.id, PrincipalStatus.DISABLED)
-                status(form) shouldBe Status.UNAUTHORIZED
+                status() shouldBe Status.UNAUTHORIZED
                 app.authorization.setStatus(service.id, PrincipalStatus.ACTIVE)
-                status(form) shouldBe formAuthorized
+                status() shouldBe submitReached
+            }
+        }
+
+        test("priced inquiry submission is the pricing authority's alone: a staff session holding the permission is refused") {
+            TestApplication.create().use { app ->
+                val holder = staffCookie(app, setOf(FionaPermissions.InquiriesCreate))
+                app
+                    .http(
+                        Request(Method.POST, "/inquiries")
+                            .withSubmissionKey()
+                            .header("Origin", TEST_ORIGIN)
+                            .header("Cookie", holder)
+                            .header("Content-Type", "application/json")
+                            .body(inquiryBody()),
+                    ).let {
+                        it.status shouldBe Status.FORBIDDEN
+                        it.error() shouldBe ErrorResponse("forbidden", SERVICE_REQUIRED)
+                    }
+                // The bootstrap administrator, a USER, is refused the same way.
+                app.adminPost("/inquiries", inquiryBody()).status shouldBe Status.FORBIDDEN
+                app.database.count("fionas.inquiries") shouldBe 0
+                app.database.count("fionas.inquiry_submissions") shouldBe 0
+                app.database.count("commerce.financial_document_snapshots") shouldBe 0
+            }
+        }
+
+        test("a service holding every staff permission still cannot commit staff-negotiated lines or proposals") {
+            TestApplication.create().use { app ->
+                val inquiry = app.createInquiry()
+                val document = app.initialEstimateOf(inquiry)
+                val overreaching =
+                    app.provisionService(
+                        "overreaching-bff",
+                        setOf(
+                            CommercePermissions.FinancialDocumentCreate,
+                            CommercePermissions.DepositRequirementManage,
+                            CommercePermissions.FinancialDocumentRead,
+                            FionaPermissions.FinancialTermsManage,
+                            FionaPermissions.InquiriesRead,
+                        ),
+                    )
+                val token = app.serviceToken(overreaching)
+                val terms = ""","terms":{"type":"PERCENTAGE","percentage":"20"}"""
+                listOf(
+                    "/financial-documents/$document/change-orders" to
+                        """{"expectedVersion":1,"lines":${proposalJson(CHURROS.new("churros"))}}""",
+                    "/inquiries/$inquiry/estimates" to """{"lines":${linesJson(listOf(CHURROS))}}""",
+                    "/inquiries/$inquiry/financial-documents" to """{"stage":"INVOICE","lines":${linesJson(listOf(CHURROS))}}""",
+                    "/staff/requests/$inquiry/quote-preview" to
+                        """{"expectedDocumentVersion":1,"lines":${proposalJson(CHURROS.new("churros"))}$terms}""",
+                    "/staff/requests/$inquiry/proposals" to """{"expectedDocumentVersion":1$terms}""",
+                ).forEach { (path, body) ->
+                    val response =
+                        app.http(Request(Method.POST, path).withBearer(token).header("Content-Type", "application/json").body(body))
+                    response.status shouldBe Status.FORBIDDEN
+                    response.error() shouldBe ErrorResponse("forbidden", STAFF_USER_REQUIRED)
+                }
+                // Reads remain available to an explicitly authorized service.
+                app.http(Request(Method.GET, "/staff/requests/$inquiry").withBearer(token)).status shouldBe Status.OK
+                app.database.count("commerce.financial_document_snapshots") shouldBe 1
+                app.database.count("fionas.inquiry_proposals") shouldBe 0
             }
         }
 
@@ -242,7 +283,6 @@ class ServicePrincipalAuthSpec :
                     Method.GET to "/payments/unapplied",
                     Method.POST to "/inquiries/00000000-0000-0000-0000-000000000001/estimates",
                     Method.PUT to "/admin/users/00000000-0000-0000-0000-000000000001/credentials/password",
-                    Method.POST to "/offering-catalog",
                 ).forEach { (method, path) ->
                     val response = app.http(Request(method, path).asFionasWeb(app))
                     response.status shouldBe Status.FORBIDDEN
@@ -274,7 +314,7 @@ class ServicePrincipalAuthSpec :
                 refused.header("Set-Cookie") shouldBe null
                 // Nothing was revoked: the token and every staff session still authenticate.
                 sessions() shouldBe before
-                app.http(Request(Method.GET, "/inquiry-form").asFionasWeb(app)).status shouldBe Status.NOT_FOUND
+                app.http(submitProbe.asFionasWeb(app)).status shouldBe submitReached
                 app.adminGet("/auth/me").status shouldBe Status.OK
             }
         }
@@ -335,13 +375,13 @@ class ServicePrincipalAuthSpec :
                 // With a trusted Origin, the session wins over the token: the session is the one revoked.
                 app.http(withCookie.header("Origin", TEST_ORIGIN).asFionasWeb(app)).status shouldBe Status.NO_CONTENT
                 app.adminGet("/auth/me").status shouldBe Status.UNAUTHORIZED
-                app.http(Request(Method.GET, "/inquiry-form").asFionasWeb(app)).status shouldBe Status.NOT_FOUND
+                app.http(submitProbe.asFionasWeb(app)).status shouldBe submitReached
             }
         }
 
         test("browser Origin protects cookie requests only; a token-only request needs no Origin") {
             TestApplication.create().use { app ->
-                val (_, submit, authorized) = customerRoutes[2]
+                val (_, submit, authorized) = customerRoutes.single()
                 app.http(submit.asFionasWeb(app)).status shouldBe authorized
                 app.http(submit.asFionasWeb(app).header("Origin", "https://evil.example")).status shouldBe authorized
                 // A cookie-carrying unsafe request still needs a trusted Origin, whatever else it carries.
@@ -351,7 +391,11 @@ class ServicePrincipalAuthSpec :
                     it.error().message shouldBe "The browser origin is not trusted"
                 }
                 app.http(withCookie.asFionasWeb(app)).status shouldBe Status.FORBIDDEN
-                app.http(withCookie.header("Origin", TEST_ORIGIN)).status shouldBe authorized
+                // A trusted Origin passes the browser policy, but a staff session is never the pricing authority.
+                app.http(withCookie.header("Origin", TEST_ORIGIN)).let {
+                    it.status shouldBe Status.FORBIDDEN
+                    it.error() shouldBe forbidden
+                }
             }
         }
 
@@ -364,12 +408,15 @@ class ServicePrincipalAuthSpec :
                 }
                 // A staff user without the permission stays that user: the token's grants are not borrowed.
                 val unprivileged = staffCookie(app, emptySet())
-                val form = Request(Method.GET, "/inquiry-form")
-                app.http(form.header("Cookie", unprivileged).asFionasWeb(app)).status shouldBe Status.FORBIDDEN
-                app.http(form.asFionasWeb(app)).status shouldBe Status.NOT_FOUND
-                // A staff session holding the permission is authorized through the same AccessControl.
-                app.http(form.header("Cookie", staffCookie(app, setOf(FionaPermissions.InquiryFormRead)))).status shouldBe
-                    Status.NOT_FOUND
+                val submit = submitProbe.header("Origin", TEST_ORIGIN)
+                app.http(submit.header("Cookie", unprivileged).asFionasWeb(app)).status shouldBe Status.FORBIDDEN
+                app.http(submit.asFionasWeb(app)).status shouldBe submitReached
+                // A staff session holding a permission is authorized through the same AccessControl.
+                app
+                    .http(
+                        Request(Method.GET, "/inquiries").header("Cookie", staffCookie(app, setOf(FionaPermissions.InquiriesRead))),
+                    ).status shouldBe
+                    Status.OK
             }
         }
 
@@ -400,7 +447,7 @@ class ServicePrincipalAuthSpec :
                 val (credentialA, secretA) = createCredential("fionas-web A")
                 val service = TestService(ServiceId(UUID.fromString(serviceId)), RoleKey("fionas.web"), secretA)
                 val tokenA = app.serviceToken(service)
-                app.http(Request(Method.GET, "/inquiry-form").withBearer(tokenA)).status shouldBe Status.NOT_FOUND
+                app.http(submitProbe.withBearer(tokenA)).status shouldBe submitReached
 
                 // Listing returns metadata only, never secret material.
                 val listing = app.adminGet("/admin/access/services/$serviceId/credentials")
@@ -418,7 +465,7 @@ class ServicePrincipalAuthSpec :
                 // Rotation without a restart: create B, use B, revoke A.
                 val (_, secretB) = createCredential("fionas-web B")
                 val tokenB = app.serviceToken(service.copy(secret = secretB))
-                app.http(Request(Method.GET, "/inquiry-form").withBearer(tokenB)).status shouldBe Status.NOT_FOUND
+                app.http(submitProbe.withBearer(tokenB)).status shouldBe submitReached
                 app
                     .adminRequest(Method.DELETE, "/admin/access/services/$serviceId/credentials/$credentialA")
                     .status shouldBe Status.NO_CONTENT
@@ -430,7 +477,7 @@ class ServicePrincipalAuthSpec :
                     ).status shouldBe Status.UNAUTHORIZED
                 app.serviceToken(service.copy(secret = secretB)).isNotBlank() shouldBe true
                 // A token A already obtained stays valid until it expires.
-                app.http(Request(Method.GET, "/inquiry-form").withBearer(tokenA)).status shouldBe Status.NOT_FOUND
+                app.http(submitProbe.withBearer(tokenA)).status shouldBe submitReached
             }
         }
 

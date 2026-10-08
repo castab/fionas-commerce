@@ -14,10 +14,10 @@ import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.issueProposal
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactly
@@ -39,7 +39,6 @@ import java.util.UUID
 class FinancialDocumentPaymentsSpec :
     FunSpec({
         lateinit var application: TestApplication
-        var revision = 0
 
         fun Response.document() = CommerceJson.asA(bodyString(), FinancialDocumentResponse.serializer())
 
@@ -51,7 +50,7 @@ class FinancialDocumentPaymentsSpec :
             application
                 .adminPost(
                     "/inquiries/${application.createInquiry()}/financial-documents",
-                    """{"stage":"$stage",${pricingBody(revision).drop(1)}""",
+                    """{"stage":"$stage","lines":${linesJson(acceptanceLines())}}""",
                 ).also { it.status shouldBe Status.CREATED }
                 .document()
 
@@ -94,10 +93,7 @@ class FinancialDocumentPaymentsSpec :
         fun payments(documentId: String) =
             application.adminGet("/financial-documents/$documentId/payments").also { it.status shouldBe Status.OK }.histories()
 
-        beforeSpec {
-            application = TestApplication.create()
-            revision = application.createAcceptanceCatalog()
-        }
+        beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
 
         test(

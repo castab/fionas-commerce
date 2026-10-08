@@ -77,7 +77,7 @@ class ReadStaffDashboard(
                                 if (state.financial.latestVersion.document is FinancialDocument.Estimate &&
                                     requested
                                         .getValue(inquiry.id)
-                                        .pricingInputs.context.guestCountIsMinimum
+                                        .requestedService.guestCountIsMinimum
                                 ) {
                                     DashboardTotalQualifier.FROM
                                 } else {

@@ -89,7 +89,7 @@ internal object StrictDepositTerms : KSerializer<DepositTermsRequest> {
     override fun serialize(
         encoder: Encoder,
         value: DepositTermsRequest,
-    ) = delegate.serialize(encoder, value)
+    ) = encoder.encodeSerializableValue(delegate, value) // Through the encoder, so the `type` discriminator is written.
 }
 
 @Serializable

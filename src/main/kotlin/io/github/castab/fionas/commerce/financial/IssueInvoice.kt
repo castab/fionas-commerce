@@ -8,13 +8,13 @@ import java.util.UUID
 
 /**
  * Manually issues the latest quote of a RELATED Fiona lineage as an invoice, without repricing: the invoice
- * is a new immutable snapshot with the same concrete lines. Fiona copies optional legacy
- * pricing metadata when present; the transition does not require it. There is no estimate-to-invoice shortcut.
+ * is a new immutable snapshot with the same concrete lines. Fiona carries the line authorship
+ * forward when present. There is no estimate-to-invoice shortcut.
  *
  * In one runtime transaction: the lineage must belong to an inquiry, its latest version must
  * be the one the caller acted on ([CommerceFailure.Conflict] otherwise), the runtime appends
  * the invoice (`CommerceFailure.IllegalTransition` when the latest snapshot is not a quote),
- * and any legacy pricing metadata is copied to the new version. Payments applied to earlier
+ * and the line authorship is carried to the new version. Payments applied to earlier
  * snapshots stay attached to them and still count toward the lineage's settlement.
  * Canonical INITIAL_ESTIMATE lineages reject manual invoicing; their deposit-satisfaction
  * booking policy reuses the same transaction-taking Invoice mechanics.
@@ -23,9 +23,9 @@ class IssueInvoice(
     private val transactor: Transactor,
     ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    pricingSources: FinancialDocumentPricingRepository,
+    authorship: FinancialDocumentAuthorshipRepository,
 ) {
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
     operator fun invoke(
         documentId: UUID,

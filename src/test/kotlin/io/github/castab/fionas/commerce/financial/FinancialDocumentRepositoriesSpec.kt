@@ -1,46 +1,40 @@
 package io.github.castab.fionas.commerce.financial
 
+import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingCategorySelection
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingSelections
-import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.changeLatest
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.inquiry
 import io.github.castab.fionas.commerce.testing.insertInquiryRecord
+import io.github.castab.fionas.commerce.testing.invoiceLatest
+import io.github.castab.fionas.commerce.testing.quoteLatest
 import io.github.castab.fionas.commerce.testing.sqlState
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.throwables.shouldThrowAny
-import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
-import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.string.shouldContain
-import kotlinx.serialization.json.Json
 import java.math.BigDecimal
-import java.time.Duration
 import java.util.Currency
 import java.util.UUID
 
 /**
  * Fiona's financial-document context on real PostgreSQL: the inquiry association and the
- * per-snapshot pricing source, in runtime transactions, keyed to commerce-runtime's exact
+ * per-snapshot line authorship, in runtime transactions, keyed to commerce-runtime's exact
  * `(document_id, version)` snapshots.
  */
 class FinancialDocumentRepositoriesSpec :
@@ -48,7 +42,7 @@ class FinancialDocumentRepositoriesSpec :
         lateinit var application: TestApplication
         val customers = JdbiCustomerRepository()
         val associations = JdbiInquiryFinancialDocumentRepository()
-        val sources = JdbiFinancialDocumentPricingRepository()
+        val authorship = JdbiFinancialDocumentAuthorshipRepository()
 
         val dollars = Currency.getInstance("USD")
 
@@ -58,25 +52,8 @@ class FinancialDocumentRepositoriesSpec :
 
         fun newLineage() = FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line()))
 
-        val inputs =
-            FionasPricingInputs(
-                OfferingsRevision.of(12),
-                OfferingSelections(
-                    listOf(
-                        OfferingCategorySelection(
-                            OfferingCategoryKey("soft-serve-flavor"),
-                            listOf("vanilla", "horchata").map(::OfferingKey),
-                        ),
-                        // An explicitly empty block is kept as submitted.
-                        OfferingCategorySelection(OfferingCategoryKey("sauce"), emptyList()),
-                        OfferingCategorySelection(
-                            OfferingCategoryKey("topping"),
-                            listOf("oreos", "sprinkles", "brownies").map(::OfferingKey),
-                        ),
-                    ),
-                ),
-                FionasOfferingsContext(75, true, Duration.ofMinutes(150)),
-            )
+        val service = LineAuthorship(ServiceId(UUID.fromString("00000000-0000-0000-0000-00000000000a")), STORED_INSTANT)
+        val staff = LineAuthorship(UserId(UUID.fromString("00000000-0000-0000-0000-00000000000b")), STORED_INSTANT.plusSeconds(60))
 
         /** A persisted inquiry and the first snapshot of a new commerce-runtime lineage, in [transaction]. */
         fun inquiryAndEstimate(transaction: Transaction): Pair<InquiryId, FinancialDocument> {
@@ -137,199 +114,100 @@ class FinancialDocumentRepositoriesSpec :
             }.sqlState() shouldBe "23503"
         }
 
-        test("pricing inputs round-trip for an exact snapshot, in order, with an explicitly empty block") {
+        test("line authorship round-trips for an exact snapshot, for a SERVICE or a USER author") {
             application.transactor.inTransaction { transaction ->
                 val (inquiryId, estimate) = inquiryAndEstimate(transaction)
                 associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                sources.insert(transaction, estimate.reference, inputs)
+                authorship.insert(transaction, estimate.reference, service)
 
-                sources.find(transaction, estimate.reference) shouldBe inputs
-                sources.find(transaction, FinancialDocumentReference(estimate.id, Version.of(2))).shouldBeNull()
-                sources.findAll(transaction, estimate.id) shouldBe mapOf(Version.INITIAL to inputs)
+                authorship.find(transaction, estimate.reference) shouldBe service
+                authorship.find(transaction, FinancialDocumentReference(estimate.id, Version.of(2))).shouldBeNull()
+                authorship.findAll(transaction, estimate.id) shouldBe mapOf(Version.INITIAL to service)
+                val revised =
+                    application.context.financialLedger.changeLatest(
+                        transaction,
+                        estimate.id,
+                        ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line()))),
+                    )
+                authorship.insert(transaction, revised.reference, staff)
+                authorship.findAll(transaction, estimate.id) shouldBe mapOf(Version.INITIAL to service, Version.of(2) to staff)
             }
         }
 
-        test("a transition's successor receives an exact copy of its source's pricing inputs") {
+        test("a transition's successor carries its source's authorship forward; a snapshot without one carries none") {
             application.transactor.inTransaction { transaction ->
                 val (inquiryId, estimate) = inquiryAndEstimate(transaction)
                 associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                sources.insert(transaction, estimate.reference, inputs)
-                val quote = application.context.financialLedger.issueQuote(transaction, estimate.id)
+                authorship.insert(transaction, estimate.reference, staff)
+                val quote = application.context.financialLedger.quoteLatest(transaction, estimate.id)
+                authorship.copy(transaction, estimate.reference, quote.reference)
+                val invoice = application.context.financialLedger.invoiceLatest(transaction, estimate.id)
+                authorship.copy(transaction, quote.reference, invoice.reference)
 
-                sources.copy(transaction, estimate.reference, quote.reference)
-
-                sources.find(transaction, quote.reference) shouldBe inputs
-                sources.findAll(transaction, estimate.id) shouldBe mapOf(Version.INITIAL to inputs, Version.of(2) to inputs)
+                authorship.findAll(transaction, estimate.id) shouldBe
+                    mapOf(Version.INITIAL to staff, Version.of(2) to staff, Version.of(3) to staff)
+                authorship.findAll(transaction, UUID.randomUUID()) shouldBe emptyMap()
             }
-        }
-
-        test("a materialized snapshot needs no pricing source to transition") {
             application.transactor.inTransaction { transaction ->
                 val (inquiryId, estimate) = inquiryAndEstimate(transaction)
                 associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                val quote = application.context.financialLedger.issueQuote(transaction, estimate.id)
-                sources.copy(transaction, estimate.reference, quote.reference)
-                sources.find(transaction, quote.reference).shouldBeNull()
+                val quote = application.context.financialLedger.quoteLatest(transaction, estimate.id)
+                authorship.copy(transaction, estimate.reference, quote.reference)
+                authorship.find(transaction, quote.reference).shouldBeNull()
             }
         }
 
-        test("a pricing source references commerce-runtime's exact snapshot of a lineage Fiona owns") {
+        test("authorship references commerce-runtime's exact snapshot of a lineage Fiona owns, once per version") {
             // A snapshot version the ledger does not have.
             shouldThrowAny {
                 application.transactor.inTransaction { transaction ->
                     val (inquiryId, estimate) = inquiryAndEstimate(transaction)
                     associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                    sources.insert(transaction, FinancialDocumentReference(estimate.id, Version.of(2)), inputs)
+                    authorship.insert(transaction, FinancialDocumentReference(estimate.id, Version.of(2)), service)
                 }
             }.sqlState() shouldBe "23503"
             // A lineage no inquiry owns.
             shouldThrowAny {
                 application.transactor.inTransaction { transaction ->
                     val (_, estimate) = inquiryAndEstimate(transaction)
-                    sources.insert(transaction, estimate.reference, inputs)
+                    authorship.insert(transaction, estimate.reference, service)
                 }
             }.sqlState() shouldBe "23503"
-        }
-
-        /** A committed inquiry-owned lineage whose first snapshot was priced from [inputs]. */
-        fun pricedLineage(): FinancialDocument =
-            application.transactor.inTransaction { transaction ->
-                val (inquiryId, estimate) = inquiryAndEstimate(transaction)
-                associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                sources.insert(transaction, estimate.reference, inputs)
-                estimate
-            }
-
-        fun storedPricing(snapshot: FinancialDocumentReference) =
-            application.database.strings(
-                "SELECT pricing_inputs::text FROM fionas.financial_document_pricing " +
-                    "WHERE document_id = '${snapshot.id}' AND document_version = ${snapshot.version.number}",
-            )
-
-        test("a pricing source is one row holding the complete inputs in Fiona's persisted representation") {
-            val estimate = pricedLineage()
-
-            storedPricing(estimate.reference).map(Json::parseToJsonElement) shouldBe
-                listOf(
-                    Json.parseToJsonElement(
-                        """
-                        {"catalogRevision": 12,
-                         "context": {"guestCount": 75, "guestCountIsMinimum": true, "durationMinutes": 150},
-                         "selections": [{"categoryKey": "soft-serve-flavor", "offeringKeys": ["vanilla", "horchata"]},
-                                        {"categoryKey": "sauce", "offeringKeys": []},
-                                        {"categoryKey": "topping", "offeringKeys": ["oreos", "sprinkles", "brownies"]}]}
-                        """.trimIndent(),
-                    ),
-                )
-        }
-
-        test("every version's own pricing source is found in version order") {
-            val revised =
-                inputs.copy(
-                    catalogRevision = OfferingsRevision.of(13),
-                    selections =
-                        OfferingSelections(
-                            listOf(
-                                OfferingCategorySelection(OfferingCategoryKey("topping"), listOf("sprinkles", "oreos").map(::OfferingKey)),
-                            ),
-                        ),
-                    context = FionasOfferingsContext(120, false, Duration.ofMinutes(90)),
-                )
-            application.transactor.inTransaction { transaction ->
-                val (inquiryId, estimate) = inquiryAndEstimate(transaction)
-                associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                sources.insert(transaction, estimate.reference, inputs)
-                val quote = application.context.financialLedger.issueQuote(transaction, estimate.id)
-                sources.insert(transaction, quote.reference, revised)
-                val invoice = application.context.financialLedger.issueInvoice(transaction, estimate.id)
-                sources.copy(transaction, quote.reference, invoice.reference)
-
-                val all = sources.findAll(transaction, estimate.id)
-                all.keys.toList() shouldContainExactly listOf(Version.INITIAL, Version.of(2), Version.of(3))
-                all shouldBe mapOf(Version.INITIAL to inputs, Version.of(2) to revised, Version.of(3) to revised)
-                sources.findAll(transaction, UUID.randomUUID()) shouldBe emptyMap()
-            }
-        }
-
-        test("an exact version has at most one pricing source") {
+            // An exact version has at most one author.
             shouldThrowAny {
                 application.transactor.inTransaction { transaction ->
                     val (inquiryId, estimate) = inquiryAndEstimate(transaction)
                     associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                    sources.insert(transaction, estimate.reference, inputs)
-                    sources.insert(transaction, estimate.reference, inputs)
+                    authorship.insert(transaction, estimate.reference, service)
+                    authorship.insert(transaction, estimate.reference, staff)
                 }
             }.sqlState() shouldBe "23505"
         }
 
-        test("a pricing source rolls back with the caller's transaction") {
-            var reference: FinancialDocumentReference? = null
-            val before = application.database.count("fionas.financial_document_pricing")
+        test("authorship rolls back with the caller's transaction, and the database accepts only USER or SERVICE authors") {
+            val before = application.database.count("fionas.financial_document_authorship")
             shouldThrow<IllegalStateException> {
                 application.transactor.inTransaction { transaction ->
                     val (inquiryId, estimate) = inquiryAndEstimate(transaction)
                     associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                    sources.insert(transaction, estimate.reference, inputs)
-                    reference = estimate.reference
+                    authorship.insert(transaction, estimate.reference, service)
                     error("a later write failed")
                 }
             }
-            application.database.count("fionas.financial_document_pricing") shouldBe before
-            storedPricing(checkNotNull(reference)).shouldBeEmpty()
-        }
-
-        test("the database requires each pricing source's inputs, as a JSON object") {
-            listOf("NULL" to "23502", "'[]'" to "23514", "'12'" to "23514").forEach { (value, state) ->
-                shouldThrowAny {
-                    application.transactor.inTransaction { transaction ->
-                        val (inquiryId, estimate) = inquiryAndEstimate(transaction)
-                        associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                        transaction.handle
-                            .createUpdate(
-                                "INSERT INTO fionas.financial_document_pricing (document_id, document_version, pricing_inputs) " +
-                                    "VALUES (:id, 1, $value)",
-                            ).bind("id", estimate.id)
-                            .execute()
-                    }
-                }.sqlState() shouldBe state
-            }
-        }
-
-        test("a malformed stored pricing source fails find, findAll, and copy, naming its exact version, and is never copied") {
-            listOf(
-                """{"catalogRevision": 12, "selections": []}""",
-                """{"catalogRevision": "12", "context": {"guestCount": 75, "guestCountIsMinimum": true, "durationMinutes": 150}, "selections": []}""",
-                """{"catalogRevision": 12, "context": {"guestCount": 75, "guestCountIsMinimum": true, "durationMinutes": 150}, """ +
-                    """"selections": [], "total": "1.00"}""",
-                """{"catalogRevision": 12, "context": {"guestCount": 75, "guestCountIsMinimum": true, "durationMinutes": 150}, """ +
-                    """"selections": [{"categoryKey": "topping", "offeringKeys": ["oreos", "oreos"]}]}""",
-            ).forEach { corrupt ->
-                val estimate = pricedLineage()
-                application.database.execute(
-                    "UPDATE fionas.financial_document_pricing SET pricing_inputs = '$corrupt' WHERE document_id = '${estimate.id}'",
-                )
-                val named = "pricing inputs of financial document ${estimate.id} version 1"
-
-                withClue(corrupt) {
-                    shouldThrow<IllegalStateException> {
-                        application.transactor.inTransaction { sources.find(it, estimate.reference) }
-                    }.message shouldContain named
-                    shouldThrow<IllegalStateException> {
-                        application.transactor.inTransaction { sources.findAll(it, estimate.id) }
-                    }.message shouldContain named
-                    var quote: FinancialDocumentReference? = null
-                    shouldThrow<IllegalStateException> {
-                        application.transactor.inTransaction { transaction ->
-                            quote =
-                                application.context.financialLedger
-                                    .issueQuote(transaction, estimate.id)
-                                    .reference
-                            sources.copy(transaction, estimate.reference, checkNotNull(quote))
-                        }
-                    }.message shouldContain named
-                    storedPricing(checkNotNull(quote)).shouldBeEmpty()
-                    storedPricing(estimate.reference).map(Json::parseToJsonElement) shouldBe listOf(Json.parseToJsonElement(corrupt))
+            application.database.count("fionas.financial_document_authorship") shouldBe before
+            shouldThrowAny {
+                application.transactor.inTransaction { transaction ->
+                    val (inquiryId, estimate) = inquiryAndEstimate(transaction)
+                    associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
+                    transaction.handle
+                        .createUpdate(
+                            "INSERT INTO fionas.financial_document_authorship " +
+                                "(document_id, document_version, author_kind, author_id, recorded_at) " +
+                                "VALUES (:id, 1, 'BROWSER', :author, now())",
+                        ).bind("id", estimate.id)
+                        .bind("author", UUID.randomUUID())
+                        .execute()
                 }
-            }
+            }.sqlState() shouldBe "23514"
         }
     })

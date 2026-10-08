@@ -2,32 +2,22 @@ package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Version
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingCategorySelection
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingSelections
-import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
-import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
-import io.github.castab.fionas.commerce.offering.FionasPricing
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
-import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.newLinesProposal
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import java.math.BigDecimal
-import java.time.Duration
 import java.util.Currency
 import java.util.UUID
 
@@ -43,45 +33,39 @@ import java.util.UUID
 class FinancialDocumentAtomicitySpec :
     FunSpec({
         lateinit var application: TestApplication
-        var revision = 0
         val inquiries = JdbiInquiryRepository()
         val associations = JdbiInquiryFinancialDocumentRepository()
-        val sources = JdbiFinancialDocumentPricingRepository()
+        val sources = JdbiFinancialDocumentAuthorshipRepository()
 
-        fun pricing() =
-            FionasPricing(
-                FionasOfferingsEngine(FIONAS_PRICING_POLICY),
-                application.context.offeringsSnapshotRepository::retrieveLatestVersion,
-            )
+        fun lines(guests: Int = 75) = acceptanceLines(guests = guests, horchata = false, toppings = 4, waffleCones = false)
 
-        fun inputs(guests: Int = 75) =
-            FionasPricingInputs(
-                OfferingsRevision.of(revision),
-                OfferingSelections(
-                    listOf(
-                        OfferingCategorySelection(OfferingCategoryKey("soft-serve-flavor"), listOf(OfferingKey("vanilla"))),
-                        OfferingCategorySelection(OfferingCategoryKey("topping"), TOPPINGS.take(4).map(::OfferingKey)),
-                        OfferingCategorySelection(OfferingCategoryKey("cone-option"), listOf(OfferingKey("cup"))),
-                    ),
-                ),
-                FionasOfferingsContext(guests, false, Duration.ofMinutes(120)),
-            )
-
-        fun createEstimate(
-            pricingSources: FinancialDocumentPricingRepository = sources,
+        fun create(
+            stage: FirstSnapshotStage,
+            authorship: FinancialDocumentAuthorshipRepository = sources,
             documentId: UUID = UUID.randomUUID(),
-        ) = CreateInquiryEstimate(
+        ) = CreateInquiryFinancialDocument(
             application.transactor,
             inquiries,
             application.context.financialLedger,
             associations,
-            pricingSources,
-            pricing(),
+            authorship,
+            MaterializeInquiryFinancialDocument(application.context.financialLedger, associations, authorship, { documentId }),
             testClock,
-            newDocumentId = { documentId },
-        )(InquiryId(UUID.fromString(application.createInquiry())), inputs())
+        )(
+            CreateInquiryFinancialDocument.Command(
+                InquiryId(UUID.fromString(application.createInquiry())),
+                stage,
+                lines().map { it.priced() },
+                application.adminId,
+            ),
+        )
 
-        fun issueQuote(pricingSources: FinancialDocumentPricingRepository = sources) =
+        fun createEstimate(
+            authorship: FinancialDocumentAuthorshipRepository = sources,
+            documentId: UUID = UUID.randomUUID(),
+        ) = create(FirstSnapshotStage.ESTIMATE, authorship, documentId)
+
+        fun issueQuote(pricingSources: FinancialDocumentAuthorshipRepository = sources) =
             IssueQuote(application.transactor, application.context.financialLedger, associations, pricingSources)
 
         fun rows(
@@ -93,41 +77,38 @@ class FinancialDocumentAtomicitySpec :
             .single()
             .toInt()
 
-        /** The snapshots (each holding its lines), Fiona associations, and Fiona pricing sources stored for [id]. */
+        /** The snapshots (each holding its lines), Fiona associations, and Fiona line authorship stored for [id]. */
         fun stored(id: UUID) =
             listOf(
                 rows("commerce.financial_document_snapshots", "document_id", id),
                 rows("fionas.inquiry_financial_documents", "document_id", id),
-                rows("fionas.financial_document_pricing", "document_id", id),
+                rows("fionas.financial_document_authorship", "document_id", id),
             )
 
-        beforeSpec {
-            application = TestApplication.create()
-            revision = application.createAcceptanceCatalog()
-        }
+        beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
 
-        test("a persisted estimate that fails after the ledger stored it leaves no snapshot, association, or pricing source") {
+        test("a persisted estimate that fails after the ledger stored it leaves no snapshot, association, or authorship") {
             val id = UUID.randomUUID()
             val failing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun insert(
                         transaction: Transaction,
                         snapshot: FinancialDocumentReference,
-                        inputs: FionasPricingInputs,
+                        authorship: LineAuthorship,
                     ) {
                         // The runtime's snapshot and Fiona's association are visible in this transaction...
                         application.context.financialLedger
                             .latest(transaction, snapshot.id)
                             .version shouldBe Version.INITIAL
                         associations.inquiryOf(transaction, snapshot.id).shouldNotBeNull()
-                        sources.insert(transaction, snapshot, inputs)
-                        error("pricing source failure after the ledger wrote")
+                        sources.insert(transaction, snapshot, authorship)
+                        error("authorship failure after the ledger wrote")
                     }
                 }
 
             val failure = shouldThrow<IllegalStateException> { createEstimate(failing, id) }
-            failure.message shouldBe "pricing source failure after the ledger wrote"
+            failure.message shouldBe "authorship failure after the ledger wrote"
 
             // ...and none of it survives the rollback.
             stored(id) shouldBe listOf(0, 0, 0)
@@ -136,50 +117,31 @@ class FinancialDocumentAtomicitySpec :
         }
 
         test("direct Quote and Invoice creation roll back the first snapshot with Fiona's context") {
-            listOf(CreateInquiryFinancialDocument.Stage.QUOTE, CreateInquiryFinancialDocument.Stage.INVOICE).forEach { stage ->
+            listOf(FirstSnapshotStage.QUOTE, FirstSnapshotStage.INVOICE).forEach { stage ->
                 val id = UUID.randomUUID()
                 val failing =
-                    object : FinancialDocumentPricingRepository by sources {
+                    object : FinancialDocumentAuthorshipRepository by sources {
                         override fun insert(
                             transaction: Transaction,
                             snapshot: FinancialDocumentReference,
-                            inputs: FionasPricingInputs,
+                            authorship: LineAuthorship,
                         ) {
                             application.context.financialLedger
                                 .latest(transaction, snapshot.id)
                                 .version shouldBe Version.INITIAL
                             associations.inquiryOf(transaction, snapshot.id).shouldNotBeNull()
-                            error("pricing source failure after direct $stage creation")
+                            error("authorship failure after direct $stage creation")
                         }
                     }
-                val create =
-                    CreateInquiryFinancialDocument(
-                        application.transactor,
-                        inquiries,
-                        application.context.financialLedger,
-                        associations,
-                        failing,
-                        pricing(),
-                        testClock,
-                        newDocumentId = { id },
-                    )
-                shouldThrow<IllegalStateException> {
-                    create(
-                        CreateInquiryFinancialDocument.Command(
-                            InquiryId(UUID.fromString(application.createInquiry())),
-                            stage,
-                            inputs(),
-                        ),
-                    )
-                }
+                shouldThrow<IllegalStateException> { create(stage, failing, id) }
                 stored(id) shouldBe listOf(0, 0, 0)
             }
         }
 
-        test("a quote that fails after the ledger appended it is rolled back with its pricing source") {
+        test("a quote that fails after the ledger appended it is rolled back with its authorship") {
             val estimate = createEstimate().latest.document
             val failing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun copy(
                         transaction: Transaction,
                         from: FinancialDocumentReference,
@@ -188,7 +150,7 @@ class FinancialDocumentAtomicitySpec :
                         application.context.financialLedger
                             .latest(transaction, from.id)
                             .version shouldBe Version.of(2)
-                        error("pricing source copy failure after the quote was appended")
+                        error("authorship copy failure after the quote was appended")
                     }
                 }
 
@@ -204,14 +166,14 @@ class FinancialDocumentAtomicitySpec :
         test("a change order that fails after the ledger appended it leaves the lineage as it was") {
             val estimate = createEstimate().latest.document
             val failing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun insert(
                         transaction: Transaction,
                         snapshot: FinancialDocumentReference,
-                        inputs: FionasPricingInputs,
+                        authorship: LineAuthorship,
                     ) {
                         snapshot.version shouldBe Version.of(2)
-                        error("pricing source failure after the change order was appended")
+                        error("authorship failure after the change order was appended")
                     }
                 }
 
@@ -221,13 +183,9 @@ class FinancialDocumentAtomicitySpec :
                     application.context.financialLedger,
                     associations,
                     failing,
-                    pricing(),
                     JdbiInquiryFulfillmentRepository(),
-                )(
-                    estimate.id,
-                    Version.INITIAL,
-                    inputs(guests = 100),
-                )
+                    testClock,
+                )(CreateChangeOrder.Command(estimate.id, Version.INITIAL, newLinesProposal(lines(guests = 100)), application.adminId))
             }
 
             application.context.financialLedger
@@ -242,11 +200,11 @@ class FinancialDocumentAtomicitySpec :
             val paymentId = UUID.randomUUID()
             val allocationId = UUID.randomUUID()
             val failing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun find(
                         transaction: Transaction,
                         snapshot: FinancialDocumentReference,
-                    ): FionasPricingInputs? {
+                    ): LineAuthorship? {
                         // The payment and its allocation are recorded in this transaction...
                         rowsIn(transaction, "commerce.payment_records", "payment_id", paymentId) shouldBe 1
                         rowsIn(transaction, "commerce.payment_allocations", "allocation_id", allocationId) shouldBe 1
@@ -287,11 +245,11 @@ class FinancialDocumentAtomicitySpec :
                 RecordPayment.Command(BigDecimal("300.00"), Currency.getInstance("USD"), PaymentMethod.CARD, null, null),
             )
             val failing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun find(
                         transaction: Transaction,
                         snapshot: FinancialDocumentReference,
-                    ): FionasPricingInputs? {
+                    ): LineAuthorship? {
                         rowsIn(transaction, "commerce.payment_allocations", "allocation_id", allocationId) shouldBe 1
                         error("failure after standalone allocation")
                     }

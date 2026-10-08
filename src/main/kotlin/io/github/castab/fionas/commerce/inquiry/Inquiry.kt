@@ -2,7 +2,6 @@ package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.time.Instant
 import java.util.UUID
 
@@ -39,8 +38,8 @@ value class InquiryMessage(
 /**
  * A customer's durable request to Fiona's, retained through booking, service and closeout.
  *
- * Every inquiry is a request for configured ice cream service: it is recorded with the
- * [FionasPricingInputs] the customer configured and its initial Estimate, in one transaction.
+ * Every inquiry is recorded with the [RequestedService] the customer asked for and the canonical
+ * initial Estimate the public pricing authority priced for it, in one transaction.
  *
  * An inquiry is not a booking and implements no booking lifecycle phase. Its canonical initial
  * Estimate lineage drives its lifecycle projection; Invoice proves booking and Fiona owns
@@ -57,17 +56,16 @@ data class Inquiry(
 )
 
 /**
- * An [inquiry] together with the [customer] who made it and the [pricingInputs] the customer
- * configured with it, as staff read an inquiry. Every inquiry has them.
+ * An [inquiry] together with the [customer] who made it and the [requestedService] recorded
+ * with it, as staff read an inquiry. Every inquiry has them.
  *
- * [pricingInputs] are the inputs the customer submitted, pinned to the catalog revision they
- * named; never lines, amounts, or totals. The initial Estimate holds the concrete lines they
- * were priced into.
+ * [requestedService] is descriptive request history, never lines, amounts, or totals; the
+ * initial Estimate holds the committed lines.
  */
 data class InquiryDetails(
     val inquiry: Inquiry,
     val customer: Customer,
-    val pricingInputs: FionasPricingInputs,
+    val requestedService: RequestedService,
     val lifecycle: InquiryLifecycle,
 ) {
     init {

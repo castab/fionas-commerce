@@ -11,17 +11,22 @@ import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.fionas.commerce.financial.AllocatePayment
-import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.FinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
-import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.LineAuthorship
 import io.github.castab.fionas.commerce.inquiry.InquiryId
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.testing.CHURROS
+import io.github.castab.fionas.commerce.testing.COURTESY_DISCOUNT
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.TestLine
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
+import io.github.castab.fionas.commerce.testing.proposalJson
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -45,7 +50,6 @@ import java.util.concurrent.atomic.AtomicInteger
 class FinancialLedgerExpansionSpec :
     FunSpec({
         lateinit var application: TestApplication
-        var revision = 0
 
         fun Response.document() = CommerceJson.asA(bodyString(), FinancialDocumentResponse.serializer())
 
@@ -58,8 +62,9 @@ class FinancialLedgerExpansionSpec :
         fun create(
             stage: String,
             inquiryId: String = application.createInquiry(),
-            pricing: String = pricingBody(revision),
-        ): Response = application.adminPost("/inquiries/$inquiryId/financial-documents", """{"stage":"$stage",${pricing.drop(1)}""")
+            lines: String = linesJson(acceptanceLines()),
+            extra: String = "",
+        ): Response = application.adminPost("/inquiries/$inquiryId/financial-documents", """{"stage":"$stage","lines":$lines$extra}""")
 
         fun record(
             amount: String = "500.00",
@@ -100,16 +105,16 @@ class FinancialLedgerExpansionSpec :
 
         beforeSpec {
             application = TestApplication.create()
-            revision = application.createAcceptanceCatalog()
             application.adminCookie
         }
         afterSpec { application.close() }
 
         test("Estimate, Quote, and Invoice each begin a new inquiry-owned lineage at version 1") {
-            val pricingSources = JdbiFinancialDocumentPricingRepository()
+            val authorship = JdbiFinancialDocumentAuthorshipRepository()
             listOf("ESTIMATE", "QUOTE", "INVOICE").forEach { stage ->
                 val inquiryId = application.createInquiry()
-                val response = create(stage, inquiryId, pricingBody(revision, extra = ",\"total\":\"0.01\",\"lines\":[]"))
+                // A caller-supplied total is never authoritative: it is ignored and derived from the lines.
+                val response = create(stage, inquiryId, extra = ",\"total\":\"0.01\"")
                 response.status shouldBe Status.CREATED
                 val document = response.document()
                 response.header("Location") shouldBe "/financial-documents/${document.id}"
@@ -117,17 +122,15 @@ class FinancialLedgerExpansionSpec :
                 document.version shouldBe 1
                 document.previousVersion.shouldBeNull()
                 document.inquiryId shouldBe inquiryId
-                document.pricing!!.catalogRevision shouldBe revision
-                document.pricing.guestCount shouldBe 75
+                document.linesAuthoredBy?.principalKind shouldBe "USER"
                 document.lines.isNotEmpty() shouldBe true
                 document.total.toBigDecimal() shouldBe document.lines.map { it.total.toBigDecimal() }.reduce(BigDecimal::add)
                 document.total shouldBe "681.25"
                 document.reconciliation?.balance shouldBe document.total
                 document.reconciliation?.grossAllocated shouldBe "0.00"
                 application.transactor.inTransaction { transaction ->
-                    val source = pricingSources.find(transaction, FinancialDocumentReference(UUID.fromString(document.id), Version.INITIAL))
-                    source?.catalogRevision?.number shouldBe revision
-                    source?.context?.guestCount shouldBe 75
+                    val source = authorship.find(transaction, FinancialDocumentReference(UUID.fromString(document.id), Version.INITIAL))
+                    source?.author shouldBe application.adminId
                     application.context.financialLedger
                         .history(transaction, UUID.fromString(document.id))
                         .size shouldBe 1
@@ -160,11 +163,36 @@ class FinancialLedgerExpansionSpec :
                 listOf(1)
         }
 
-        test("creation rejects missing inquiries, missing catalog revisions, invalid pricing, and unknown stages") {
+        test("creation rejects missing inquiries, invalid lines, and unknown stages, writing nothing") {
+            val inquiryId = application.createInquiry()
+            val before = application.database.count("commerce.financial_document_snapshots")
             create("QUOTE", UUID.randomUUID().toString()).status shouldBe Status.NOT_FOUND
-            create("INVOICE", pricing = pricingBody(revision + 100)).status shouldBe Status.NOT_FOUND
-            create("ESTIMATE", pricing = pricingBody(revision, guests = 0)).status shouldBe Status.UNPROCESSABLE_ENTITY
-            create("OTHER").status shouldBe Status.UNPROCESSABLE_ENTITY
+            create("INVOICE", inquiryId, lines = "[]").status shouldBe Status.UNPROCESSABLE_ENTITY
+            create("ESTIMATE", inquiryId, lines = linesJson(listOf(COURTESY_DISCOUNT))).status shouldBe Status.UNPROCESSABLE_ENTITY
+            create("ESTIMATE", inquiryId, lines = linesJson(listOf(CHURROS.copy(unitPrice = "450.001")))).status shouldBe
+                Status.UNPROCESSABLE_ENTITY
+            create("OTHER", inquiryId).status shouldBe Status.UNPROCESSABLE_ENTITY
+            application.database.count("commerce.financial_document_snapshots") shouldBe before
+        }
+
+        test("a bespoke RELATED document records arbitrary staff lines with no catalog, and a staff change order edits them") {
+            val created = create("ESTIMATE", lines = linesJson(listOf(CHURROS, COURTESY_DISCOUNT))).document()
+            created.total shouldBe "400.00"
+            val ids = created.lines.map { it.id }
+            val changed =
+                application.adminPost(
+                    "/financial-documents/${created.id}/change-orders",
+                    """{"expectedVersion":1,"lines":${proposalJson(
+                        CHURROS.copy(unitPrice = "500.00").existing(ids[0]),
+                        TestLine("Travel", unitPrice = "25.00").new("travel"),
+                    )}}""",
+                )
+            changed.status shouldBe Status.OK
+            val revised = changed.document()
+            revised.version shouldBe 2
+            revised.lines.map { it.description } shouldContainExactly listOf("Churro catering service", "Travel")
+            revised.lines.first().id shouldBe ids[0]
+            revised.total shouldBe "525.00"
         }
 
         test("standalone recording persists a payment with no allocation and preserves exact receipt details") {
@@ -394,18 +422,18 @@ class FinancialLedgerExpansionSpec :
             val secondDocument = create("QUOTE").document()
             val payment = record().payment()
             val associations = JdbiInquiryFinancialDocumentRepository()
-            val sources = JdbiFinancialDocumentPricingRepository()
+            val sources = JdbiFinancialDocumentAuthorshipRepository()
             val firstBackendPid = AtomicInteger()
             val secondBackendPid = AtomicInteger()
             val firstInserted = CountDownLatch(1)
             val releaseFirst = CountDownLatch(1)
             val secondLineageLocked = CountDownLatch(1)
             val firstSources =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun find(
                         transaction: Transaction,
                         snapshot: FinancialDocumentReference,
-                    ): FionasPricingInputs? {
+                    ): LineAuthorship? {
                         // describeLocked runs after ledger.allocatePayment inserted the allocation,
                         // while this transaction still holds the payment row lock.
                         firstBackendPid.set(backendPid(transaction))

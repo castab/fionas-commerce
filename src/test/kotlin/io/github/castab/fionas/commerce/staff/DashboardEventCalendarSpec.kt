@@ -6,9 +6,10 @@ import io.github.castab.fionas.commerce.fionaEventCalendarZone
 import io.github.castab.fionas.commerce.http.StaffAttentionReasonResponse
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.invoiceLatest
+import io.github.castab.fionas.commerce.testing.quoteLatest
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -46,13 +47,12 @@ class DashboardEventCalendarSpec :
                         TestApplication.create(clock = clock, eventCalendarZone = calendarZone)
                     }
                 application.use { app ->
-                    app.createAcceptanceCatalog()
                     val id = app.createInquiry()
                     app.database.execute("UPDATE fionas.inquiries SET event_date = DATE '2026-07-25' WHERE id = '$id'")
                     val document = UUID.fromString(app.initialEstimateOf(id))
                     app.transactor.inTransaction {
-                        app.context.financialLedger.issueQuote(it, document)
-                        app.context.financialLedger.issueInvoice(it, document)
+                        app.context.financialLedger.quoteLatest(it, document)
+                        app.context.financialLedger.invoiceLatest(it, document)
                     }
                     val dashboard = CommerceJson.asA(app.adminGet("/staff/dashboard").bodyString(), StaffDashboardResponse.serializer())
                     if (calendarZone == null) {
@@ -94,13 +94,12 @@ class DashboardEventCalendarSpec :
                         TestApplication.create(clock = utcClock, eventCalendarZone = alternate)
                     }
                 application.use { app ->
-                    app.createAcceptanceCatalog()
                     val id = app.createInquiry()
                     app.database.execute("UPDATE fionas.inquiries SET event_date = DATE '$date' WHERE id = '$id'")
                     val document = UUID.fromString(app.initialEstimateOf(id))
                     app.transactor.inTransaction {
-                        app.context.financialLedger.issueQuote(it, document)
-                        app.context.financialLedger.issueInvoice(it, document)
+                        app.context.financialLedger.quoteLatest(it, document)
+                        app.context.financialLedger.invoiceLatest(it, document)
                     }
 
                     fun read() = CommerceJson.asA(app.adminGet("/staff/dashboard").bodyString(), StaffDashboardResponse.serializer())

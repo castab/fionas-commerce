@@ -21,7 +21,7 @@ contract. Cross-link to those rules rather than duplicating their mechanics here
 The system is conceptually:
 
 ```text
-Fiona frontend / BFF clients
+Fiona frontend / BFF clients   (fionas-web: catalog, customer pricing, staff UI)
             ↓
       fionas-commerce
             ↓
@@ -43,7 +43,7 @@ Fiona owns the concrete business built on top of it.
 - Fiona-specific persistence;
 - inquiry workflow;
 - customers and contacts;
-- Fiona pricing policy;
+- the trusted boundary that accepts already-priced financial lines, and who authored them;
 - relationships between Fiona entities and shared commerce facts;
 - Fiona authentication and credential verification;
 - application-specific permission definitions;
@@ -140,8 +140,7 @@ Fiona must not persist local copies of runtime-owned facts such as:
 - deposit requirement state;
 - deposit satisfaction;
 - permission catalogs;
-- runtime authorization state;
-- shared offering catalog contents.
+- runtime authorization state.
 
 If Fiona needs a convenient view of shared state, prefer:
 
@@ -215,55 +214,49 @@ Where Fiona policy requires an inquiry to produce an estimate, Fiona orchestrate
 
 ---
 
-# 9. Offering Selection Is Part of Fiona Inquiry Intent
+# 9. The Requested Service Is Descriptive Inquiry Intent
 
-For Fiona's current business workflow, an inquiry requires the customer to describe the ice-cream service they want through the configured offering selections.
+For Fiona's current business workflow, an inquiry describes the service the customer
+configured: guest count, duration, and the choices they made. That description is inquiry
+intent and is retained as the customer asked for it.
 
-Offering selection is therefore not an optional enhancement to the inquiry experience.
-
-The public application collects the selections required to evaluate Fiona's service offering, and Fiona applies its business policy to them.
-
-The generic offering catalog remains owned by the shared commerce platform.
-
-Fiona owns:
-
-- the relevant catalog binding;
-- business context supplied to evaluation;
-- catering-specific selection policy;
-- pricing interpretation;
-- the relationship between the resulting evaluation and the inquiry.
+It is not a pricing input. Fiona never derives, validates, or adjusts money from it, and its
+identifiers refer to the web catalog, not to anything Fiona owns. Staff may agree to provide
+something entirely different (a bespoke service instead of the configured one) without the
+request being rewritten.
 
 ---
 
-# 10. Pricing Policy Is Fiona-Owned and Server-Authoritative
+# 10. Prices Come From Trusted Authorities; Fiona Records Them
 
-The offering catalog describes reusable commercial choices and generic price metadata.
+Fiona owns no product catalog and no pricing policy. Customer-facing catalog contents and the
+rules that turn a configured request into prices belong to the web application's server-only
+modules. Negotiated amounts belong to the verified staff member who agrees them with the
+customer.
 
-Fiona determines what those choices mean in the context of its business.
+Fiona therefore accepts money only as complete, already-priced financial lines, and only from
+an authorized pricing authority:
 
-Fiona may apply policy involving concepts such as:
+- the web server, authenticated as a SERVICE principal, for the initial Estimate of a customer
+  submission;
+- a verified staff USER, holding an explicit financial-terms capability, for every negotiated
+  document after it.
 
-- guest count;
-- service duration;
-- catering-specific premiums;
-- packages;
-- dependencies between selections;
-- Fiona-specific minimums or constraints.
+The kind of principal is part of this authority. A service is never recorded as a staff
+approver, and a staff session cannot submit customer-priced lines. Delegation, on-behalf-of
+headers, and impersonation are not authority.
 
-These rules belong in Fiona unless they become complete reusable commerce concepts in their own right.
+The backend still owns the authoritative financial facts:
 
-Clients submit intent, not authoritative financial values.
+- it validates the structure and exact arithmetic of every line;
+- it never accepts a client-supplied total; shared commerce derives every total from the lines;
+- it records who authored each exact snapshot's lines;
+- it turns a staff edit into an explicit, identity-preserving shared change order;
+- it commits lines, documents, deposits, and publication atomically.
 
-The backend derives:
-
-- accepted selections;
-- authoritative prices;
-- line items;
-- totals;
-- provenance;
-- the resulting financial document.
-
-Never trust client-submitted totals or prices simply because the UI calculated or displayed them.
+Never reintroduce a catalog, a pricing engine, or price validation in Fiona to "double-check"
+an authority. A frontend that displays a price is not an authority unless its server is the
+authenticated pricing principal.
 
 ---
 
@@ -352,30 +345,26 @@ for the current concrete API, persistence, locking, concurrency and read-model r
 
 ## Staff quote composition
 
-Staff may negotiate the initial Quote, but they express commercial intent, never financial
-values: keep the authoritative Estimate, change financially neutral service selections, or
-reprice a reviewed configuration from the current catalog; give a generated charge a
-negotiated final amount; add separate charges, discounts and credits. The server derives
-every line, total and deposit, and a review must be explicit: approval re-derives the result
-under the publication lock and refuses to publish anything other than what staff previewed.
-A preview is a query that changes nothing.
+Staff negotiate the canonical Quote by committing the complete, ordered final lines: keep a
+line, override it under the same identity, remove it, or add a bespoke charge, discount, or
+credit. The verified staff member is the pricing authority for those values; the server derives
+every total and the deposit, and a review must be explicit: approval re-derives the result under
+the publication lock and refuses to publish anything other than what staff previewed. A preview
+is a query that changes nothing.
 
-Persisted Estimate lines are immutable facts. Keeping an Estimate never reprices it, and line
-identity is never inferred from descriptions or positions; only a fully equal ordered result
-proves correspondence. An intermediate Estimate is recorded only for an actual financial
-change, and the shared nonnegative-total policy runs before any ledger write.
+Persisted lines are immutable facts. Line identity comes from what the caller names, never from
+descriptions or positions; only a fully equal ordered result proves an unchanged document. An
+intermediate Estimate is recorded only for an actual financial change, and the shared
+nonnegative-total policy runs before any ledger write.
 
-What Fiona promises to serve (guest count, duration, every selected offering including
-unpriced ones, and the catalog names staff reviewed) is an independent Fiona business fact.
-It is bound immutably to the exact Quote snapshot it approves, together with why each ledger
-line exists and the staff reasons and provenance for manual edits. It holds no money: amounts
-remain on the shared ledger lines it names. The catalog keeps only current contents, so
-historical names are never reconstructed; selections the current catalog no longer offers
-require review. Quotes published without composition simply have no plan.
+What Fiona promises to serve is an independent Fiona business fact: a money-free description
+of the commitment and notes on the lines, bound immutably to the exact Quote snapshot it
+approves and to the staff user who approved it. Amounts remain on the shared ledger lines it
+names. Quotes published without composed lines simply have no plan.
 
 Composition and publication are one atomic unit with the Quote, deposit approval and
 proposal; publication is still not delivery. See
-[the quote builder contract in `AGENTS.md`](AGENTS.md#quote-builder-initial-composition).
+[the quote builder contract in `AGENTS.md`](AGENTS.md#quote-builder-staff-committed-lines).
 
 ## Inquiry lifecycle projection and booking policy
 
@@ -492,6 +481,11 @@ Do not assume:
 
 Administrative authorization interfaces may therefore expose roles and permissions that were created after the frontend was built.
 
+A permission describes a capability, not a caller. Where an action's meaning depends on who is
+accountable for it (customer-priced submission by the web pricing service, negotiated terms by a
+human staff member), the route additionally requires that principal kind explicitly; it never
+infers it from role names.
+
 ---
 
 # 15. Fiona Owns HTTP Composition
@@ -604,12 +598,12 @@ financial state or lifecycle. New bootstrap Administrators receive the permissio
 roles require explicit read-modify-replace grants through `/admin/access`.
 
 `ReadStaffDashboard` owns one unlocked REPEATABLE READ spanning the existing transaction-taking
-operational core, bulk inquiry/requested-pricing/customer enrichment and one PostgreSQL
+operational core, bulk inquiry/requested-service/customer enrichment and one PostgreSQL
 communication attention aggregate. `attentionFor(transaction, inquiryIds)` returns at most
 one `(unacknowledgedSince, latestEmailAt)` value per inquiry with activity. A single set-based
 window/filtered aggregate derives the clearing order and the two actual-time values; full
 historical communication rows never reach the dashboard. Returned communication data is
-O(inquiries), even as append-only history grows. Requested pricing restoration remains strict;
+O(inquiries), even as append-only history grows. Requested service restoration remains strict;
 corrupt data fails the whole read rather than defaulting the minimum flag. Complete
 population integrity is mandatory, including records outside queues. Nonempty populations
 use exactly ten SQL statements for one or many inquiries. Concurrent commits cannot mix
@@ -692,7 +686,7 @@ When an application relationship references a published runtime identity, preser
 
 Do not duplicate runtime tables into the Fiona schema.
 
-While this project remains pre-production without production data requiring compatibility, prefer the correct target Fiona schema over unnecessary transitional compatibility structures.
+While this project remains pre-production without production data requiring compatibility, prefer the correct target Fiona schema over unnecessary transitional compatibility structures. A rebaseline of the migration history is acceptable only in that state, and the operator, never the application, resets affected databases.
 
 Once production data exists, migration compatibility becomes a deliberate operational requirement.
 
@@ -814,14 +808,14 @@ Inquiry workflow, customer relationships, catering policy, authentication experi
 
 **Shared commerce state has one owner.**
 
-Fiona consumes financial, payment, deposit, catalog, session, and authorization capabilities rather than reproducing them.
+Fiona consumes financial, payment, deposit, session, and authorization capabilities rather than reproducing them.
 
 **Relationships are application-owned.**
 
 Fiona relates inquiries, customers, bookings, and other application concepts to independent shared commerce facts.
 
-**Clients express intent; the backend establishes authoritative business facts.**
+**Only trusted authorities author money; the backend establishes authoritative business facts.**
 
-Pricing, financial documents, permissions, and transactional orchestration are server responsibilities.
+Prices arrive as complete lines from the authenticated web pricing service or a verified staff user; validation, derived totals, financial documents, permissions, and transactional orchestration are server responsibilities.
 
 **When a Fiona feature exposes a missing shared concept, fix the boundary instead of hiding it locally.**

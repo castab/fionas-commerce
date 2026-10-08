@@ -9,23 +9,28 @@ import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
+import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.AllocatedPayment
+import io.github.castab.fionas.commerce.financial.CreateChangeOrder
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
+import io.github.castab.fionas.commerce.financial.FirstSnapshotStage
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryProposalId
+import io.github.castab.fionas.commerce.financial.LineProposalViolations
+import io.github.castab.fionas.commerce.financial.MAX_DOCUMENT_LINES
 import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.inquiry.InquiryId
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.RouteMetaDsl
@@ -49,78 +54,42 @@ import java.time.format.DateTimeParseException
 import java.util.Currency
 import java.util.UUID
 
-/** The body of `POST /inquiries/{inquiryId}/estimates`: commercial inputs only, never amounts or lines. */
+/** The body of `POST /inquiries/{inquiryId}/estimates`: the staff-committed lines of a new Estimate lineage. */
 @Serializable
 data class CreateInquiryEstimateRequest(
     @ApiProperty(
         description =
-            "The revision of Fiona's Offerings catalog to price from, as `GET /offering-catalog` returned it. The " +
-                "revision must be current; stale inputs fail with 409 CATALOG_REVISION_STALE. At least 1.",
+            "The exact already-priced lines, in order: 1 to $MAX_DOCUMENT_LINES lines in one currency with a nonnegative " +
+                "total. Fiona generates their ids and derives every total.",
     )
-    val catalogRevision: Int,
-    @ApiProperty(description = "The guests to price the event for. At least 1.")
-    val guestCount: Int,
-    @ApiProperty(
-        description = "Whether `guestCount` is a lower bound (\"100+ guests\"). Pricing still uses `guestCount`. False when absent.",
-    )
-    val guestCountIsMinimum: Boolean = false,
-    @ApiProperty(description = "The service duration in minutes: one of 90, 120, 150, or 180.")
-    val durationMinutes: Int,
-    @ApiProperty(description = "The chosen offerings, one entry per catalog category, in the order they are shown.")
-    val selections: List<PricingSelection>,
+    val lines: List<PricedLineRequest>,
 )
 
-/** A new lineage's starting stage and Fiona commercial inputs, never caller-authored financial values. */
+/** A new lineage's starting stage and its staff-committed lines. */
 @Serializable
 data class CreateInquiryFinancialDocumentRequest(
     @ApiProperty(description = "The first snapshot's stage: `ESTIMATE`, `QUOTE`, or `INVOICE`.")
     val stage: String,
-    @ApiProperty(
-        description = "Current catalog revision; older revisions fail with 409 CATALOG_REVISION_STALE. At least 1.",
-    )
-    val catalogRevision: Int,
-    @ApiProperty(description = "The guests to price the event for. At least 1.")
-    val guestCount: Int,
-    @ApiProperty(description = "Whether `guestCount` is a lower bound. False when absent.")
-    val guestCountIsMinimum: Boolean = false,
-    @ApiProperty(description = "The service duration in minutes: one of 90, 120, 150, or 180.")
-    val durationMinutes: Int,
-    @ApiProperty(description = "The chosen offerings, in catalog category order.")
-    val selections: List<PricingSelection>,
+    @ApiProperty(description = "The exact already-priced lines, in order; Fiona generates their ids and derives every total.")
+    val lines: List<PricedLineRequest>,
 )
 
-/** The body of `POST /financial-documents/{documentId}/change-orders`: the revised commercial inputs. */
+/** The body of `POST /financial-documents/{documentId}/change-orders`: the complete staff-committed final lines. */
 @Serializable
 data class ChangeOrderRequest(
     @ApiProperty(
         description =
-            "The version of the document the change was made from, which must still be its latest version. A " +
-                "document that has moved on answers `409 conflict`, so no change lands on a version its caller never saw.",
+            "The version the staff user reviewed, which must still be the document's latest version. A document that has " +
+                "moved on answers `409 conflict`; the edit is never rebased onto a version its author never saw.",
     )
     val expectedVersion: Int,
     @ApiProperty(
         description =
-            "The current catalog revision to reprice from. Older revisions fail with 409 CATALOG_REVISION_STALE; " +
-                "reload and review the selections before repricing. Historical document lines remain unchanged.",
+            "The complete final lines, in order. Each names an existing line of the reviewed version (`lineItemId`: carried " +
+                "when unchanged, or a direct override under the same id) or a new line (`key`). Reviewed lines left out are " +
+                "removed. Lines identical to the current ones are no financial change.",
     )
-    val catalogRevision: Int,
-    @ApiProperty(description = "The revised number of guests. At least 1.")
-    val guestCount: Int,
-    @ApiProperty(description = "Whether `guestCount` is a lower bound (\"100+ guests\"). False when absent.")
-    val guestCountIsMinimum: Boolean = false,
-    @ApiProperty(description = "The revised service duration in minutes: one of 90, 120, 150, or 180.")
-    val durationMinutes: Int,
-    @ApiProperty(description = "The revised chosen offerings, one entry per catalog category, in the order they are shown.")
-    val selections: List<PricingSelection>,
-)
-
-/** The offerings chosen from one catalog category. */
-@Serializable
-data class PricingSelection(
-    @ApiProperty(description = "The catalog category's key, for example `topping`.")
-    val category: String,
-    @ApiProperty(description = "The keys of the chosen offerings of that category, in the order chosen.")
-    val offerings: List<String>,
+    val lines: List<ProposedLineRequest>,
 )
 
 /** The body of the quote and invoice transitions. */
@@ -237,7 +206,7 @@ data class RefundAllocationRequest(
 
 /**
  * One immutable financial-document snapshot, as commerce-runtime's ledger records it, with
- * optional legacy staff pricing metadata. Settlement is derived, never stored.
+ * who committed its lines. Settlement is derived, never stored.
  */
 @Serializable
 data class FinancialDocumentResponse(
@@ -257,14 +226,16 @@ data class FinancialDocumentResponse(
     @ApiProperty(description = "The id of the inquiry the lineage belongs to.", format = "uuid")
     val inquiryId: String,
     @ApiProperty(
-        description = "Optional legacy staff pricing metadata. Absent for inquiry-materialized snapshots; lines are authoritative.",
+        description =
+            "Who committed this snapshot's lines: the SERVICE pricing authority for an inquiry's Estimate v1, or the staff " +
+                "USER for staff-authored lines; stage transitions carry it forward unchanged.",
     )
-    val pricing: DocumentPricing? = null,
+    val linesAuthoredBy: LineAuthorshipResponse? = null,
     @ApiProperty(description = "The snapshot's lines, in order. Line ids are durable ledger facts.")
     val lines: List<FinancialDocumentLine>,
     @ApiProperty(description = "The sum of the lines' subtotals, an exact decimal.")
     val subtotal: String,
-    @ApiProperty(description = "The sum of the lines' tax, an exact decimal. No tax is charged yet, so it is zero.")
+    @ApiProperty(description = "The sum of the lines' tax amounts, an exact decimal.")
     val taxAmount: String,
     @ApiProperty(description = "`subtotal` plus `taxAmount`, an exact decimal.")
     val total: String,
@@ -276,21 +247,6 @@ data class FinancialDocumentResponse(
                 "are never reconciled after later payments.",
     )
     val reconciliation: DocumentReconciliation? = null,
-)
-
-/** The commercial inputs a snapshot was priced from. */
-@Serializable
-data class DocumentPricing(
-    @ApiProperty(description = "The catalog revision the snapshot was priced from.")
-    val catalogRevision: Int,
-    @ApiProperty(description = "The guests the snapshot was priced for.")
-    val guestCount: Int,
-    @ApiProperty(description = "Whether the guest count was a lower bound.")
-    val guestCountIsMinimum: Boolean,
-    @ApiProperty(description = "The service duration in minutes.")
-    val durationMinutes: Int,
-    @ApiProperty(description = "The chosen offerings, in the order they were submitted.")
-    val selections: List<PricingSelection>,
 )
 
 /** One line of a financial-document snapshot. */
@@ -308,7 +264,7 @@ data class FinancialDocumentLine(
     val unitPrice: String,
     @ApiProperty(description = "`unitPrice` × `quantity` (or `unitPrice` for a flat charge), an exact decimal.")
     val subtotal: String,
-    @ApiProperty(description = "The line's tax, an exact decimal; zero for now.")
+    @ApiProperty(description = "The line's final tax amount, an exact decimal.")
     val taxAmount: String,
     @ApiProperty(description = "`subtotal` plus `taxAmount`, an exact decimal.")
     val total: String,
@@ -339,7 +295,7 @@ data class FinancialDocumentHistoryResponse(
     val id: String,
     @ApiProperty(description = "The id of the inquiry the lineage belongs to.", format = "uuid")
     val inquiryId: String,
-    @ApiProperty(description = "Every self-contained snapshot, oldest first, with optional legacy staff pricing metadata.")
+    @ApiProperty(description = "Every self-contained snapshot, oldest first, with its line authorship.")
     val versions: List<FinancialDocumentResponse>,
 )
 
@@ -595,8 +551,8 @@ private val paymentIdPath =
 private val financialDocuments =
     Tag(
         "Financial documents",
-        "An inquiry's persisted estimates, quotes, and invoices: immutable commerce-runtime snapshots, priced by Fiona's " +
-            "server from commercial inputs, with self-contained lines and optional legacy staff pricing metadata.",
+        "An inquiry's persisted estimates, quotes, and invoices: immutable commerce-runtime snapshots whose self-contained " +
+            "lines an authorized actor committed; Fiona derives totals and never reprices.",
     )
 
 private val payments = Tag("Payments", "Money received, allocations to exact financial-document snapshots, and refunds.")
@@ -606,21 +562,25 @@ private const val EXAMPLE_INQUIRY = "c755f7cd-1e28-4c75-a85f-d066ede7387d"
 private const val NOT_FOUND_DOCUMENT = "Financial document $EXAMPLE_DOCUMENT was not found"
 private const val STALE_DOCUMENT = "Financial document $EXAMPLE_DOCUMENT is at v4, not the expected v3; reload it and retry"
 
-private val exampleSelections =
+private val exampleLines =
     listOf(
-        PricingSelection("soft-serve-flavor", listOf("vanilla", "horchata")),
-        PricingSelection("topping", listOf("sprinkles", "oreos", "strawberries", "brownies", "gummy-bears", "cookie-dough")),
-        PricingSelection("cone-option", listOf("waffle-cone")),
+        PricedLineRequest("Churro catering service", "Prepared on site", "1", "450.00", "0.00", "USD"),
+        PricedLineRequest("Courtesy discount", null, null, "-50.00", "0.00", "USD"),
     )
 
-private val exampleCreateEstimate =
-    CreateInquiryEstimateRequest(catalogRevision = 20, guestCount = 75, durationMinutes = 120, selections = exampleSelections)
+private val exampleCreateEstimate = CreateInquiryEstimateRequest(exampleLines)
 
-private val exampleCreateFinancialDocument =
-    CreateInquiryFinancialDocumentRequest("QUOTE", 20, 75, durationMinutes = 120, selections = exampleSelections)
+private val exampleCreateFinancialDocument = CreateInquiryFinancialDocumentRequest("QUOTE", exampleLines)
 
 private val exampleChangeOrder =
-    ChangeOrderRequest(expectedVersion = 1, catalogRevision = 20, guestCount = 100, durationMinutes = 120, selections = exampleSelections)
+    ChangeOrderRequest(
+        expectedVersion = 1,
+        lines =
+            listOf(
+                ProposedLineRequest("0b0c8e6e-9f4a-4c1e-8e59-2f1f3a4b5c61", null, "Base service", "2 hours", null, "250.00", "0.00", "USD"),
+                ProposedLineRequest(null, "travel", "Travel surcharge", "Outside the local area", null, "75.00", "0.00", "USD"),
+            ),
+    )
 
 private fun exampleDocument(
     version: Int,
@@ -667,7 +627,7 @@ private fun exampleDocument(
         previousVersion = (version - 1).takeIf { it >= 1 },
         stage = stage,
         inquiryId = EXAMPLE_INQUIRY,
-        pricing = DocumentPricing(20, guests, false, 120, exampleSelections),
+        linesAuthoredBy = LineAuthorshipResponse("USER", "580a28a1-7417-480a-9089-8f5f3c25c1cd", "2026-09-28T17:05:00Z"),
         lines = lines,
         subtotal = total,
         taxAmount = "0.00",
@@ -835,8 +795,13 @@ private val exampleDocumentPayments =
 private fun RouteMetaDsl.financialErrors(
     permission: PermissionKey,
     unsafe: Boolean,
+) = financialErrors(permission, UNTRUSTED_ORIGIN.takeIf { unsafe })
+
+private fun RouteMetaDsl.financialErrors(
+    permission: PermissionKey,
+    alsoForbidden: String?,
 ) {
-    principalAccess(permission, UNTRUSTED_ORIGIN.takeIf { unsafe })
+    principalAccess(permission, alsoForbidden)
     returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure; its cause is never described.", INTERNAL_FAILURE)
 }
 
@@ -850,62 +815,59 @@ private fun RouteMetaDsl.staleVersion(extra: String) =
         STALE_DOCUMENT,
     )
 
-private const val PRICING_REJECTED =
-    "a value is invalid, or the inputs cannot be priced: they do not fit the catalog revision (for example " +
-        "`TOO_MANY_SELECTIONS`, `UNKNOWN_OFFERING`) or Fiona's pricing (for example `INVALID_GUEST_COUNT`, " +
-        "`UNSUPPORTED_DURATION`). Optional `violations` expose stable codes; the message is diagnostic."
+private const val LINES_REJECTED =
+    "a value is invalid: no lines or more than $MAX_DOCUMENT_LINES, a blank description, a malformed or overlong decimal, " +
+        "more fraction digits than the currency allows, an inexact subtotal, mixed currencies, or a negative total."
+
+/** The `403` causes of a route that commits staff-negotiated financial values, beyond missing permissions. */
+private const val STAFF_TERMS_FORBIDDEN =
+    "or the principal lacks `fionas.financial-terms.manage`, or is not a staff USER (a SERVICE token never commits " +
+        "staff-negotiated values), $UNTRUSTED_ORIGIN"
+
+/** Every route that commits staff-negotiated lines: the commerce permission, Fiona's terms authority, and a staff USER. */
+private fun AccessControl.staffTerms(permission: PermissionKey) =
+    requirePermission(permission).then(requirePermission(FionaPermissions.FinancialTermsManage)).then(requireStaffUser)
 
 /**
- * `POST /inquiries/{inquiryId}/estimates`: persists an estimate for an inquiry, priced by the
- * server from commercial inputs. Requires `commerce.financial-document.create`.
+ * `POST /inquiries/{inquiryId}/estimates`: persists a new RELATED Estimate lineage from the final
+ * lines a verified staff user committed.
  */
 fun createInquiryEstimateRoute(
-    createEstimate: (InquiryId, FionasPricingInputs) -> InquiryFinancialDocument,
+    createDocument: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
     access: AccessControl,
 ): ContractRoute =
     "/inquiries" / inquiryIdPath / "estimates" meta {
         operationId = "createInquiryEstimate"
-        summary = "Persist an estimate for an inquiry"
+        summary = "Persist a staff-authored estimate for an inquiry"
         description =
-            "Prices the commercial inputs from the current catalog revision, rejecting stale inputs, with the same Fiona pricing as " +
-            "`POST /estimate-preview`, and records the lines as version 1 of a new financial-document lineage owned by " +
-            "the inquiry, together with the inputs it was priced from. Lines, amounts, and totals are never accepted " +
-            "from the caller. The `Location` response header holds the document's path, " +
-            "`/financial-documents/{documentId}`. Requires `commerce.financial-document.create`."
+            "Records the exact already-priced lines a verified staff user committed as version 1 of a new RELATED Estimate " +
+            "lineage owned by the inquiry, with the user as their author. Nothing is priced or checked against a catalog; " +
+            "totals are derived from the lines. The `Location` response header holds `/financial-documents/{documentId}`. " +
+            "Requires a staff USER holding `commerce.financial-document.create` and `fionas.financial-terms.manage`."
         tags += financialDocuments
         receiving(createEstimateRequest to exampleCreateEstimate)
         returning(Status.CREATED, documentResponse to exampleEstimate, "The persisted estimate. `Location` holds its path.")
-        catalogRevisionConflict()
         malformed("`inquiryId`")
-        returningError(
-            ErrorCategory.NOT_FOUND,
-            "no inquiry has this id, or the catalog revision does not exist.",
-            "Offerings catalog revision r20 was not found",
-        )
-        returningError(ErrorCategory.VALIDATION_FAILED, PRICING_REJECTED, "The selection cannot be estimated: INVALID_GUEST_COUNT (...)")
-        financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
+        returningError(ErrorCategory.NOT_FOUND, "no inquiry has this id.", "Inquiry $EXAMPLE_INQUIRY was not found")
+        returningError(ErrorCategory.VALIDATION_FAILED, LINES_REJECTED, "A financial document has at least one line")
+        financialErrors(CommercePermissions.FinancialDocumentCreate, STAFF_TERMS_FORBIDDEN)
+        security = staffSessionSecurity
     } bindContract Method.POST to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then(catalogRevisionStaleResponses).then { request: Request ->
+        access.staffTerms(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
             val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
             val body = createEstimateRequest(request)
-            val created =
-                createEstimate(
-                    inquiryId,
-                    pricingInputs(
-                        body.catalogRevision,
-                        body.guestCount,
-                        body.guestCountIsMinimum,
-                        body.durationMinutes,
-                        body.selections.map { it.category to it.offerings },
-                    ),
-                )
+            val command =
+                validating {
+                    CreateInquiryFinancialDocument.Command(inquiryId, FirstSnapshotStage.ESTIMATE, body.lines.domain(), staffUser(request))
+                }
+            val created = createDocument(command)
             Response(Status.CREATED)
                 .header("Location", "/financial-documents/${created.latest.document.id}")
                 .with(documentResponse of created.toResponse())
         }
     }
 
-/** `POST /inquiries/{inquiryId}/financial-documents`: prices and creates a chosen first stage. */
+/** `POST /inquiries/{inquiryId}/financial-documents`: a new RELATED lineage at a chosen first stage, from staff-committed lines. */
 fun createInquiryFinancialDocumentRoute(
     createDocument: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
     access: AccessControl,
@@ -914,10 +876,11 @@ fun createInquiryFinancialDocumentRoute(
         operationId = "createInquiryFinancialDocument"
         summary = "Create an inquiry's financial document"
         description =
-            "Prices inputs from the current catalog revision, rejecting stale inputs, and creates version 1 of a new inquiry-owned " +
-            "Estimate, Quote, or Invoice lineage. A direct Quote or Invoice has no predecessor; no intermediate " +
-            "snapshots are invented. The caller cannot supply lines or totals. `Location` contains " +
-            "`/financial-documents/{documentId}`. Requires `commerce.financial-document.create`."
+            "Records the exact already-priced lines a verified staff user committed as version 1 of a new RELATED " +
+            "Estimate, Quote, or Invoice lineage owned by the inquiry. A direct Quote or Invoice has no predecessor; no " +
+            "intermediate snapshots are invented. Nothing is priced or checked against a catalog. `Location` contains " +
+            "`/financial-documents/{documentId}`. Requires a staff USER holding `commerce.financial-document.create` and " +
+            "`fionas.financial-terms.manage`."
         tags += financialDocuments
         receiving(createFinancialDocumentRequest to exampleCreateFinancialDocument)
         returning(
@@ -925,34 +888,24 @@ fun createInquiryFinancialDocumentRoute(
             documentResponse to exampleDocument(1, "QUOTE", 75, unpaid("681.25")),
             "The first snapshot and exact-reference reconciliation; `Location` holds its path.",
         )
-        catalogRevisionConflict()
         malformed("`inquiryId`")
-        returningError(ErrorCategory.NOT_FOUND, "the inquiry or catalog revision does not exist.", "Inquiry $EXAMPLE_INQUIRY was not found")
-        returningError(
-            ErrorCategory.VALIDATION_FAILED,
-            "the stage or commercial inputs are invalid. $PRICING_REJECTED",
-            "Invalid starting stage",
-        )
-        financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
+        returningError(ErrorCategory.NOT_FOUND, "the inquiry does not exist.", "Inquiry $EXAMPLE_INQUIRY was not found")
+        returningError(ErrorCategory.VALIDATION_FAILED, "the stage is unknown, or $LINES_REJECTED", "Invalid starting stage")
+        financialErrors(CommercePermissions.FinancialDocumentCreate, STAFF_TERMS_FORBIDDEN)
+        security = staffSessionSecurity
     } bindContract Method.POST to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then(catalogRevisionStaleResponses).then { request: Request ->
+        access.staffTerms(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
             val inquiryId = InquiryId(uuidIn(id, inquiryIdPath))
             val body = createFinancialDocumentRequest(request)
-            val stage =
+            val command =
                 validating {
-                    requireNotNull(CreateInquiryFinancialDocument.Stage.entries.find { it.name == body.stage }) {
-                        "Starting stage must be ESTIMATE, QUOTE, or INVOICE"
-                    }
+                    val stage =
+                        requireNotNull(FirstSnapshotStage.entries.find { it.name == body.stage }) {
+                            "Starting stage must be ESTIMATE, QUOTE, or INVOICE"
+                        }
+                    CreateInquiryFinancialDocument.Command(inquiryId, stage, body.lines.domain(), staffUser(request))
                 }
-            val inputs =
-                pricingInputs(
-                    body.catalogRevision,
-                    body.guestCount,
-                    body.guestCountIsMinimum,
-                    body.durationMinutes,
-                    body.selections.map { it.category to it.offerings },
-                )
-            val created = createDocument(CreateInquiryFinancialDocument.Command(inquiryId, stage, inputs))
+            val created = createDocument(command)
             Response(Status.CREATED)
                 .header("Location", "/financial-documents/${created.latest.document.id}")
                 .with(documentResponse of created.toResponse())
@@ -969,7 +922,7 @@ fun listInquiryFinancialDocumentsRoute(
         summary = "List an inquiry's financial documents"
         description =
             "Every financial-document lineage the inquiry owns, oldest first, each at its latest snapshot with its " +
-            "optional legacy pricing metadata and current settlement. Requires `commerce.financial-document.read`."
+            "line authorship and current settlement. Requires `commerce.financial-document.read`."
         tags += financialDocuments
         returning(
             Status.OK,
@@ -996,7 +949,7 @@ fun getFinancialDocumentRoute(
         operationId = "getFinancialDocument"
         summary = "Read a financial document"
         description =
-            "The lineage's latest immutable snapshot, optional legacy staff pricing metadata, and the settlement derived " +
+            "The lineage's latest immutable snapshot, its line authorship, and the settlement derived " +
             "from every payment applied to any of its versions. Only documents an inquiry owns exist here. Requires " +
             "`commerce.financial-document.read`."
         tags += financialDocuments
@@ -1010,7 +963,7 @@ fun getFinancialDocumentRoute(
         }
     }
 
-/** `GET /financial-documents/{documentId}/history`: every version, with its pricing inputs. */
+/** `GET /financial-documents/{documentId}/history`: every version, with its line authorship. */
 fun getFinancialDocumentHistoryRoute(
     getHistory: (UUID) -> InquiryFinancialDocumentHistory,
     access: AccessControl,
@@ -1019,7 +972,7 @@ fun getFinancialDocumentHistoryRoute(
         operationId = "getFinancialDocumentHistory"
         summary = "Read a financial document's history"
         description =
-            "Every self-contained immutable snapshot of the lineage, oldest first, with optional legacy staff pricing metadata. " +
+            "Every self-contained immutable snapshot of the lineage, oldest first, with its line authorship. " +
             "Historical snapshots carry no settlement; the current settlement is on `GET /financial-documents/{documentId}`. " +
             "Requires `commerce.financial-document.read`."
         tags += financialDocuments
@@ -1052,8 +1005,8 @@ fun issueQuoteRoute(
         operation = "issueQuote",
         summary = "Issue an estimate as a quote",
         description =
-            "Issues the latest version, an estimate, as a quote: a new immutable snapshot with the same lines and the " +
-                "legacy pricing metadata when present, never repriced. Only RELATED lineages support this standalone action. " +
+            "Issues the latest version, an estimate, as a quote: a new immutable snapshot with the same lines and their " +
+                "authorship, never repriced. Only RELATED lineages support this standalone action. " +
                 "Canonical INITIAL_ESTIMATE issuance requires POST /staff/requests/{inquiryId}/proposals with explicit deposit terms.",
         from = "an estimate",
         example = exampleQuote,
@@ -1071,8 +1024,8 @@ fun issueInvoiceRoute(
         operation = "issueInvoice",
         summary = "Issue a quote as an invoice",
         description =
-            "Issues the latest version, a quote, as an invoice: a new immutable snapshot with the same lines and the " +
-                "legacy pricing metadata when present, never repriced. Payments applied to earlier versions stay attached to them and " +
+            "Issues the latest version, a quote, as an invoice: a new immutable snapshot with the same lines and their " +
+                "authorship, never repriced. Payments applied to earlier versions stay attached to them and " +
                 "still count toward the settlement. An estimate cannot become an invoice directly. " +
                 "This manual action is allowed only for RELATED lineages. Canonical INITIAL_ESTIMATE lineages " +
                 "reject it with illegal_transition and become Invoice only through active deposit satisfaction.",
@@ -1115,56 +1068,57 @@ private fun stageTransitionRoute(
     }
 
 /**
- * `POST /financial-documents/{documentId}/change-orders`: reprices the latest snapshot from
- * revised commercial inputs, in its current stage.
+ * `POST /financial-documents/{documentId}/change-orders`: commits the complete final lines a
+ * verified staff user authored for the exact version they reviewed, in the current stage.
  */
 fun createChangeOrderRoute(
-    changeOrder: (UUID, Version, FionasPricingInputs) -> InquiryFinancialDocument,
+    changeOrder: (CreateChangeOrder.Command) -> InquiryFinancialDocument,
     access: AccessControl,
 ): ContractRoute =
     "/financial-documents" / documentIdPath / "change-orders" meta {
         operationId = "createChangeOrder"
-        summary = "Reprice a financial document"
+        summary = "Revise a financial document's lines"
         description =
-            "Fiona's change order: prices revised inputs from the current catalog revision, rejecting stale inputs, " +
-            "and appends the result as a new version in the same stage, whether estimate, quote, or invoice, with the " +
-            "revised inputs as its pricing source. The new lines replace the current ones; lines, amounts, and totals " +
-            "are never accepted from the caller. Inputs that price exactly as the current version does are no " +
-            "financial change and are rejected. Requires `commerce.financial-document.create`. " +
-            "Canonical Quote change orders are rejected with illegal_transition; use atomic staff proposal quote-revisions. " +
-            "Canonical Estimate and Invoice change orders and RELATED lineages retain this operation, except that " +
-            "a CLOSED canonical Invoice rejects ordinary change orders with illegal_transition. " +
-            "The resulting document total must be nonnegative; zero totals and negative reconciliation balances are allowed."
+            "Fiona's staff change order: commits the complete final lines a verified staff user authored for the version " +
+            "they reviewed, appending them as a new version in the same stage (estimate, RELATED quote, or invoice), " +
+            "authored by that user. Existing lines keep their ids when carried unchanged or overridden (`lineItemId`); " +
+            "reviewed lines left out are removed; new lines (`key`) are added with ids derived from the document, the " +
+            "reviewed version and the key. Nothing is priced or checked against a catalog; totals are derived from the " +
+            "lines. Lines identical to the current ones are no financial change (`NO_FINANCIAL_CHANGE`). The resulting " +
+            "total must be nonnegative (`NEGATIVE_DOCUMENT_TOTAL`); zero totals and negative reconciliation balances are " +
+            "allowed. Canonical Quote change orders are rejected with illegal_transition (use the staff proposal " +
+            "quote-revisions); a CLOSED canonical Invoice rejects ordinary change orders with illegal_transition. Requires " +
+            "a staff USER holding `commerce.financial-document.create` and `fionas.financial-terms.manage`."
         tags += financialDocuments
         receiving(changeOrderRequest to exampleChangeOrder)
         returning(Status.OK, documentResponse to exampleChangedEstimate, "The new latest snapshot.")
-        malformed("`documentId`")
-        returningError(
-            ErrorCategory.NOT_FOUND,
-            "no inquiry owns a document with this id, or the catalog revision does not exist.",
-            NOT_FOUND_DOCUMENT,
-        )
-        catalogRevisionConflict(" `conflict`: expectedVersion is no longer latest; reload the document and retry.")
+        malformed("`documentId` or a body `lineItemId`, or a line names both or neither of `lineItemId` and `key`;")
+        returningError(ErrorCategory.NOT_FOUND, "no inquiry owns a document with this id.", NOT_FOUND_DOCUMENT)
+        staleVersion(" `illegal_transition` at the same status for a canonical Quote or a CLOSED canonical lineage.")
         returningError(
             ErrorCategory.VALIDATION_FAILED,
-            "$PRICING_REJECTED Inputs that produce exactly the current lines or a negative document total are rejected.",
-            "The revised pricing produces no financial change",
+            "$LINES_REJECTED Stable `violations` codes: `LINE_NOT_IN_REVIEWED_DOCUMENT`, `CURRENCY_MISMATCH`, " +
+                "`NO_FINANCIAL_CHANGE`, `NEGATIVE_DOCUMENT_TOTAL`.",
+            "The proposed lines are exactly the current lines; there is no financial change",
+            listOf(ValidationViolationResponse(LineProposalViolations.NO_FINANCIAL_CHANGE)),
         )
-        financialErrors(CommercePermissions.FinancialDocumentCreate, unsafe = true)
+        financialErrors(CommercePermissions.FinancialDocumentCreate, STAFF_TERMS_FORBIDDEN)
+        security = staffSessionSecurity
     } bindContract Method.POST to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.FinancialDocumentCreate).then(catalogRevisionStaleResponses).then { request: Request ->
+        access.staffTerms(CommercePermissions.FinancialDocumentCreate).then { request: Request ->
             val documentId = uuidIn(id, documentIdPath)
             val body = changeOrderRequest(request)
-            val expected = validating { Version.of(body.expectedVersion) }
-            val inputs =
-                pricingInputs(
-                    body.catalogRevision,
-                    body.guestCount,
-                    body.guestCountIsMinimum,
-                    body.durationMinutes,
-                    body.selections.map { it.category to it.offerings },
-                )
-            Response(Status.OK).with(documentResponse of changeOrder(documentId, expected, inputs).toResponse())
+            val identities = body.lines.identities(changeOrderRequest)
+            val command =
+                validating {
+                    CreateChangeOrder.Command(
+                        documentId,
+                        Version.of(body.expectedVersion),
+                        body.lines.domain(identities),
+                        staffUser(request),
+                    )
+                }
+            Response(Status.OK).with(documentResponse of changeOrder(command).toResponse())
         }
     }
 

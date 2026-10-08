@@ -1,53 +1,44 @@
 package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.deposit.DepositRequirement
+import io.github.castab.commerce.deposit.DepositRequirementRevision
 import io.github.castab.commerce.deposit.DepositTerms
+import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentReference
+import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingCategorySelection
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingSelections
-import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.payment.PaymentMethod
-import io.github.castab.commerce.runtime.http.CommerceJson
-import io.github.castab.commerce.runtime.offering.OfferingPriceDto
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
-import io.github.castab.commerce.staff.PrincipalId
-import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
-import io.github.castab.fionas.commerce.http.InquiryStageResponse
-import io.github.castab.fionas.commerce.http.StaffRequestResponse
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.InquiryStage
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
-import io.github.castab.fionas.commerce.offering.CatalogRevisionStale
-import io.github.castab.fionas.commerce.offering.FionasChargeSource
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
+import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
+import io.github.castab.fionas.commerce.testing.CHURROS
+import io.github.castab.fionas.commerce.testing.COURTESY_DISCOUNT
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
-import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.TestLine
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
-import io.github.castab.fionas.commerce.testing.currentCatalogRevision
-import io.github.castab.fionas.commerce.testing.fionasPricing
+import io.github.castab.fionas.commerce.testing.inquiryProposals
 import io.github.castab.fionas.commerce.testing.issueProposal
-import io.github.castab.fionas.commerce.testing.pricingBody
-import io.github.castab.fionas.commerce.testing.retireOfferings
 import io.github.castab.fionas.commerce.testing.testClock
-import io.github.castab.fionas.commerce.testing.updateOffering
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import java.math.BigDecimal
-import java.time.Duration
 import java.util.Currency
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -56,27 +47,47 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * The quote builder's initial composition through the real application and PostgreSQL: a
- * write-free preview, and one atomic issuance of Estimate → [Estimate] → Quote, service plan,
- * deposit approval and publication. Amounts derive from Fiona's actual engine and acceptance
- * catalog: 40 guests for two hours with vanilla, four included toppings and waffle cones price
- * base $250.00 + ice cream $160.00 + waffle cones $30.00 = $440.00.
+ * Staff Quote composition from authoritative final lines, purely and on real PostgreSQL: no
+ * catalog or pricing policy anywhere. Staff replace soft serve with bespoke churros, override and
+ * credit, preview write-free, and publish exactly the reviewed result atomically.
  */
 class QuoteBuilderSpec :
     FunSpec({
         lateinit var app: TestApplication
+        val usd = Currency.getInstance("USD")
         val owners = JdbiInquiryFinancialDocumentRepository()
-        val sources = JdbiFinancialDocumentPricingRepository()
         val history = JdbiInquiryProposalRepository()
         val plans = JdbiInquiryServicePlanRepository()
-        val actor = UserId(UUID.randomUUID())
-        val usd = Currency.getInstance("USD")
+        val percent = DepositTerms.Percentage(BigDecimal("20"))
 
-        fun usd(amount: String) = Money(BigDecimal(amount), usd)
+        fun money(amount: String) = Money(BigDecimal(amount), usd)
 
-        fun fixed(amount: String) = DepositTerms.Fixed(usd(amount))
+        fun new(
+            key: String,
+            line: TestLine,
+        ) = ProposedLine(ProposedLineIdentity.New(LineKey(key)), line.priced())
 
-        fun composition() = InquiryQuoteComposition(JdbiInquiryRepository(), sources, app.fionasPricing())
+        fun existing(
+            line: LineItem,
+            replacement: TestLine? = null,
+        ) = ProposedLine(
+            ProposedLineIdentity.Existing(line.id),
+            replacement?.priced() ?: PricedLine(line.description, line.subDescription, line.quantity, line.price, line.taxAmount),
+        )
+
+        val plan =
+            ProposedServicePlan(
+                ServiceCommitment(
+                    "Churro catering for an evening reception",
+                    100,
+                    120,
+                    listOf("Churros with chocolate sauce", "Cinnamon sugar"),
+                ),
+                listOf(ProposedLineNote(ProposedLineIdentity.New(LineKey("courtesy")), "Returning customer courtesy")),
+            )
+
+        /** The example that must pass: no soft serve at all, a bespoke churro service and a separate courtesy discount. */
+        val churroSwitch = LineProposal(listOf(new("churros", CHURROS), new("courtesy", COURTESY_DISCOUNT)))
 
         fun proposals(
             servicePlans: InquiryServicePlanRepository = plans,
@@ -85,70 +96,48 @@ class QuoteBuilderSpec :
         ) = InquiryProposals(
             app.context.financialLedger,
             associations,
-            sources,
+            JdbiFinancialDocumentAuthorshipRepository(),
             publications,
             servicePlans,
-            composition(),
-            app.fionasPricing(),
             testClock,
         )
 
         fun preview(
             id: InquiryId,
-            composition: QuoteComposition,
-            terms: DepositTerms = fixed("105.00"),
+            lines: LineProposal,
+            servicePlan: ProposedServicePlan? = null,
+            terms: DepositTerms = percent,
             version: Int = 1,
-        ) = PreviewInquiryQuote(app.transactor, app.context.financialLedger, owners, history, composition())(
-            PreviewInquiryQuote.Command(id, Version.of(version), composition, terms),
+        ) = PreviewInquiryQuote(app.transactor, app.context.financialLedger, owners, history)(
+            PreviewInquiryQuote.Command(id, Version.of(version), lines, servicePlan, terms),
         )
 
         fun issue(
             id: InquiryId,
-            composition: QuoteComposition?,
+            lines: LineProposal?,
+            servicePlan: ProposedServicePlan? = null,
             token: QuoteReviewToken? = null,
-            terms: DepositTerms = fixed("105.00"),
+            terms: DepositTerms = percent,
             version: Int = 1,
             core: InquiryProposals = proposals(),
-            principal: PrincipalId = actor,
         ) = IssueInquiryProposal(app.transactor, core)(
             IssueInquiryProposal.Command(
                 id,
                 Version.of(version),
                 terms,
-                principal,
-                composition?.let { ReviewedQuoteComposition(it, token ?: preview(id, it, terms, version).reviewToken) },
+                app.adminId,
+                lines?.let { ReviewedQuoteComposition(it, servicePlan, token ?: preview(id, it, servicePlan, terms, version).reviewToken) },
             ),
         )
 
-        fun newInquiry(): InquiryId =
-            InquiryId(
-                UUID.fromString(
-                    app.createInquiry {
-                        pricingBody(
-                            it,
-                            guests = 40,
-                            softServe = listOf("vanilla"),
-                            toppings = TOPPINGS.take(4),
-                            cones = listOf("waffle-cone"),
-                        )
-                    },
-                ),
-            )
+        fun newInquiry(): InquiryId = InquiryId(UUID.fromString(app.createInquiry()))
 
         fun lineage(id: InquiryId) = app.transactor.inTransaction { owners.initialEstimateOf(it, id)!! }
 
-        fun estimateLines(id: InquiryId) =
+        fun estimate(id: InquiryId) =
             app.context.financialLedger
                 .history(lineage(id))
-                .first()
-                .lineItems
-
-        fun requested(id: InquiryId) = app.transactor.inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
-
-        fun reason(text: String) = QuoteEditReason(text)
-
-        fun staffRequest(id: InquiryId) =
-            CommerceJson.asA(app.adminGet("/staff/requests/${id.value}").bodyString(), StaffRequestResponse.serializer())
+                .first() as FinancialDocument.Estimate
 
         val tables =
             listOf(
@@ -157,7 +146,7 @@ class QuoteBuilderSpec :
                 "commerce.payment_records",
                 "fionas.inquiry_proposals",
                 "fionas.inquiry_service_plans",
-                "fionas.financial_document_pricing",
+                "fionas.financial_document_authorship",
                 "fionas.inquiry_communications",
             )
 
@@ -175,7 +164,7 @@ class QuoteBuilderSpec :
                     .depositRequirementHistory(document)
                     .map { it.requirement }
             val publications = app.transactor.inTransaction { history.history(it, id) }
-            val requestedInputs = requested(id)
+            val requested = app.transactor.inTransaction { JdbiInquiryRepository().findRequested(it, id) }
             val totals = counts()
             action()
             app.context.financialLedger.history(document) shouldBe before
@@ -183,33 +172,9 @@ class QuoteBuilderSpec :
                 .depositRequirementHistory(document)
                 .map { it.requirement } shouldBe deposits
             app.transactor.inTransaction { history.history(it, id) } shouldBe publications
-            requested(id) shouldBe requestedInputs
+            app.transactor.inTransaction { JdbiInquiryRepository().findRequested(it, id) } shouldBe requested
             counts() shouldBe totals
         }
-
-        fun keep(
-            overrides: List<QuoteLineOverride> = emptyList(),
-            adjustments: List<QuoteAdjustment> = emptyList(),
-        ) = QuoteComposition(QuotePricing.KeepEstimate, overrides, adjustments)
-
-        fun adjustment(
-            key: String,
-            kind: QuoteAdjustmentKind,
-            amount: String,
-            description: String,
-            why: String,
-        ) = QuoteAdjustment(QuoteAdjustmentKey(key), kind, QuoteLineDescription(description), null, usd(amount), reason(why))
-
-        fun selections(
-            softServe: List<String> = listOf("vanilla"),
-            cones: List<String> = listOf("waffle-cone"),
-        ) = OfferingSelections(
-            listOf(
-                OfferingCategorySelection(OfferingCategoryKey("soft-serve-flavor"), softServe.map(::OfferingKey)),
-                OfferingCategorySelection(OfferingCategoryKey("topping"), TOPPINGS.take(4).map(::OfferingKey)),
-                OfferingCategorySelection(OfferingCategoryKey("cone-option"), cones.map(::OfferingKey)),
-            ),
-        )
 
         fun observedOwners(pid: AtomicInteger) =
             object : InquiryFinancialDocumentRepository by owners {
@@ -237,330 +202,272 @@ class QuoteBuilderSpec :
             }
         }
 
-        beforeSpec {
-            app = TestApplication.create()
-            app.createAcceptanceCatalog()
-        }
+        beforeSpec { app = TestApplication.create() }
         afterSpec { app.close() }
 
-        test("preview of an untouched Estimate is its persisted result, writes nothing, and fails write-free") {
-            val id = newInquiry()
-            val lines = estimateLines(id)
-            lines.map {
-                it.total.amount
-                    .stripTrailingZeros()
-                    .toPlainString()
-            } shouldContainExactly listOf("250", "160", "30")
-            unchanged(id) {
-                val composed = preview(id, keep())
-                composed.financialChange shouldBe false
-                composed.quote.version shouldBe Version.of(2)
-                composed.quote.lineItems shouldBe lines
-                composed.quote.total.amount shouldBe BigDecimal("440.00")
-                composed.requiredDeposit shouldBe usd("105.00")
-                composed.selections.flatMap { it.offerings }.map { it.displayName } shouldContainExactly
-                    listOf("Vanilla", "Sprinkles", "Oreos", "Strawberries", "Brownies", "Waffle cones")
-                preview(id, keep()).reviewToken shouldBe composed.reviewToken
-                shouldThrow<CommerceFailure.Conflict> { preview(id, keep(), version = 2) }
-                shouldThrow<CommerceFailure.NotFound> { preview(InquiryId(UUID.randomUUID()), keep()) }
-                shouldThrow<CommerceFailure.ValidationFailed> { preview(id, keep(), fixed("440.01")) }
-                shouldThrow<CommerceFailure.ValidationFailed> {
-                    preview(id, keep(adjustments = listOf(adjustment("c", QuoteAdjustmentKind.CREDIT, "440.00", "Credit", "Free event"))))
-                }.violations.single().code shouldBe QuoteCompositionViolations.QUOTE_TOTAL_NOT_POSITIVE
-                shouldThrow<CommerceFailure.ValidationFailed> {
-                    preview(id, keep(adjustments = listOf(adjustment("c", QuoteAdjustmentKind.CREDIT, "500.00", "Credit", "Too much"))))
-                }.violations.single().code shouldBe QuoteCompositionViolations.NEGATIVE_DOCUMENT_TOTAL
-            }
+        // The pure core: no database, catalog or pricing policy.
+
+        val inquiry = InquiryId(UUID.fromString("00000000-0000-0000-0000-0000000000a1"))
+        val pureEstimate =
+            FinancialDocument.Estimate.create(
+                UUID.fromString("00000000-0000-0000-0000-0000000000e1"),
+                acceptanceLines().mapIndexed { index, line -> line.priced().withId(UUID(0, index.toLong() + 1)) },
+            )
+
+        test("keeping every line composes the Estimate's own Quote successor, with no change order") {
+            val composed =
+                QuoteComposer.compose(
+                    inquiry,
+                    pureEstimate,
+                    LineProposal(pureEstimate.lineItems.map { existing(it) }),
+                    null,
+                    percent,
+                )
+            composed.lines.changes.shouldBeNull()
+            composed.financialChange shouldBe false
+            composed.quote shouldBe pureEstimate.toQuote()
+            composed.requiredDeposit shouldBe money("136.25")
+            composed.lines.lines
+                .map { it.origin }
+                .toSet() shouldBe setOf(ResolvedLineOrigin.CARRIED)
         }
 
-        test("the unmodified Estimate issues as Quote v2 with an approved plan; Estimate and requested inputs stay intact") {
-            val id = newInquiry()
-            val lines = estimateLines(id)
-            val inputs = requested(id)
-            val issued = issue(id, keep())
-            val quote =
-                issued.financial.latest.document
-                    .shouldBeInstanceOf<FinancialDocument.Quote>()
-            quote.version shouldBe Version.of(2)
-            quote.lineItems shouldBe lines
-            app.context.financialLedger
-                .history(quote.id)
-                .map { it.version.number } shouldContainExactly listOf(1, 2)
-            app.context.financialLedger
-                .history(quote.id)
-                .first()
-                .lineItems shouldBe lines
-            requested(id) shouldBe inputs
-            val plan = issued.servicePlan.shouldNotBeNull()
-            plan.quote shouldBe quote.reference
-            plan.reviewedEstimate shouldBe FinancialDocumentReference(quote.id, Version.INITIAL)
-            plan.basis shouldBe QuotePricingBasis.KEEP_ESTIMATE
-            plan.lines.map { it.lineItemId } shouldContainExactly lines.map { it.id }
-            plan.lines.all { it.origin == ServicePlanLineOrigin.EstimateLine && it.overrideReason == null } shouldBe true
-            plan.context shouldBe inputs.context
-            app.transactor.inTransaction { plans.find(it, quote.reference) } shouldBe plan
-            // Composed Quotes record their provenance in the plan, not legacy pricing metadata.
-            issued.financial.latest.pricing
+        test("the churro switch removes every soft-serve line and adds bespoke lines; domain totals and the deposit follow") {
+            val composed = QuoteComposer.compose(inquiry, pureEstimate, churroSwitch, plan, percent)
+            val changes = composed.lines.changes.shouldNotBeNull()
+            changes.changes
+                .filterIsInstance<ChangeOrder.Change.RemoveLineItem>()
+                .map { it.lineItemId } shouldContainExactly pureEstimate.lineItems.map { it.id }
+            composed.quote.lineItems.map { it.description } shouldContainExactly listOf("Churro catering service", "Courtesy discount")
+            composed.quote.version shouldBe Version.of(3)
+            composed.quote.total shouldBe money("400.00")
+            composed.requiredDeposit shouldBe money("80.00")
+            val (churros, courtesy) = composed.quote.lineItems
+            churros.id shouldBe proposedLineId(pureEstimate.id, pureEstimate.version, LineKey("churros"))
+            composed.servicePlan!!.lineNotes shouldBe listOf(ServicePlanLineNote(courtesy.id, "Returning customer courtesy"))
+        }
+
+        test("a direct override keeps its line id; an independent adjustment has its own derived identity") {
+            val iceCream = pureEstimate.lineItems[1]
+            val proposal =
+                LineProposal(
+                    pureEstimate.lineItems.map {
+                        if (it ==
+                            iceCream
+                        ) {
+                            existing(it, TestLine("Ice cream service", "Negotiated", null, "250.00"))
+                        } else {
+                            existing(it)
+                        }
+                    } +
+                        new("travel", TestLine("Travel surcharge", null, null, "40.00")),
+                )
+            val composed = QuoteComposer.compose(inquiry, pureEstimate, proposal, null, percent)
+            composed.lines.lines.map { it.origin } shouldContainExactly
+                listOf(ResolvedLineOrigin.CARRIED, ResolvedLineOrigin.REPLACED) + List(3) { ResolvedLineOrigin.CARRIED } +
+                ResolvedLineOrigin.NEW
+            composed.quote.lineItems[1].id shouldBe iceCream.id
+            composed.quote.lineItems[1].price shouldBe money("250.00")
+            composed.quote.lineItems[1]
+                .quantity
                 .shouldBeNull()
-            val active =
-                issued.deposit.depositRequirement!!
-                    .requirement
-                    .shouldBeInstanceOf<DepositRequirement.Active>()
-            active.approvalReference shouldBe quote.reference
-            active.requiredAmount shouldBe usd("105.00")
-            issued.proposal.kind shouldBe ProposalIssuanceKind.INITIAL
-            issued.proposal.documentReference shouldBe quote.reference
+            composed.quote.lineItems
+                .last()
+                .id shouldNotBe iceCream.id
+            composed.quote.total shouldBe money("671.25")
+            // The reviewed Estimate is untouched.
+            pureEstimate.lineItems[1].price shouldBe money("4.00")
         }
 
-        test("an override, a charge and a discount publish Estimate v1 → Estimate v2 → Quote v3 with exact provenance, then book once") {
+        test("the review token is deterministic and binds lines, order, service plan, terms and reviewed version") {
+            val base = QuoteComposer.compose(inquiry, pureEstimate, churroSwitch, plan, percent)
+            QuoteComposer.compose(inquiry, pureEstimate, churroSwitch, plan, percent).reviewToken shouldBe base.reviewToken
+            listOf(
+                QuoteComposer.compose(inquiry, pureEstimate, LineProposal(churroSwitch.lines.reversed()), plan, percent),
+                QuoteComposer.compose(
+                    inquiry,
+                    pureEstimate,
+                    LineProposal(listOf(new("churros", CHURROS.copy(unitPrice = "451.00")), new("courtesy", COURTESY_DISCOUNT))),
+                    plan,
+                    percent,
+                ),
+                QuoteComposer.compose(inquiry, pureEstimate, churroSwitch, null, percent),
+                QuoteComposer.compose(
+                    inquiry,
+                    pureEstimate,
+                    churroSwitch,
+                    plan.copy(service = plan.service.copy(guestCount = 101)),
+                    percent,
+                ),
+                QuoteComposer.compose(inquiry, pureEstimate, churroSwitch, plan, DepositTerms.Percentage(BigDecimal("25"))),
+                QuoteComposer.compose(inquiry, pureEstimate, churroSwitch, plan, DepositTerms.Fixed(money("80.00"))),
+                QuoteComposer.compose(
+                    inquiry,
+                    pureEstimate.changeOrder(
+                        ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(CHURROS.priced().withId(UUID.randomUUID())))),
+                    ),
+                    churroSwitch,
+                    plan,
+                    percent,
+                ),
+            ).forEach { it.reviewToken shouldNotBe base.reviewToken }
+        }
+
+        test("negative, zero, unknown-line, foreign-currency and unknown-note proposals reject with stable codes") {
+            fun codes(
+                proposal: LineProposal,
+                servicePlan: ProposedServicePlan? = null,
+            ) = shouldThrow<CommerceFailure.ValidationFailed> {
+                QuoteComposer.compose(inquiry, pureEstimate, proposal, servicePlan, percent)
+            }.violations.map { it.code }
+
+            codes(LineProposal(listOf(new("credit", COURTESY_DISCOUNT)))) shouldBe listOf(LineProposalViolations.NEGATIVE_DOCUMENT_TOTAL)
+            codes(LineProposal(listOf(new("free", TestLine("Complimentary service", unitPrice = "0.00"))))) shouldBe
+                listOf(QUOTE_TOTAL_NOT_POSITIVE)
+            codes(LineProposal(listOf(ProposedLine(ProposedLineIdentity.Existing(UUID.randomUUID()), CHURROS.priced())))) shouldBe
+                listOf(LineProposalViolations.LINE_NOT_IN_REVIEWED_DOCUMENT)
+            codes(LineProposal(listOf(new("eur", CHURROS.copy(currency = "EUR"))))) shouldBe
+                listOf(LineProposalViolations.CURRENCY_MISMATCH)
+            codes(
+                churroSwitch,
+                ProposedServicePlan(plan.service, listOf(ProposedLineNote(ProposedLineIdentity.New(LineKey("missing")), "Why"))),
+            ) shouldBe listOf(SERVICE_PLAN_LINE_NOT_FOUND)
+        }
+
+        // Real PostgreSQL publication.
+
+        test(
+            "the churro switch previews write-free and publishes exactly the reviewed Quote, deposit, plan and proposal; it books, serves and closes",
+        ) {
             val id = newInquiry()
-            val (base, iceCream, waffle) = estimateLines(id)
-            val composition =
-                keep(
-                    listOf(
-                        QuoteLineOverride(QuoteOverrideTarget.ExistingLine(iceCream.id), usd("145.00"), reason("Negotiated package rate")),
-                    ),
-                    listOf(
-                        adjustment("travel-1", QuoteAdjustmentKind.CHARGE, "25.00", "Additional travel fee", "Outside normal service area"),
-                        adjustment("courtesy-1", QuoteAdjustmentKind.DISCOUNT, "20.00", "Courtesy discount", "Customer accommodation"),
-                    ),
-                )
-            val reviewed = preview(id, composition)
-            reviewed.quote.total.amount shouldBe BigDecimal("430.00")
-            val issued = issue(id, composition, reviewed.reviewToken)
-            val versions = app.context.financialLedger.history(lineage(id))
-            versions.map { it::class } shouldContainExactly
-                listOf(FinancialDocument.Estimate::class, FinancialDocument.Estimate::class, FinancialDocument.Quote::class)
-            versions.map { it.total.amount } shouldContainExactly listOf(BigDecimal("440.00"), BigDecimal("430.00"), BigDecimal("430.00"))
-            versions[0].lineItems shouldContainExactly listOf(base, iceCream, waffle)
+            val original = estimate(id)
+            lateinit var reviewed: ComposedQuote
+            unchanged(id) { reviewed = preview(id, churroSwitch, plan) }
+            reviewed.quote.total shouldBe money("400.00")
+
+            val issued = issue(id, churroSwitch, plan, reviewed.reviewToken)
+            val document = lineage(id)
+            val ledger = app.context.financialLedger
+            // Estimate v1 → Estimate v2 (the staff lines) → Quote v3, with v1 unchanged.
+            ledger.history(document).map { it.javaClass.simpleName to it.version.number } shouldContainExactly
+                listOf("Estimate" to 1, "Estimate" to 2, "Quote" to 3)
+            ledger.history(document).first() shouldBe original
             val quote =
                 issued.financial.latest.document
                     .shouldBeInstanceOf<FinancialDocument.Quote>()
-            quote.version shouldBe Version.of(3)
-            quote.lineItems[0] shouldBe base
-            quote.lineItems[1].id shouldBe iceCream.id
-            quote.lineItems[1].quantity.shouldBeNull()
-            quote.lineItems[1].price.amount shouldBe BigDecimal("145.00")
-            quote.lineItems[2] shouldBe waffle
-            quote.lineItems.drop(3).map { it.price.amount } shouldContainExactly listOf(BigDecimal("25.00"), BigDecimal("-20.00"))
-            // The published lines are the reviewed lines, persisted ids included.
-            quote.lineItems.map { it.description } shouldContainExactly reviewed.quote.lineItems.map { it.description }
-            val plan = issued.servicePlan.shouldNotBeNull()
-            plan.reviewedEstimate.version shouldBe Version.INITIAL
-            plan.approvedAt shouldBe STORED_INSTANT
-            plan.principalId shouldBe actor
-            plan.lines shouldContainExactly
-                listOf(
-                    ServicePlanLine(base.id, ServicePlanLineOrigin.EstimateLine, null),
-                    ServicePlanLine(iceCream.id, ServicePlanLineOrigin.EstimateLine, reason("Negotiated package rate")),
-                    ServicePlanLine(waffle.id, ServicePlanLineOrigin.EstimateLine, null),
-                    ServicePlanLine(
-                        quote.lineItems[3].id,
-                        ServicePlanLineOrigin.Adjustment(QuoteAdjustmentKind.CHARGE, reason("Outside normal service area")),
-                        null,
-                    ),
-                    ServicePlanLine(
-                        quote.lineItems[4].id,
-                        ServicePlanLineOrigin.Adjustment(QuoteAdjustmentKind.DISCOUNT, reason("Customer accommodation")),
-                        null,
-                    ),
-                )
-            plan.selections.flatMap { it.offerings }.map { it.offering.value } shouldContainExactly
-                listOf("vanilla") + TOPPINGS.take(4) + "waffle-cone"
+            quote shouldBe reviewed.quote
+            quote.lineItems.map { it.description } shouldContainExactly listOf("Churro catering service", "Courtesy discount")
+            issued.financial.latest.authorship shouldBe LineAuthorship(app.adminId, STORED_INSTANT)
+            app.transactor.inTransaction {
+                JdbiFinancialDocumentAuthorshipRepository().findAll(it, document).mapValues { (_, authored) -> authored.author }
+            } shouldBe mapOf(Version.of(1) to app.web.id, Version.of(2) to app.adminId, Version.of(3) to app.adminId)
             val active =
                 issued.deposit.depositRequirement!!
                     .requirement
                     .shouldBeInstanceOf<DepositRequirement.Active>()
             active.approvalReference shouldBe quote.reference
-            active.requiredAmount shouldBe usd("105.00")
-            // Issued, not sent: no communication, payment or booking follows approval.
-            val quoted = staffRequest(id)
-            quoted.inquiry.lifecycle.stage shouldBe InquiryStageResponse.QUOTED
-            quoted.servicePlan.shouldNotBeNull().documentVersion shouldBe 3
-            quoted.payments shouldBe emptyList()
-            app.transactor
-                .inTransaction { JdbiInquiryRepository().findRequested(it, id)!! }
-                .pricingInputs.context.guestCount shouldBe 40
-            app.database.count("fionas.inquiry_communications") shouldBe 0
-            // The existing exact full-deposit acceptance books the same lineage.
-            val paid =
-                RecordDocumentPayment(app.transactor, app.context.financialLedger, owners, sources, testClock, history)(
-                    RecordDocumentPayment.Command(
-                        quote.id,
-                        quote.version,
-                        BigDecimal("105.00"),
-                        PaymentMethod.CASH,
-                        null,
-                        null,
-                        issued.proposal.id,
-                    ),
+            active.requiredAmount shouldBe reviewed.requiredDeposit
+            issued.proposal.kind shouldBe ProposalIssuanceKind.INITIAL
+            issued.proposal.issuedBy shouldBe app.adminId
+            val stored = app.transactor.inTransaction { plans.find(it, quote.reference) }.shouldNotBeNull()
+            stored shouldBe issued.servicePlan
+            stored.service shouldBe plan.service
+            stored.reviewedVersion shouldBe Version.INITIAL
+            stored.approvedBy shouldBe app.adminId
+            stored.lineNotes.single().lineItemId shouldBe quote.lineItems[1].id
+
+            // Accepting the exact deposit books the inquiry; serving and paying in full close it.
+            val pay =
+                RecordDocumentPayment(
+                    app.transactor,
+                    ledger,
+                    owners,
+                    JdbiFinancialDocumentAuthorshipRepository(),
+                    testClock,
+                    history,
                 )
-            paid.document.latest.document
+            pay(
+                RecordDocumentPayment.Command(
+                    document,
+                    Version.of(3),
+                    BigDecimal("80.00"),
+                    PaymentMethod.CARD,
+                    null,
+                    null,
+                    issued.proposal.id,
+                ),
+            ).document.latest.document
                 .shouldBeInstanceOf<FinancialDocument.Invoice>()
-                .lineItems shouldBe quote.lineItems
-            val booked = staffRequest(id)
-            booked.inquiry.lifecycle.stage shouldBe InquiryStageResponse.BOOKED
-            booked.servicePlan shouldBe quoted.servicePlan
+            val lifecycle = ReadInquiryLifecycle(ledger, owners, JdbiInquiryFulfillmentRepository())
+            app.transactor.inTransaction { lifecycle.read(it, id) }.stage shouldBe InquiryStage.BOOKED
+            val fulfillment =
+                ManageInquiryFulfillment(
+                    app.transactor,
+                    JdbiInquiryRepository(),
+                    owners,
+                    ledger,
+                    JdbiInquiryFulfillmentRepository(),
+                    testClock,
+                )
+            fulfillment.markServed(ManageInquiryFulfillment.Command(id, app.adminId)).stage shouldBe InquiryStage.SERVED
+            pay(RecordDocumentPayment.Command(document, Version.of(4), BigDecimal("320.00"), PaymentMethod.CASH, null, null))
+            fulfillment.close(ManageInquiryFulfillment.Command(id, app.adminId)).stage shouldBe InquiryStage.CLOSED
+            ledger.history(document).first() shouldBe original
         }
 
-        test("changed unpriced selections are pinned as a service-only plan without an intermediate Estimate") {
+        test("unchanged lines publish Estimate v1 → Quote v2 directly, with a service plan when one is approved") {
             val id = newInquiry()
-            val lines = estimateLines(id)
-            val revision = OfferingsRevision.of(app.currentCatalogRevision())
-            val issued =
-                issue(id, QuoteComposition(QuotePricing.ReviseServiceSelections(revision, selections(softServe = listOf("chocolate")))))
+            val kept = LineProposal(estimate(id).lineItems.map { existing(it) })
+            val servicePlan = ProposedServicePlan(ServiceCommitment("Soft serve as requested", 75, 120, emptyList()))
+            val issued = issue(id, kept, servicePlan)
             issued.financial.latest.document.version shouldBe Version.of(2)
-            issued.financial.latest.document.lineItems shouldBe lines
-            val plan = issued.servicePlan.shouldNotBeNull()
-            plan.basis shouldBe QuotePricingBasis.REVISE_SERVICE_SELECTIONS
-            plan.selections
-                .first()
-                .offerings
-                .map { it.displayName } shouldContainExactly listOf("Chocolate")
-            requested(id)
-                .selections.categories
-                .first()
-                .offerings shouldContainExactly listOf(OfferingKey("vanilla"))
-            // A priced change is never smuggled through: Horchata and Cups change the charges.
-            val other = newInquiry()
-            unchanged(other) {
-                shouldThrow<CommerceFailure.ValidationFailed> {
-                    issue(
-                        other,
-                        QuoteComposition(QuotePricing.ReviseServiceSelections(revision, selections(softServe = listOf("horchata")))),
-                    )
-                }.violations.single().code shouldBe QuoteCompositionViolations.SERVICE_SELECTIONS_CHANGE_PRICING
-            }
+            issued.financial.latest.document.lineItems shouldBe estimate(id).lineItems
+            issued.servicePlan!!.reviewedVersion shouldBe Version.INITIAL
+            issued.financial.latest.authorship
+                ?.author shouldBe app.web.id
         }
 
-        test("repricing a reviewed configuration targets generated sources and requires the current catalog revision") {
+        test("approval re-composes from authoritative state: a tampered or stale review writes nothing") {
             val id = newInquiry()
-            val revision = app.currentCatalogRevision()
-            val inputs =
-                FionasPricingInputs(
-                    OfferingsRevision.of(revision),
-                    selections(softServe = listOf("vanilla", "horchata")),
-                    FionasOfferingsContext(50, false, Duration.ofMinutes(150)),
-                )
-            val waffleSource = FionasChargeSource.SelectedOffering(OfferingCategoryKey("cone-option"), OfferingKey("waffle-cone"))
-            val composition =
-                QuoteComposition(
-                    QuotePricing.RepriceConfiguration(inputs),
-                    listOf(QuoteLineOverride(QuoteOverrideTarget.GeneratedCharge(waffleSource), usd("30.00"), reason("Cone promotion"))),
-                )
-            unchanged(id) {
-                shouldThrow<CommerceFailure.Conflict> {
+            val token = preview(id, churroSwitch, plan).reviewToken
+            // Different amounts, order, service plan or terms than were reviewed.
+            listOf(
+                { issue(id, LineProposal(churroSwitch.lines.reversed()), plan, token) },
+                {
                     issue(
                         id,
-                        composition.copy(
-                            pricing =
-                                QuotePricing.RepriceConfiguration(
-                                    inputs.copy(
-                                        catalogRevision =
-                                            OfferingsRevision.of(
-                                                revision - 1,
-                                            ),
-                                    ),
-                                ),
-                        ),
+                        LineProposal(listOf(new("churros", CHURROS.copy(unitPrice = "100.00")), new("courtesy", COURTESY_DISCOUNT))),
+                        plan,
+                        token,
                     )
-                }.cause.shouldBeInstanceOf<CatalogRevisionStale>()
+                },
+                { issue(id, churroSwitch, null, token) },
+                { issue(id, churroSwitch, plan, token, terms = DepositTerms.Percentage(BigDecimal("50"))) },
+            ).forEach { attempt ->
+                unchanged(id) { shouldThrow<CommerceFailure.Conflict> { attempt() }.cause.shouldBeInstanceOf<QuoteReviewStale>() }
             }
-            val estimate = estimateLines(id)
-            val issued = issue(id, composition)
-            val quote = issued.financial.latest.document
-            quote.version shouldBe Version.of(3)
-            // base 150 + 2.5 h × 50 = 275; ice cream 50 × 4 = 200; horchata 50 × 0.50 = 25; waffle cones overridden 37.50 → 30.
-            quote.lineItems.map {
-                it.total.amount
-                    .stripTrailingZeros()
-                    .toPlainString()
-            } shouldContainExactly
-                listOf("275", "200", "25", "30")
-            quote.lineItems.none { line -> estimate.any { it.id == line.id } } shouldBe true
-            val plan = issued.servicePlan.shouldNotBeNull()
-            plan.lines.map { (it.origin as ServicePlanLineOrigin.Generated).source } shouldContainExactly
-                listOf(
-                    FionasChargeSource.BaseService,
-                    FionasChargeSource.IceCreamService,
-                    FionasChargeSource.SelectedOffering(OfferingCategoryKey("soft-serve-flavor"), OfferingKey("horchata")),
-                    waffleSource,
+            // The Estimate moved on after review: the reviewed version is stale, and nothing is rebased.
+            val estimateNow = estimate(id)
+            app.transactor.inTransaction { transaction ->
+                app.context.financialLedger.changeOrder(
+                    transaction,
+                    estimateNow.id,
+                    ChangeOrder(
+                        listOf(
+                            ChangeOrder.Change.AddLineItem(TestLine("Late charge", unitPrice = "1.00").priced().withId(UUID.randomUUID())),
+                        ),
+                    ),
+                    Version.INITIAL,
                 )
-            plan.lines.last().overrideReason shouldBe reason("Cone promotion")
-            plan.context shouldBe inputs.context
-            issued.financial.latest.pricing
-                .shouldBeNull()
-            app.transactor.inTransaction { sources.findAll(it, quote.id) } shouldBe emptyMap()
+            }
+            unchanged(id) { shouldThrow<CommerceFailure.Conflict> { issue(id, churroSwitch, plan, token) } }
+            unchanged(id) { shouldThrow<CommerceFailure.Conflict> { preview(id, churroSwitch, plan) } }
         }
 
-        test("approval re-evaluates the composition: a changed result after review is stale and writes nothing") {
+        test("failure at the plan insert, deposit approval or publication rolls back every fact") {
             val id = newInquiry()
-            val composition = keep()
-            val token = preview(id, composition).reviewToken
-            unchanged(id) {
-                shouldThrow<CommerceFailure.Conflict> {
-                    issue(id, composition, QuoteReviewToken("0".repeat(64)))
-                }.cause.shouldBeInstanceOf<QuoteReviewStale>()
-                shouldThrow<CommerceFailure.Conflict> { issue(id, composition, token, terms = fixed("100.00")) }
-                    .cause
-                    .shouldBeInstanceOf<QuoteReviewStale>()
-            }
-            // A catalog rename after review changes the names staff would approve.
-            app.updateOffering(app.currentCatalogRevision(), "vanilla") { it.copy(displayName = "Vanilla bean") }
-            unchanged(id) {
-                shouldThrow<CommerceFailure.Conflict> { issue(id, composition, token) }.cause.shouldBeInstanceOf<QuoteReviewStale>()
-            }
-            val reviewed = preview(id, composition)
-            reviewed.selections
-                .first()
-                .offerings
-                .single()
-                .displayName shouldBe "Vanilla bean"
-            issue(id, composition, reviewed.reviewToken)
-                .servicePlan!!
-                .selections
-                .first()
-                .offerings
-                .single()
-                .displayName shouldBe "Vanilla bean"
-            app.updateOffering(app.currentCatalogRevision(), "vanilla") { it.copy(displayName = "Vanilla") }
-        }
-
-        test("failure at the change-order write, plan insert, deposit approval or publication rolls back every fact") {
-            val id = newInquiry()
-            val (_, iceCream) = estimateLines(id)
-            val composition =
-                keep(listOf(QuoteLineOverride(QuoteOverrideTarget.ExistingLine(iceCream.id), usd("150.00"), reason("Negotiated"))))
-            val token = preview(id, composition).reviewToken
+            val token = preview(id, churroSwitch, plan).reviewToken
             val document = lineage(id)
-            // Change order: another runtime writer holds the lineage's NOWAIT mutation lock.
-            val holding = CountDownLatch(1)
-            val release = CountDownLatch(1)
-            val holder =
-                CompletableFuture.runAsync {
-                    runCatching {
-                        app.transactor.inTransaction { transaction ->
-                            app.context.financialLedger.activateDepositRequirement(
-                                transaction,
-                                document,
-                                Version.INITIAL,
-                                fixed("10.00"),
-                                null,
-                            )
-                            holding.countDown()
-                            check(release.await(30, TimeUnit.SECONDS))
-                            error("roll back the holder")
-                        }
-                    }
-                }
-            try {
-                holding.await(30, TimeUnit.SECONDS) shouldBe true
-                unchanged(id) { shouldThrow<CommerceFailure.Conflict> { issue(id, composition, token) } }
-            } finally {
-                release.countDown()
-                holder.get(30, TimeUnit.SECONDS)
-            }
-            // Plan insert, after both ledger successors exist in the transaction.
             val failingPlan =
                 object : InquiryServicePlanRepository by plans {
                     override fun insert(
@@ -577,8 +484,7 @@ class QuoteBuilderSpec :
                 }
             unchanged(
                 id,
-            ) { shouldThrow<IllegalStateException> { issue(id, composition, token, core = proposals(servicePlans = failingPlan)) } }
-            // Deposit approval: a competing requirement makes the approval's expected empty history stale.
+            ) { shouldThrow<IllegalStateException> { issue(id, churroSwitch, plan, token, core = proposals(servicePlans = failingPlan)) } }
             val competingDeposit =
                 object : InquiryServicePlanRepository by plans {
                     override fun insert(
@@ -590,43 +496,50 @@ class QuoteBuilderSpec :
                             transaction,
                             document,
                             plan.quote.version,
-                            fixed("10.00"),
+                            DepositTerms.Fixed(money("10.00")),
                             null,
                         )
                     }
                 }
             unchanged(id) {
-                shouldThrow<CommerceFailure.Conflict> { issue(id, composition, token, core = proposals(servicePlans = competingDeposit)) }
+                shouldThrow<CommerceFailure.Conflict> {
+                    issue(
+                        id,
+                        churroSwitch,
+                        plan,
+                        token,
+                        core = proposals(servicePlans = competingDeposit),
+                    )
+                }
             }
-            // Publication, after the deposit was approved against the final Quote.
             val failingPublication =
                 object : InquiryProposalRepository by history {
                     override fun append(
                         transaction: Transaction,
                         proposal: InquiryProposal,
                     ) {
-                        app.context.financialLedger
-                            .latestDepositRequirement(transaction, document)!!
-                            .requirement
-                            .shouldBeInstanceOf<DepositRequirement.Active>()
-                            .approvalReference shouldBe proposal.documentReference
                         history.append(transaction, proposal)
                         error("after publication")
                     }
                 }
             unchanged(id) {
-                shouldThrow<IllegalStateException> { issue(id, composition, token, core = proposals(publications = failingPublication)) }
+                shouldThrow<IllegalStateException> {
+                    issue(
+                        id,
+                        churroSwitch,
+                        plan,
+                        token,
+                        core = proposals(publications = failingPublication),
+                    )
+                }
             }
-            issue(id, composition, token)
+            issue(id, churroSwitch, plan, token)
                 .financial.latest.document.version shouldBe Version.of(3)
         }
 
-        test("concurrent composed approvals of one Estimate: one publishes, the waiting one conflicts") {
+        test("concurrent approvals of one reviewed Estimate: one publishes, the waiting one conflicts without rebasing") {
             val id = newInquiry()
-            val (_, iceCream) = estimateLines(id)
-            val composition =
-                keep(listOf(QuoteLineOverride(QuoteOverrideTarget.ExistingLine(iceCream.id), usd("150.00"), reason("Negotiated"))))
-            val token = preview(id, composition).reviewToken
+            val token = preview(id, churroSwitch, plan).reviewToken
             val entered = CountDownLatch(1)
             val resume = CountDownLatch(1)
             val pausing =
@@ -640,7 +553,7 @@ class QuoteBuilderSpec :
                         check(resume.await(30, TimeUnit.SECONDS))
                     }
                 }
-            val first = CompletableFuture.supplyAsync { issue(id, composition, token, core = proposals(servicePlans = pausing)) }
+            val first = CompletableFuture.supplyAsync { issue(id, churroSwitch, plan, token, core = proposals(servicePlans = pausing)) }
             try {
                 entered.await(30, TimeUnit.SECONDS) shouldBe true
                 val pid = AtomicInteger()
@@ -649,7 +562,8 @@ class QuoteBuilderSpec :
                         runCatching {
                             issue(
                                 id,
-                                composition,
+                                churroSwitch,
+                                plan,
                                 token,
                                 core = proposals(associations = observedOwners(pid)),
                             )
@@ -666,100 +580,79 @@ class QuoteBuilderSpec :
                 resume.countDown()
             }
             app.transactor.inTransaction { history.history(it, id) }.size shouldBe 1
-            app.database.count("fionas.inquiry_service_plans WHERE document_id = '${lineage(id)}'") shouldBe 1
             app.context.financialLedger
                 .history(lineage(id))
                 .size shouldBe 3
         }
 
-        test("deposit-only issuance remains compatible and records no plan; SERVICE provenance is retained on plans") {
-            val legacy = newInquiry()
-            val issued = app.issueProposal(legacy)
+        test("issuance without lines keeps the Estimate and records no plan; only an unissued Estimate can be composed") {
+            val id = newInquiry()
+            val issued = app.issueProposal(id)
             issued.servicePlan.shouldBeNull()
             issued.financial.latest.document.version shouldBe Version.of(2)
-            staffRequest(legacy).servicePlan.shouldBeNull()
-            val service = ServiceId(UUID.randomUUID())
-            val composed = issue(newInquiry(), keep(), principal = service)
-            composed.servicePlan!!.principalId shouldBe service
-            app.transactor.inTransaction { plans.find(it, composed.proposal.documentReference) }!!.principalId shouldBe service
-            // Only an unissued Estimate can be composed.
-            shouldThrow<CommerceFailure.IllegalTransition> {
-                preview(legacy, keep(), version = 2)
-            }
+            shouldThrow<CommerceFailure.IllegalTransition> { preview(id, churroSwitch, version = 2) }
         }
 
-        test("a later Quote revision keeps the approved plan as history and reports no plan for the new Quote") {
+        test("a Quote revision commits staff lines with a new plan; a deposit-only revision keeps the Quote and records none") {
             val id = newInquiry()
-            val (_, iceCream) = estimateLines(id)
-            val issued =
-                issue(
-                    id,
-                    keep(listOf(QuoteLineOverride(QuoteOverrideTarget.ExistingLine(iceCream.id), usd("150.00"), reason("Negotiated")))),
-                )
-            val plan = issued.servicePlan.shouldNotBeNull()
-            val revised =
-                ReviseInquiryQuoteProposal(app.transactor, proposals())(
+            val first = issue(id, churroSwitch, plan)
+            val quote = first.financial.latest.document
+            val (churros, courtesy) = quote.lineItems
+            val revision =
+                ReviseInquiryQuoteProposal(app.transactor, app.inquiryProposals())(
                     ReviseInquiryQuoteProposal.Command(
                         id,
-                        Version.of(3),
-                        issued.proposal.depositRequirementRevision,
-                        requested(id).copy(
-                            catalogRevision = OfferingsRevision.of(app.currentCatalogRevision()),
-                            context = FionasOfferingsContext(60, false, Duration.ofMinutes(120)),
-                        ),
-                        fixed("105.00"),
-                        actor,
+                        quote.version,
+                        DepositRequirementRevision.INITIAL,
+                        LineProposal(listOf(existing(churros, CHURROS.copy(unitPrice = "500.00")), existing(courtesy))),
+                        percent,
+                        app.adminId,
+                        ProposedServicePlan(plan.service.copy(guestCount = 120)),
                     ),
                 )
-            revised.financial.latest.document.version shouldBe Version.of(4)
-            revised.servicePlan.shouldBeNull()
-            staffRequest(id).servicePlan.shouldBeNull()
-            app.transactor.inTransaction { plans.find(it, plan.quote) } shouldBe plan
+            val revised = revision.financial.latest.document
+            revised.version shouldBe Version.of(4)
+            revised.lineItems.map { it.id } shouldContainExactly listOf(churros.id, courtesy.id)
+            revised.total shouldBe money("450.00")
+            revision.proposal.kind shouldBe ProposalIssuanceKind.QUOTE_REVISED
+            revision.servicePlan!!.reviewedVersion shouldBe Version.of(3)
+            revision.servicePlan.service.guestCount shouldBe 120
+            // The earlier plan stays as history of its own Quote.
+            app.transactor.inTransaction { plans.find(it, quote.reference) } shouldBe first.servicePlan
+            val depositOnly =
+                ReviseInquiryProposalDeposit(app.transactor, app.inquiryProposals())(
+                    ReviseInquiryProposalDeposit.Command(
+                        id,
+                        Version.of(4),
+                        DepositRequirementRevision.of(2),
+                        DepositTerms.Fixed(money("100.00")),
+                        app.adminId,
+                    ),
+                )
+            depositOnly.servicePlan.shouldBeNull()
+            app.transactor.inTransaction { plans.find(it, FinancialDocumentReference(revised.id, Version.of(4))) }.shouldNotBeNull()
+            // Revising to the same lines is no change.
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                ReviseInquiryQuoteProposal(app.transactor, app.inquiryProposals())(
+                    ReviseInquiryQuoteProposal.Command(
+                        id,
+                        Version.of(4),
+                        DepositRequirementRevision.of(3),
+                        LineProposal(revised.lineItems.map { existing(it) }),
+                        percent,
+                        app.adminId,
+                    ),
+                )
+            }.violations.map { it.code } shouldBe listOf(LineProposalViolations.NO_FINANCIAL_CHANGE)
         }
 
-        test("changed catalog prices never reprice a kept Estimate; retired selections require review instead of fabricated names") {
+        test("a staff approver that is not a real user cannot be recorded") {
             val id = newInquiry()
-            val lines = estimateLines(id)
-            var revision =
-                app.updateOffering(app.currentCatalogRevision(), "waffle-cone") {
-                    it.copy(
-                        price =
-                            CommerceJson.asA(
-                                """{"kind":"PER_QUANTITY","amount":"1.25","currency":"USD","dimension":"guest"}""",
-                                OfferingPriceDto.serializer(),
-                            ),
-                    )
-                }
-            val kept = preview(id, keep())
-            kept.quote.lineItems shouldBe lines
-            kept.quote.total.amount shouldBe BigDecimal("440.00")
-            kept.catalogRevision shouldBe OfferingsRevision.of(revision)
-            revision = app.retireOfferings(revision, "waffle-cone")
-            val inputs = requested(id)
+            val ghost = UserId(UUID.randomUUID())
             unchanged(id) {
-                shouldThrow<CommerceFailure.ValidationFailed> { issue(id, keep(), QuoteReviewToken("0".repeat(64))) }
-                    .violations
-                    .map { it.code } shouldContainExactly listOf("UNKNOWN_OFFERING")
+                runCatching {
+                    IssueInquiryProposal(app.transactor, proposals())(IssueInquiryProposal.Command(id, Version.INITIAL, percent, ghost))
+                }.isFailure shouldBe true
             }
-            val reselected =
-                issue(
-                    id,
-                    QuoteComposition(
-                        QuotePricing.RepriceConfiguration(
-                            FionasPricingInputs(OfferingsRevision.of(revision), selections(cones = listOf("cup")), inputs.context),
-                        ),
-                    ),
-                )
-            reselected.financial.latest.document.total.amount shouldBe BigDecimal("410.00")
-            reselected.servicePlan!!
-                .selections
-                .last()
-                .offerings
-                .map { it.displayName } shouldContainExactly listOf("Cups")
-            requested(id) shouldBe inputs
-            app.context.financialLedger
-                .history(lineage(id))
-                .first()
-                .lineItems shouldBe lines
         }
     })

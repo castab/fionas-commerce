@@ -1,5 +1,11 @@
 # Change-order financial foundation audit
 
+> **Follow-up status (commerce 0.0.23, trusted priced lines).** Both gaps this audit identified
+> are closed: staff change orders now commit granular, identity-preserving final lines instead
+> of complete catalog repricing, and commerce-runtime 0.0.23's `changeOrder`, `issueQuote` and
+> `issueInvoice` take the caller's expected document version. The domain semantics recorded
+> below still hold. Kept as history of the 0.0.22 audit.
+
 ## Scope and dependency evidence
 
 This slice hardens existing Fiona mutations; it introduces no granular staff command,

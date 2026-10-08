@@ -6,7 +6,7 @@ import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.runtime.financial.FinancialLineageView
-import io.github.castab.commerce.staff.PrincipalId
+import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.math.BigDecimal
 import java.time.Instant
@@ -26,7 +26,8 @@ data class InquiryProposal(
     val documentReference: FinancialDocumentReference,
     val depositRequirementRevision: DepositRequirementRevision,
     val issuedAt: Instant,
-    val principalId: PrincipalId,
+    /** The verified staff user who published it. */
+    val issuedBy: UserId,
     val kind: ProposalIssuanceKind,
 ) {
     init {

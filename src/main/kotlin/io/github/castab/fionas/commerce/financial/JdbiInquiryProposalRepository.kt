@@ -6,13 +6,13 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.isUniqueViolation
-import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.sql.ResultSet
 import java.time.OffsetDateTime
 import java.util.UUID
 
+/** [InquiryProposalRepository] on `fionas.inquiry_proposals`; the publisher references the runtime's published `commerce.users`. */
 class JdbiInquiryProposalRepository : InquiryProposalRepository {
     override fun append(
         transaction: Transaction,
@@ -27,24 +27,13 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
             .mapTo(UUID::class.java)
             .findOne()
             .orElseThrow { CommerceFailure.NotFound("Canonical inquiry financial lineage was not found") }
-        val principal = proposal.principalId
-        val kind =
-            when (principal) {
-                is UserId -> "USER"
-                is ServiceId -> "SERVICE"
-            }
-        val actor =
-            when (principal) {
-                is UserId -> principal.value
-                is ServiceId -> principal.value
-            }
         try {
             transaction.handle
                 .createUpdate(
                     """
                     INSERT INTO fionas.inquiry_proposals
-                        (id, inquiry_id, document_id, document_version, deposit_requirement_revision, kind, issued_at, principal_kind, principal_id)
-                    VALUES (:id, :inquiry, :document, :version, :revision, :kind, :at, :principalKind, :actor)
+                        (id, inquiry_id, document_id, document_version, deposit_requirement_revision, kind, issued_at, issued_by)
+                    VALUES (:id, :inquiry, :document, :version, :revision, :kind, :at, :issuedBy)
                     """.trimIndent(),
                 ).bind("id", proposal.id.value)
                 .bind("inquiry", proposal.inquiryId.value)
@@ -53,8 +42,7 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
                 .bind("revision", proposal.depositRequirementRevision.number)
                 .bind("kind", proposal.kind.name)
                 .bind("at", proposal.issuedAt)
-                .bind("principalKind", kind)
-                .bind("actor", actor)
+                .bind("issuedBy", proposal.issuedBy.value)
                 .execute()
         } catch (failure: Exception) {
             if (failure.isUniqueViolation()) throw CommerceFailure.Conflict("Proposal has already been issued", failure)
@@ -103,11 +91,7 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
             FinancialDocumentReference(row.getObject("document_id", UUID::class.java), Version.of(row.getInt("document_version"))),
             DepositRequirementRevision.of(row.getInt("deposit_requirement_revision")),
             row.getObject("issued_at", OffsetDateTime::class.java).toInstant(),
-            when (row.getString("principal_kind")) {
-                "USER" -> UserId(row.getObject("principal_id", UUID::class.java))
-                "SERVICE" -> ServiceId(row.getObject("principal_id", UUID::class.java))
-                else -> error("Invalid proposal principal kind")
-            },
+            UserId(row.getObject("issued_by", UUID::class.java)),
             ProposalIssuanceKind.valueOf(row.getString("kind")),
         )
 }

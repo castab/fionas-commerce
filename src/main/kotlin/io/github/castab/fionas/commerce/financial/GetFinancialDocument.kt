@@ -8,7 +8,7 @@ import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
 /**
- * Reads the latest snapshot of a Fiona lineage, its pricing source, and its current
+ * Reads the latest snapshot of a Fiona lineage, its line authorship, and its current
  * settlement, in one REPEATABLE READ transaction so all three describe one point-in-time
  * lineage state. A lineage no inquiry owns is
  * [CommerceFailure.NotFound], even when commerce-runtime's ledger holds it.
@@ -17,9 +17,9 @@ class GetFinancialDocument(
     private val transactor: Transactor,
     ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    pricingSources: FinancialDocumentPricingRepository,
+    authorship: FinancialDocumentAuthorshipRepository,
 ) {
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
     operator fun invoke(documentId: UUID): InquiryFinancialDocument =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->

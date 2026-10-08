@@ -21,13 +21,16 @@ import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
 import io.github.castab.fionas.commerce.staff.FionaPermissions
+import io.github.castab.fionas.commerce.testing.CHURROS
+import io.github.castab.fionas.commerce.testing.COURTESY_DISCOUNT
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
-import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.TestLine
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.asFionasWeb
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.linesJson
+import io.github.castab.fionas.commerce.testing.requestedServiceJson
 import io.github.castab.fionas.commerce.testing.withBearer
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.core.spec.style.FunSpec
@@ -63,12 +66,8 @@ import java.util.UUID
 class InquiryRoutesSpec :
     FunSpec({
         lateinit var application: TestApplication
-        var revision = 0
 
-        beforeSpec {
-            application = TestApplication.create()
-            revision = application.createAcceptanceCatalog()
-        }
+        beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
 
         fun TestApplication.post(body: String) =
@@ -128,9 +127,10 @@ class InquiryRoutesSpec :
             zipCode: String = "92626",
             eventDate: String = "2026-12-05",
             eventType: String = "BIRTHDAY",
-            pricing: String? = pricingBody(revision),
+            requested: String? = requestedServiceJson(),
+            lines: String? = linesJson(acceptanceLines()),
         ) = """{"name":"$name","email":"$email","zipCode":"$zipCode","eventDate":"$eventDate","eventType":"$eventType"$extra""" +
-            pricing?.let { ""","pricingInputs":$it""" }.orEmpty() + "}"
+            requested?.let { ""","requestedService":$it""" }.orEmpty() + lines?.let { ""","lines":$it""" }.orEmpty() + "}"
 
         // POST /inquiries: public, and a receipt of the new inquiry only.
 
@@ -234,14 +234,14 @@ class InquiryRoutesSpec :
         test("missing, null or numeric ZIP is a malformed request and writes nothing") {
             val before = rows()
             listOf(
-                """{"name":"Jane","email":"missing-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":${pricingBody(
-                    revision,
+                """{"name":"Jane","email":"missing-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","requestedService":${requestedServiceJson()},"lines":${linesJson(
+                    acceptanceLines(),
                 )}}""",
-                """{"name":"Jane","email":"null-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":${pricingBody(
-                    revision,
+                """{"name":"Jane","email":"null-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","requestedService":${requestedServiceJson()},"lines":${linesJson(
+                    acceptanceLines(),
                 )},"zipCode":null}""",
-                """{"name":"Jane","email":"numeric-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":${pricingBody(
-                    revision,
+                """{"name":"Jane","email":"numeric-zip@example.com","eventDate":"2026-12-05","eventType":"BIRTHDAY","requestedService":${requestedServiceJson()},"lines":${linesJson(
+                    acceptanceLines(),
                 )},"zipCode":2108}""",
             ).forEach { body ->
                 post(body).let {
@@ -316,7 +316,7 @@ class InquiryRoutesSpec :
             rows() shouldBe before
         }
 
-        test("an unreadable body, including missing or null pricing inputs, is a malformed request, and nothing is recorded") {
+        test("an unreadable body, including missing or null requested service or lines, is a malformed request, and nothing is recorded") {
             val before = rows()
 
             post("""{"email":"jane@example.com"}""").let {
@@ -324,12 +324,20 @@ class InquiryRoutesSpec :
                 it.error().code shouldBe "malformed_request"
             }
             post("""{not json""").error().code shouldBe "malformed_request"
-            listOf(null, "null", """{"catalogRevision":$revision}""", "[]").forEach { pricing ->
-                post(inquiryBody("jane@example.com", pricing = pricing)).let {
-                    it.status shouldBe Status.BAD_REQUEST
-                    it.error().code shouldBe "malformed_request"
-                }
+            listOf(null, "null", "[]").forEach { requested ->
+                post(inquiryBody("jane@example.com", requested = requested)).error().code shouldBe "malformed_request"
             }
+            listOf(null, "null", "{}").forEach { lines ->
+                post(inquiryBody("jane@example.com", lines = lines)).error().code shouldBe "malformed_request"
+            }
+            // Amounts are exact decimal strings, never JSON numbers.
+            post(
+                inquiryBody(
+                    "jane@example.com",
+                    lines = """[{"description":"Service","unitPrice":450.00,"taxAmount":"0.00","currency":"USD"}]""",
+                ),
+            ).error()
+                .code shouldBe "malformed_request"
 
             rows() shouldBe before
         }
@@ -373,10 +381,21 @@ class InquiryRoutesSpec :
                 it.id shouldBe id
                 it.name shouldBe "Ada"
                 it.message.shouldBeNull()
-                it.pricingInputs.catalogRevision shouldBe revision
+                it.requestedService.guestCount shouldBe 75
             }
             response.keys() shouldBe
-                setOf("id", "customerId", "name", "email", "createdAt", "pricingInputs", "zipCode", "eventDate", "eventType", "lifecycle")
+                setOf(
+                    "id",
+                    "customerId",
+                    "name",
+                    "email",
+                    "createdAt",
+                    "requestedService",
+                    "zipCode",
+                    "eventDate",
+                    "eventType",
+                    "lifecycle",
+                )
         }
 
         test("an authorized read of an unknown inquiry is not found, and a malformed id a malformed request") {
@@ -441,161 +460,151 @@ class InquiryRoutesSpec :
 
         // The configured request survives the handoff to staff.
 
-        test("the configured pricing inputs survive persistence and are returned to staff exactly as submitted") {
-            val inputs =
-                pricingBody(revision, guests = 120, minutes = 180, toppings = TOPPINGS.reversed())
-                    .replace("\"guestCount\":120", "\"guestCount\":120,\"guestCountIsMinimum\":true")
+        test("the requested service survives persistence and is returned to staff exactly as recorded") {
+            val requested =
+                """{"guestCount":120,"guestCountIsMinimum":true,"durationMinutes":180,""" +
+                    """"items":[{"label":" Horchata soft serve ","group":"Soft serve","key":"horchata"},""" +
+                    """{"label":"Churros, if possible"}],""" +
+                    """"pricingReference":"fionas-web-pricing@2026-10-01"}"""
 
-            val response = post(inquiryBody("configured-${UUID.randomUUID()}@example.com", pricing = inputs))
+            val response = post(inquiryBody("configured-${UUID.randomUUID()}@example.com", requested = requested))
 
             response.status shouldBe Status.CREATED
             response.keys() shouldBe setOf("id", "createdAt")
-            application.adminGet("/inquiries/${response.receipt().id}").inquiry().pricingInputs shouldBe
-                InquiryRequestedPricing(
-                    catalogRevision = revision,
+            application.adminGet("/inquiries/${response.receipt().id}").inquiry().requestedService shouldBe
+                RequestedServiceRequest(
                     guestCount = 120,
                     guestCountIsMinimum = true,
                     durationMinutes = 180,
-                    selections =
+                    items =
                         listOf(
-                            PricingSelection("soft-serve-flavor", listOf("vanilla", "horchata")),
-                            PricingSelection("topping", TOPPINGS.reversed()),
-                            PricingSelection("cone-option", listOf("waffle-cone")),
+                            RequestedServiceItemRequest("Horchata soft serve", "Soft serve", "horchata"),
+                            RequestedServiceItemRequest("Churros, if possible"),
                         ),
+                    pricingReference = "fionas-web-pricing@2026-10-01",
                 )
         }
 
-        test("the requested catalog revision is pinned: a later catalog revision never replaces it") {
+        test("the requested service is descriptive only: lines that disagree with it are recorded exactly as the authority priced them") {
+            // A bespoke request: 40 guests and a churro service no catalog offers, at a flat negotiated price.
             val response =
-                post(inquiryBody("pinned-${UUID.randomUUID()}@example.com", pricing = pricingBody(revision)))
-
-            val later = application.addOffering(revision, "pistachio", "soft-serve-flavor", "Pistachio")
-
-            later shouldBe revision + 1
-            application
-                .adminGet("/inquiries/${response.receipt().id}")
-                .inquiry()
-                .pricingInputs
-                .catalogRevision shouldBe revision
-            revision = later
-        }
-
-        test("pricing inputs the pricing rejects fail exactly as an estimate preview fails, and nothing is recorded") {
-            val before = rows()
-            listOf(
-                pricingBody(revision, guests = 0),
-                pricingBody(revision, minutes = 45),
-                pricingBody(revision, toppings = TOPPINGS + "sprinkles"),
-                pricingBody(revision, cones = listOf("no-such-cone")),
-                pricingBody(999),
-            ).forEach { inputs ->
-                val preview =
-                    application.http(
-                        Request(
-                            Method.POST,
-                            "/estimate-preview",
-                        ).asFionasWeb(application).header("Content-Type", "application/json").body(inputs),
-                    )
-                val submitted = post(inquiryBody("rejected-${UUID.randomUUID()}@example.com", pricing = inputs))
-
-                preview.status.successful shouldBe false
-                submitted.status shouldBe preview.status
-                submitted.error() shouldBe preview.error()
-            }
-            post(inquiryBody("rejected@example.com", pricing = pricingBody(999))).error().code shouldBe "not_found"
-
-            rows() shouldBe before
-        }
-
-        test("client-calculated amounts are never accepted: they are ignored, and only the inputs are recorded") {
-            val forged = ""","lines":[{"description":"Everything","unitPrice":"1.00"}],"subtotal":"1.00","total":"1.00""""
-            val inputs = pricingBody(revision, extra = forged)
-
-            val response =
-                post(inquiryBody("forged-${UUID.randomUUID()}@example.com", extra = ""","total":"1.00"""", pricing = inputs))
+                post(
+                    inquiryBody(
+                        "bespoke-${UUID.randomUUID()}@example.com",
+                        requested = requestedServiceJson(guests = 40, minutes = null, items = listOf("Churro bar")),
+                        lines = linesJson(listOf(CHURROS, COURTESY_DISCOUNT)),
+                    ),
+                )
 
             response.status shouldBe Status.CREATED
-            val read = application.adminGet("/inquiries/${response.receipt().id}")
-            Json
-                .parseToJsonElement(read.bodyString())
-                .jsonObject
-                .getValue("pricingInputs")
-                .jsonObject.keys shouldBe
-                setOf("catalogRevision", "guestCount", "guestCountIsMinimum", "durationMinutes", "selections")
-            read.bodyString() shouldNotContain "1.00"
+            val id = response.receipt().id
+            val estimate =
+                CommerceJson.asA(
+                    application.adminGet("/financial-documents/${application.initialEstimateOf(id)}").bodyString(),
+                    FinancialDocumentResponse.serializer(),
+                )
+            estimate.lines.map { Triple(it.description, it.quantity, it.unitPrice) } shouldContainExactly
+                listOf(Triple("Churro catering service", "1", "450.00"), Triple("Courtesy discount", null, "-50.00"))
+            estimate.total shouldBe "400.00"
         }
 
-        test("a returning customer's new request keeps its own inputs, and the earlier one is unchanged") {
+        test("invalid lines are a validation failure with nothing recorded, and their key stays usable") {
+            val before = rows()
+            val key = "invalid-lines-${UUID.randomUUID()}"
+            listOf(
+                "[]",
+                linesJson(listOf(TestLine("   ", unitPrice = "1.00"))),
+                linesJson(listOf(TestLine("Service", unitPrice = "1.005"))),
+                linesJson(listOf(TestLine("Service", unitPrice = "1e3"))),
+                linesJson(listOf(TestLine("Service", unitPrice = "1".repeat(50)))),
+                linesJson(listOf(TestLine("Service", quantity = "3", unitPrice = "0.333"))),
+                linesJson(listOf(TestLine("Service", quantity = "0", unitPrice = "1.00"))),
+                linesJson(listOf(TestLine("Service", unitPrice = "1.00", currency = "EUR"), TestLine("Other", unitPrice = "1.00"))),
+                linesJson(listOf(TestLine("Service", unitPrice = "1.00", currency = "XYZ"))),
+                linesJson(listOf(TestLine("Credit", unitPrice = "-10.00"))),
+                linesJson(List(101) { TestLine("Line $it", unitPrice = "1.00") }),
+            ).forEach { lines ->
+                val response =
+                    application.http(
+                        Request(Method.POST, "/inquiries")
+                            .withSubmissionKey(key)
+                            .asFionasWeb(application)
+                            .header("Content-Type", "application/json")
+                            .body(inquiryBody("rejected-${UUID.randomUUID()}@example.com", lines = lines)),
+                    )
+                response.status shouldBe Status.UNPROCESSABLE_ENTITY
+                response.error().code shouldBe "validation_failed"
+            }
+            rows() shouldBe before
+            application
+                .http(
+                    Request(Method.POST, "/inquiries")
+                        .withSubmissionKey(key)
+                        .asFionasWeb(application)
+                        .header("Content-Type", "application/json")
+                        .body(inquiryBody("accepted-${UUID.randomUUID()}@example.com")),
+                ).status shouldBe Status.CREATED
+        }
+
+        test("a caller-supplied total is never authoritative: it is ignored and the total is derived from the lines") {
+            val response =
+                post(inquiryBody("forged-${UUID.randomUUID()}@example.com", extra = ""","total":"1.00","subtotal":"1.00""""))
+
+            response.status shouldBe Status.CREATED
+            val id = response.receipt().id
+            CommerceJson
+                .asA(
+                    application.adminGet("/financial-documents/${application.initialEstimateOf(id)}").bodyString(),
+                    FinancialDocumentResponse.serializer(),
+                ).total shouldBe "681.25"
+        }
+
+        test("a returning customer's new request keeps its own requested service, and the earlier one is unchanged") {
             val email = "repeat-${UUID.randomUUID()}@example.com"
-            val first = post(inquiryBody(email, pricing = pricingBody(revision, guests = 50))).receipt()
-            val firstInputs = application.adminGet("/inquiries/${first.id}").inquiry().pricingInputs
+            val first = post(inquiryBody(email, requested = requestedServiceJson(guests = 50))).receipt()
+            val firstRequest = application.adminGet("/inquiries/${first.id}").inquiry().requestedService
 
             val second =
                 post(
                     inquiryBody(
                         email,
                         name = "Someone Else",
-                        pricing = pricingBody(revision, guests = 200, minutes = 90),
+                        requested = requestedServiceJson(guests = 200, minutes = 90),
+                        lines = linesJson(acceptanceLines(guests = 200, minutes = 90)),
                     ),
                 ).receipt()
 
             val secondRead = application.adminGet("/inquiries/${second.id}").inquiry()
             val firstRead = application.adminGet("/inquiries/${first.id}").inquiry()
             secondRead.customerId shouldBe firstRead.customerId
-            firstRead.pricingInputs shouldBe firstInputs
-            firstRead.pricingInputs.guestCount shouldBe 50
-            secondRead.pricingInputs.guestCount shouldBe 200
-            secondRead.pricingInputs.durationMinutes shouldBe 90
+            firstRead.requestedService shouldBe firstRequest
+            firstRead.requestedService.guestCount shouldBe 50
+            secondRead.requestedService.guestCount shouldBe 200
+            secondRead.requestedService.durationMinutes shouldBe 90
         }
 
-        test("preview → public inquiry with the same inputs → staff read → an estimate priced as the preview, with nothing re-entered") {
-            val inputs = pricingBody(revision)
-            val preview =
-                application.http(
-                    Request(
-                        Method.POST,
-                        "/estimate-preview",
-                    ).asFionasWeb(application).header("Content-Type", "application/json").body(inputs),
-                )
-            preview.status shouldBe Status.OK
-            val previewTotal = CommerceJson.asA(preview.bodyString(), EstimatePreviewResponse.serializer()).total
+        test("service-priced inquiry → staff read → canonical Estimate v1 with exactly the submitted lines, authored by the service") {
             val documents = application.database.count("commerce.financial_document_snapshots")
 
             val receipt =
-                post(inquiryBody("handoff-${UUID.randomUUID()}@example.com", extra = ""","message":"A birthday"""", pricing = inputs))
-                    .receipt()
+                post(inquiryBody("handoff-${UUID.randomUUID()}@example.com", extra = ""","message":"A birthday"""")).receipt()
 
-            // The UI key internally materializes one initial Estimate without staff create permission.
+            // The service's permission internally materializes one initial Estimate without staff financial permissions.
             application.database.count("commerce.financial_document_snapshots") shouldBe documents + 1
-            val initialId =
-                application.database
-                    .strings(
-                        "SELECT document_id FROM fionas.inquiry_financial_documents WHERE inquiry_id = '${receipt.id}' AND purpose = 'INITIAL_ESTIMATE'",
-                    ).single()
             val initial =
                 CommerceJson.asA(
-                    application.adminGet("/financial-documents/$initialId").bodyString(),
+                    application.adminGet("/financial-documents/${application.initialEstimateOf(receipt.id)}").bodyString(),
                     FinancialDocumentResponse.serializer(),
                 )
             initial.version shouldBe 1
             initial.stage shouldBe "ESTIMATE"
-            initial.total shouldBe previewTotal
-            initial.pricing.shouldBeNull()
-            // Staff can still create a related estimate from the historical request.
-            val requested =
-                Json
-                    .parseToJsonElement(application.adminGet("/inquiries/${receipt.id}").bodyString())
-                    .jsonObject
-                    .getValue("pricingInputs")
-                    .toString()
-            val estimate = application.adminPost("/inquiries/${receipt.id}/estimates", requested)
-            estimate.status shouldBe Status.CREATED
-            val document = CommerceJson.asA(estimate.bodyString(), FinancialDocumentResponse.serializer())
-            document.total shouldBe previewTotal
-            document.pricing!!.catalogRevision shouldBe revision
-            CommerceJson.asA(requested, InquiryRequestedPricing.serializer()).let {
-                document.pricing shouldBe
-                    DocumentPricing(it.catalogRevision, it.guestCount, it.guestCountIsMinimum, it.durationMinutes, it.selections)
+            initial.total shouldBe "681.25"
+            initial.lines.map { it.description } shouldContainExactly acceptanceLines().map { it.description }
+            initial.linesAuthoredBy.shouldNotBeNull().let {
+                it.principalKind shouldBe "SERVICE"
+                it.principalId shouldBe
+                    application.web.id.value
+                        .toString()
             }
         }
 
@@ -658,13 +667,12 @@ class InquiryRoutesSpec :
         test("inquiries are listed newest first, a bounded page at a time, with the default and maximum page sizes") {
             val clock = SteppingClock(Instant.parse("2026-10-01T12:00:00Z"))
             TestApplication.create(clock = clock).use { app ->
-                val current = app.createAcceptanceCatalog()
                 val ids =
                     List(105) { index ->
                         clock.now = Instant.parse("2026-10-01T12:00:00Z").plus(Duration.ofMinutes(index.toLong()))
                         app
                             .post(
-                                inquiryBody("inbox-$index@example.com", name = "Customer $index", pricing = pricingBody(current)),
+                                inquiryBody("inbox-$index@example.com", name = "Customer $index"),
                             ).receipt()
                             .id
                     }
@@ -715,12 +723,11 @@ class InquiryRoutesSpec :
         test("inquiries recorded at the same instant are neither repeated nor skipped across pages") {
             val clock = SteppingClock(Instant.parse("2026-10-02T09:00:00Z"))
             TestApplication.create(clock = clock).use { app ->
-                val current = app.createAcceptanceCatalog()
-                val older = app.post(inquiryBody("older@example.com", pricing = pricingBody(current))).receipt().id
+                val older = app.post(inquiryBody("older@example.com")).receipt().id
                 clock.now = Instant.parse("2026-10-02T09:30:00.123456Z")
-                val tied = List(9) { app.post(inquiryBody("tied-$it@example.com", pricing = pricingBody(current))).receipt().id }
+                val tied = List(9) { app.post(inquiryBody("tied-$it@example.com")).receipt().id }
                 clock.now = Instant.parse("2026-10-02T10:00:00Z")
-                val newer = app.post(inquiryBody("newer@example.com", pricing = pricingBody(current))).receipt().id
+                val newer = app.post(inquiryBody("newer@example.com")).receipt().id
 
                 val walked = mutableListOf<String>()
                 var cursor: String? = null
@@ -742,16 +749,15 @@ class InquiryRoutesSpec :
         test("an inquiry recorded while staff page through the list never shifts a later page") {
             val clock = SteppingClock(Instant.parse("2026-10-03T09:00:00Z"))
             TestApplication.create(clock = clock).use { app ->
-                val current = app.createAcceptanceCatalog()
                 val ids =
                     List(6) { index ->
                         clock.now = Instant.parse("2026-10-03T09:00:00Z").plusSeconds(index.toLong())
-                        app.post(inquiryBody("stable-$index@example.com", pricing = pricingBody(current))).receipt().id
+                        app.post(inquiryBody("stable-$index@example.com")).receipt().id
                     }.reversed()
                 val first = app.adminGet("/inquiries?limit=3").list()
 
                 clock.now = Instant.parse("2026-10-03T10:00:00Z")
-                app.post(inquiryBody("arrived-later@example.com", pricing = pricingBody(current)))
+                app.post(inquiryBody("arrived-later@example.com"))
 
                 app
                     .adminGet("/inquiries?limit=3&cursor=${first.nextCursor}")

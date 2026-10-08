@@ -19,11 +19,10 @@ import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.communicationHistory
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.invoiceLatest
 import io.github.castab.fionas.commerce.testing.issueProposal
-import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
@@ -117,7 +116,6 @@ class DashboardAttentionSpec :
 
         beforeTest {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
         }
         afterTest { app.close() }
 
@@ -140,9 +138,7 @@ class DashboardAttentionSpec :
                 val id =
                     InquiryId(
                         UUID.fromString(
-                            app.createInquiry(pricing = {
-                                pricingBody(it).replace("\"guestCount\":", "\"guestCountIsMinimum\":$minimum,\"guestCount\":")
-                            }),
+                            app.createInquiry(guestCountIsMinimum = minimum),
                         ),
                     )
                 recorder().customerEmailReceived(id, STORED_INSTANT)
@@ -169,7 +165,7 @@ class DashboardAttentionSpec :
                     .workQueue.needsReply.items
                     .single()
                     .totalQualifier shouldBe DashboardTotalQualifierResponse.EXACT
-                app.transactor.inTransaction { app.context.financialLedger.issueInvoice(it, UUID.fromString(document(id))) }
+                app.transactor.inTransaction { app.context.financialLedger.invoiceLatest(it, UUID.fromString(document(id))) }
                 serve(id)
                 val invoice = read(STORED_INSTANT)
                 listOf(invoice.workQueue.needsReply, invoice.workQueue.needsResolution).forEach {
@@ -255,7 +251,7 @@ class DashboardAttentionSpec :
             resolution(state(id), yesterday, at) shouldBe null
             quote(id)
             resolution(state(id), yesterday, at) shouldBe null
-            app.transactor.inTransaction { app.context.financialLedger.issueInvoice(it, UUID.fromString(document(id))) }
+            app.transactor.inTransaction { app.context.financialLedger.invoiceLatest(it, UUID.fromString(document(id))) }
             val booked = state(id)
             resolution(booked, today, at) shouldBe null
             resolution(booked, tomorrow, at) shouldBe null

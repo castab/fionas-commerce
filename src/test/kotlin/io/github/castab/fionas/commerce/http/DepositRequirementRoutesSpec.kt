@@ -13,7 +13,7 @@ import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.changeLatest
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.testClock
 import io.github.castab.fionas.commerce.testing.withBearer
@@ -107,7 +107,6 @@ class DepositRequirementRoutesSpec :
 
         beforeSpec {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
             app.adminCookie
         }
         afterSpec { app.close() }
@@ -188,7 +187,7 @@ class DepositRequirementRoutesSpec :
             val id = newDocument()
             val active = set(id, terms = percent()).active()
             app.transactor.inTransaction { transaction ->
-                app.context.financialLedger.changeOrder(
+                app.context.financialLedger.changeLatest(
                     transaction,
                     id,
                     ChangeOrder(

@@ -6,7 +6,6 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.TestDatabase
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -15,7 +14,6 @@ import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.string.shouldStartWith
 import java.util.UUID
 
 /** The database shape fionas-commerce ends up with after commerce-runtime's migration phase. */
@@ -57,7 +55,7 @@ class DatabaseSchemaSpec :
                     "inquiry_submissions",
                     "user_credentials",
                     "inquiry_financial_documents",
-                    "financial_document_pricing",
+                    "financial_document_authorship",
                 )
         }
 
@@ -81,9 +79,11 @@ class DatabaseSchemaSpec :
             )
 
         test("proposal publication stores only exact identities and provenance with unique pairs and Fiona association integrity") {
-            application.database.foreignKeys("inquiry_proposals") shouldContainExactly
+            application.database.foreignKeys("inquiry_proposals") shouldContainExactlyInAnyOrder
                 listOf(
                     "inquiry_id, document_id → fionas.inquiry_financial_documents(inquiry_id, document_id)",
+                    "document_id, document_version → commerce.financial_document_snapshots(document_id, version)",
+                    "issued_by → commerce.users(principal_id)",
                 )
             application.database.strings(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' AND table_name = 'inquiry_proposals' ORDER BY ordinal_position",
@@ -97,8 +97,7 @@ class DatabaseSchemaSpec :
                     "deposit_requirement_revision",
                     "kind",
                     "issued_at",
-                    "principal_kind",
-                    "principal_id",
+                    "issued_by",
                 )
             application.database
                 .strings(
@@ -116,6 +115,7 @@ class DatabaseSchemaSpec :
                     "inquiry_id, document_id → fionas.inquiry_financial_documents(inquiry_id, document_id)",
                     "document_id, document_version → commerce.financial_document_snapshots(document_id, version)",
                     "document_id, reviewed_document_version → commerce.financial_document_snapshots(document_id, version)",
+                    "approved_by → commerce.users(principal_id)",
                 )
             application.database.strings(
                 "SELECT column_name || ' ' || is_nullable || ' ' || data_type FROM information_schema.columns " +
@@ -126,12 +126,9 @@ class DatabaseSchemaSpec :
                     "document_version NO integer",
                     "inquiry_id NO uuid",
                     "reviewed_document_version NO integer",
-                    "pricing_basis NO text",
-                    "catalog_revision NO integer",
                     "plan NO jsonb",
                     "approved_at NO timestamp with time zone",
-                    "principal_kind NO text",
-                    "principal_id NO uuid",
+                    "approved_by NO uuid",
                 )
             application.database.strings(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_service_plans'::regclass AND contype = 'p'",
@@ -143,11 +140,7 @@ class DatabaseSchemaSpec :
                 listOf(
                     "CHECK ((document_version >= 2))",
                     "CHECK (((reviewed_document_version >= 1) AND (reviewed_document_version < document_version)))",
-                    "CHECK ((pricing_basis = ANY (ARRAY['KEEP_ESTIMATE'::text, 'REVISE_SERVICE_SELECTIONS'::text, " +
-                        "'REPRICE_CONFIGURATION'::text])))",
-                    "CHECK ((catalog_revision >= 1))",
                     "CHECK ((jsonb_typeof(plan) = 'object'::text))",
-                    "CHECK ((principal_kind = ANY (ARRAY['USER'::text, 'SERVICE'::text])))",
                 )
             application.database.strings(
                 "SELECT datetime_precision::text FROM information_schema.columns WHERE table_schema = 'fionas' " +
@@ -256,7 +249,6 @@ class DatabaseSchemaSpec :
                 listOf(
                     "CREATE INDEX inquiry_communications_inquiry_order_idx ON fionas.inquiry_communications USING btree (inquiry_id, recorded_order) INCLUDE (kind, occurred_at)",
                 )
-            application.createAcceptanceCatalog()
             val inquiry = application.createInquiry()
             val principal =
                 application.authorization
@@ -284,13 +276,14 @@ class DatabaseSchemaSpec :
         val obsoletePricingTables =
             listOf(
                 "inquiry_pricing",
+                "financial_document_pricing",
                 "inquiry_pricing_categories",
                 "inquiry_pricing_selections",
                 "financial_document_pricing_categories",
                 "financial_document_pricing_selections",
             )
 
-        test("no child table represents part of a pricing-inputs value") {
+        test("no table stores catalog pricing inputs or their parts") {
             application.database
                 .tables(FIONA_MIGRATION_SCHEMA)
                 .filter { it in obsoletePricingTables }
@@ -300,10 +293,14 @@ class DatabaseSchemaSpec :
             }
         }
 
-        test("an inquiry's requested pricing inputs are a required JSON object in the inquiry row itself") {
-            application.database.columns("inquiries", "pricing_inputs") shouldContainExactly listOf("pricing_inputs NO jsonb")
-            application.database.checks("inquiries", "pricing_inputs") shouldContainExactly
-                listOf("CHECK ((jsonb_typeof(pricing_inputs) = 'object'::text))")
+        test("an inquiry's requested service is a required JSON object in the inquiry row itself, and no pricing inputs remain") {
+            application.database.columns("inquiries", "requested_service") shouldContainExactly listOf("requested_service NO jsonb")
+            application.database.checks("inquiries", "requested_service") shouldContainExactly
+                listOf("CHECK ((jsonb_typeof(requested_service) = 'object'::text))")
+            application.database
+                .strings(
+                    "SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = 'fionas' AND column_name LIKE '%pricing%'",
+                ).shouldBeEmpty()
         }
 
         test("an inquiry references only its customer; no reverse pricing reference or deferred constraint remains") {
@@ -348,24 +345,29 @@ class DatabaseSchemaSpec :
             ) shouldContainExactly emptyList()
         }
 
-        test("every pricing source is one row keyed to commerce-runtime's exact snapshot of a lineage Fiona owns") {
-            application.database.foreignKeys("financial_document_pricing") shouldContainExactlyInAnyOrder
+        test("line authorship is one provenance row per exact snapshot of a lineage Fiona owns, holding no money") {
+            application.database.foreignKeys("financial_document_authorship") shouldContainExactlyInAnyOrder
                 listOf(
                     "document_id → fionas.inquiry_financial_documents(document_id)",
                     "document_id, document_version → commerce.financial_document_snapshots(document_id, version)",
                 )
             application.database.strings(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint " +
-                    "WHERE conrelid = 'fionas.financial_document_pricing'::regclass AND contype IN ('p', 'u')",
+                    "WHERE conrelid = 'fionas.financial_document_authorship'::regclass AND contype IN ('p', 'u')",
             ) shouldContainExactly listOf("PRIMARY KEY (document_id, document_version)")
-            // One complete pricing-inputs value per version; the former scalar columns are not duplicated beside it.
             application.database.strings(
                 "SELECT column_name || ' ' || is_nullable || ' ' || data_type FROM information_schema.columns " +
-                    "WHERE table_schema = 'fionas' AND table_name = 'financial_document_pricing' ORDER BY column_name",
+                    "WHERE table_schema = 'fionas' AND table_name = 'financial_document_authorship' ORDER BY ordinal_position",
             ) shouldContainExactly
-                listOf("document_id NO uuid", "document_version NO integer", "pricing_inputs NO jsonb")
-            application.database.checks("financial_document_pricing", "pricing_inputs") shouldContainExactly
-                listOf("CHECK ((jsonb_typeof(pricing_inputs) = 'object'::text))")
+                listOf(
+                    "document_id NO uuid",
+                    "document_version NO integer",
+                    "author_kind NO text",
+                    "author_id NO uuid",
+                    "recorded_at NO timestamp with time zone",
+                )
+            application.database.checks("financial_document_authorship", "author_kind") shouldContainExactly
+                listOf("CHECK ((author_kind = ANY (ARRAY['USER'::text, 'SERVICE'::text])))")
         }
 
         test("Fiona duplicates no ledger fact: documents, payments, refunds, and reconciliation stay in commerce") {
@@ -435,12 +437,13 @@ class DatabaseSchemaSpec :
             application.database.tables("public").shouldBeEmpty()
         }
 
-        test("Fiona creates no Offerings persistence: the catalog lives only in commerce-runtime's tables") {
+        test("no catalog persistence exists anywhere: neither Fiona nor commerce-runtime 0.0.23 stores offerings") {
             application.database
                 .strings(
                     "SELECT table_schema || '.' || table_name FROM information_schema.tables " +
-                        "WHERE table_name LIKE '%offering%' ORDER BY 1",
-                ).forEach { it shouldStartWith "commerce." }
+                        "WHERE table_schema NOT IN ('information_schema', 'pg_catalog') " +
+                        "AND (table_name LIKE '%offering%' OR table_name LIKE '%catalog%') ORDER BY 1",
+                ).shouldBeEmpty()
         }
 
         test("inquiries reference their customer, and customer emails are unique") {

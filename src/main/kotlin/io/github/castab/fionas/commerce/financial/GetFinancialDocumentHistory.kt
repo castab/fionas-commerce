@@ -7,8 +7,8 @@ import io.github.castab.commerce.runtime.persistence.Transactor
 import java.util.UUID
 
 /**
- * Reads every immutable snapshot of a Fiona lineage, oldest first, each with the pricing
- * inputs that produced it, in one REPEATABLE READ transaction. Historical snapshots are not
+ * Reads every immutable snapshot of a Fiona lineage, oldest first, each with its line
+ * authorship, in one REPEATABLE READ transaction. Historical snapshots are not
  * reconciled: an allocation made to a later snapshot cannot be reconciled against an
  * earlier one. A lineage no inquiry owns is [CommerceFailure.NotFound].
  */
@@ -16,9 +16,9 @@ class GetFinancialDocumentHistory(
     private val transactor: Transactor,
     ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    pricingSources: FinancialDocumentPricingRepository,
+    authorship: FinancialDocumentAuthorshipRepository,
 ) {
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
     operator fun invoke(documentId: UUID): InquiryFinancialDocumentHistory =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->

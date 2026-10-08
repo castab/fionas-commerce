@@ -14,7 +14,7 @@ import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
-import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
@@ -26,12 +26,13 @@ import io.github.castab.fionas.commerce.staff.ReadStaffDashboard
 import io.github.castab.fionas.commerce.staff.StaffAttentionReason
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.changeLatest
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
-import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.proposalId
+import io.github.castab.fionas.commerce.testing.replacementLines
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -52,11 +53,10 @@ import java.util.concurrent.TimeUnit
 class InquiryOperationalStatesSpec :
     FunSpec({
         lateinit var app: TestApplication
-        var catalogRevision = 0
         val inquiries = JdbiInquiryRepository()
         val owners = JdbiInquiryFinancialDocumentRepository()
         val facts = JdbiInquiryFulfillmentRepository()
-        val pricing = JdbiFinancialDocumentPricingRepository()
+        val pricing = JdbiFinancialDocumentAuthorshipRepository()
         val user = UserId(UUID.randomUUID())
         val service = ServiceId(UUID.randomUUID())
 
@@ -123,7 +123,7 @@ class InquiryOperationalStatesSpec :
 
         fun addCharge(id: UUID) {
             app.transactor.inTransaction { transaction ->
-                app.context.financialLedger.changeOrder(
+                app.context.financialLedger.changeLatest(
                     transaction,
                     id,
                     ChangeOrder(
@@ -137,7 +137,6 @@ class InquiryOperationalStatesSpec :
 
         beforeTest {
             app = TestApplication.create()
-            catalogRevision = app.createAcceptanceCatalog()
         }
         afterTest { app.close() }
 
@@ -307,7 +306,7 @@ class InquiryOperationalStatesSpec :
                 .adminPost(
                     "/staff/requests/${pair.first.value}/proposals/quote-revisions",
                     """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,
-                    "pricingInputs":${pricingBody(catalogRevision, guests = 100)},
+                    "lines":${replacementLines(acceptanceLines(guests = 100))},
                     "terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
                 ).status shouldBe Status.OK
             read()

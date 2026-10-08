@@ -10,15 +10,16 @@ import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
-import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.FinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.InquiryProposal
 import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
-import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryServicePlanRepository
+import io.github.castab.fionas.commerce.financial.LineAuthorship
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -26,15 +27,14 @@ import io.github.castab.fionas.commerce.inquiry.InquiryStage
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
 import io.github.castab.fionas.commerce.testing.proposalId
-import io.github.castab.fionas.commerce.testing.requestedPricing
+import io.github.castab.fionas.commerce.testing.requestedService
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -49,15 +49,14 @@ import java.util.concurrent.TimeUnit
 class StaffRequestSpec :
     FunSpec({
         lateinit var app: TestApplication
-        var revision = 0
         val customers = JdbiCustomerRepository()
         val owners = JdbiInquiryFinancialDocumentRepository()
-        val sources = JdbiFinancialDocumentPricingRepository()
+        val sources = JdbiFinancialDocumentAuthorshipRepository()
 
         fun reader(
             associations: InquiryFinancialDocumentRepository = owners,
             people: CustomerRepository = customers,
-            pricing: FinancialDocumentPricingRepository = sources,
+            pricing: FinancialDocumentAuthorshipRepository = sources,
             proposals: InquiryProposalRepository = JdbiInquiryProposalRepository(),
         ) = ReadStaffRequest(
             app.transactor,
@@ -75,22 +74,11 @@ class StaffRequestSpec :
         )
 
         fun submitted(): Pair<InquiryId, UUID> {
-            val id =
-                app.createInquiry("jane@example.com") {
-                    pricingBody(
-                        it,
-                        softServe = listOf("vanilla"),
-                        toppings = listOf("sprinkles", "oreos", "strawberries", "brownies"),
-                        cones = listOf("cup"),
-                    )
-                }
+            val id = app.createInquiry("jane@example.com", acceptanceLines(horchata = false, toppings = 4, waffleCones = false))
             return InquiryId(UUID.fromString(id)) to UUID.fromString(app.initialEstimateOf(id))
         }
 
-        beforeSpec {
-            app = TestApplication.create()
-            revision = app.createAcceptanceCatalog()
-        }
+        beforeSpec { app = TestApplication.create() }
         afterSpec { app.close() }
 
         test("new request composes customer event intent lifecycle and authoritative Estimate without writes") {
@@ -109,7 +97,7 @@ class StaffRequestSpec :
             request.inquiry.inquiry.eventDate.value
                 .toString() shouldBe "2026-12-05"
             request.inquiry.inquiry.eventType.name shouldBe "BIRTHDAY"
-            request.inquiry.pricingInputs shouldBe requestedPricing(revision)
+            request.inquiry.requestedService shouldBe requestedService()
             request.inquiry.lifecycle.stage shouldBe InquiryStage.REQUESTED
             request.inquiry.lifecycle.documentId shouldBe document
             request.financial.inquiryId shouldBe id
@@ -120,7 +108,8 @@ class StaffRequestSpec :
             estimate.version shouldBe Version.INITIAL
             estimate.lineItems.map { it.description } shouldBe listOf("Base service", "Ice cream service")
             estimate.total.amount.compareTo(BigDecimal("550.00")) shouldBe 0
-            request.financial.latest.pricing shouldBe null
+            request.financial.latest.authorship
+                ?.author shouldBe app.web.id
             request.financial.latest.createdAt shouldBe
                 app.context.financialLedger
                     .latestVersion(document)
@@ -136,7 +125,8 @@ class StaffRequestSpec :
 
         test("Quote issuance moves the same canonical lineage and excludes newer RELATED financial documents") {
             val (id, document) = submitted()
-            app.adminPost("/inquiries/${id.value}/estimates", pricingBody(revision)).status shouldBe Status.CREATED
+            app.adminPost("/inquiries/${id.value}/estimates", """{"lines":${linesJson(acceptanceLines())}}""").status shouldBe
+                Status.CREATED
             val initial = reader()(id)
             initial.inquiry.lifecycle.stage shouldBe InquiryStage.REQUESTED
             initial.financial.latest.document.id shouldBe document
@@ -216,11 +206,11 @@ class StaffRequestSpec :
             val resume = CountDownLatch(1)
             val seen = mutableSetOf<Transaction>()
             val observing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun find(
                         transaction: Transaction,
                         snapshot: FinancialDocumentReference,
-                    ): FionasPricingInputs? {
+                    ): LineAuthorship? {
                         seen += transaction
                         return sources.find(transaction, snapshot)
                     }

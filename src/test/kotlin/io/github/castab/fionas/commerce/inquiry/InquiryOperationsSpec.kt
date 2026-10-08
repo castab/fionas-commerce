@@ -1,71 +1,49 @@
 package io.github.castab.fionas.commerce.inquiry
 
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingCategorySelection
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingSelections
-import io.github.castab.commerce.offering.OfferingsRevision
+import io.github.castab.commerce.financial.FinancialDocumentReference
+import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
-import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
-import io.github.castab.fionas.commerce.offering.CatalogRevisionStale
-import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
-import io.github.castab.fionas.commerce.offering.FionasPricing
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.testing.CHURROS
+import io.github.castab.fionas.commerce.testing.COURTESY_DISCOUNT
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
-import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.addOffering
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
-import io.github.castab.fionas.commerce.testing.testClock
+import io.github.castab.fionas.commerce.testing.TestLine
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.createInquiryOperation
+import io.github.castab.fionas.commerce.testing.inquiryCommand
+import io.github.castab.fionas.commerce.testing.requestedService
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.string.shouldContain
-import java.time.Duration
+import java.math.BigDecimal
 import java.util.UUID
 
 class InquiryOperationsSpec :
     FunSpec({
         lateinit var application: TestApplication
-        var revision = 0
         val customers = JdbiCustomerRepository()
         val inquiries = JdbiInquiryRepository()
 
-        beforeSpec {
-            application = TestApplication.create()
-            revision = application.createAcceptanceCatalog()
-        }
+        beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
-
-        fun pricing() =
-            FionasPricing(
-                FionasOfferingsEngine(FIONAS_PRICING_POLICY),
-                application.context.offeringsSnapshotRepository::retrieveLatestVersion,
-            )
 
         fun createInquiry(
             customerId: CustomerId = CustomerId(UUID.randomUUID()),
             inquiryId: InquiryId = InquiryId(UUID.randomUUID()),
             inquiryRepository: InquiryRepository = inquiries,
-        ) = CreateInquiry(
-            application.transactor,
-            customers,
-            inquiryRepository,
-            JdbiInquirySubmissionRepository(),
-            PublicInquiryPricing(pricing()),
-            testClock,
-            MaterializeInquiryFinancialDocument(application.context.financialLedger, JdbiInquiryFinancialDocumentRepository(), testClock),
-            { customerId },
-            { inquiryId },
+        ) = application.createInquiryOperation(
+            customers = customers,
+            inquiries = inquiryRepository,
+            newCustomerId = { customerId },
+            newInquiryId = { inquiryId },
         )
 
         fun getInquiry() =
@@ -80,42 +58,13 @@ class InquiryOperationsSpec :
                 ),
             )
 
-        fun inputs(
-            catalogRevision: Int = revision,
-            guests: Int = 75,
-            minutes: Long = 120,
-            toppings: List<String> = TOPPINGS,
-        ) = FionasPricingInputs(
-            catalogRevision = OfferingsRevision.of(catalogRevision),
-            selections =
-                OfferingSelections(
-                    listOf(
-                        OfferingCategorySelection(
-                            OfferingCategoryKey("soft-serve-flavor"),
-                            listOf("vanilla", "horchata").map(::OfferingKey),
-                        ),
-                        OfferingCategorySelection(OfferingCategoryKey("topping"), toppings.map(::OfferingKey)),
-                        OfferingCategorySelection(OfferingCategoryKey("cone-option"), listOf(OfferingKey("waffle-cone"))),
-                    ),
-                ),
-            context = FionasOfferingsContext(guestCount = guests, guestCountIsMinimum = true, duration = Duration.ofMinutes(minutes)),
-        )
-
         fun command(
             email: String,
             name: String = "Jane Doe",
             message: String? = "Ice cream for a birthday party",
-            pricingInputs: FionasPricingInputs = inputs(),
-        ) = CreateInquiry.Command(
-            CustomerName.of(name),
-            Email.of(email),
-            InquiryMessage.ofOptional(message),
-            pricingInputs,
-            ZipCode("92626"),
-            EventDate.of("2026-12-05"),
-            EventType.BIRTHDAY,
-            InquirySubmissionKey(UUID.randomUUID().toString()),
-        )
+            requested: RequestedService = requestedService(guestCountIsMinimum = true),
+            lines: List<TestLine> = acceptanceLines(),
+        ) = application.inquiryCommand(email, name, message, lines, requested)
 
         fun rows() =
             listOf("fionas.customers", "fionas.inquiries")
@@ -144,7 +93,7 @@ class InquiryOperationsSpec :
             read.customer.name shouldBe CustomerName("Jane Doe")
             read.customer.email shouldBe Email(email)
             read.customer.createdAt shouldBe STORED_INSTANT
-            read.pricingInputs shouldBe inputs()
+            read.requestedService shouldBe requestedService(guestCountIsMinimum = true)
             application.transactor.inTransaction { JdbiInquiryFinancialDocumentRepository().documentsOf(it, inquiryId) }.size shouldBe 1
         }
 
@@ -161,52 +110,48 @@ class InquiryOperationsSpec :
             application.database.count("fionas.customers") shouldBe customersAfterFirst
         }
 
-        test("the configured pricing inputs are recorded with the inquiry exactly as submitted") {
-            val submitted = inputs(guests = 120, minutes = 180)
+        test("the requested service is recorded with the inquiry exactly as submitted") {
+            val submitted = requestedService(guests = 120, minutes = 180)
 
-            val created = createInquiry()(command("configured-${UUID.randomUUID()}@example.com", pricingInputs = submitted))
+            val created = createInquiry()(command("configured-${UUID.randomUUID()}@example.com", requested = submitted))
 
-            getInquiry()(created.id).pricingInputs shouldBe submitted
+            getInquiry()(created.id).requestedService shouldBe submitted
         }
 
-        test("the requested catalog revision is pinned, even after the catalog moves on") {
-            val pinned = inputs()
-            val created = createInquiry()(command("pinned-${UUID.randomUUID()}@example.com", pricingInputs = pinned))
+        test("the authority's lines become Estimate v1 exactly, in order, with the submitting service as their author") {
+            val created =
+                createInquiry()(command("bespoke-${UUID.randomUUID()}@example.com", lines = listOf(CHURROS, COURTESY_DISCOUNT)))
 
-            val later = application.addOffering(revision, "mint", "soft-serve-flavor", "Mint")
-
-            later shouldBe revision + 1
-            getInquiry()(created.id).pricingInputs.catalogRevision shouldBe OfferingsRevision.of(revision)
-            val before = rows()
-            shouldThrow<CommerceFailure.Conflict> {
-                createInquiry()(command("older-${UUID.randomUUID()}@example.com", pricingInputs = inputs(revision)))
-            }.cause.let { (it as CatalogRevisionStale).currentRevision shouldBe OfferingsRevision.of(later) }
-            rows() shouldBe before
-            revision = later
+            val estimate =
+                application.transactor.inTransaction {
+                    val id = checkNotNull(JdbiInquiryFinancialDocumentRepository().initialEstimateOf(it, created.id))
+                    application.context.financialLedger.latest(it, id) to
+                        JdbiFinancialDocumentAuthorshipRepository().find(it, FinancialDocumentReference(id, Version.INITIAL))
+                }
+            estimate.first.lineItems.map { it.description to it.price.amount } shouldBe
+                listOf("Churro catering service" to BigDecimal("450.00"), "Courtesy discount" to BigDecimal("-50.00"))
+            estimate.first.total.amount shouldBe BigDecimal("400.00")
+            estimate.second?.author shouldBe application.web.id
         }
 
-        test("a returning customer's new request records its own inputs and leaves earlier ones unchanged") {
+        test("a returning customer's new request records its own requested service and leaves earlier ones unchanged") {
             val email = "repeat-${UUID.randomUUID()}@example.com"
-            val first = createInquiry()(command(email, pricingInputs = inputs(guests = 50)))
-            val second = createInquiry()(command(email, name = "Someone Else", pricingInputs = inputs(guests = 200, minutes = 90)))
+            val first = createInquiry()(command(email, requested = requestedService(guests = 50)))
+            val second = createInquiry()(command(email, name = "Someone Else", requested = requestedService(guests = 200, minutes = 90)))
 
             second.customerId shouldBe first.customerId
-            getInquiry()(first.id).pricingInputs shouldBe inputs(guests = 50)
-            getInquiry()(second.id).pricingInputs shouldBe inputs(guests = 200, minutes = 90)
+            getInquiry()(first.id).requestedService shouldBe requestedService(guests = 50)
+            getInquiry()(second.id).requestedService shouldBe requestedService(guests = 200, minutes = 90)
         }
 
-        test("inputs the pricing rejects are a validation failure, and nothing is recorded") {
+        test("lines that do not form a valid nonnegative document are rejected before anything is recorded") {
             val before = rows()
 
-            shouldThrow<CommerceFailure.ValidationFailed> {
-                createInquiry()(command("rejected-${UUID.randomUUID()}@example.com", pricingInputs = inputs(guests = 0)))
-            }.message shouldContain "INVALID_GUEST_COUNT"
-            shouldThrow<CommerceFailure.ValidationFailed> {
-                createInquiry()(command("rejected-${UUID.randomUUID()}@example.com", pricingInputs = inputs(toppings = TOPPINGS.take(2))))
-            }.message shouldContain "TOO_FEW_SELECTIONS"
-            shouldThrow<CommerceFailure.NotFound> {
-                createInquiry()(command("rejected-${UUID.randomUUID()}@example.com", pricingInputs = inputs(catalogRevision = 999)))
-            }.message shouldBe "Offerings catalog revision r999 was not found"
+            shouldThrow<IllegalArgumentException> { command("empty@example.com", lines = emptyList()) }
+            shouldThrow<IllegalArgumentException> { command("negative@example.com", lines = listOf(COURTESY_DISCOUNT)) }
+            shouldThrow<IllegalArgumentException> {
+                command("mixed@example.com", lines = listOf(CHURROS, CHURROS.copy(currency = "EUR")))
+            }
 
             rows() shouldBe before
         }
@@ -218,7 +163,7 @@ class InquiryOperationsSpec :
                     override fun insert(
                         transaction: Transaction,
                         inquiry: Inquiry,
-                        pricingInputs: FionasPricingInputs,
+                        requestedService: RequestedService,
                     ): Unit = error("inquiry insert failed")
                 }
 
