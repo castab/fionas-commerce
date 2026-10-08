@@ -42,7 +42,37 @@ class FionasOfferingsEngine(
         snapshot: OfferingsSnapshot,
         selections: OfferingSelections,
         context: FionasOfferingsContext,
-    ): OfferingsPolicyResult {
+    ): OfferingsPolicyResult =
+        when (val charges = charges(snapshot, selections, context)) {
+            is Charges.Refused -> OfferingsPolicyResult.Rejected(charges.violations)
+            is Charges.Accepted -> {
+                val noTax = Money.zero(policy.currency)
+                OfferingsPolicyResult.Accepted(
+                    charges.charges.map { LineItem(lineItemId(), it.description, it.subDescription, it.quantity, it.price, noTax) },
+                )
+            }
+        }
+
+    /**
+     * The [FionasChargeSource] of each line an accepted evaluation of [selections] and [context]
+     * from [snapshot] produces, in line order. It applies exactly the policy [evaluateValid]
+     * applies, so the two cannot disagree; call it only for a selection the engine accepted.
+     */
+    fun sources(
+        snapshot: OfferingsSnapshot,
+        selections: OfferingSelections,
+        context: FionasOfferingsContext,
+    ): List<FionasChargeSource> =
+        when (val charges = charges(snapshot, selections, context)) {
+            is Charges.Refused -> error("Charge sources were requested for a selection Fiona's policy rejects")
+            is Charges.Accepted -> charges.charges.map { it.source }
+        }
+
+    private fun charges(
+        snapshot: OfferingsSnapshot,
+        selections: OfferingSelections,
+        context: FionasOfferingsContext,
+    ): Charges {
         val violations = mutableListOf<FionasOfferingsViolation>()
         if (context.guestCount < 1) violations += FionasOfferingsViolation.InvalidGuestCount(context.guestCount)
         if (context.duration !in policy.allowedDurations) {
@@ -54,25 +84,22 @@ class FionasOfferingsEngine(
                     // Structural validation has already proven every selected offering exists.
                     val offering = checkNotNull(snapshot.offering(key)) { "Offering ${key.value} passed validation but is absent" }
                     offering.price?.let { price ->
-                        when (val priced = charge(offering, price, context)) {
+                        when (val priced = charge(offering, price, context, FionasChargeSource.SelectedOffering(block.category, key))) {
                             is Priced.Charged -> priced.charge
                             is Priced.Refused -> null.also { violations += priced.violation }
                         }
                     }
                 }
             }
-        if (violations.isNotEmpty()) return OfferingsPolicyResult.Rejected(violations)
+        if (violations.isNotEmpty()) return Charges.Refused(violations)
 
         val toppings =
             selections.categories
                 .find { it.category == policy.toppingCategory }
                 ?.offerings
                 ?.size ?: 0
-        val charges =
-            listOf(baseService(context), iceCreamService(context)) + selectionCharges + listOfNotNull(extraToppings(toppings, context))
-        val noTax = Money.zero(policy.currency)
-        return OfferingsPolicyResult.Accepted(
-            charges.map { LineItem(lineItemId(), it.description, it.subDescription, it.quantity, it.price, noTax) },
+        return Charges.Accepted(
+            listOf(baseService(context), iceCreamService(context)) + selectionCharges + listOfNotNull(extraToppings(toppings, context)),
         )
     }
 
@@ -80,6 +107,7 @@ class FionasOfferingsEngine(
         val hours = checkNotNull(context.duration.exactMultipleOf(ONE_HOUR)) { "Allowed durations are whole-minute hour fractions" }
         val hoursText = hours.stripTrailingZeros().toPlainString() + if (hours.compareTo(BigDecimal.ONE) == 0) " hour" else " hours"
         return Charge(
+            source = FionasChargeSource.BaseService,
             description = "Base service",
             subDescription = "$hoursText · setup, staff & local travel",
             quantity = null,
@@ -89,6 +117,7 @@ class FionasOfferingsEngine(
 
     private fun iceCreamService(context: FionasOfferingsContext) =
         Charge(
+            source = FionasChargeSource.IceCreamService,
             description = "Ice cream service",
             subDescription = "${context.guestCount}${if (context.guestCountIsMinimum) "+" else ""} guests",
             quantity = context.guestCount.toBigDecimal(),
@@ -102,6 +131,7 @@ class FionasOfferingsEngine(
         val extra = toppings - policy.includedToppingCount
         if (extra <= 0) return null
         return Charge(
+            source = FionasChargeSource.ExtraToppings,
             description = "Extra toppings ($extra)",
             subDescription = "${policy.includedToppingCount} toppings included; each extra is charged per guest",
             quantity = extra.toBigDecimal() * context.guestCount.toBigDecimal(),
@@ -114,6 +144,7 @@ class FionasOfferingsEngine(
         offering: Offering,
         price: OfferingPrice,
         context: FionasOfferingsContext,
+        source: FionasChargeSource,
     ): Priced {
         policy.offeringPriceViolation(offering, context.duration)?.let { return Priced.Refused(it) }
         val amount =
@@ -129,15 +160,26 @@ class FionasOfferingsEngine(
                 is OfferingPrice.PerDuration ->
                     checkNotNull(context.duration.exactMultipleOf(price.interval)) { "A compatible duration price has an exact multiplier" }
             }
-        return Priced.Charged(Charge(offering.displayName, offering.description, quantity, amount))
+        return Priced.Charged(Charge(source, offering.displayName, offering.description, quantity, amount))
     }
 
     private class Charge(
+        val source: FionasChargeSource,
         val description: String,
         val subDescription: String?,
         val quantity: BigDecimal?,
         val price: Money,
     )
+
+    private sealed interface Charges {
+        class Accepted(
+            val charges: List<Charge>,
+        ) : Charges
+
+        class Refused(
+            val violations: List<FionasOfferingsViolation>,
+        ) : Charges
+    }
 
     private sealed interface Priced {
         class Charged(

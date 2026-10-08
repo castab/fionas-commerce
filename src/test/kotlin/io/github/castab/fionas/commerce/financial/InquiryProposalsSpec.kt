@@ -23,6 +23,7 @@ import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.fionasPricing
 import io.github.castab.fionas.commerce.testing.requestedPricing
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
@@ -60,7 +61,9 @@ class InquiryProposalsSpec :
             associations,
             metadata,
             repository,
-            FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), app.context.offeringsSnapshotRepository::retrieveLatestVersion),
+            JdbiInquiryServicePlanRepository(),
+            InquiryQuoteComposition(JdbiInquiryRepository(), metadata, app.fionasPricing()),
+            app.fionasPricing(),
             testClock,
         )
 

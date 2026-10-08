@@ -72,13 +72,23 @@ internal fun repricing(
     current: List<LineItem>,
     revised: List<LineItem>,
 ): ChangeOrder {
-    if (current.map(::chargeOf) == revised.map(::chargeOf)) {
+    if (sameCharges(current, revised)) {
         throw CommerceFailure.ValidationFailed("The revised pricing produces no financial change")
     }
     return ChangeOrder(
         current.map { ChangeOrder.Change.RemoveLineItem(it.id) } + revised.map { ChangeOrder.Change.AddLineItem(it) },
     )
 }
+
+/**
+ * Whether [first] and [second] charge exactly the same, line by line in order: descriptions,
+ * quantities, prices, tax and currency, ignoring line ids. Amounts compare numerically, whatever
+ * their scale. An equal total alone is not equal charges.
+ */
+internal fun sameCharges(
+    first: List<LineItem>,
+    second: List<LineItem>,
+): Boolean = first.map(::chargeOf) == second.map(::chargeOf)
 
 /** What a line charges, without its id; amounts compare numerically, whatever their scale. */
 private data class Charge(

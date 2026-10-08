@@ -62,6 +62,7 @@ private val notInvoked =
         acknowledgeInquiryCommunication = { error("not called while rendering") },
         readStaffRequest = { error("not called while rendering") },
         issueInquiryProposal = { error("not called while rendering") },
+        previewInquiryQuote = { error("not called while rendering") },
         reviseInquiryQuoteProposal = { error("not called while rendering") },
         reviseInquiryProposalDeposit = { error("not called while rendering") },
         readStaffDashboard = { error("not called while rendering") },

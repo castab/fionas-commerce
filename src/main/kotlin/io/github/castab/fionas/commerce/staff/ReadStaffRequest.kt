@@ -6,6 +6,7 @@ import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
+import io.github.castab.fionas.commerce.financial.InquiryServicePlanRepository
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.financial.requireCoherentProposal
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
@@ -19,6 +20,7 @@ class ReadStaffRequest(
     private val ledger: FinancialLedger,
     private val proposals: InquiryProposalRepository,
     private val payments: ListFinancialDocumentPaymentHistories,
+    private val servicePlans: InquiryServicePlanRepository,
 ) {
     operator fun invoke(id: InquiryId): StaffRequest =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
@@ -33,6 +35,11 @@ class ReadStaffRequest(
             val proposal = proposals.latest(transaction, id)
             requireCoherentProposal(id, proposal, view)
             val histories = payments.read(transaction, document.latest.document.id)
-            StaffRequest(inquiry, document, proposal, view, histories)
+            // The approved plan of the published Quote; absent for Quotes issued without composition.
+            val plan = proposal?.let { servicePlans.find(transaction, it.documentReference) }
+            plan?.let {
+                check(it.describes(ledger.get(transaction, it.quote))) { "Staff request service plan disagrees with its Quote snapshot" }
+            }
+            StaffRequest(inquiry, document, proposal, view, histories, plan)
         }
 }

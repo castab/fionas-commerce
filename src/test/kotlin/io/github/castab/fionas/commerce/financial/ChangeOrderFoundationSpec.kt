@@ -385,7 +385,16 @@ class ChangeOrderFoundationSpec :
                 val operation =
                     ReviseInquiryQuoteProposal(
                         app.transactor,
-                        InquiryProposals(ledger, owners, sources, repository, pricing(total), testClock),
+                        InquiryProposals(
+                            ledger,
+                            owners,
+                            sources,
+                            repository,
+                            JdbiInquiryServicePlanRepository(),
+                            InquiryQuoteComposition(JdbiInquiryRepository(), sources, pricing(total)),
+                            pricing(total),
+                            testClock,
+                        ),
                     )
                 shouldThrow<CommerceFailure.ValidationFailed> {
                     operation(

@@ -14,6 +14,8 @@ import io.github.castab.fionas.commerce.financial.FIONAS_DEFAULT_DEPOSIT_TERMS
 import io.github.castab.fionas.commerce.financial.InquiryProposal
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.IssuedInquiryProposal
+import io.github.castab.fionas.commerce.financial.QuoteReviewToken
+import io.github.castab.fionas.commerce.financial.ReviewedQuoteComposition
 import io.github.castab.fionas.commerce.financial.ReviseInquiryProposalDeposit
 import io.github.castab.fionas.commerce.financial.ReviseInquiryQuoteProposal
 import kotlinx.serialization.Serializable
@@ -29,11 +31,24 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import org.http4k.core.then
 import org.http4k.core.with
+import org.http4k.lens.Invalid
+import org.http4k.lens.LensFailure
 
 @Serializable
 data class IssueInquiryProposalRequest(
     @ApiProperty(description = "Exact reviewed current Estimate version.") val expectedDocumentVersion: Int,
     @Serializable(with = StrictDepositTerms::class) val terms: DepositTermsRequest,
+    @ApiProperty(
+        description =
+            "Optional reviewed quote composition, exactly as previewed. Absent issues the Estimate unchanged. " +
+                "Present requires `reviewToken`.",
+    )
+    val composition: QuoteCompositionRequest? = null,
+    @ApiProperty(
+        description = "The preview's reviewToken for `composition`; required with it and forbidden without it.",
+        pattern = "^[0-9a-f]{64}$",
+    )
+    val reviewToken: String? = null,
 )
 
 @Serializable
@@ -69,6 +84,8 @@ data class IssuedInquiryProposalResponse(
     val proposal: InquiryProposalResponse,
     val financial: FinancialDocumentResponse,
     val depositRequirement: CurrentDepositRequirementResponse,
+    @ApiProperty(description = "The approved service plan of the published Quote; present only when issued with a composition.")
+    val servicePlan: ServicePlanResponse? = null,
 )
 
 internal fun InquiryProposal.toResponse(): InquiryProposalResponse =
@@ -91,7 +108,12 @@ internal fun InquiryProposal.toResponse(): InquiryProposalResponse =
     )
 
 private fun IssuedInquiryProposal.toResponse() =
-    IssuedInquiryProposalResponse(proposal.toResponse(), financial.toResponse(), deposit.currentDepositResponse())
+    IssuedInquiryProposalResponse(
+        proposal.toResponse(),
+        financial.toResponse(),
+        deposit.currentDepositResponse(),
+        servicePlan?.toResponse(),
+    )
 
 private val proposalBody = jsonBody(IssuedInquiryProposalResponse.serializer())
 private val initialBody = jsonBody(IssueInquiryProposalRequest.serializer())
@@ -158,7 +180,11 @@ private val depositRevisionExample =
             ),
     )
 
-private fun RouteMetaDsl.proposalErrors(example: IssuedInquiryProposalResponse = proposalExample) {
+private fun RouteMetaDsl.proposalErrors(
+    example: IssuedInquiryProposalResponse = proposalExample,
+    conflictExtra: String = "",
+    validationExtra: String = "",
+) {
     tags += Tag("Staff proposals", "Atomic publication of an exact canonical Quote and approved deposit pair.")
     principalAuthentication()
     returning(Status.OK, proposalBody to example)
@@ -176,12 +202,13 @@ private fun RouteMetaDsl.proposalErrors(example: IssuedInquiryProposalResponse =
     returningError(
         ErrorCategory.CONFLICT,
         "Stale document version, deposit revision or catalog revision. Reload and review. " +
-            "Also illegal_transition for an ineligible stage or historical applied payment.",
+            "Also illegal_transition for an ineligible stage or historical applied payment." + conflictExtra,
         "Stale expected version",
     )
     returningError(
         ErrorCategory.VALIDATION_FAILED,
-        "Invalid positive versions, decimal terms, pricing, or a no-op revision. Also invariant_violated for shared financial/pricing invariants.",
+        "Invalid positive versions, decimal terms, pricing, or a no-op revision. " +
+            "Also invariant_violated for shared financial/pricing invariants." + validationExtra,
         "The revised deposit terms produce no change",
     )
     returningError(
@@ -204,13 +231,29 @@ internal fun issueInquiryProposalRoute(
         operationId = "issueInquiryProposal"
         summary = "Publish the initial inquiry proposal"
         description =
-            "Derives the canonical lineage from inquiryId. Atomically issues Estimate to Quote without repricing, explicitly approves deposit terms against the new Quote, and records INITIAL issuance with authenticated provenance. The suggested deposit is 20%; terms are required. No communication is sent. Stale attempts conflict. Cache-Control: no-store."
+            "Derives the canonical lineage from inquiryId. Without `composition`, atomically issues Estimate to Quote without " +
+            "repricing. With a reviewed `composition` and its preview `reviewToken`, re-evaluates it under the canonical " +
+            "association lock and requires the identical result (otherwise 409 QUOTE_REVIEW_STALE); appends an " +
+            "intermediate Estimate only when charges change, then the Quote, its immutable service plan (servicePlan), " +
+            "the deposit approved against that final Quote, and the publication, all in one transaction. A Quote total " +
+            "must be positive. Explicitly approves deposit terms against the new Quote and records INITIAL issuance with " +
+            "authenticated provenance. The suggested deposit is 20%; terms are required. Issued is not sent: no " +
+            "communication, payment or booking follows. Stale attempts conflict. Cache-Control: no-store."
         receiving(initialBody to IssueInquiryProposalRequest(1, defaultTerms))
-        proposalErrors()
+        proposalErrors(
+            proposalExample,
+            " With a composition, CATALOG_REVISION_STALE for a stale reviewed catalog revision and QUOTE_REVIEW_STALE when the " +
+                "composition no longer produces the reviewed result; preview again (both no-store).",
+            " With a composition: " + COMPOSITION_REJECTED,
+        )
     } bindContract Method.POST to { id: String, _: String ->
-        access.proposalAccess().then { request: Request ->
+        access.proposalAccess().then(quoteReviewStaleResponses).then { request: Request ->
             val inquiry = inquiryId(id)
             val body = initialBody(request)
+            if ((body.composition == null) != (body.reviewToken == null)) {
+                throw LensFailure(Invalid(initialBody.metas.single().copy(name = "reviewToken")))
+            }
+            val composition = body.composition?.domain(initialBody)
             val command =
                 validating {
                     IssueInquiryProposal.Command(
@@ -218,6 +261,7 @@ internal fun issueInquiryProposalRoute(
                         Version.of(body.expectedDocumentVersion),
                         body.terms.domain(),
                         authenticatedPrincipal(request),
+                        composition?.let { ReviewedQuoteComposition(it, QuoteReviewToken(body.reviewToken!!)) },
                     )
                 }
             Response(Status.OK).header("Cache-Control", "no-store").with(proposalBody of issue(command).toResponse())

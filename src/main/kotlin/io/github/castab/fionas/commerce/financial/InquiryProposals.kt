@@ -22,27 +22,47 @@ class InquiryProposals(
     private val associations: InquiryFinancialDocumentRepository,
     pricingSources: FinancialDocumentPricingRepository,
     private val proposals: InquiryProposalRepository,
+    private val servicePlans: InquiryServicePlanRepository,
+    private val compositions: InquiryQuoteComposition,
     private val pricing: FionasPricing,
     private val clock: Clock,
     private val newId: () -> InquiryProposalId = { InquiryProposalId(UUID.randomUUID()) },
 ) {
     private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
 
+    /**
+     * Publishes the initial proposal. Without a composition the Estimate is issued unchanged.
+     * With one, under the same association lock and in the same transaction: the composition is
+     * evaluated again from authoritative state and must reproduce the reviewed result exactly;
+     * an intermediate Estimate is appended only when charges change; the Quote, its immutable
+     * service plan, the deposit approved against that final Quote and the publication follow.
+     */
     internal fun issue(
         transaction: Transaction,
         command: IssueInquiryProposal.Command,
     ): IssuedInquiryProposal {
         val current = canonical(transaction, command.inquiryId, command.expectedDocumentVersion)
-        if (current.document !is FinancialDocument.Estimate) {
-            throw CommerceFailure.IllegalTransition(
-                "Initial proposal requires an Estimate",
-            )
-        }
-        val view = ledger.financialLineages(transaction, listOf(current.document.id)).single()
+        val estimate =
+            current.document as? FinancialDocument.Estimate
+                ?: throw CommerceFailure.IllegalTransition("Initial proposal requires an Estimate")
+        val view = ledger.financialLineages(transaction, listOf(estimate.id)).single()
         requireCoherentProposal(command.inquiryId, proposals.latest(transaction, command.inquiryId), view)
-        val quote = documents.quote(transaction, current)
+        val reviewed = command.composition
+        if (reviewed == null) {
+            val quote = documents.quote(transaction, current)
+            documents.approveDeposit(transaction, quote, command.terms, null)
+            return publish(transaction, command.inquiryId, quote, command.principalId, ProposalIssuanceKind.INITIAL)
+        }
+        val composed = compositions.compose(transaction, command.inquiryId, estimate, reviewed.composition, command.terms)
+        if (composed.reviewToken != reviewed.reviewToken) {
+            throw CommerceFailure.Conflict(QUOTE_REVIEW_STALE_MESSAGE, QuoteReviewStale())
+        }
+        val quote = documents.composedQuote(transaction, current, composed)
+        val approvedAt = clock.instant().truncatedTo(ChronoUnit.MICROS)
+        val plan = composed.servicePlan(quote, approvedAt, command.principalId)
+        servicePlans.insert(transaction, plan)
         documents.approveDeposit(transaction, quote, command.terms, null)
-        return publish(transaction, command.inquiryId, quote, command.principalId, ProposalIssuanceKind.INITIAL)
+        return publish(transaction, command.inquiryId, quote, command.principalId, ProposalIssuanceKind.INITIAL).copy(servicePlan = plan)
     }
 
     internal fun reviseQuote(

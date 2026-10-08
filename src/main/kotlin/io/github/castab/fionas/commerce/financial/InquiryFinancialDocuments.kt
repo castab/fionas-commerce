@@ -167,6 +167,32 @@ internal class FionaFinancialDocuments(
             pricingSources.copy(transaction, current.document.reference, it.reference)
         }
 
+    /**
+     * Persists a composed initial Quote; the caller holds the association lock on [current], the
+     * exact Estimate [composed] was evaluated from. Its change order, when charges change, passes
+     * Fiona's [validateChangeOrder] first and appends one same-stage Estimate successor; the
+     * runtime then derives the Quote. No legacy pricing metadata is written or copied: manually
+     * negotiated lines were not priced by the catalog, and the service plan records provenance.
+     */
+    fun composedQuote(
+        transaction: Transaction,
+        current: Current,
+        composed: ComposedQuote,
+    ): FinancialDocument.Quote {
+        check(current.document.reference == composed.reviewed.reference) { "The composition was evaluated from another snapshot" }
+        composed.changes?.let { changes ->
+            validateChangeOrder(current.document, changes)
+            ledger.changeOrder(transaction, current.document.id, changes)
+        }
+        val quote = ledger.issueQuote(transaction, current.document.id)
+        check(
+            quote.reference == composed.quote.reference &&
+                quote.lineItems.map { it.id } == composed.quote.lineItems.map { it.id } &&
+                sameCharges(quote.lineItems, composed.quote.lineItems),
+        ) { "The persisted Quote differs from the composed Quote" }
+        return quote
+    }
+
     fun reprice(
         transaction: Transaction,
         current: Current,

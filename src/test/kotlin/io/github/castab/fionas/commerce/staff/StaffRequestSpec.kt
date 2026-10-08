@@ -18,6 +18,7 @@ import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryServicePlanRepository
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -70,6 +71,7 @@ class StaffRequestSpec :
             app.context.financialLedger,
             proposals,
             ListFinancialDocumentPaymentHistories(app.transactor, app.context.financialLedger, associations),
+            JdbiInquiryServicePlanRepository(),
         )
 
         fun submitted(): Pair<InquiryId, UUID> {

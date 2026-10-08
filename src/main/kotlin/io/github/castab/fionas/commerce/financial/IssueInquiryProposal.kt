@@ -15,6 +15,8 @@ class IssueInquiryProposal(
         val expectedDocumentVersion: Version,
         val terms: DepositTerms,
         val principalId: PrincipalId,
+        /** Absent: issue the Estimate unchanged, as before. Present: atomically publish the reviewed composition. */
+        val composition: ReviewedQuoteComposition? = null,
     )
 
     operator fun invoke(command: Command): IssuedInquiryProposal = transactor.inTransaction { proposals.issue(it, command) }

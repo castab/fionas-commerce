@@ -112,6 +112,9 @@ Fiona owns, and persists in its own tables:
 - which inquiry owns each commerce-runtime `FinancialDocument` lineage and its semantic purpose,
   optional legacy staff pricing metadata, change-order intent, and payment acceptance policy (see
   [Financial documents and payments](#financial-documents-and-payments));
+- the immutable approved service plan of a composed canonical Quote: promised service, the
+  catalog names staff reviewed, and why each Quote line exists (see
+  [Quote builder: initial composition](#quote-builder-initial-composition));
 - inquiry served/closed operational facts with authenticated principal provenance;
 - inquiry communication activity (inbound email, staff-sent email, acknowledgement) and dashboard attention policy;
 - contacts (future);
@@ -852,6 +855,9 @@ after runtime-owned migrations.
   provenance plus optional complete closed timestamp/provenance. Served is mandatory in
   every row; closed fields must be all absent or all present. No stage, amount or backfill.
   `V14` adds append-only canonical proposal issuance with exact pair uniqueness and Fiona association integrity.
+  `V15` adds immutable `inquiry_service_plans`, keyed by the exact composed Quote snapshot,
+  with foreign keys to Fiona's association and to the published runtime snapshots of the
+  Quote and of its reviewed Estimate. Its `plan` jsonb is money-free; no backfill.
   `V13` adds Fiona-only append-only inquiry communication facts, database-generated durable
   record order and an inquiry/order covering index. The still-unmerged V13 was corrected
   in place before release; no externally immutable migration was affected.
@@ -1424,6 +1430,92 @@ the latest proposal is historical Quote/deposit context and its approval/revisio
 match the immutable accepted deposit. Pre-slice development Quotes receive
 no compatibility shim, invented publication, or backfill.
 
+## Quote builder: initial composition
+
+Staff compose the initial canonical Quote from the persisted canonical Estimate, preview it
+without writes, and publish it through the one existing initial issuance operation.
+
+- **Intent, never values.** `QuoteComposition` is typed staff intent: one `QuotePricing` mode,
+  `QuoteLineOverride`s and `QuoteAdjustment`s. Clients never supply lines, unit prices, totals,
+  deposit amounts, line ids for new lines, or documents. HTTP unions (`mode`, override `type`)
+  are closed: `StrictUnion` serializers reject foreign fields (`400`).
+- **Three explicit pricing modes; none reprices silently.** `KEEP_ESTIMATE` keeps the latest
+  persisted Estimate lines and ids exactly; the effective configuration is unchanged.
+  `REVISE_SERVICE_SELECTIONS` keeps those lines for changed selections that the current
+  catalog prices identically to the effective configuration (`SERVICE_SELECTIONS_CHANGE_PRICING`
+  otherwise, `SERVICE_SELECTIONS_UNCHANGED` for a no-op); guests and duration are unchanged.
+  `REPRICE_CONFIGURATION` prices a complete reviewed configuration from the current catalog;
+  older revisions are `409 CATALOG_REVISION_STALE`. The effective configuration is the pricing
+  source of the reviewed Estimate version, else, for Estimate v1 only, the inquiry's requested
+  inputs; anything else fails internally. All modes evaluate the plan's configuration against
+  the current catalog, so ineligible or retired selections reject with offering codes
+  (`UNKNOWN_OFFERING`, `OFFERING_UNAVAILABLE`, ...) and require reselection; nothing is dropped
+  or named from memory.
+- **Generated charge sources.** `FionasOfferingsEngine.sources` names each generated line's
+  `FionasChargeSource` (base service, ice cream service, a selected offering by category/key,
+  extra toppings) through the same private policy that produces the lines;
+  `FionasPricing.priceWithSources` pairs them. No offering is named in code; unpriced
+  selections have no source. Never infer a persisted line's source by description or position.
+- **Overrides** set a final nonnegative flat amount (`quantity = null`, no rounding) on an
+  existing Estimate line by id (non-repricing modes) or on a generated source (repricing only);
+  wrong-mode targets are `OVERRIDE_TARGET_NOT_ALLOWED`, missing ones `OVERRIDE_TARGET_NOT_FOUND`,
+  duplicates `DUPLICATE_OVERRIDE_TARGET`, equal totals `OVERRIDE_UNCHANGED`. A per-unit line
+  loses its unit sub-description; a flat line keeps it. Tax is zero; an overridden taxed line
+  fails internally until a tax slice decides. **Adjustments** are positive magnitudes that
+  `CHARGE` keeps and `DISCOUNT`/`CREDIT` negate, each a new flat line with a server id, in
+  request order after the service lines, keyed by a request-local `clientKey` that is never
+  persisted. Money has at most the currency's minor digits and the document's currency.
+- **Financial change is exact.** `sameCharges` (description, sub-description, quantity, price,
+  tax, currency, order; numeric scale-insensitive; ids ignored) decides whether an intermediate
+  Estimate is needed. Equal totals with different facts are a change. Without repricing, the
+  change order replaces overridden lines by id and adds adjustments; repricing explicitly
+  removes and re-adds the whole line set. When repricing reproduces the Estimate's charges, its
+  persisted lines and ids are kept (complete ordered equality proves the correspondence).
+- **One pure core.** `QuoteComposer` (pure; only generated ids vary) derives selections with the
+  current catalog's names, ordered lines with provenance, the `ChangeOrder`, the domain Quote
+  candidate (`changeOrder(...).toQuote()`, so commerce-domain derives totals), the deposit via
+  shared `DepositTerms.resolve` (plus Fiona's minor-unit check for fixed terms), and a SHA-256
+  `QuoteReviewToken` over every reviewed fact except generated ids (catalog revision included).
+  Negative results are `NEGATIVE_DOCUMENT_TOTAL`; a nonpositive initial Quote is
+  `QUOTE_TOTAL_NOT_POSITIVE` (a positive deposit cannot fit). Violations carry stable codes in
+  runtime `ValidationErrorResponse.violations`.
+- **Preview** `POST /staff/requests/{inquiryId}/quote-preview` (`previewInquiryQuote`) runs
+  `PreviewInquiryQuote` in one unlocked REPEATABLE READ: canonical lineage at exactly
+  `expectedDocumentVersion`, Estimate stage, coherent empty proposal/deposit history, then
+  `InquiryQuoteComposition`. It writes nothing, even on failure. It requires the issuance
+  permission intersection (`commerce.financial-document.create` and
+  `commerce.deposit-requirement.manage`), USER or SERVICE, trusted Origin for cookies; `200`
+  no-store.
+- **Issuance** extends `IssueInquiryProposal` with an optional `ReviewedQuoteComposition`; the
+  HTTP body adds optional `composition` and `reviewToken`, both or neither (`400`). Without
+  them, behavior and response are unchanged. With them, `InquiryProposals.issue` locks the
+  association (`expectLatest`), checks Estimate stage and coherence, re-composes from
+  authoritative state, requires the identical token (`409 QUOTE_REVIEW_STALE`, no-store), then
+  `FionaFinancialDocuments.composedQuote` runs #19's `validateChangeOrder` before the
+  transaction-taking `ledger.changeOrder` (only when charges change) and `ledger.issueQuote`,
+  and checks the persisted Quote equals the candidate. The plan is inserted, the deposit is
+  approved against that final Quote, and the INITIAL proposal is appended: one READ COMMITTED
+  transaction; any failure rolls back every fact. Composed Quotes write and copy no legacy
+  pricing metadata. Chains: `E1 → Q2` (no financial change, including service-only plans) or
+  `E1 → E2 → Q3`. Issued is not sent: no communication, payment or booking follows.
+- **Service plans** (`InquiryServicePlan`, V15 `inquiry_service_plans`) are immutable, one per
+  exact Quote snapshot, written only by composed initial issuance. They store basis, catalog
+  revision, reviewed Estimate version, context, selections with reviewed names/descriptions,
+  and one entry per Quote line by ledger id (`ESTIMATE_LINE`, `GENERATED` source, or
+  `ADJUSTMENT` kind/reason) with an optional override reason, plus approval Clock time and
+  USER/SERVICE provenance shared by every edit. No amounts, totals, stages or current flags.
+  For an `ESTIMATE_LINE` override, the original is the same id in the reviewed Estimate; a
+  repriced line's generated pre-override amount is preview-only and not persisted. Only
+  `JdbiInquiryServicePlanRepository` encodes and restores the strict JSON (`ArchitectureSpec`).
+- **Read model.** `ReadStaffRequest` adds optional `servicePlan`: the plan of the latest
+  proposal's exact Quote, checked against that ledger snapshot's line ids in the same
+  REPEATABLE READ; contradictions or corrupt JSON fail internally. Deposit-only Quotes, and
+  Quotes from a later `reviseInquiryQuoteProposal`, have no plan (explicit absence, never
+  invented); an earlier plan stays stored as history. Booking keeps the accepted Quote's plan.
+- Quote revision, Invoice adjustment, post-close correction, drafts, decline, notes, expiry,
+  messages, delivery and payment links remain separate slices; the standalone change-order and
+  quote-revision routes keep their complete-repricing semantics.
+
 ## Deposit requirements and bulk financial lineages
 
 - `ReadStaffRequest` is a derived, read-only application projection in `staff`, not a new
@@ -1643,9 +1735,9 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...inquiry` | `Inquiry` and its values/repositories; submission key, canonical fingerprint and transaction-bound submission repository; requested pricing inputs/history; lifecycle projection, fulfillment repository and explicit service/closeout; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries`, public eligibility/pricing and the customer form's `InquiryForm` values/`GetInquiryForm` adapter |
 | `...offering` | `FionaOfferings.kt` (Fiona's catalog id and its binding to commerce-runtime's Offerings capability), Fiona's pricing (`FionasPricingInputs`, `FionasOfferingsContext` and its violations, `FionasPricingPolicy`, `FionasOfferingsEngine`, `FionasPricing`), the persisted pricing-inputs JSON (`PersistedPricingInputs.kt`), and the `PreviewEstimate` operation with its `EstimatePreview` result |
-| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations |
+| `...financial` | Fiona's context for the runtime's financial ledger: the inquiry association and optional legacy pricing repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateInquiryEstimate`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; the quote builder's composition intent (`QuoteComposition`), pure `QuoteComposer`, transaction-bound `InquiryQuoteComposition`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository and persisted JSON (`PersistedServicePlan.kt`) |
 | `...staff` | Fiona's credential persistence, password verification, permission definition, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
-| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `AuthRoutes.kt`) |
+| `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `InquiryFormRoutes.kt`, `EstimatePreviewRoutes.kt`, `FinancialDocumentRoutes.kt`, `InquiryProposalRoutes.kt`, `QuoteBuilderRoutes.kt`, `AuthRoutes.kt`) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
 
 Do not create empty packages or layers for future work. Avoid `service`, `manager`,
@@ -1880,6 +1972,15 @@ The gaps below were rechecked and remain open; they do not justify unrelated Fio
   historical Quote allocation. Cover separate excess-money Invoice receipts, whole split histories,
   refunds and explicit empty payments without requiring payment mutation permission. OpenAPI must describe the
   mounted request route and reuse the existing inquiry and financial schemas.
+- Keep the quote builder suites: `QuoteComposerSpec` (pure: every mode, flat overrides and
+  non-divisible totals, signed adjustments, stable codes, negative/zero totals, shared deposit
+  resolution, review-token stability and sensitivity, retired/unavailable selections),
+  `PersistedServicePlanSpec` (strict money-free JSON), `QuoteBuilderSpec` (real PostgreSQL:
+  write-free preview, no repricing after catalog changes, `E1 → Q2` and `E1 → E2 → Q3` chains,
+  plan readback, rollback at the change-order write, plan insert, deposit approval and
+  publication, association-lock contention, legacy deposit-only issuance, later revision, and
+  exact-deposit booking), and `QuoteBuilderRoutesSpec` (complete handler: shapes, codes,
+  no-store, USER/SERVICE permissions, Origin and fail-closed corrupt plans).
 - Run `./gradlew ktlintCheck test build` before considering work complete.
 - Node.js 20 or newer must be on PATH for `ReplaceCatalogSpec`, which runs the actual
   catalog replacement/payment scripts against a started test runtime and throwaway PostgreSQL. CI provisions

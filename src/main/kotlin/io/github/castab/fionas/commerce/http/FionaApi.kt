@@ -18,12 +18,14 @@ import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.AllocatedPayment
+import io.github.castab.fionas.commerce.financial.ComposedQuote
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryFinancialLineage
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.IssuedInquiryProposal
+import io.github.castab.fionas.commerce.financial.PreviewInquiryQuote
 import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
 import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
@@ -77,6 +79,7 @@ class FionaOperations(
     val acknowledgeInquiryCommunication: (RecordInquiryCommunication.Acknowledge) -> Unit,
     val readStaffRequest: (InquiryId) -> StaffRequest,
     val issueInquiryProposal: (IssueInquiryProposal.Command) -> IssuedInquiryProposal,
+    val previewInquiryQuote: (PreviewInquiryQuote.Command) -> ComposedQuote,
     val reviseInquiryQuoteProposal: (ReviseInquiryQuoteProposal.Command) -> IssuedInquiryProposal,
     val reviseInquiryProposalDeposit: (ReviseInquiryProposalDeposit.Command) -> IssuedInquiryProposal,
     val readStaffDashboard: () -> StaffDashboard,
@@ -131,6 +134,7 @@ fun fionaApiRoutes(
     listOf(
         acknowledgeInquiryCommunicationRoute(operations.acknowledgeInquiryCommunication, auth.access),
         readStaffRequestRoute(operations.readStaffRequest, auth.access),
+        previewInquiryQuoteRoute(operations.previewInquiryQuote, auth.access),
         issueInquiryProposalRoute(operations.issueInquiryProposal, auth.access),
         reviseInquiryQuoteProposalRoute(operations.reviseInquiryQuoteProposal, auth.access),
         reviseInquiryProposalDepositRoute(operations.reviseInquiryProposalDeposit, auth.access),
