@@ -153,7 +153,7 @@ private fun PricingInputsJson.restore(): FionasPricingInputs {
  * An `Int` that must be a JSON number. kotlinx.serialization otherwise also accepts the quoted
  * text `"75"`, which would let a differently typed stored value pass.
  */
-private object StrictIntSerializer : KSerializer<Int> {
+internal object StrictIntSerializer : KSerializer<Int> {
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("FionaStrictInt", PrimitiveKind.INT)
 
     override fun serialize(
@@ -169,7 +169,7 @@ private object StrictIntSerializer : KSerializer<Int> {
 }
 
 /** A `Boolean` that must be a JSON `true` or `false`, never the text `"true"`. */
-private object StrictBooleanSerializer : KSerializer<Boolean> {
+internal object StrictBooleanSerializer : KSerializer<Boolean> {
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("FionaStrictBoolean", PrimitiveKind.BOOLEAN)
 
     override fun serialize(
@@ -185,7 +185,7 @@ private object StrictBooleanSerializer : KSerializer<Boolean> {
 }
 
 /** A `String` that must be a JSON string, never a number, boolean, or `null`. */
-private object StrictStringSerializer : KSerializer<String> {
+internal object StrictStringSerializer : KSerializer<String> {
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("FionaStrictString", PrimitiveKind.STRING)
 
     override fun serialize(

@@ -20,15 +20,18 @@ import io.github.castab.fionas.commerce.financial.GetDepositRequirementHistory
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryProposals
+import io.github.castab.fionas.commerce.financial.InquiryQuoteComposition
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.IssueInvoice
 import io.github.castab.fionas.commerce.financial.IssueQuote
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryServicePlanRepository
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
+import io.github.castab.fionas.commerce.financial.PreviewInquiryQuote
 import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
@@ -189,7 +192,11 @@ fun fionaApplication(
             val getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, pricingSources)
             val paymentHistories = ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)
             val proposalHistory = JdbiInquiryProposalRepository()
-            val proposals = InquiryProposals(ledger, documentOwners, pricingSources, proposalHistory, pricing, clock)
+            val servicePlans = JdbiInquiryServicePlanRepository()
+            // One quote composition core for the write-free preview and the atomic initial issuance.
+            val quoteComposition = InquiryQuoteComposition(inquiries, pricingSources, pricing)
+            val proposals =
+                InquiryProposals(ledger, documentOwners, pricingSources, proposalHistory, servicePlans, quoteComposition, pricing, clock)
             val operations =
                 FionaOperations(
                     readStaffRequest = ReadStaffRequest(
@@ -199,8 +206,16 @@ fun fionaApplication(
                         ledger,
                         proposalHistory,
                         paymentHistories,
+                        servicePlans,
                     )::invoke,
                     issueInquiryProposal = IssueInquiryProposal(context.transactor, proposals)::invoke,
+                    previewInquiryQuote = PreviewInquiryQuote(
+                        context.transactor,
+                        ledger,
+                        documentOwners,
+                        proposalHistory,
+                        quoteComposition,
+                    )::invoke,
                     reviseInquiryQuoteProposal = ReviseInquiryQuoteProposal(context.transactor, proposals)::invoke,
                     reviseInquiryProposalDeposit = ReviseInquiryProposalDeposit(context.transactor, proposals)::invoke,
                     readStaffDashboard = ReadStaffDashboard(

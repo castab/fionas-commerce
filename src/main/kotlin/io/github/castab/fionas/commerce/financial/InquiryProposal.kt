@@ -41,6 +41,8 @@ data class IssuedInquiryProposal(
     val proposal: InquiryProposal,
     val financial: InquiryFinancialDocument,
     val deposit: FinancialLineageView,
+    /** The approved service plan, when the published Quote was composed with one. */
+    val servicePlan: InquiryServicePlan? = null,
 )
 
 /** A previous issuance becomes non-payable automatically when either authoritative identity changes. */

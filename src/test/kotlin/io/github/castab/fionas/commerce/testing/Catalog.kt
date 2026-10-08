@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce.testing
 
 import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.offering.CatalogRevisionDto
 import io.github.castab.commerce.runtime.offering.CategoryDto
 import io.github.castab.commerce.runtime.offering.OfferingAvailabilityDto
 import io.github.castab.commerce.runtime.offering.OfferingDto
@@ -203,3 +204,35 @@ fun TestApplication.initialEstimateOf(inquiryId: String): String =
             "SELECT document_id FROM fionas.inquiry_financial_documents " +
                 "WHERE inquiry_id = '$inquiryId' AND purpose = 'INITIAL_ESTIMATE'",
         ).single()
+
+/** Replaces one offering's complete definition through the runtime API, as an administrator edits it. */
+fun TestApplication.updateOffering(
+    expectedRevision: Int,
+    key: String,
+    change: (OfferingDto) -> OfferingDto,
+): Int {
+    val original = CommerceJson.asA(adminGet("/offering-catalog/offerings/$key").bodyString(), OfferingResultDto.serializer()).offering
+    val mutation = OfferingsBatchDto(expectedRevision, listOf(change(original)))
+    val response =
+        adminRequest(Method.PUT, "/offering-catalog/offerings", CommerceJson.json.encodeToString(OfferingsBatchDto.serializer(), mutation))
+    check(response.status == Status.OK) { "Updating an offering failed: ${response.status} ${response.bodyString()}" }
+    return CommerceJson.asA(response.bodyString(), OfferingsDto.serializer()).revision
+}
+
+/** Retires offerings through the runtime API; their keys stay reserved but leave the current catalog. */
+fun TestApplication.retireOfferings(
+    expectedRevision: Int,
+    vararg keys: String,
+): Int {
+    val response =
+        adminPost(
+            "/offering-catalog/offerings/retire",
+            """{"expectedRevision":$expectedRevision,"keys":[${keys.joinToString(",") { "\"$it\"" }}]}""",
+        )
+    check(response.status == Status.OK) { "Retiring offerings failed: ${response.status} ${response.bodyString()}" }
+    return CommerceJson.asA(response.bodyString(), CatalogRevisionDto.serializer()).revision
+}
+
+/** The current revision of Fiona's catalog, as any client observes it. */
+fun TestApplication.currentCatalogRevision(): Int =
+    CommerceJson.asA(http(Request(Method.GET, "/offering-catalog")).bodyString(), OfferingsCatalogDto.serializer()).revision

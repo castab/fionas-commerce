@@ -350,6 +350,33 @@ to shared commerce when needed.
 See [the proposal contract in `AGENTS.md`](AGENTS.md#atomic-canonical-proposal-publication)
 for the current concrete API, persistence, locking, concurrency and read-model rules.
 
+## Staff quote composition
+
+Staff may negotiate the initial Quote, but they express commercial intent, never financial
+values: keep the authoritative Estimate, change financially neutral service selections, or
+reprice a reviewed configuration from the current catalog; give a generated charge a
+negotiated final amount; add separate charges, discounts and credits. The server derives
+every line, total and deposit, and a review must be explicit: approval re-derives the result
+under the publication lock and refuses to publish anything other than what staff previewed.
+A preview is a query that changes nothing.
+
+Persisted Estimate lines are immutable facts. Keeping an Estimate never reprices it, and line
+identity is never inferred from descriptions or positions; only a fully equal ordered result
+proves correspondence. An intermediate Estimate is recorded only for an actual financial
+change, and the shared nonnegative-total policy runs before any ledger write.
+
+What Fiona promises to serve (guest count, duration, every selected offering including
+unpriced ones, and the catalog names staff reviewed) is an independent Fiona business fact.
+It is bound immutably to the exact Quote snapshot it approves, together with why each ledger
+line exists and the staff reasons and provenance for manual edits. It holds no money: amounts
+remain on the shared ledger lines it names. The catalog keeps only current contents, so
+historical names are never reconstructed; selections the current catalog no longer offers
+require review. Quotes published without composition simply have no plan.
+
+Composition and publication are one atomic unit with the Quote, deposit approval and
+proposal; publication is still not delivery. See
+[the quote builder contract in `AGENTS.md`](AGENTS.md#quote-builder-initial-composition).
+
 ## Inquiry lifecycle projection and booking policy
 
 The inquiry's unique `INITIAL_ESTIMATE` lineage drives its operational lifecycle. Other

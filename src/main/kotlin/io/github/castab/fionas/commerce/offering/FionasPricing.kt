@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.offering
 
+import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsEvaluation
 import io.github.castab.commerce.offering.OfferingsEvaluationResult
@@ -32,12 +33,15 @@ class FionasPricing(
         inputs: FionasPricingInputs,
         conflictMessage: String = STAFF_CATALOG_REVISION_STALE_MESSAGE,
     ): OfferingsEvaluation {
-        val snapshot =
-            retrieveLatest(transaction, FIONA_OFFERINGS_CATALOG_ID)
-                ?: throw CommerceFailure.NotFound("Fiona's Offerings catalog was not found")
+        val snapshot = currentSnapshot(transaction)
         requireCurrentCatalogRevision(inputs.catalogRevision, snapshot, conflictMessage)
         return price(snapshot, inputs)
     }
+
+    /** The current snapshot of Fiona's catalog, observed once in [transaction]; [CommerceFailure.NotFound] before it exists. */
+    fun currentSnapshot(transaction: Transaction): OfferingsSnapshot =
+        retrieveLatest(transaction, FIONA_OFFERINGS_CATALOG_ID)
+            ?: throw CommerceFailure.NotFound("Fiona's Offerings catalog was not found")
 
     /** Prices [inputs] from [snapshot], which must be the exact revision they name. */
     fun price(
@@ -56,6 +60,37 @@ class FionasPricing(
                     violations = result.violations,
                 )
         }
+    }
+
+    /**
+     * Prices [inputs] from [snapshot] exactly as [price] does, pairing every line with the
+     * [FionasChargeSource] that caused it. Pure: it reads nothing.
+     */
+    fun priceWithSources(
+        snapshot: OfferingsSnapshot,
+        inputs: FionasPricingInputs,
+    ): SourcedEvaluation {
+        val evaluation = price(snapshot, inputs)
+        val sources = engine.sources(snapshot, inputs.selections, inputs.context)
+        check(sources.size == evaluation.lineItems.size) {
+            "Fiona's engine produced ${evaluation.lineItems.size} lines but ${sources.size} sources"
+        }
+        return SourcedEvaluation(evaluation.lineItems.zip(sources) { line, source -> SourcedLine(line, source) })
+    }
+}
+
+/** One line Fiona's engine generated and the stable logical source that caused it. */
+data class SourcedLine(
+    val line: LineItem,
+    val source: FionasChargeSource,
+)
+
+/** An accepted evaluation's lines, in line order, each with its distinct source. */
+data class SourcedEvaluation(
+    val lines: List<SourcedLine>,
+) {
+    init {
+        check(lines.map { it.source }.toSet().size == lines.size) { "An evaluation produces at most one line per charge source" }
     }
 }
 

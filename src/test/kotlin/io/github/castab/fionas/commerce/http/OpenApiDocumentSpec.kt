@@ -254,6 +254,8 @@ class OpenApiDocumentSpec :
                 Triple("/staff/requests/{inquiryId}", "get", "readStaffRequest") to listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/staff/requests/{inquiryId}/proposals", "post", "issueInquiryProposal") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/quote-preview", "post", "previewInquiryQuote") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/staff/requests/{inquiryId}/proposals/quote-revisions", "post", "reviseInquiryQuoteProposal") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/staff/requests/{inquiryId}/proposals/deposit-revisions", "post", "reviseInquiryProposalDeposit") to
@@ -320,6 +322,7 @@ class OpenApiDocumentSpec :
                 "readStaffDashboard" to "Staff dashboard",
                 "readStaffRequest" to "Staff requests",
                 "issueInquiryProposal" to "Staff proposals",
+                "previewInquiryQuote" to "Staff proposals",
                 "reviseInquiryQuoteProposal" to "Staff proposals",
                 "reviseInquiryProposalDeposit" to "Staff proposals",
                 "acknowledgeInquiryCommunication" to "Inquiries",
@@ -425,6 +428,38 @@ class OpenApiDocumentSpec :
                 "IssueInquiryProposalRequest",
                 "ReviseInquiryQuoteProposalRequest",
                 "ReviseInquiryProposalDepositRequest",
+                "PreviewInquiryQuoteRequest",
+                "QuoteCompositionRequest",
+                "QuotePricingRequest",
+                "QuotePricingRequest_KEEP_ESTIMATE",
+                "QuotePricingRequest_REVISE_SERVICE_SELECTIONS",
+                "QuotePricingRequest_REPRICE_CONFIGURATION",
+                "QuoteOverrideRequest",
+                "QuoteOverrideTargetRequest",
+                "QuoteOverrideTargetRequest_EXISTING_LINE",
+                "QuoteOverrideTargetRequest_BASE_SERVICE",
+                "QuoteOverrideTargetRequest_ICE_CREAM_SERVICE",
+                "QuoteOverrideTargetRequest_EXTRA_TOPPINGS",
+                "QuoteOverrideTargetRequest_SELECTED_OFFERING",
+                "QuoteAdjustmentRequest",
+                "InquiryQuotePreviewResponse",
+                "QuotePreviewLineResponse",
+                "QuoteLineOverrideResponse",
+                "QuoteDepositPreviewResponse",
+                "QuoteLineOriginResponse",
+                "QuoteLineOriginResponse_ESTIMATE_LINE",
+                "QuoteLineOriginResponse_GENERATED",
+                "QuoteLineOriginResponse_ADJUSTMENT",
+                "ChargeSourceResponse",
+                "ChargeSourceResponse_BASE_SERVICE",
+                "ChargeSourceResponse_ICE_CREAM_SERVICE",
+                "ChargeSourceResponse_EXTRA_TOPPINGS",
+                "ChargeSourceResponse_SELECTED_OFFERING",
+                "ServiceConfigurationResponse",
+                "ServicePlanCategoryResponse",
+                "ServicePlanOfferingResponse",
+                "ServicePlanResponse",
+                "ServicePlanLineResponse",
                 "StaffDashboardSummaryResponse",
                 "StaffDashboardWorkQueueResponse",
                 "StaffWorkQueueResponse",
@@ -865,6 +900,7 @@ class OpenApiDocumentSpec :
                             "/inquiries/{inquiryId}/estimates",
                             "/inquiries/{inquiryId}/financial-documents",
                             "/financial-documents/{documentId}/change-orders",
+                            "/staff/requests/{inquiryId}/quote-preview",
                         ).contains(path) shouldBe true
                         status shouldBe "409"
                     } else {
@@ -1199,6 +1235,83 @@ class OpenApiDocumentSpec :
                 setDepositRequirementRoute({ error("not called") }, access),
                 withdrawDepositRequirementRoute({ error("not called") }, access),
                 queryFinancialLineagesRoute({ error("not called") }, access),
+            ).forEach { route ->
+                route.meta.responses
+                    .map { it.message.status }
+                    .shouldBeUnique()
+            }
+        }
+
+        test("quote builder: closed composition unions, write-free preview, optional reviewed issuance and money-free plans") {
+            val preview = operation("/staff/requests/{inquiryId}/quote-preview", "post")
+            preview.text("operationId") shouldBe "previewInquiryQuote"
+            listOf("writes nothing", "REPEATABLE_READ", "reviewToken", "no-store", "commerce.deposit-requirement.manage").forEach {
+                preview.text("description") shouldContain it
+            }
+            preview.text("responses", "409", "description").let {
+                it shouldContain "CATALOG_REVISION_STALE"
+                it shouldContain "`conflict`"
+                it shouldContain "`illegal_transition`"
+            }
+            preview.text("responses", "422", "description").let { description ->
+                listOf("OVERRIDE_TARGET_NOT_FOUND", "QUOTE_TOTAL_NOT_POSITIVE", "SERVICE_SELECTIONS_CHANGE_PRICING").forEach {
+                    description shouldContain it
+                }
+            }
+            schema("PreviewInquiryQuoteRequest").strings("required") shouldContainExactly
+                listOf("expectedDocumentVersion", "composition", "terms")
+            schema("PreviewInquiryQuoteRequest").text("properties", "terms", "\$ref") shouldBe "#/components/schemas/DepositTermsRequest"
+            schema("QuoteCompositionRequest").strings("required") shouldContainExactly listOf("pricing")
+            mapOf(
+                "QuotePricingRequest" to ("mode" to listOf("KEEP_ESTIMATE", "REVISE_SERVICE_SELECTIONS", "REPRICE_CONFIGURATION")),
+                "QuoteOverrideTargetRequest" to
+                    ("type" to listOf("EXISTING_LINE", "BASE_SERVICE", "ICE_CREAM_SERVICE", "EXTRA_TOPPINGS", "SELECTED_OFFERING")),
+            ).forEach { (name, union) ->
+                val (discriminator, tags) = union
+                schema(name).text("discriminator", "propertyName") shouldBe discriminator
+                schema(name).at("discriminator", "mapping").jsonObject.keys shouldContainExactlyInAnyOrder tags
+                tags.forEach { tag ->
+                    val variant = schema("${name}_$tag")
+                    variant.text("properties", discriminator, "const") shouldBe tag
+                    variant.at("additionalProperties") shouldBe JsonPrimitive(false)
+                }
+            }
+            schema("QuotePricingRequest_KEEP_ESTIMATE").at("properties").jsonObject.keys shouldContainExactly listOf("mode")
+            schema("QuotePricingRequest_REPRICE_CONFIGURATION").strings("required") shouldContainExactlyInAnyOrder
+                listOf("mode", "catalogRevision", "guestCount", "durationMinutes", "selections")
+            schema("QuoteOverrideTargetRequest_EXISTING_LINE").text("properties", "lineItemId", "format") shouldBe "uuid"
+            schema("QuoteOverrideRequest").strings("required") shouldContainExactly listOf("target", "finalAmount", "currency", "reason")
+            schema("QuoteAdjustmentRequest").strings("required") shouldContainExactly
+                listOf("clientKey", "kind", "description", "amount", "currency", "reason")
+            schema(
+                "QuoteAdjustmentRequest",
+            ).at("properties", "kind", "enum").jsonArray.map { it.jsonPrimitive.content } shouldContainExactly
+                listOf("CHARGE", "DISCOUNT", "CREDIT")
+            schema("QuoteAdjustmentRequest").at("properties", "reason", "maxLength") shouldBe JsonPrimitive(500)
+            // Issuance stays backward compatible: composition and reviewToken are additive and optional.
+            schema("IssueInquiryProposalRequest").at("properties").jsonObject.keys shouldContainExactlyInAnyOrder
+                listOf("expectedDocumentVersion", "terms", "composition", "reviewToken")
+            schema("IssueInquiryProposalRequest").text("properties", "composition", "\$ref") shouldBe
+                "#/components/schemas/QuoteCompositionRequest"
+            operation("/staff/requests/{inquiryId}/proposals", "post").text("responses", "409", "description") shouldContain
+                "QUOTE_REVIEW_STALE"
+            listOf("IssuedInquiryProposalResponse", "StaffRequestResponse").forEach {
+                schema(it).text("properties", "servicePlan", "\$ref") shouldBe "#/components/schemas/ServicePlanResponse"
+                schema(it).strings("required").contains("servicePlan") shouldBe false
+            }
+            // The plan carries no money; amounts stay on the ledger lines it names.
+            listOf("ServicePlanResponse", "ServicePlanLineResponse", "ServiceConfigurationResponse").forEach { name ->
+                schema(name)
+                    .at("properties")
+                    .jsonObject.keys
+                    .none { Regex("(?i)amount|price|total|balance").containsMatchIn(it) } shouldBe true
+            }
+            schema("InquiryQuotePreviewResponse").text("properties", "reviewToken", "pattern") shouldBe "^[0-9a-f]{64}$"
+            // Inspect executable metadata before rendering can collapse duplicate status entries.
+            val access = metadataAuth.access
+            listOf(
+                previewInquiryQuoteRoute({ error("not called") }, access),
+                issueInquiryProposalRoute({ error("not called") }, access),
             ).forEach { route ->
                 route.meta.responses
                     .map { it.message.status }

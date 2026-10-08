@@ -9,9 +9,11 @@ import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
+import io.github.castab.fionas.commerce.financial.InquiryServicePlanRepository
 import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
+import io.github.castab.fionas.commerce.financial.JdbiInquiryServicePlanRepository
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.fionaApiRoutes
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
@@ -116,6 +118,7 @@ class ArchitectureSpec :
                 CredentialRepository::class.java,
                 InquiryFinancialDocumentRepository::class.java,
                 InquiryProposalRepository::class.java,
+                InquiryServicePlanRepository::class.java,
                 FinancialDocumentPricingRepository::class.java,
             ).forEach { repository ->
                 repository.declaredMethods.forEach { method ->
@@ -134,6 +137,7 @@ class ArchitectureSpec :
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
                 JdbiInquiryProposalRepository::class.java,
+                JdbiInquiryServicePlanRepository::class.java,
                 JdbiFinancialDocumentPricingRepository::class.java,
             ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
@@ -180,6 +184,7 @@ class ArchitectureSpec :
                     "financial/CreateChangeOrder.kt: inTransaction",
                     "financial/IssueQuote.kt: inTransaction",
                     "financial/IssueInquiryProposal.kt: inTransaction",
+                    "financial/PreviewInquiryQuote.kt: inTransaction",
                     "financial/ReviseInquiryQuoteProposal.kt: inTransaction",
                     "financial/ReviseInquiryProposalDeposit.kt: inTransaction",
                     "financial/IsCurrentPayableInquiryProposal.kt: inTransaction",
@@ -208,17 +213,19 @@ class ArchitectureSpec :
                 !it.path.contains("${File.separator}http${File.separator}") &&
                     it.name != "FionaApplication.kt" &&
                     it.name != "FionaOfferings.kt" &&
-                    it.name != "PersistedPricingInputs.kt"
+                    it.name != "PersistedPricingInputs.kt" &&
+                    it.name != "PersistedServicePlan.kt"
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
-            // The one serialization outside http is Fiona's persisted pricing-inputs JSON: a database
-            // representation, never a wire format. It knows no HTTP and no HTTP code uses it.
-            listOf(File(mainSources, "offering/PersistedPricingInputs.kt"))
+            // The only serialization outside http is Fiona's persisted pricing-inputs and service-plan JSON:
+            // database representations, never wire formats. They know no HTTP and no HTTP code uses them.
+            listOf(File(mainSources, "offering/PersistedPricingInputs.kt"), File(mainSources, "financial/PersistedServicePlan.kt"))
                 .containing(listOf("org.http4k", ".http.", "CommerceJson"))
                 .shouldBeEmpty()
             sources { it.path.contains("${File.separator}http${File.separator}") }
-                .containing(listOf("toPersistedJson", "restorePersistedPricingInputs"))
-                .shouldBeEmpty()
+                .containing(
+                    listOf("toPersistedJson", "restorePersistedPricingInputs", "encodeServicePlanContent", "restoreServicePlanContent"),
+                ).shouldBeEmpty()
         }
 
         test("persisted pricing inputs are encoded and restored only by the repositories whose rows own them") {
@@ -228,6 +235,15 @@ class ArchitectureSpec :
                         Regex("""\b(?:toPersistedJson|restorePersistedPricingInputs)\b""").containsMatchIn(file.codeWithoutComments())
                 }.map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactlyInAnyOrder
                 listOf("inquiry/JdbiInquiryRepository.kt", "financial/JdbiFinancialDocumentPricingRepository.kt")
+        }
+
+        test("persisted service plans are encoded and restored only by the repository whose rows own them") {
+            sources()
+                .filter { file ->
+                    file.name != "PersistedServicePlan.kt" &&
+                        Regex("""\b(?:encodeServicePlanContent|restoreServicePlanContent)\b""").containsMatchIn(file.codeWithoutComments())
+                }.map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactly
+                listOf("financial/JdbiInquiryServicePlanRepository.kt")
         }
 
         test("Fiona runs no migration lifecycle of its own; commerce-runtime orchestrates both streams") {
@@ -277,6 +293,7 @@ class ArchitectureSpec :
                         queryFinancialLineages = { error("not called while rendering") },
                         issueQuote = { _, _ -> error("not called") },
                         issueInquiryProposal = { error("not called") },
+                        previewInquiryQuote = { error("not called") },
                         reviseInquiryQuoteProposal = { error("not called") },
                         reviseInquiryProposalDeposit = { error("not called") },
                         issueInvoice = { _, _ -> error("not called") },

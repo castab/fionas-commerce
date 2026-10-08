@@ -94,7 +94,9 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md).
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, and its requested pricing inputs. `404` when unknown, `400` when the id is not a UUID. |
 | `POST /inquiries/{inquiryId}/communications/acknowledge` | `fionas.communications.acknowledge` | Record explicit customer-email acknowledgement; repeated calls return `204`. |
 | `GET /staff/dashboard` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | One coherent snapshot of operational counts and enriched staff work queues. USER sessions and SERVICE tokens are supported. |
-| `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
+| `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review, with the published Quote's optional `servicePlan`. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
+| `POST /staff/requests/{inquiryId}/quote-preview` | **Both** `commerce.financial-document.create` and `commerce.deposit-requirement.manage` | Write-free preview of a composed initial Quote: proposed lines with provenance, domain totals, resolved deposit and `reviewToken`. See [Quote builder](#quote-builder). |
+| `POST /staff/requests/{inquiryId}/proposals` | **Both** `commerce.financial-document.create` and `commerce.deposit-requirement.manage` | Atomic initial Quote publication with approved deposit terms; optionally the reviewed `composition` and its `reviewToken`. See [Atomic canonical proposal publication](#atomic-canonical-proposal-publication). |
 
 The server-side web frontend (`fionas-web`, or a future BFF) calls `GET /inquiry-form`,
 `POST /estimate-preview`, and `POST /inquiries` as a SERVICE principal, with
@@ -1099,6 +1101,86 @@ the latest proposal is historical Quote/deposit context and its approval/revisio
 match the immutable accepted deposit. Pre-slice development Quotes receive
 no compatibility shim, invented publication, or backfill.
 
+## Quote builder
+
+Staff compose the initial canonical Quote from the persisted canonical Estimate: what Fiona's
+proposes to serve, negotiated final amounts for generated charges, and separate charges,
+discounts and credits. A preview writes nothing; one approval publishes exactly the reviewed
+result. The browser sends intent only; the server derives every line, total and deposit.
+Contract rules: [`AGENTS.md`](AGENTS.md#quote-builder-initial-composition). Captured request and
+response examples and the `fionas-web` sequence:
+[`docs/quote-builder-implementation.md`](docs/quote-builder-implementation.md).
+
+```text
+GET  /staff/requests/{I}                 Estimate v1 (REQUESTED) + financial.version
+POST /staff/requests/{I}/quote-preview   composition + terms → lines, total, deposit, reviewToken (no writes)
+POST /staff/requests/{I}/proposals       same composition + terms + reviewToken →
+                                         [Estimate v2 when charges change] → Quote, service plan,
+                                         deposit approved against that Quote, INITIAL proposal
+GET  /staff/requests/{I}                 QUOTED, proposal, depositRequirement, servicePlan
+```
+
+`composition.pricing.mode` is one of:
+
+| Mode | Baseline lines | Catalog use |
+|---|---|---|
+| `KEEP_ESTIMATE` | The reviewed Estimate's persisted lines and ids, never repriced | Current names for the plan; selections must still be selectable |
+| `REVISE_SERVICE_SELECTIONS` (`catalogRevision`, `selections`) | Persisted lines; the new selections must price exactly like the old ones today (unpriced flavors, equal-price swaps) | Current revision required |
+| `REPRICE_CONFIGURATION` (`catalogRevision`, `guestCount`, `guestCountIsMinimum`, `durationMinutes`, `selections`) | Newly priced lines replacing the Estimate's whole line set when charges differ | Current revision required (`409 CATALOG_REVISION_STALE` otherwise) |
+
+`overrides[]` set a line's final nonnegative amount (`finalAmount`, `currency`, `reason`): target
+`{"type":"EXISTING_LINE","lineItemId":…}` without repricing, or a generated source
+(`BASE_SERVICE`, `ICE_CREAM_SERVICE`, `EXTRA_TOPPINGS`, `SELECTED_OFFERING` with `category` and
+`offering`) when repricing. The line becomes flat (`quantity` absent) at exactly that amount.
+`adjustments[]` (`clientKey`, `kind` `CHARGE`/`DISCOUNT`/`CREDIT`, `description`, optional
+`subDescription`, positive `amount`, `currency`, `reason`) add separate signed flat lines after
+the service lines. Overrides and adjustments combine freely.
+
+```json
+POST /staff/requests/{inquiryId}/quote-preview
+{"expectedDocumentVersion": 1,
+ "composition": {"pricing": {"mode": "KEEP_ESTIMATE"},
+   "overrides": [{"target": {"type": "EXISTING_LINE", "lineItemId": "<Ice cream service line id>"},
+                  "finalAmount": "145.00", "currency": "USD", "reason": "Negotiated package rate"}],
+   "adjustments": [{"clientKey": "travel-1", "kind": "CHARGE", "description": "Additional travel fee",
+                    "amount": "25.00", "currency": "USD", "reason": "Outside normal service area"},
+                   {"clientKey": "courtesy-1", "kind": "DISCOUNT", "description": "Courtesy discount",
+                    "amount": "20.00", "currency": "USD", "reason": "Customer accommodation"}]},
+ "terms": {"type": "FIXED", "amount": "105.00", "currency": "USD"}}
+```
+
+For a $440.00 Estimate (base $250.00, ice cream $160.00 for 40 guests, waffle cones $30.00), the
+preview answers `financialChange: true`, `quoteVersion: 3`, lines $250.00, $145.00 (flat, with
+its original 40 × $4.00 = $160.00 under `override`), $30.00, $25.00 and −$20.00, `total`
+`430.00`, `deposit.requiredAmount` `105.00`, and a `reviewToken`. Issuing with the same body plus
+`"reviewToken"` appends Estimate v2 ($430.00) and Quote v3, and returns `servicePlan` beside
+`proposal`, `financial` and `depositRequirement`. Without any financial change the chain is
+Estimate v1 → Quote v2. Issued is not sent: nothing is emailed, paid or booked; the existing
+exact deposit payment books the Quote as before.
+
+- **Preview** (`previewInquiryQuote`) requires both `commerce.financial-document.create` and
+  `commerce.deposit-requirement.manage`, like issuance, for USER sessions (trusted Origin) and
+  SERVICE tokens. `200` no-store. It never writes, even on failure.
+- **Issuance** accepts the deposit-only body unchanged. `composition` and `reviewToken` come
+  together or not at all (`400`). A result that no longer matches the review, for example after
+  a catalog rename or a different deposit, is `409 QUOTE_REVIEW_STALE` (no-store); preview again.
+- Errors use the runtime envelope: `400 malformed_request` for unreadable or contradictory
+  shapes (closed unions); `409 conflict` (stale `expectedDocumentVersion`), `illegal_transition`
+  (no longer an unissued Estimate) or `CATALOG_REVISION_STALE`; `422 validation_failed` with
+  stable `violations` codes: `OVERRIDE_TARGET_NOT_FOUND`, `OVERRIDE_TARGET_NOT_ALLOWED`,
+  `DUPLICATE_OVERRIDE_TARGET`, `OVERRIDE_UNCHANGED`, `DUPLICATE_ADJUSTMENT_KEY`,
+  `CURRENCY_MISMATCH`, `SERVICE_SELECTIONS_UNCHANGED`, `SERVICE_SELECTIONS_CHANGE_PRICING`,
+  `NEGATIVE_DOCUMENT_TOTAL`, `QUOTE_TOTAL_NOT_POSITIVE`, plus the offering codes
+  (`UNKNOWN_OFFERING`, `OFFERING_UNAVAILABLE`, ...) for selections the current catalog no longer
+  offers.
+- **Service plan** (`servicePlan` on issuance and `GET /staff/requests/{inquiryId}`): the exact
+  Quote version, reviewed Estimate version, pricing basis, catalog revision, approval time and
+  USER/SERVICE principal, the approved guests, duration and selections with the catalog names
+  staff reviewed (unpriced offerings included), and one entry per Quote line by `lineItemId`
+  with its origin (`ESTIMATE_LINE`, `GENERATED` source, or `ADJUSTMENT` kind and reason) and an
+  optional `overrideReason`. It holds no money: join on `lineItemId` with the financial lines.
+  Deposit-only issuance and later Quote revisions have no plan.
+
 ## Financial documents and payments
 
 Every accepted inquiry already creates its canonical Estimate. Staff evolve that lineage:
@@ -1797,6 +1879,13 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   checks, microsecond timestamps, database-generated durable record order and an inquiry/order
   covering index. Its unmerged definition was corrected in place before release; no V14
   or production-data conversion was required. It adds no dashboard state.
+  `V14` adds append-only `inquiry_proposals` publication identities (see
+  [Atomic canonical proposal publication](#atomic-canonical-proposal-publication)).
+  `V15` adds immutable `inquiry_service_plans`: one row per exact composed canonical Quote
+  snapshot, keyed `(document_id, document_version)` with foreign keys to Fiona's association and
+  to the runtime's published snapshots of both the Quote and the reviewed Estimate. Its `plan`
+  jsonb holds the approved service and line provenance, never money. Earlier Quotes receive no
+  plan; nothing is backfilled (see [Quote builder](#quote-builder)).
   Fiona never creates or
   changes anything in `commerce`, where the runtime keeps its own tables, including the
   current Offerings catalog storage and the financial ledger's snapshots (with
@@ -2211,6 +2300,9 @@ dependencies or caching; Gradle tracks both scripts as test inputs.
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after proposal issuance, RELATED exclusion, strict integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, shared nested DTO contracts, both live USER/SERVICE read permissions, no-store and reviewed document input |
 | `InquiryProposalsSpec` | Exact full deposit acceptance, zero-write partial/excess/stale rejection, equal-amount deposit republication, negotiated terms, Invoice partial payments and both deterministic acceptance/revision race outcomes; exact immutable pairs and frozen terms; Quote/deposit-only revisions; gross-allocation guard after refunds; rollback at late financial/publication writes; observed PostgreSQL association contention; ordered history and USER/SERVICE provenance; currentness and unlocked repeatable snapshots; immutable booked acceptance across Invoice change orders and corruption detection |
 | `InquiryProposalRoutesSpec` | Initial/default staff projection, both revision paths and booking; canonical deposit mutation rejected before/after booking with unchanged history/projection; pre-publication Estimate validation, booked Invoice change orders and RELATED Invoice deposit behavior preserved; live USER/SERVICE permission intersection, trusted Origin, malformed/stale/no-op mappings and corrupt-pair internal failures |
+| `QuoteComposerSpec` | The quote composition core, purely, with an explicit test policy reproducing the $415 → $405 builder case: no repricing when keeping an Estimate, flat and non-divisible overrides, signed charges/discounts/credits together, every stable rejection code, negative and zero totals, shared HALF_UP deposits, review-token stability across generated ids and sensitivity to every reviewed fact, neutral and priced selection changes, source-targeted repricing, and retired/unavailable selections |
+| `QuoteBuilderSpec` | Composition through PostgreSQL: write-free preview and failures; Estimate v1 → Quote v2 and v1 → v2 → Quote v3 chains with intact Estimate and requested inputs; service-only plans; current-catalog repricing; stale reviews; rollback at the change-order write, plan insert, deposit approval and publication; observed association contention; deposit-only compatibility; SERVICE provenance; later Quote revision; exact deposit booking |
+| `QuoteBuilderRoutesSpec`, `PersistedServicePlanSpec` | Preview and composed issuance through the complete handler: no-store, write-free, closed request shapes (`400`), stable `422` codes, `conflict`/`CATALOG_REVISION_STALE`/`QUOTE_REVIEW_STALE`, deposit-only response shape, USER/SERVICE permission intersection and Origin, fail-closed corrupt plans; strict money-free plan JSON |
 | `InquiryMaterializationSpec` | Exact persisted Estimate v1 lines from one evaluation and one latest lookup; publication after validation; new/reused customers; inquiry input history; rollback within ledger and during/after the final association write; canonical uniqueness with related lineages; financial reads, custom ledger changes and transitions after test-only catalog removal, without pricing metadata |
 | `InquiryRequestFingerprintSpec` | Pinned v1 encoding, every semantic scalar, message presence, exact duration, category/offering identity and ordering; canonical normalization and key exclusion; bounded opaque key validation |
 | `InquiryIdempotencyRoutesSpec` | Full-handler replay with exact receipts, no second inquiry/Estimate/association; replay after publication; changed-intent conflicts; canonical transport equivalence; stale/validation/malformed/authentication failures release keys; different keys remain distinct commands |

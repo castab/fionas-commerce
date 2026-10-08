@@ -43,6 +43,13 @@ data class StaffRequestResponse(
                 "An empty collection means no payments have been associated with this lineage.",
     )
     val payments: List<PaymentHistoryResponse>,
+    @ApiProperty(
+        description =
+            "The immutable approved service plan of the published Quote (proposal.documentVersion): promised service, " +
+                "reviewed catalog names and why each Quote line exists. Absent before issuance, for a Quote issued without a " +
+                "composition, and after a later Quote revision until a revision slice records one; never invented.",
+    )
+    val servicePlan: ServicePlanResponse? = null,
 )
 
 internal fun readStaffRequestRoute(
@@ -111,6 +118,7 @@ internal fun readStaffRequestRoute(
                                 request.suggestedDepositTerms.toResponse(),
                                 request.deposit.currentDepositResponse(),
                                 request.payments.map { it.toResponse() },
+                                request.servicePlan?.toResponse(),
                             ),
                     )
             }

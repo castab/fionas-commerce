@@ -104,6 +104,14 @@ copy of persistence is not required here.
 No missing negative-line, targeted-change, history, refund or reconciliation API was found.
 Post-close eligibility and zero-Quote booking decisions belong to Fiona, not upstream.
 
+The quote builder slice additionally verified, at the same tag, that commerce-domain's public
+`DepositTerms.resolve(document)` (used by `DepositRequirement.Active.approve`) is a pure,
+write-free resolver: a preview resolves the exact deposit against the uncommitted pure Quote
+candidate with the same HALF_UP and bound rules the ledger applies at approval. No deposit
+preview gap exists. Targeted overrides and adjustments (next-slice items 1, 2 and 4) are now
+implemented for initial canonical Quote composition only; see
+[the quote builder contract](../AGENTS.md#quote-builder-initial-composition).
+
 ## Next-slice readiness
 
 1. Define authorized Fiona staff intents for add charge/credit, replace and remove using
