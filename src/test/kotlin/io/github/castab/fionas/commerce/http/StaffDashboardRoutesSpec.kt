@@ -11,10 +11,11 @@ import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.communicationHistory
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
+import io.github.castab.fionas.commerce.testing.invoiceLatest
 import io.github.castab.fionas.commerce.testing.issueProposal
+import io.github.castab.fionas.commerce.testing.quoteLatest
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -53,7 +54,6 @@ class StaffDashboardRoutesSpec :
         }
 
         test("both live permissions gate USER and SERVICE before evaluation and retain session precedence") {
-            app.createAcceptanceCatalog()
             val inquiry = app.createInquiry()
             // A corrupt population proves forbidden requests never invoke the read operation.
             app.database.execute("UPDATE fionas.inquiry_financial_documents SET purpose = 'RELATED'")
@@ -111,7 +111,6 @@ class StaffDashboardRoutesSpec :
         }
 
         test("requested and quoted records serialize navigation, enrichment, canonical facts and exact money without contact data") {
-            app.createAcceptanceCatalog()
             val id = app.createInquiry()
             val document = app.initialEstimateOf(id)
 
@@ -179,7 +178,6 @@ class StaffDashboardRoutesSpec :
         }
 
         test("corrupt fulfillment and customer enrichment fail safely through the complete handler") {
-            app.createAcceptanceCatalog()
             val id = app.createInquiry()
             app.database.execute("UPDATE fionas.customers SET name = '   '")
             val failure = app.adminGet(path)
@@ -191,15 +189,15 @@ class StaffDashboardRoutesSpec :
                 .jsonPrimitive.content shouldBe "internal_failure"
             failure.bodyString().contains("Dashboard") shouldBe false
             app.database.execute("UPDATE fionas.customers SET name = 'Jane Doe'")
-            val storedPricing = app.database.strings("SELECT pricing_inputs::text FROM fionas.inquiries WHERE id = '$id'").single()
-            app.database.execute("UPDATE fionas.inquiries SET pricing_inputs = '{\"corrupt\":true}'::jsonb")
+            val storedPricing = app.database.strings("SELECT requested_service::text FROM fionas.inquiries WHERE id = '$id'").single()
+            app.database.execute("UPDATE fionas.inquiries SET requested_service = '{\"corrupt\":true}'::jsonb")
             val corruptPricing = app.adminGet(path)
             corruptPricing.status shouldBe Status.INTERNAL_SERVER_ERROR
-            corruptPricing.bodyString().contains("pricing_inputs") shouldBe false
+            corruptPricing.bodyString().contains("requested_service") shouldBe false
             corruptPricing.bodyString().contains("corrupt") shouldBe false
             app.transactor.inTransaction {
                 it.handle
-                    .createUpdate("UPDATE fionas.inquiries SET pricing_inputs = CAST(:inputs AS jsonb)")
+                    .createUpdate("UPDATE fionas.inquiries SET requested_service = CAST(:inputs AS jsonb)")
                     .bind("inputs", storedPricing)
                     .execute()
             }
@@ -215,12 +213,11 @@ class StaffDashboardRoutesSpec :
         }
 
         test("unread inbound overlaps served balance resolution; acknowledgement clears reply with USER and SERVICE provenance") {
-            app.createAcceptanceCatalog()
             val id = InquiryId(UUID.fromString(app.createInquiry()))
             val document = UUID.fromString(app.initialEstimateOf(id.value.toString()))
             app.transactor.inTransaction {
-                app.context.financialLedger.issueQuote(it, document)
-                app.context.financialLedger.issueInvoice(it, document)
+                app.context.financialLedger.quoteLatest(it, document)
+                app.context.financialLedger.invoiceLatest(it, document)
             }
             app.adminPost("/inquiries/${id.value}/served").status shouldBe Status.OK
             val record =

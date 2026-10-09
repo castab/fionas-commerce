@@ -12,8 +12,9 @@ import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.changeLatest
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.testClock
 import io.github.castab.fionas.commerce.testing.withBearer
@@ -107,7 +108,6 @@ class DepositRequirementRoutesSpec :
 
         beforeSpec {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
             app.adminCookie
         }
         afterSpec { app.close() }
@@ -188,7 +188,7 @@ class DepositRequirementRoutesSpec :
             val id = newDocument()
             val active = set(id, terms = percent()).active()
             app.transactor.inTransaction { transaction ->
-                app.context.financialLedger.changeOrder(
+                app.context.financialLedger.changeLatest(
                     transaction,
                     id,
                     ChangeOrder(
@@ -411,7 +411,7 @@ class DepositRequirementRoutesSpec :
             }
         }
 
-        test("read and manage permissions are independent for USER sessions and SERVICE tokens with shared Origin policy") {
+        test("reads accept USER or SERVICE; standalone deposit mutations need a staff USER with both terms permissions") {
             val id = newDocument()
             val admin = checkNotNull(app.authorization.findUserByUsername("admin"))
             val original = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
@@ -419,6 +419,8 @@ class DepositRequirementRoutesSpec :
                 listOf(
                     setOf(CommercePermissions.FinancialDocumentRead),
                     setOf(CommercePermissions.DepositRequirementManage),
+                    setOf(FionaPermissions.FinancialTermsManage),
+                    setOf(CommercePermissions.DepositRequirementManage, FionaPermissions.FinancialTermsManage),
                     setOf(CommercePermissions.FinancialDocumentCreate),
                     emptySet(),
                 )
@@ -461,22 +463,46 @@ class DepositRequirementRoutesSpec :
                             request(method, url, """{"documentIds":["$id"]}""", user).status shouldBe
                                 if (CommercePermissions.FinancialDocumentRead in grants) Status.OK else Status.FORBIDDEN
                         }
+                        // Approving or withdrawing terms is a staff decision: both permissions, and a USER.
+                        val allowed =
+                            user &&
+                                CommercePermissions.DepositRequirementManage in grants &&
+                                FionaPermissions.FinancialTermsManage in grants
                         val latest =
                             app.context.financialLedger
                                 .latestDepositRequirement(id)
                                 ?.requirement
                                 ?.revision
                                 ?.number
+                        val before =
+                            app.context.financialLedger
+                                .depositRequirementHistory(id)
+                                .map { it.requirement }
                         request(Method.PUT, path(id), setBody(revision = latest), user).status shouldBe
-                            if (CommercePermissions.DepositRequirementManage in grants) Status.OK else Status.FORBIDDEN
+                            if (allowed) Status.OK else Status.FORBIDDEN
+                        if (!allowed) {
+                            app.context.financialLedger
+                                .depositRequirementHistory(id)
+                                .map { it.requirement } shouldBe before
+                        }
                         val revision =
                             app.context.financialLedger
                                 .latestDepositRequirement(id)
                                 ?.requirement
                                 ?.revision
                                 ?.number ?: 1
+                        val beforeWithdrawal =
+                            app.context.financialLedger
+                                .depositRequirementHistory(id)
+                                .map { it.requirement }
                         request(Method.DELETE, path(id), """{"expectedRequirementRevision":$revision}""", user).status shouldBe
-                            if (CommercePermissions.DepositRequirementManage in grants) Status.OK else Status.FORBIDDEN
+                            if (allowed) Status.OK else Status.FORBIDDEN
+                        if (!allowed) {
+                            app.context.financialLedger
+                                .depositRequirementHistory(id)
+                                .map { it.requirement } shouldBe
+                                beforeWithdrawal
+                        }
                     }
                 }
             } finally {

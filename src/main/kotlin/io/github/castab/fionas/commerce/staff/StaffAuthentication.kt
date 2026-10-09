@@ -63,11 +63,15 @@ object FionaPermissions {
     val InquiriesCreate = PermissionKey("fionas.inquiries.create")
     val CommunicationsAcknowledge = PermissionKey("fionas.communications.acknowledge")
     val InquiriesManage = PermissionKey("fionas.inquiries.manage")
-    val InquiryFormRead = PermissionKey("fionas.inquiry-form.read")
-    val EstimatePreviewCreate = PermissionKey("fionas.estimate-preview.create")
+
+    /**
+     * A verified staff user's authority to commit negotiated financial terms: staff-authored
+     * lines, direct overrides, adjustments, and proposal deposit terms. Routes that use it also
+     * require a USER principal, so a service credential never stands in for a staff approver.
+     */
+    val FinancialTermsManage = PermissionKey("fionas.financial-terms.manage")
 
     private val inquiries = PermissionGroup("fionas.inquiries")
-    private val pricing = PermissionGroup("fionas.pricing")
 
     val definitions =
         listOf(
@@ -85,8 +89,9 @@ object FionaPermissions {
             ),
             PermissionDefinition(
                 InquiriesCreate,
-                "Submit inquiries",
-                "Record a customer's inquiry with its configured service, which prices and materializes its initial Estimate",
+                "Submit priced inquiries",
+                "As the public pricing authority (a SERVICE principal only), record a customer's inquiry with the exact " +
+                    "already-priced lines of its initial Estimate",
                 inquiries,
             ),
             PermissionDefinition(
@@ -102,16 +107,11 @@ object FionaPermissions {
                 inquiries,
             ),
             PermissionDefinition(
-                InquiryFormRead,
-                "Read the inquiry form",
-                "Read the customer inquiry form with its current catalog choices and advisory pricing facts",
-                inquiries,
-            ),
-            PermissionDefinition(
-                EstimatePreviewCreate,
-                "Preview estimates",
-                "Price a selection from an exact catalog revision without recording anything",
-                pricing,
+                FinancialTermsManage,
+                "Negotiate financial terms",
+                "As a verified staff user, commit staff-authored financial lines, overrides, adjustments, proposal " +
+                    "deposit terms, and standalone deposit terms",
+                PermissionGroup("fionas.financial-terms"),
             ),
         )
 }
@@ -244,9 +244,9 @@ class BootstrapFirstAdmin(
                         RoleDefinition(
                             CommerceRoles.Administrator,
                             "Administrator",
-                            "May administer Fiona's staff and service access, inquiries, offerings catalog, financial documents, deposit requirements, payments, and refunds",
+                            "May administer Fiona's staff and service access, inquiries, negotiated financial terms, " +
+                                "financial documents, deposit requirements, payments, and refunds",
                             setOf(
-                                CommercePermissions.OfferingsManage,
                                 CommercePermissions.FinancialDocumentRead,
                                 CommercePermissions.FinancialDocumentCreate,
                                 CommercePermissions.DepositRequirementManage,
@@ -260,11 +260,9 @@ class BootstrapFirstAdmin(
                                 RuntimePermissions.ServiceCredentialManage,
                                 FionaPermissions.CredentialsManage,
                                 FionaPermissions.InquiriesRead,
-                                FionaPermissions.InquiriesCreate,
                                 FionaPermissions.InquiriesManage,
                                 FionaPermissions.CommunicationsAcknowledge,
-                                FionaPermissions.InquiryFormRead,
-                                FionaPermissions.EstimatePreviewCreate,
+                                FionaPermissions.FinancialTermsManage,
                             ),
                         ),
                     )

@@ -8,7 +8,6 @@ import io.github.castab.commerce.runtime.financial.DepositRequirementVersion
 import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
-import io.github.castab.commerce.runtime.offering.OfferingsHttpCapability
 import io.github.castab.commerce.runtime.serviceauth.ServiceAuthenticationHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
@@ -19,6 +18,7 @@ import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.AllocatedPayment
 import io.github.castab.fionas.commerce.financial.ComposedQuote
+import io.github.castab.fionas.commerce.financial.CreateChangeOrder
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
@@ -39,15 +39,12 @@ import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
-import io.github.castab.fionas.commerce.inquiry.InquiryForm
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryLifecycle
 import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
-import io.github.castab.fionas.commerce.offering.EstimatePreview
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import io.github.castab.fionas.commerce.staff.StaffDashboard
 import io.github.castab.fionas.commerce.staff.StaffRequest
@@ -88,9 +85,7 @@ class FionaOperations(
     val getInquiry: (InquiryId) -> InquiryDetails,
     val markInquiryServed: (ManageInquiryFulfillment.Command) -> InquiryLifecycle,
     val closeInquiry: (ManageInquiryFulfillment.Command) -> InquiryLifecycle,
-    val getInquiryForm: () -> InquiryForm,
-    val previewEstimate: (FionasPricingInputs) -> EstimatePreview,
-    val createInquiryEstimate: (InquiryId, FionasPricingInputs) -> InquiryFinancialDocument,
+    val createInquiryEstimate: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
     val createInquiryFinancialDocument: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
     val listInquiryFinancialDocuments: (InquiryId) -> List<InquiryFinancialDocument>,
     val getFinancialDocument: (UUID) -> InquiryFinancialDocument,
@@ -102,7 +97,7 @@ class FionaOperations(
     val queryFinancialLineages: (QueryFinancialLineages.Command) -> List<InquiryFinancialLineage>,
     val issueQuote: (UUID, Version) -> InquiryFinancialDocument,
     val issueInvoice: (UUID, Version) -> InquiryFinancialDocument,
-    val createChangeOrder: (UUID, Version, FionasPricingInputs) -> InquiryFinancialDocument,
+    val createChangeOrder: (CreateChangeOrder.Command) -> InquiryFinancialDocument,
     val recordPayment: (RecordDocumentPayment.Command) -> RecordedPayment,
     val listFinancialDocumentPayments: (UUID) -> List<PaymentHistory>,
     val listUnappliedPayments: () -> List<PaymentHistory>,
@@ -139,13 +134,11 @@ fun fionaApiRoutes(
         reviseInquiryQuoteProposalRoute(operations.reviseInquiryQuoteProposal, auth.access),
         reviseInquiryProposalDepositRoute(operations.reviseInquiryProposalDeposit, auth.access),
         readStaffDashboardRoute(operations.readStaffDashboard, auth.access),
-        getInquiryFormRoute(operations.getInquiryForm, auth.access),
         createInquiryRoute(operations.createInquiry, auth.access),
         listInquiriesRoute(operations.listInquiries, auth.access),
         getInquiryRoute(operations.getInquiry, auth.access),
         inquiryFulfillmentRoute("served", "markInquiryServed", operations.markInquiryServed, auth.access),
         inquiryFulfillmentRoute("close", "closeInquiry", operations.closeInquiry, auth.access),
-        previewEstimateRoute(operations.previewEstimate, auth.access),
         createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
         createInquiryFinancialDocumentRoute(operations.createInquiryFinancialDocument, auth.access),
         listInquiryFinancialDocumentsRoute(operations.listInquiryFinancialDocuments, auth.access),
@@ -174,7 +167,7 @@ fun fionaApiRoutes(
 /**
  * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of the
  * commerce-runtime capabilities Fiona mounts, each implemented and described by the runtime:
- * Fiona's Offerings catalog ([offerings]), staff and service access administration
+ * staff and service access administration
  * ([authorizationAdmin], which also serves the one permission catalog route), the
  * request's principal ([currentPrincipal]), and the service token endpoint
  * ([serviceAuthentication]). The contract also serves its own OpenAPI document at
@@ -187,7 +180,6 @@ fun fionaApiRoutes(
  */
 fun fionaApi(
     operations: FionaOperations,
-    offerings: OfferingsHttpCapability,
     authorizationAdmin: AuthorizationAdministrationHttpCapability,
     currentPrincipal: CurrentPrincipalHttpCapability,
     serviceAuthentication: ServiceAuthenticationHttpCapability,
@@ -196,7 +188,6 @@ fun fionaApi(
 ): RoutingHttpHandler {
     val apiRoutes =
         fionaApiRoutes(operations, auth) +
-            offerings.contractRoutes +
             authorizationAdmin.contractRoutes +
             currentPrincipal.contractRoutes +
             serviceAuthentication.contractRoutes

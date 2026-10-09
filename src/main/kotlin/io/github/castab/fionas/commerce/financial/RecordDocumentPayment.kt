@@ -38,13 +38,13 @@ class RecordDocumentPayment(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    pricingSources: FinancialDocumentPricingRepository,
+    authorship: FinancialDocumentAuthorshipRepository,
     private val clock: Clock,
     proposals: InquiryProposalRepository,
     private val newPaymentId: () -> UUID = UUID::randomUUID,
     private val newAllocationId: () -> UUID = UUID::randomUUID,
 ) {
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
     private val deposits = CanonicalInquiryDepositPaymentPolicy(ledger, documents, proposals)
 
     /**

@@ -10,20 +10,14 @@ import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.financial.RefundAllocationPortion
 import io.github.castab.commerce.runtime.operation.CommerceFailure
-import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
-import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
-import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
-import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
-import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.inquiryProposals
 import io.github.castab.fionas.commerce.testing.issueProposal
-import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -43,7 +37,7 @@ class ChangeOrderFoundationSpec :
         lateinit var app: TestApplication
         val usd = Currency.getInstance("USD")
         val owners = JdbiInquiryFinancialDocumentRepository()
-        val sources = JdbiFinancialDocumentPricingRepository()
+        val sources = JdbiFinancialDocumentAuthorshipRepository()
 
         fun money(value: String) = Money(BigDecimal(value), usd)
 
@@ -58,7 +52,6 @@ class ChangeOrderFoundationSpec :
 
         beforeSpec {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
         }
         afterSpec { app.close() }
 
@@ -68,7 +61,7 @@ class ChangeOrderFoundationSpec :
             val original = invoice()
             val originalVersion = ledger.version(original.reference)
             val credit = line("-40.00", "Desired flavor unavailable — service credit")
-            val revised = ledger.changeOrder(original.id, add(credit))
+            val revised = ledger.changeOrder(original.id, add(credit), original.version)
             val persisted = ledger.version(revised.reference)
 
             revised.shouldBeInstanceOf<FinancialDocument.Invoice>()
@@ -102,7 +95,7 @@ class ChangeOrderFoundationSpec :
             val charge = line("75.00", "Extra service")
             val credit = line("-40.00", "Service credit")
             val changes = ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(charge), ChangeOrder.Change.AddLineItem(credit)))
-            val mixed = ledger.changeOrder(original.id, changes)
+            val mixed = ledger.changeOrder(original.id, changes, original.version)
             mixed.total shouldBe money("635.00")
             val replacement = charge.copy(price = money("25.00"))
             val revised =
@@ -114,6 +107,7 @@ class ChangeOrderFoundationSpec :
                             ChangeOrder.Change.RemoveLineItem(credit.id),
                         ),
                     ),
+                    mixed.version,
                 )
             revised.lineItems shouldBe original.lineItems + replacement
             revised.total shouldBe money("625.00")
@@ -128,8 +122,11 @@ class ChangeOrderFoundationSpec :
                             ChangeOrder.Change.RemoveLineItem(UUID.randomUUID()),
                         ),
                     ),
+                    revised.version,
                 )
             }
+            // A version the caller did not review is stale, even when the change itself is valid.
+            shouldThrow<CommerceFailure.Conflict> { ledger.changeOrder(original.id, add(line("1.00")), original.version) }
             ledger.versionHistory(original.id).map { it.document to it.createdAt } shouldBe history
             // Later changes can target a line added earlier in the same order.
             ledger
@@ -141,6 +138,7 @@ class ChangeOrderFoundationSpec :
                             ChangeOrder.Change.ReplaceLineItem(credit.id, credit.copy(price = money("-25.00"))),
                         ),
                     ),
+                    revised.version,
                 ).total shouldBe money("600.00")
         }
 
@@ -148,14 +146,18 @@ class ChangeOrderFoundationSpec :
             val ledger = app.context.financialLedger
             val original = invoice()
             val adjustment = line("2.125").copy(quantity = BigDecimal("-2.00"), taxAmount = money("-0.12500"))
-            val revised = ledger.changeOrder(original.id, add(adjustment))
+            val revised = ledger.changeOrder(original.id, add(adjustment), original.version)
             revised.subtotal.amount.toPlainString() shouldBe "595.75000"
             revised.taxAmount.amount.toPlainString() shouldBe "-0.12500"
             revised.total.amount.toPlainString() shouldBe "595.62500"
             ledger.get(revised.reference) shouldBe revised
             shouldThrow<CommerceFailure.ValidationFailed> {
                 val eur = Currency.getInstance("EUR")
-                ledger.changeOrder(original.id, add(line("1").copy(price = Money(BigDecimal.ONE, eur), taxAmount = Money.zero(eur))))
+                ledger.changeOrder(
+                    original.id,
+                    add(line("1").copy(price = Money(BigDecimal.ONE, eur), taxAmount = Money.zero(eur))),
+                    revised.version,
+                )
             }
             ledger.latest(original.id) shouldBe revised
         }
@@ -193,7 +195,7 @@ class ChangeOrderFoundationSpec :
                     ledger.reconcileLatest(original.id).balance shouldBe money(if (paid == "200.00") "400.00" else "0.00")
                     val changes = add(line(adjustment))
                     validateChangeOrder(original, changes)
-                    val revised = ledger.changeOrder(original.id, changes)
+                    val revised = ledger.changeOrder(original.id, changes, original.version)
                     val after = ledger.paymentHistory(payment.id)
                     after.payment shouldBe before.payment
                     after.allocations shouldBe before.allocations
@@ -224,24 +226,91 @@ class ChangeOrderFoundationSpec :
                 }
             }
 
-        fun pricing(total: String) =
-            FionasPricing(
-                FionasOfferingsEngine(
-                    FIONAS_PRICING_POLICY.copy(baseEventFee = money(total), hourlyRate = money("0"), perGuestRate = money("0")),
+        /** A staff proposal replacing every reviewed line with one flat line charging [total]. */
+        fun flat(total: String) =
+            LineProposal(
+                listOf(
+                    ProposedLine(
+                        ProposedLineIdentity.New(LineKey("revised")),
+                        PricedLine("Revised service", null, null, money(total), money("0.00")),
+                    ),
                 ),
-                app.context.offeringsSnapshotRepository::retrieveLatestVersion,
             )
 
-        test("negative repricing rejects even after full payment and zero Invoice repricing persists with a negative balance") {
-            val id =
-                InquiryId(
-                    UUID.fromString(
-                        app.createInquiry(pricing = {
-                            pricingBody(it, softServe = listOf("vanilla"), toppings = TOPPINGS.take(4), cones = listOf("cup"))
-                        }),
-                    ),
+        fun changeOrder() =
+            CreateChangeOrder(app.transactor, app.context.financialLedger, owners, sources, JdbiInquiryFulfillmentRepository(), testClock)
+
+        fun keep(
+            line: LineItem,
+            scale: Int? = null,
+        ) = ProposedLine(
+            ProposedLineIdentity.Existing(line.id),
+            PricedLine(
+                line.description,
+                line.subDescription,
+                line.quantity,
+                scale?.let { Money(line.price.amount.setScale(it), usd) } ?: line.price,
+                scale?.let { Money(line.taxAmount.amount.setScale(it), usd) } ?: line.taxAmount,
+            ),
+        )
+
+        test(
+            "financially identical staff lines persist their identity: reorder and remove-and-add append versions, a true no-op does not",
+        ) {
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
+            val a = line("100.00")
+            val b = line("100.00")
+            val original = app.context.financialLedger.create(FinancialDocument.Invoice.create(UUID.randomUUID(), listOf(a, b)))
+            app.transactor.inTransaction { owners.associate(it, InquiryDocumentAssociation(id, original.id, STORED_INSTANT)) }
+            val ledger = app.context.financialLedger
+
+            // Reordering equal lines is a real edit: a new immutable version holding [B, A].
+            val reordered =
+                changeOrder()(CreateChangeOrder.Command(original.id, original.version, LineProposal(listOf(keep(b), keep(a))), app.adminId))
+            val v2 = reordered.latest.document
+            v2.version shouldBe Version.of(2)
+            v2.lineItems.map { it.id } shouldBe listOf(b.id, a.id)
+            v2.lineItems shouldBe listOf(b, a)
+            v2.total shouldBe original.total
+            reordered.latest.authorship?.author shouldBe app.adminId
+            ledger.get(original.reference).lineItems shouldBe listOf(a, b)
+
+            // Omitting A and adding an identical new line is a remove-and-add under a new id.
+            val replacement =
+                ProposedLine(
+                    ProposedLineIdentity.New(LineKey("replacement")),
+                    PricedLine("Catering", null, null, money("100.00"), money("0.00")),
                 )
-            val inputs = app.transactor.inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
+            val v3 =
+                changeOrder()(
+                    CreateChangeOrder.Command(original.id, v2.version, LineProposal(listOf(keep(b), replacement)), app.adminId),
+                ).latest.document
+            v3.version shouldBe Version.of(3)
+            v3.lineItems.map { it.id }.first() shouldBe b.id
+            val added = v3.lineItems.last().id
+            (added == a.id) shouldBe false
+            added shouldBe proposedLineId(original.id, v2.version, LineKey("replacement"))
+            v3.total shouldBe original.total
+            ledger.get(v2.reference).lineItems shouldBe listOf(b, a)
+
+            // The same ordered ids with numerically equal amounts at another scale: no change, no version.
+            val stored = v3.lineItems
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                changeOrder()(
+                    CreateChangeOrder.Command(original.id, v3.version, LineProposal(stored.map { keep(it, scale = 4) }), app.adminId),
+                )
+            }.violations.map { it.code } shouldBe listOf(LineProposalViolations.NO_FINANCIAL_CHANGE)
+            ledger.versionHistory(original.id).size shouldBe 3
+
+            // A stale reviewed version still conflicts, even for an identity-only edit, and appends nothing.
+            shouldThrow<CommerceFailure.Conflict> {
+                changeOrder()(CreateChangeOrder.Command(original.id, v2.version, LineProposal(listOf(keep(a), keep(b))), app.adminId))
+            }
+            ledger.versionHistory(original.id).map { it.document } shouldBe listOf(original, v2, v3)
+        }
+
+        test("a negative staff change order rejects even after full payment; a zero Invoice persists with a negative balance") {
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
             val document = invoice()
             app.transactor.inTransaction { owners.associate(it, InquiryDocumentAssociation(id, document.id, STORED_INSTANT)) }
             val payment = PaymentRecord(UUID.randomUUID(), money("600.00"), PaymentMethod.CARD, STORED_INSTANT)
@@ -257,21 +326,10 @@ class ChangeOrderFoundationSpec :
                 app.context.financialLedger
                     .versionHistory(document.id)
                     .map { it.document to it.createdAt }
-            listOf("-0.001", "-120.00").forEach { total ->
+            listOf("-0.01", "-120.00").forEach { total ->
                 shouldThrow<CommerceFailure.ValidationFailed> {
-                    CreateChangeOrder(
-                        app.transactor,
-                        app.context.financialLedger,
-                        owners,
-                        sources,
-                        pricing(total),
-                        JdbiInquiryFulfillmentRepository(),
-                    )(
-                        document.id,
-                        document.version,
-                        inputs,
-                    )
-                }
+                    changeOrder()(CreateChangeOrder.Command(document.id, document.version, flat(total), app.adminId))
+                }.violations.map { it.code } shouldBe listOf(LineProposalViolations.NEGATIVE_DOCUMENT_TOTAL)
                 app.context.financialLedger
                     .versionHistory(document.id)
                     .map { it.document to it.createdAt } shouldBe before
@@ -282,28 +340,23 @@ class ChangeOrderFoundationSpec :
                 val documents = FionaFinancialDocuments(app.context.financialLedger, owners, sources)
                 val current = documents.expectLatest(transaction, document.id, document.version)
                 shouldThrow<CommerceFailure.ValidationFailed> {
-                    documents.reprice(transaction, current, inputs, pricing("-120.00"))
+                    documents.commitLines(
+                        transaction,
+                        current,
+                        flat("-120.00").resolveAgainst(current.document),
+                        app.adminId,
+                        STORED_INSTANT,
+                    )
                 }
                 app.context.financialLedger.history(transaction, document.id) shouldBe listOf(document)
                 sources.findAll(transaction, document.id) shouldBe emptyMap()
             }
-            val zero =
-                CreateChangeOrder(
-                    app.transactor,
-                    app.context.financialLedger,
-                    owners,
-                    sources,
-                    pricing("0.000"),
-                    JdbiInquiryFulfillmentRepository(),
-                )(
-                    document.id,
-                    document.version,
-                    inputs,
-                )
+            val zero = changeOrder()(CreateChangeOrder.Command(document.id, document.version, flat("0.000"), app.adminId))
             zero.latest.document.total.amount
                 .signum() shouldBe 0
             zero.latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
             zero.latest.document.version shouldBe document.version.next()
+            zero.latest.authorship?.author shouldBe app.adminId
             zero.reconciliation.balance.amount
                 .compareTo(BigDecimal("-600")) shouldBe 0
             val history = app.context.financialLedger.paymentHistory(payment.id)
@@ -313,16 +366,8 @@ class ChangeOrderFoundationSpec :
             history.refundAllocations shouldBe emptyList()
         }
 
-        test("concurrent repricing of one reviewed version commits one immediate successor and conflicts the stale writer") {
-            val id =
-                InquiryId(
-                    UUID.fromString(
-                        app.createInquiry(pricing = {
-                            pricingBody(it, softServe = listOf("vanilla"), toppings = TOPPINGS.take(4), cones = listOf("cup"))
-                        }),
-                    ),
-                )
-            val inputs = app.transactor.inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
+        test("concurrent staff edits of one reviewed version commit one immediate successor and conflict the stale writer") {
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
             val document = invoice()
             app.transactor.inTransaction { owners.associate(it, InquiryDocumentAssociation(id, document.id, STORED_INSTANT)) }
             val ready = CountDownLatch(2)
@@ -332,20 +377,7 @@ class ChangeOrderFoundationSpec :
                     CompletableFuture.supplyAsync {
                         ready.countDown()
                         check(start.await(30, TimeUnit.SECONDS))
-                        runCatching {
-                            CreateChangeOrder(
-                                app.transactor,
-                                app.context.financialLedger,
-                                owners,
-                                sources,
-                                pricing(total),
-                                JdbiInquiryFulfillmentRepository(),
-                            )(
-                                document.id,
-                                document.version,
-                                inputs,
-                            )
-                        }
+                        runCatching { changeOrder()(CreateChangeOrder.Command(document.id, document.version, flat(total), app.adminId)) }
                     }
                 }
             try {
@@ -363,54 +395,34 @@ class ChangeOrderFoundationSpec :
             }
         }
 
-        test("negative Quote repricing and unpublishable zero Quote preserve the entire approved proposal") {
-            val id =
-                InquiryId(
-                    UUID.fromString(
-                        app.createInquiry(pricing = {
-                            pricingBody(it, softServe = listOf("vanilla"), toppings = TOPPINGS.take(4), cones = listOf("cup"))
-                        }),
-                    ),
-                )
+        test("a negative Quote revision and an unpublishable zero Quote preserve the entire approved proposal") {
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
             val published = app.issueProposal(id)
             val document = published.proposal.documentReference.id
-            val inputs = app.transactor.inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
             val ledger = app.context.financialLedger
             val history = ledger.versionHistory(document).map { it.document to it.createdAt }
             val deposits = ledger.depositRequirementHistory(document).map { it.requirement to it.createdAt }
             val repository = JdbiInquiryProposalRepository()
             val publications = app.transactor.inTransaction { repository.history(it, id) }
+            val authored = app.transactor.inTransaction { sources.findAll(it, document) }
             val before = app.adminGet("/staff/requests/${id.value}").bodyString()
-            listOf("-20.00", "0.000").forEach { total ->
-                val operation =
-                    ReviseInquiryQuoteProposal(
-                        app.transactor,
-                        InquiryProposals(
-                            ledger,
-                            owners,
-                            sources,
-                            repository,
-                            JdbiInquiryServicePlanRepository(),
-                            InquiryQuoteComposition(JdbiInquiryRepository(), sources, pricing(total)),
-                            pricing(total),
-                            testClock,
-                        ),
-                    )
+            val cases = listOf("-20.00" to LineProposalViolations.NEGATIVE_DOCUMENT_TOTAL, "0.000" to QUOTE_TOTAL_NOT_POSITIVE)
+            cases.forEach { (total, code) ->
                 shouldThrow<CommerceFailure.ValidationFailed> {
-                    operation(
+                    ReviseInquiryQuoteProposal(app.transactor, app.inquiryProposals())(
                         ReviseInquiryQuoteProposal.Command(
                             id,
                             published.proposal.documentReference.version,
                             published.proposal.depositRequirementRevision,
-                            inputs,
+                            flat(total),
                             DepositTerms.Percentage(BigDecimal("20")),
-                            UserId(UUID.randomUUID()),
+                            app.adminId,
                         ),
                     )
-                }
+                }.violations.map { it.code } shouldBe listOf(code)
                 ledger.versionHistory(document).map { it.document to it.createdAt } shouldBe history
                 ledger.depositRequirementHistory(document).map { it.requirement to it.createdAt } shouldBe deposits
-                app.transactor.inTransaction { sources.findAll(it, document) } shouldBe emptyMap()
+                app.transactor.inTransaction { sources.findAll(it, document) } shouldBe authored
                 app.transactor.inTransaction { repository.history(it, id) } shouldBe publications
                 app.adminGet("/staff/requests/${id.value}").bodyString() shouldBe before
             }

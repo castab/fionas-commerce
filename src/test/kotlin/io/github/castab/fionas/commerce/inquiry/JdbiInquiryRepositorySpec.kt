@@ -1,19 +1,12 @@
 package io.github.castab.fionas.commerce.inquiry
 
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingCategorySelection
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingSelections
-import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.inquiry
 import io.github.castab.fionas.commerce.testing.insertInquiryRecord
-import io.github.castab.fionas.commerce.testing.requestedPricing
+import io.github.castab.fionas.commerce.testing.requestedService
 import io.github.castab.fionas.commerce.testing.sqlState
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.throwables.shouldThrowAny
@@ -25,7 +18,6 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import kotlinx.serialization.json.Json
-import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
@@ -59,11 +51,11 @@ class JdbiInquiryRepositorySpec :
                 shouldThrowAny {
                     application.transactor.inTransaction { transaction ->
                         customers.insert(transaction, customer)
-                        inquiries.insert(transaction, inquiry, requestedPricing())
+                        inquiries.insert(transaction, inquiry, requestedService())
                         transaction.handle
                             .createUpdate(
                                 "INSERT INTO fionas.inquiries " +
-                                    "(id, customer_id, created_at, zip_code, event_date, event_type, pricing_inputs) " +
+                                    "(id, customer_id, created_at, zip_code, event_date, event_type, requested_service) " +
                                     "VALUES (:id, :customer, :time, $value, :eventDate, :eventType, '{}')",
                             ).bind("id", UUID.randomUUID())
                             .bind("customer", customer.id.value)
@@ -106,7 +98,7 @@ class JdbiInquiryRepositorySpec :
                         transaction.handle
                             .createUpdate(
                                 "INSERT INTO fionas.inquiries " +
-                                    "(id, customer_id, created_at, zip_code, event_date, event_type, pricing_inputs) " +
+                                    "(id, customer_id, created_at, zip_code, event_date, event_type, requested_service) " +
                                     "VALUES (:id, :customer, :time, '92626', $date, $type, '{}')",
                             ).bind("id", UUID.randomUUID())
                             .bind("customer", customer.id.value)
@@ -141,7 +133,7 @@ class JdbiInquiryRepositorySpec :
 
             val failure =
                 shouldThrowAny {
-                    application.transactor.inTransaction { inquiries.insert(it, inquiry(customer()), requestedPricing()) }
+                    application.transactor.inTransaction { inquiries.insert(it, inquiry(customer()), requestedService()) }
                 }
 
             failure.sqlState() shouldBe "23503"
@@ -199,75 +191,70 @@ class JdbiInquiryRepositorySpec :
             }
         }
 
-        // Every stored property of FionasPricingInputs, ordered blocks and offerings, and an empty block.
-        val orderedInputs =
-            FionasPricingInputs(
-                catalogRevision = OfferingsRevision.of(7),
-                selections =
-                    OfferingSelections(
-                        listOf(
-                            OfferingCategorySelection(OfferingCategoryKey("topping"), listOf("sprinkles", "oreos").map(::OfferingKey)),
-                            OfferingCategorySelection(OfferingCategoryKey("cone-option"), emptyList()),
-                            OfferingCategorySelection(
-                                OfferingCategoryKey("soft-serve-flavor"),
-                                listOf("vanilla", "horchata").map(::OfferingKey),
-                            ),
-                        ),
+        // Every stored property of a RequestedService, ordered items, and optional values present and absent.
+        val orderedRequest =
+            RequestedService(
+                guestCount = 100,
+                guestCountIsMinimum = true,
+                durationMinutes = 150,
+                items =
+                    listOf(
+                        RequestedServiceItem("Sprinkles", "Toppings", "sprinkles"),
+                        RequestedServiceItem("Churros, if possible", null, null),
+                        RequestedServiceItem("Horchata soft serve", "Soft serve", "horchata"),
                     ),
-                context = FionasOfferingsContext(guestCount = 100, guestCountIsMinimum = true, duration = Duration.ofMinutes(150)),
+                pricingReference = "fionas-web-pricing@2026-10-01",
             )
 
-        fun storedPricing(id: InquiryId) =
+        fun storedRequest(id: InquiryId) =
             Json.parseToJsonElement(
-                application.database.strings("SELECT pricing_inputs::text FROM fionas.inquiries WHERE id = '${id.value}'").single(),
+                application.database.strings("SELECT requested_service::text FROM fionas.inquiries WHERE id = '${id.value}'").single(),
             )
 
-        test("an inquiry and its complete requested pricing inputs are one row, in Fiona's persisted representation") {
+        test("an inquiry and its complete requested service are one row, in Fiona's persisted representation") {
             val customer = customer()
             val inquiry = inquiry(customer)
             val before = application.database.count("fionas.inquiries")
 
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry, orderedInputs)
+                inquiries.insert(transaction, inquiry, orderedRequest)
             }
 
             application.database.count("fionas.inquiries") shouldBe before + 1
-            storedPricing(inquiry.id) shouldBe
+            storedRequest(inquiry.id) shouldBe
                 Json.parseToJsonElement(
                     """
-                    {"catalogRevision": 7,
-                     "context": {"guestCount": 100, "guestCountIsMinimum": true, "durationMinutes": 150},
-                     "selections": [{"categoryKey": "topping", "offeringKeys": ["sprinkles", "oreos"]},
-                                    {"categoryKey": "cone-option", "offeringKeys": []},
-                                    {"categoryKey": "soft-serve-flavor", "offeringKeys": ["vanilla", "horchata"]}]}
+                    {"guestCount": 100, "guestCountIsMinimum": true, "durationMinutes": 150,
+                     "items": [{"label": "Sprinkles", "group": "Toppings", "key": "sprinkles"},
+                               {"label": "Churros, if possible", "group": null, "key": null},
+                               {"label": "Horchata soft serve", "group": "Soft serve", "key": "horchata"}],
+                     "pricingReference": "fionas-web-pricing@2026-10-01"}
                     """.trimIndent(),
                 )
         }
 
-        test("an inquiry's requested pricing inputs are read back with it exactly, in order, empty blocks included") {
+        test("an inquiry's requested service is read back with it exactly, in order, absent values included") {
             val customer = customer()
             val inquiry = inquiry(customer)
+            val minimal = RequestedService(5, false, null, emptyList(), null)
+            val other = inquiry(customer)
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry, orderedInputs)
+                inquiries.insert(transaction, inquiry, orderedRequest)
+                inquiries.insert(transaction, other, minimal)
             }
 
             val read = checkNotNull(application.transactor.inTransaction { inquiries.findRequested(it, inquiry.id) })
 
-            read shouldBe RequestedInquiry(inquiry, orderedInputs)
-            read.pricingInputs.catalogRevision shouldBe OfferingsRevision.of(7)
-            read.pricingInputs.context shouldBe FionasOfferingsContext(100, true, Duration.ofMinutes(150))
-            read.pricingInputs.selections.categories
-                .map { it.category.value } shouldContainExactly
-                listOf("topping", "cone-option", "soft-serve-flavor")
-            read.pricingInputs.selections.categories
-                .map { block -> block.offerings.map { it.value } } shouldContainExactly
-                listOf(listOf("sprinkles", "oreos"), emptyList(), listOf("vanilla", "horchata"))
+            read shouldBe RequestedInquiry(inquiry, orderedRequest)
+            read.requestedService.items.map { it.label } shouldContainExactly
+                listOf("Sprinkles", "Churros, if possible", "Horchata soft serve")
+            application.transactor.inTransaction { inquiries.findRequested(it, other.id) }?.requestedService shouldBe minimal
             application.transactor.inTransaction { inquiries.findRequested(it, InquiryId(UUID.randomUUID())) }.shouldBeNull()
         }
 
-        test("an inquiry and its pricing inputs roll back together with the caller's transaction") {
+        test("an inquiry and its requested service roll back together with the caller's transaction") {
             val customer = customer()
             val inquiry = inquiry(customer)
             val before = application.database.count("fionas.inquiries")
@@ -275,7 +262,7 @@ class JdbiInquiryRepositorySpec :
             shouldThrowAny {
                 application.transactor.inTransaction { transaction ->
                     customers.insert(transaction, customer)
-                    inquiries.insert(transaction, inquiry, orderedInputs)
+                    inquiries.insert(transaction, inquiry, orderedRequest)
                     error("a later write in the same operation failed")
                 }
             }
@@ -285,16 +272,16 @@ class JdbiInquiryRepositorySpec :
             application.transactor.inTransaction { customers.findById(it, customer.id) }.shouldBeNull()
         }
 
-        test("the database requires every inquiry's pricing inputs, as a JSON object") {
+        test("the database requires every inquiry's requested service, as a JSON object") {
             val customer = customer()
             application.transactor.inTransaction { customers.insert(it, customer) }
-            listOf("NULL" to "23502", "'[]'" to "23514", "'\"inputs\"'" to "23514", "'7'" to "23514").forEach { (value, state) ->
+            listOf("NULL" to "23502", "'[]'" to "23514", "'\"service\"'" to "23514", "'7'" to "23514").forEach { (value, state) ->
                 shouldThrowAny {
                     application.transactor.inTransaction { transaction ->
                         transaction.handle
                             .createUpdate(
                                 "INSERT INTO fionas.inquiries " +
-                                    "(id, customer_id, created_at, zip_code, event_date, event_type, pricing_inputs) " +
+                                    "(id, customer_id, created_at, zip_code, event_date, event_type, requested_service) " +
                                     "VALUES (:id, :customer, :time, '92626', DATE '2026-12-05', 'BIRTHDAY', $value)",
                             ).bind("id", UUID.randomUUID())
                             .bind("customer", customer.id.value)
@@ -305,102 +292,69 @@ class JdbiInquiryRepositorySpec :
             }
         }
 
-        test("pricing inputs that cannot be stored faithfully fail before anything is written") {
-            val customer = customer()
-            application.transactor.inTransaction { customers.insert(it, customer) }
-            val before = application.database.count("fionas.inquiries")
-            val valid = requestedPricing()
-            listOf(
-                valid.copy(context = valid.context.copy(duration = Duration.ofMinutes(90).plusSeconds(30))) to "whole number of minutes",
-                valid.copy(context = valid.context.copy(guestCount = 0)) to "guestCount",
-                valid.copy(
-                    selections =
-                        OfferingSelections(
-                            listOf(
-                                OfferingCategorySelection(OfferingCategoryKey("topping"), emptyList()),
-                                OfferingCategorySelection(OfferingCategoryKey("topping"), emptyList()),
-                            ),
-                        ),
-                ) to "more than once",
-                valid.copy(
-                    selections =
-                        OfferingSelections(
-                            listOf(OfferingCategorySelection(OfferingCategoryKey("topping"), listOf("oreos", "oreos").map(::OfferingKey))),
-                        ),
-                ) to "more than once",
-            ).forEach { (inputs, reason) ->
-                shouldThrowAny {
-                    application.transactor.inTransaction { inquiries.insert(it, inquiry(customer), inputs) }
-                }.message shouldContain reason
-            }
-
-            application.database.count("fionas.inquiries") shouldBe before
+        test("a requested service that breaks its invariants cannot even be constructed") {
+            listOf<() -> Any>(
+                { RequestedService(0, false, null, emptyList(), null) },
+                { RequestedService(1, false, 0, emptyList(), null) },
+                { RequestedService(1, false, null, emptyList(), " padded ") },
+                { RequestedService(1, false, null, List(101) { RequestedServiceItem("Item $it", null, null) }, null) },
+                { RequestedServiceItem("  ", null, null) },
+                { RequestedServiceItem("Label", "", null) },
+                { RequestedServiceItem("x".repeat(201), null, null) },
+            ).forEach { shouldThrow<IllegalArgumentException> { it() } }
         }
 
-        test("malformed stored pricing inputs fail loudly, naming their inquiry, and are never repaired") {
+        test("a malformed stored requested service fails loudly, naming its inquiry, and is never repaired") {
             val customer = customer()
             val inquiry = inquiry(customer)
             application.transactor.inTransaction { transaction ->
                 customers.insert(transaction, customer)
-                inquiries.insert(transaction, inquiry, orderedInputs)
+                inquiries.insert(transaction, inquiry, orderedRequest)
             }
 
-            fun context(
-                guestCount: String = "100",
-                minimum: String = "true",
-                minutes: String = "150",
+            fun item(
+                label: String = "\"Sprinkles\"",
                 extra: String = "",
-            ) = """"context": {"guestCount": $guestCount, "guestCountIsMinimum": $minimum, "durationMinutes": $minutes$extra}"""
-
-            fun block(
-                category: String = "\"topping\"",
-                offerings: String = "[\"oreos\"]",
-                extra: String = "",
-            ) = """{"categoryKey": $category, "offeringKeys": $offerings$extra}"""
+            ) = """{"label": $label, "group": null, "key": null$extra}"""
 
             fun stored(
-                revision: String = "7",
-                context: String = context(),
-                selections: String = "[${block()}]",
+                guests: String = "100",
+                minimum: String = "true",
+                minutes: String = "150",
+                items: String = "[${item()}]",
+                reference: String = "null",
                 extra: String = "",
-            ) = """{"catalogRevision": $revision, $context, "selections": $selections$extra}"""
+            ) = """{"guestCount": $guests, "guestCountIsMinimum": $minimum, "durationMinutes": $minutes, "items": $items, """ +
+                """"pricingReference": $reference$extra}"""
             listOf(
                 // Missing and null properties are never defaulted.
-                """{${context()}, "selections": []}""",
-                """{"catalogRevision": 7, "selections": []}""",
-                """{"catalogRevision": 7, ${context()}}""",
-                stored(context = """"context": {"guestCount": 100, "guestCountIsMinimum": true}"""),
-                stored(selections = """[{"categoryKey": "topping"}]"""),
-                stored(revision = "null"),
-                stored(context = context(guestCount = "null")),
-                stored(selections = "null"),
-                stored(selections = "[${block(offerings = "[null]")}]"),
+                """{"guestCountIsMinimum": true, "durationMinutes": 150, "items": [], "pricingReference": null}""",
+                """{"guestCount": 100, "durationMinutes": 150, "items": [], "pricingReference": null}""",
+                """{"guestCount": 100, "guestCountIsMinimum": true, "durationMinutes": 150, "pricingReference": null}""",
+                """{"guestCount": 100, "guestCountIsMinimum": true, "durationMinutes": 150, "items": []}""",
+                stored(guests = "null"),
+                stored(items = "null"),
+                stored(items = "[{\"label\": \"x\"}]"),
+                stored(items = "[${item(label = "null")}]"),
                 // Unknown properties are never ignored.
                 stored(extra = """, "total": "250.00""""),
-                stored(context = context(extra = """, "currency": "USD"""")),
-                stored(selections = "[${block(extra = """, "price": 1""")}]"),
+                stored(items = "[${item(extra = """, "price": 1""")}]"),
                 // JSON values of the wrong type are never coerced.
-                stored(revision = "\"7\""),
-                stored(revision = "7.5"),
-                stored(context = context(guestCount = "\"75\"")),
-                stored(context = context(minimum = "\"true\"")),
-                stored(context = context(minimum = "1")),
-                stored(context = context(minutes = "2147483648")),
-                stored(selections = "[${block(category = "5")}]"),
-                stored(selections = "[${block(offerings = "\"oreos\"")}]"),
-                stored(selections = block()),
-                // Values the domain or the stored invariants reject.
-                stored(revision = "0"),
-                stored(context = context(guestCount = "0")),
-                stored(context = context(minutes = "0")),
-                stored(selections = "[${block(category = "\"\"")}]"),
-                stored(selections = "[${block(category = "\"soft serve\"")}]"),
-                stored(selections = "[${block(offerings = "[\" oreos\"]")}]"),
-                stored(selections = "[${block(offerings = "[\"oreos\", \"oreos\"]")}]"),
-                stored(selections = "[${block()}, ${block(offerings = "[]")}]"),
+                stored(guests = "\"75\""),
+                stored(guests = "7.5"),
+                stored(minimum = "\"true\""),
+                stored(minimum = "1"),
+                stored(minutes = "2147483648"),
+                stored(items = item()),
+                stored(reference = "5"),
+                // Values the domain rejects.
+                stored(guests = "0"),
+                stored(minutes = "0"),
+                stored(items = "[${item(label = "\" padded \"")}]"),
+                stored(reference = "\"\""),
             ).forEach { corrupt ->
                 application.database.execute(
-                    "UPDATE fionas.inquiries SET pricing_inputs = '${corrupt.replace("'", "''")}' WHERE id = '${inquiry.id.value}'",
+                    "UPDATE fionas.inquiries SET requested_service = '${corrupt.replace("'", "''")}' WHERE id = '${inquiry.id.value}'",
                 )
 
                 val failure =
@@ -408,8 +362,8 @@ class JdbiInquiryRepositorySpec :
                         application.transactor.inTransaction { inquiries.findRequested(it, inquiry.id) }
                     }
 
-                withClue(corrupt) { failure.message shouldContain "pricing inputs of inquiry ${inquiry.id.value}" }
-                storedPricing(inquiry.id) shouldBe Json.parseToJsonElement(corrupt)
+                withClue(corrupt) { failure.message shouldContain "requested service of inquiry ${inquiry.id.value}" }
+                storedRequest(inquiry.id) shouldBe Json.parseToJsonElement(corrupt)
             }
         }
 

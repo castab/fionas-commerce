@@ -12,20 +12,19 @@ import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.RoleKey
+import io.github.castab.fionas.commerce.testing.CHURROS
+import io.github.castab.fionas.commerce.testing.COURTESY_DISCOUNT
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
-import io.github.castab.fionas.commerce.testing.TOPPINGS
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.addOffering
-import io.github.castab.fionas.commerce.testing.asFionasWeb
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.TestLine
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.adminId
+import io.github.castab.fionas.commerce.testing.changeOrderBody
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
-import io.github.castab.fionas.commerce.testing.perGuest
-import io.github.castab.fionas.commerce.testing.pricingBody
-import io.github.castab.fionas.commerce.testing.proposalId
-import io.github.castab.fionas.commerce.testing.withSubmissionKey
+import io.github.castab.fionas.commerce.testing.linesJson
+import io.github.castab.fionas.commerce.testing.proposalJson
 import io.kotest.core.spec.style.FunSpec
-import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
@@ -45,16 +44,13 @@ import java.util.UUID
 
 /**
  * Fiona's persisted financial documents and payments through the complete fionas-commerce
- * HTTP handler, over real PostgreSQL: estimates priced by the server from an exact catalog
- * revision, change orders, quotes, invoices, and payments, all recorded by commerce-runtime's
- * ledger, with Fiona's inquiry association and pricing source beside them.
+ * HTTP handler, over real PostgreSQL: staff-authored estimates, staff line edits, quotes,
+ * invoices, and payments, all recorded by commerce-runtime's ledger, with Fiona's inquiry
+ * association and line authorship beside them. Nothing is priced or checked against a catalog.
  */
 class FinancialDocumentRoutesSpec :
     FunSpec({
         lateinit var application: TestApplication
-
-        // The catalog revision the acceptance estimate is priced from.
-        var revision = 0
 
         fun Response.document() = CommerceJson.asA(bodyString(), FinancialDocumentResponse.serializer())
 
@@ -64,12 +60,14 @@ class FinancialDocumentRoutesSpec :
 
         fun Response.error() = CommerceJson.asA(bodyString(), ErrorResponse.serializer())
 
+        fun linesBody(lines: List<TestLine> = acceptanceLines()) = """{"lines":${linesJson(lines)}}"""
+
         fun estimate(
             inquiryId: String,
-            body: String = pricingBody(revision),
+            body: String = linesBody(),
         ) = application.adminPost("/inquiries/$inquiryId/estimates", body)
 
-        fun newEstimate(body: String = pricingBody(revision)): FinancialDocumentResponse =
+        fun newEstimate(body: String = linesBody()): FinancialDocumentResponse =
             estimate(application.createInquiry(), body).also { it.status shouldBe Status.CREATED }.document()
 
         fun changeOrder(
@@ -103,7 +101,13 @@ class FinancialDocumentRoutesSpec :
         /** A line as the customer sees it, without its id. */
         fun FinancialDocumentLine.charge() = listOf(description, subDescription, quantity, unitPrice, subtotal, taxAmount, total, currency)
 
-        fun EstimatePreviewLine.charge() = listOf(description, subDescription, quantity, unitPrice, subtotal, taxAmount, total, currency)
+        /** A change-order body keeping [document]'s lines by id with [edit] applied, plus [added] new lines. */
+        fun edited(
+            document: FinancialDocumentResponse,
+            added: List<String> = emptyList(),
+            edit: (FinancialDocumentLine) -> TestLine? = { it.test() },
+        ) = """{"expectedVersion":${document.version},"lines":""" +
+            proposalJson(*(document.lines.mapNotNull { line -> edit(line)?.existing(line.id) } + added).toTypedArray()) + "}"
 
         fun count(sql: String) =
             application.database
@@ -116,69 +120,13 @@ class FinancialDocumentRoutesSpec :
                 "SELECT document_version FROM commerce.payment_allocations WHERE document_id = '$documentId' ORDER BY document_version",
             )
 
-        beforeSpec {
-            application = TestApplication.create()
-            revision = application.createAcceptanceCatalog()
-        }
+        beforeSpec { application = TestApplication.create() }
         afterSpec { application.close() }
 
-        test("every pricing workflow exposes the same structured rejection without losing its explanation") {
-            val invalidInputs = pricingBody(revision, minutes = 100)
-            val inquiryId = application.createInquiry()
-            val document = newEstimate()
-            val responses =
-                listOf(
-                    application.http(
-                        Request(
-                            Method.POST,
-                            "/estimate-preview",
-                        ).asFionasWeb(application).header("Content-Type", "application/json").body(invalidInputs),
-                    ),
-                    application.http(
-                        Request(
-                            Method.POST,
-                            "/inquiries",
-                        ).withSubmissionKey().asFionasWeb(application).header("Content-Type", "application/json").body(
-                            """{"name":"Rejected","email":"rejected@example.com","zipCode":"92626","eventDate":"2026-12-05","eventType":"BIRTHDAY","pricingInputs":$invalidInputs}""",
-                        ),
-                    ),
-                    estimate(inquiryId, invalidInputs),
-                    application.adminPost(
-                        "/inquiries/$inquiryId/financial-documents",
-                        invalidInputs.dropLast(1) + """, "stage":"QUOTE"}""",
-                    ),
-                    changeOrder(document.id, pricingBody(revision, minutes = 100, expectedVersion = 1)),
-                )
-            val errors =
-                responses.map { response ->
-                    response.status shouldBe Status.UNPROCESSABLE_ENTITY
-                    CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()).also {
-                        it.code shouldBe "validation_failed"
-                        it.violations!!.map { violation -> violation.code } shouldBe listOf("UNSUPPORTED_DURATION")
-                        it.message shouldContain "the service duration must be one of 90, 120, 150, 180 minutes, got 100"
-                    }
-                }
-            errors.distinct().size shouldBe 1
-        }
-
-        test("an inquiry becomes a persisted estimate, a quote, a deposit, an invoice, change orders, and a final payment") {
+        test("an inquiry gains a staff estimate, line edits, a quote, a deposit, an invoice, and a final payment") {
             val inquiryId = application.createInquiry()
 
-            // The public preview prices the same inputs and records nothing.
-            val snapshotsBefore = application.database.count("commerce.financial_document_snapshots")
-            val preview =
-                application.http(
-                    Request(
-                        Method.POST,
-                        "/estimate-preview",
-                    ).asFionasWeb(application).header("Content-Type", "application/json").body(pricingBody(revision)),
-                )
-            preview.status shouldBe Status.OK
-            val previewed = CommerceJson.asA(preview.bodyString(), EstimatePreviewResponse.serializer())
-            previewed.total shouldBe "681.25"
-            application.database.count("commerce.financial_document_snapshots") shouldBe snapshotsBefore
-
-            // D/v1: the server prices the inputs exactly as the preview did, and persists them.
+            // D/v1: the staff user's exact lines, recorded as committed, with the user as their author.
             val created = estimate(inquiryId)
             created.status shouldBe Status.CREATED
             val v1 = created.document()
@@ -187,53 +135,41 @@ class FinancialDocumentRoutesSpec :
             v1.previousVersion.shouldBeNull()
             v1.stage shouldBe "ESTIMATE"
             v1.inquiryId shouldBe inquiryId
-            v1.lines.map { it.charge() } shouldBe previewed.lines.map { it.charge() }
+            v1.lines.map { it.description } shouldContainExactly acceptanceLines().map { it.description }
             v1.total shouldBe "681.25"
             v1.subtotal shouldBe "681.25"
             v1.taxAmount shouldBe "0.00"
             v1.currency shouldBe "USD"
-            v1.pricing shouldBe
-                DocumentPricing(
-                    revision,
-                    75,
-                    false,
-                    120,
-                    listOf(
-                        PricingSelection("soft-serve-flavor", listOf("vanilla", "horchata")),
-                        PricingSelection("topping", TOPPINGS),
-                        PricingSelection("cone-option", listOf("waffle-cone")),
-                    ),
-                )
+            v1.linesAuthoredBy.shouldNotBeNull().let {
+                it.principalKind shouldBe "USER"
+                it.principalId shouldBe application.adminId.value.toString()
+            }
             v1.reconciliation shouldBe DocumentReconciliation("0.00", "0.00", "681.25", "USD")
             val id = v1.id
             application.database.strings(
                 "SELECT inquiry_id FROM fionas.inquiry_financial_documents WHERE document_id = '$id'",
             ) shouldContainExactly listOf(inquiryId)
-            application.database.strings(
-                "SELECT document_version || ' ' || (pricing_inputs ->> 'catalogRevision') || ' ' || " +
-                    "(pricing_inputs -> 'context' ->> 'guestCount') FROM fionas.financial_document_pricing " +
-                    "WHERE document_id = '$id'",
-            ) shouldContainExactly listOf("1 $revision 75")
 
-            // D/v2: the guest count changes, and the server reprices it.
+            // D/v2: the guest count changes; staff override each per-guest line in place, under its id.
+            val hundred = acceptanceLines(guests = 100).associateBy { it.description.substringBefore(" (") }
             val v2 =
-                changeOrder(id, pricingBody(revision, guests = 100, expectedVersion = 1))
+                changeOrder(id, edited(v1) { hundred.getValue(it.description.substringBefore(" (")) })
                     .also { it.status shouldBe Status.OK }
                     .document()
             v2.version shouldBe 2
             v2.previousVersion shouldBe 1
             v2.stage shouldBe "ESTIMATE"
             v2.total shouldBe "825.00"
-            v2.pricing!!.guestCount shouldBe 100
-            // Repricing replaces the line set: no line of v2 pretends to be a line of v1.
-            (v2.lines.map { it.id } intersect v1.lines.map { it.id }.toSet()).shouldBeEmpty()
+            // Overrides keep every line's identity; the predecessor is untouched.
+            v2.lines.map { it.id } shouldContainExactly v1.lines.map { it.id }
+            get("/financial-documents/$id/history").history().versions.first() shouldBe v1.copy(reconciliation = null)
 
-            // D/v3: the quote keeps the estimate's lines and pricing source; nothing is repriced.
+            // D/v3: the quote keeps the estimate's lines and their authorship; nothing is repriced.
             val v3 = quote(id, 2).also { it.status shouldBe Status.OK }.document()
             v3.version shouldBe 3
             v3.stage shouldBe "QUOTE"
             v3.lines shouldBe v2.lines
-            v3.pricing shouldBe v2.pricing
+            v3.linesAuthoredBy shouldBe v2.linesAuthoredBy
             v3.reconciliation shouldBe DocumentReconciliation("0.00", "0.00", "825.00", "USD")
 
             // A $300 deposit against the quote.
@@ -257,13 +193,14 @@ class FinancialDocumentRoutesSpec :
             v4.version shouldBe 4
             v4.stage shouldBe "INVOICE"
             v4.lines shouldBe v3.lines
-            v4.pricing shouldBe v3.pricing
+            v4.linesAuthoredBy shouldBe v3.linesAuthoredBy
             v4.reconciliation shouldBe DocumentReconciliation("300.00", "300.00", "525.00", "USD")
             allocatedVersions(id) shouldContainExactly listOf("3")
 
             // D/v5: service time is added to the invoice; the balance follows the new total.
+            val longer = acceptanceLines(guests = 100, minutes = 150).first()
             val v5 =
-                changeOrder(id, pricingBody(revision, guests = 100, minutes = 150, expectedVersion = 4))
+                changeOrder(id, edited(v4) { if (it.description == "Base service") longer else it.test() })
                     .also { it.status shouldBe Status.OK }
                     .document()
             v5.version shouldBe 5
@@ -271,7 +208,7 @@ class FinancialDocumentRoutesSpec :
             v5.total shouldBe "850.00"
             v5.lines.first().charge() shouldBe
                 listOf("Base service", "2.5 hours · setup, staff & local travel", null, "275.00", "275.00", "0.00", "275.00", "USD")
-            v5.pricing!!.durationMinutes shouldBe 150
+            v5.lines.first().id shouldBe v4.lines.first().id
             v5.reconciliation shouldBe DocumentReconciliation("300.00", "300.00", "550.00", "USD")
             allocatedVersions(id) shouldContainExactly listOf("3")
 
@@ -288,16 +225,14 @@ class FinancialDocumentRoutesSpec :
             val latest = get("/financial-documents/$id").also { it.status shouldBe Status.OK }.document()
             latest shouldBe v5.copy(reconciliation = DocumentReconciliation("850.00", "850.00", "0.00", "USD"))
 
-            // The full history, each version with its own pricing source and no settlement.
+            // The full history, each version with its authorship and no settlement.
             val history = get("/financial-documents/$id/history").also { it.status shouldBe Status.OK }.history()
             history.id shouldBe id
             history.inquiryId shouldBe inquiryId
             history.versions.map { it.version } shouldContainExactly listOf(1, 2, 3, 4, 5)
             history.versions.map { it.stage } shouldContainExactly listOf("ESTIMATE", "ESTIMATE", "QUOTE", "INVOICE", "INVOICE")
             history.versions.map { it.total } shouldContainExactly listOf("681.25", "825.00", "825.00", "825.00", "850.00")
-            history.versions.map { it.pricing!!.guestCount } shouldContainExactly listOf(75, 100, 100, 100, 100)
-            history.versions.map { it.pricing!!.durationMinutes } shouldContainExactly listOf(120, 120, 120, 120, 150)
-            history.versions.map { it.pricing!!.catalogRevision }.toSet() shouldBe setOf(revision)
+            history.versions.map { it.linesAuthoredBy?.principalKind }.toSet() shouldBe setOf("USER")
             history.versions.forEach { it.reconciliation.shouldBeNull() }
             // Every mutation response carries the runtime's metadata for that exact persisted version.
             val written = listOf(v1, v2, v3, v4, v5)
@@ -330,7 +265,7 @@ class FinancialDocumentRoutesSpec :
         test("an inquiry may own several lineages") {
             val inquiryId = application.createInquiry()
             val first = estimate(inquiryId).document()
-            val second = estimate(inquiryId, pricingBody(revision, guests = 50)).document()
+            val second = estimate(inquiryId, linesBody(listOf(CHURROS))).document()
 
             first.id shouldNotBe second.id
             val listed =
@@ -351,158 +286,142 @@ class FinancialDocumentRoutesSpec :
                 .map { it.id } shouldContainExactly listOf(application.initialEstimateOf(fresh))
         }
 
-        test("the caller cannot supply lines, amounts, or totals: the server prices every persisted document") {
-            val forged = ""","lines":[{"description":"Everything","unitPrice":"1.00"}],"subtotal":"1.00","total":"1.00""""
-            val created = newEstimate(pricingBody(revision, extra = forged))
-            created.total shouldBe "681.25"
-            created.lines shouldHaveSize 5
-
-            val changed = changeOrder(created.id, pricingBody(revision, guests = 100, expectedVersion = 1, extra = forged)).document()
-            changed.total shouldBe "825.00"
+        test("a caller-supplied total is never authoritative: the total is always derived from the committed lines") {
+            val created = newEstimate(linesBody(listOf(CHURROS, COURTESY_DISCOUNT)).dropLast(1) + ""","total":"1.00","subtotal":"1.00"}""")
+            created.total shouldBe "400.00"
+            created.lines.map { it.unitPrice } shouldContainExactly listOf("450.00", "-50.00")
         }
 
-        test("change orders reprice in the current stage: estimate, quote, and invoice") {
+        test("precise unit rates are kept exactly while every subtotal, tax and total settles in minor units") {
+            val sampler = TestLine("Tasting spoons", null, "8", "0.125")
+            val created = newEstimate(linesBody(listOf(CHURROS, sampler)))
+            val rated = created.lines[1]
+            rated.unitPrice shouldBe "0.125"
+            rated.subtotal shouldBe "1.00"
+            created.total shouldBe "451.00"
+
+            fun storedRate(documentId: String) =
+                application.database.strings(
+                    "SELECT line ->> 'priceAmount' FROM commerce.financial_document_snapshots, jsonb_array_elements(lines) AS l(line) " +
+                        "WHERE document_id = '$documentId' AND line ->> 'description' = 'Tasting spoons'",
+                )
+            storedRate(created.id) shouldContainExactly listOf("0.125")
+            // The public pricing authority may submit the same precise rate on a customer's Estimate v1.
+            val submitted = application.createInquiry(lines = listOf(CHURROS, sampler))
+            storedRate(application.initialEstimateOf(submitted)) shouldContainExactly listOf("0.125")
+
+            // Editing the rate's quantity keeps its precision; history keeps the original version exactly.
+            val revised =
+                changeOrder(
+                    created.id,
+                    """{"expectedVersion":1,"lines":${proposalJson(
+                        CHURROS.existing(created.lines[0].id),
+                        sampler.copy(quantity = "16").existing(rated.id),
+                    )}}""",
+                ).also { it.status shouldBe Status.OK }.document()
+            revised.lines[1].id shouldBe rated.id
+            revised.lines[1].unitPrice shouldBe "0.125"
+            revised.lines[1].subtotal shouldBe "2.00"
+            revised.total shouldBe "452.00"
+            get("/financial-documents/${created.id}/history").history().versions.map { it.lines[1].unitPrice } shouldContainExactly
+                listOf("0.125", "0.125")
+
+            // Nothing is rounded: an inexact extended subtotal or an over-precise flat price is rejected and writes nothing.
+            val versions = count("SELECT count(*) FROM commerce.financial_document_snapshots WHERE document_id = '${created.id}'")
+            listOf(sampler.copy(quantity = "3"), sampler.copy(quantity = null)).forEach { invalid ->
+                changeOrder(
+                    created.id,
+                    """{"expectedVersion":2,"lines":${proposalJson(CHURROS.existing(created.lines[0].id), invalid.new("spoons"))}}""",
+                ).status shouldBe Status.UNPROCESSABLE_ENTITY
+                estimate(application.createInquiry(), linesBody(listOf(invalid))).status shouldBe Status.UNPROCESSABLE_ENTITY
+            }
+            count("SELECT count(*) FROM commerce.financial_document_snapshots WHERE document_id = '${created.id}'") shouldBe versions
+        }
+
+        test("staff edits carry, override, remove, add and reorder lines, keeping every existing line's identity") {
+            val created = newEstimate(linesBody(listOf(CHURROS, COURTESY_DISCOUNT, TestLine("Napkins", unitPrice = "5.00"))))
+            val (churros, discount, napkins) = created.lines
+            val revised =
+                changeOrder(
+                    created.id,
+                    """{"expectedVersion":1,"lines":${proposalJson(
+                        TestLine("Travel", "Outside the local area", null, "75.00").new("travel"),
+                        COURTESY_DISCOUNT.copy(unitPrice = "-25.00").existing(discount.id),
+                        CHURROS.existing(churros.id),
+                    )}}""",
+                ).also { it.status shouldBe Status.OK }.document()
+            revised.lines.map { it.description } shouldContainExactly listOf("Travel", "Courtesy discount", "Churro catering service")
+            revised.lines[1].id shouldBe discount.id
+            revised.lines[2].id shouldBe churros.id
+            revised.lines.map { it.id }.contains(napkins.id) shouldBe false
+            revised.total shouldBe "500.00"
+            // The predecessor is immutable.
+            get("/financial-documents/${created.id}/history")
+                .history()
+                .versions
+                .first()
+                .lines shouldBe created.lines
+        }
+
+        test("change orders commit staff lines in the current stage: estimate, quote, and invoice") {
             val estimate = newEstimate()
-            changeOrder(estimate.id, pricingBody(revision, guests = 80, expectedVersion = 1)).document().stage shouldBe "ESTIMATE"
-            quote(estimate.id, 2).document().stage shouldBe "QUOTE"
-            val changedQuote =
-                changeOrder(estimate.id, pricingBody(revision, guests = 80, cones = listOf("cup"), expectedVersion = 3)).document()
-            changedQuote.stage shouldBe "QUOTE"
-            changedQuote.version shouldBe 4
-            changedQuote.lines.map { it.description } shouldContainExactly
-                listOf("Base service", "Ice cream service", "Horchata", "Extra toppings (2)")
-            invoice(estimate.id, 4).document().stage shouldBe "INVOICE"
-            changeOrder(estimate.id, pricingBody(revision, guests = 90, cones = listOf("cup"), expectedVersion = 5)).document().let {
+            val v2 = changeOrder(estimate.id, changeOrderBody(1, acceptanceLines(guests = 80))).document()
+            v2.stage shouldBe "ESTIMATE"
+            quote(estimate.id, 2).status shouldBe Status.OK
+            val v4 = changeOrder(estimate.id, changeOrderBody(3, acceptanceLines(guests = 80, waffleCones = false))).document()
+            v4.stage shouldBe "QUOTE"
+            invoice(estimate.id, 4).status shouldBe Status.OK
+            changeOrder(estimate.id, changeOrderBody(5, acceptanceLines(guests = 90, waffleCones = false))).document().let {
                 it.stage shouldBe "INVOICE"
                 it.version shouldBe 6
-                it.pricing!!.guestCount shouldBe 90
+                it.lines.single { line -> line.description == "Ice cream service" }.quantity shouldBe "90"
             }
         }
 
-        test("inputs that price exactly as the current version does are no financial change") {
+        test("invalid staff line proposals are rejected with stable codes and append nothing") {
             val estimate = newEstimate()
 
-            changeOrder(estimate.id, pricingBody(revision, expectedVersion = 1)).let {
-                it.status shouldBe Status.UNPROCESSABLE_ENTITY
-                it.error() shouldBe ErrorResponse("validation_failed", "The revised pricing produces no financial change")
-            }
+            fun rejected(
+                body: String,
+                status: Status = Status.UNPROCESSABLE_ENTITY,
+            ) = changeOrder(estimate.id, body).also { it.status shouldBe status }
+
+            fun Response.codes() =
+                CommerceJson
+                    .asA(bodyString(), ValidationErrorResponse.serializer())
+                    .violations
+                    .orEmpty()
+                    .map { it.code }
+
+            rejected(edited(estimate)).codes() shouldBe listOf("NO_FINANCIAL_CHANGE")
+            rejected(edited(estimate, listOf(TestLine("Credit", unitPrice = "-1000.00").new("credit")))).codes() shouldBe
+                listOf("NEGATIVE_DOCUMENT_TOTAL")
+            rejected("""{"expectedVersion":1,"lines":${proposalJson(CHURROS.existing(UUID.randomUUID().toString()))}}""").codes() shouldBe
+                listOf("LINE_NOT_IN_REVIEWED_DOCUMENT")
+            rejected("""{"expectedVersion":1,"lines":${proposalJson(CHURROS.copy(currency = "EUR").new("eur"))}}""").codes() shouldBe
+                listOf("CURRENCY_MISMATCH")
+            rejected("""{"expectedVersion":1,"lines":[]}""")
+            rejected("""{"expectedVersion":1,"lines":${proposalJson(CHURROS.new("a"), CHURROS.new("a"))}}""")
+            rejected("""{"expectedVersion":1,"lines":${proposalJson(CHURROS.new("bad key"))}}""")
+            rejected("""{"expectedVersion":1,"lines":${proposalJson(CHURROS.copy(unitPrice = "4.505").new("a"))}}""")
+            // A line naming both or neither identity, or an unreadable id, is malformed.
+            rejected(
+                """{"expectedVersion":1,"lines":[{"lineItemId":"${estimate.lines.first().id}","key":"a",${CHURROS.json().drop(1)}]}""",
+                Status.BAD_REQUEST,
+            )
+            rejected("""{"expectedVersion":1,"lines":[${CHURROS.json()}]}""", Status.BAD_REQUEST)
+            rejected("""{"expectedVersion":1,"lines":[${CHURROS.existing("not-a-uuid")}]}""", Status.BAD_REQUEST)
             get("/financial-documents/${estimate.id}/history").history().versions shouldHaveSize 1
-        }
-
-        test("new staff pricing rejects old catalog revisions without modifying existing documents") {
-            val estimate = newEstimate()
-            val inquiryId = application.createInquiry()
-            val mango = application.addOffering(revision, "mango", "soft-serve-flavor", "Mango", perGuest("1.00"))
-            val snapshots = application.database.count("commerce.financial_document_snapshots")
-            val sources = application.database.count("fionas.financial_document_pricing")
-            val owners = application.database.count("fionas.inquiry_financial_documents")
-            val stale = pricingBody(revision)
-            val rejected =
-                listOf(
-                    changeOrder(estimate.id, pricingBody(revision, guests = 76, expectedVersion = 1)),
-                    estimate(inquiryId, stale),
-                ) +
-                    listOf("ESTIMATE", "QUOTE", "INVOICE").map { stage ->
-                        application.adminPost("/inquiries/$inquiryId/financial-documents", stale.dropLast(1) + """, "stage":"$stage"}""")
-                    }
-            rejected.forEach {
-                it.status shouldBe Status.CONFLICT
-                it.error() shouldBe
-                    ErrorResponse(
-                        CATALOG_REVISION_STALE,
-                        "The offerings catalog changed; reload it and review the selections before pricing again",
-                    )
-                it.header("Cache-Control") shouldBe "no-store"
-            }
-            application.database.count("commerce.financial_document_snapshots") shouldBe snapshots
-            application.database.count("fionas.financial_document_pricing") shouldBe sources
-            application.database.count("fionas.inquiry_financial_documents") shouldBe owners
-            get("/financial-documents/${estimate.id}").document().total shouldBe estimate.total
-            val adopted = changeOrder(estimate.id, pricingBody(mango, softServe = listOf("mango"), expectedVersion = 1)).document()
-            adopted.pricing!!.catalogRevision shouldBe mango
-            adopted.lines.map { it.description } shouldContain "Mango"
-            changeOrder(estimate.id, pricingBody(mango + 1, expectedVersion = 2)).let {
-                it.status shouldBe Status.NOT_FOUND
-                it.error() shouldBe ErrorResponse("not_found", "Offerings catalog revision r${mango + 1} was not found")
-            }
-            estimate(inquiryId, pricingBody(mango)).status shouldBe Status.CREATED
-            revision = mango
-        }
-
-        test("future and missing catalogs reject every staff pricing path while recorded documents still transition") {
-            TestApplication.create().use { fresh ->
-                val current = fresh.createAcceptanceCatalog()
-                val inquiry = fresh.createInquiry()
-                val document = fresh.initialEstimateOf(inquiry)
-                val snapshotCount = fresh.database.count("commerce.financial_document_snapshots")
-
-                fun rejectedPricing(requested: Int) =
-                    listOf(
-                        fresh.adminPost("/inquiries/$inquiry/estimates", pricingBody(requested)),
-                        fresh.adminPost(
-                            "/financial-documents/$document/change-orders",
-                            pricingBody(requested, guests = 80, expectedVersion = 1),
-                        ),
-                        fresh.http(
-                            Request(Method.POST, "/estimate-preview")
-                                .asFionasWeb(fresh)
-                                .header("Content-Type", "application/json")
-                                .body(pricingBody(requested)),
-                        ),
-                    ) +
-                        listOf("ESTIMATE", "QUOTE", "INVOICE").map { stage ->
-                            fresh.adminPost(
-                                "/inquiries/$inquiry/financial-documents",
-                                pricingBody(requested).dropLast(1) +
-                                    """, "stage":"$stage"}""",
-                            )
-                        }
-                rejectedPricing(current + 1).forEach { it.status shouldBe Status.NOT_FOUND }
-                fresh.database.count("commerce.financial_document_snapshots") shouldBe snapshotCount
-                fresh.database.count("fionas.financial_document_pricing") shouldBe 0
-                // Test-only deletion observes independence; production catalogs remain runtime-owned.
-                fresh.database.execute("DELETE FROM commerce.offerings_catalogs")
-                rejectedPricing(current).forEach { it.status shouldBe Status.NOT_FOUND }
-                fresh.database.count("commerce.financial_document_snapshots") shouldBe snapshotCount
-                fresh.database.count("fionas.financial_document_pricing") shouldBe 0
-                fresh.adminGet("/financial-documents/$document").document().total shouldBe "681.25"
-                fresh
-                    .adminPost(
-                        "/staff/requests/$inquiry/proposals",
-                        """{"expectedDocumentVersion":1,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
-                    ).status shouldBe Status.OK
-                fresh
-                    .adminPost("/financial-documents/$document/invoice", """{"expectedVersion":2}""")
-                    .status shouldBe Status.CONFLICT
-                fresh
-                    .adminRequest(
-                        Method.PUT,
-                        "/financial-documents/$document/deposit-requirement",
-                        """{"expectedDocumentVersion":2,"terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",
-                    ).status shouldBe Status.CONFLICT
-                fresh
-                    .adminPost(
-                        "/financial-documents/$document/payments",
-                        """{"documentVersion":2,"amount":"50","method":"CARD","expectedProposalId":"${fresh.proposalId(
-                            UUID.fromString(document),
-                        )!!.value}"}""",
-                    ).let {
-                        it.status shouldBe Status.CREATED
-                        it.payment().documentVersion shouldBe 2
-                    }
-                fresh.adminGet("/financial-documents/$document").document().stage shouldBe "INVOICE"
-                fresh.adminGet("/financial-documents/$document/history").history().versions shouldHaveSize 3
-            }
         }
 
         test("an action on a version that is no longer the latest is a conflict, and appends nothing") {
             val estimate = newEstimate()
-            changeOrder(estimate.id, pricingBody(revision, guests = 80, expectedVersion = 1)).status shouldBe Status.OK
+            changeOrder(estimate.id, changeOrderBody(1, acceptanceLines(guests = 80))).status shouldBe Status.OK
 
             listOf(
                 quote(estimate.id, 1),
-                changeOrder(estimate.id, pricingBody(revision, guests = 90, expectedVersion = 1)),
-                changeOrder(estimate.id, pricingBody(revision, guests = 90, expectedVersion = 3)),
+                changeOrder(estimate.id, changeOrderBody(1, acceptanceLines(guests = 90))),
+                changeOrder(estimate.id, changeOrderBody(3, acceptanceLines(guests = 90))),
             ).forEach {
                 it.status shouldBe Status.CONFLICT
                 it.error().code shouldBe "conflict"
@@ -610,7 +529,7 @@ class FinancialDocumentRoutesSpec :
                     get("/financial-documents/$id/payments"),
                     quote(id, 1),
                     invoice(id, 1),
-                    changeOrder(id, pricingBody(revision, guests = 80, expectedVersion = 1)),
+                    changeOrder(id, changeOrderBody(1, acceptanceLines(guests = 80))),
                     pay(id, 1, "10.00"),
                 ).forEach {
                     it.status shouldBe Status.NOT_FOUND
@@ -643,9 +562,9 @@ class FinancialDocumentRoutesSpec :
                 it.error().code shouldBe "malformed_request"
             }
             estimate(application.createInquiry(), "{}").status shouldBe Status.BAD_REQUEST
-            estimate(application.createInquiry(), pricingBody(revision, guests = 0)).let {
+            estimate(application.createInquiry(), linesBody(listOf(COURTESY_DISCOUNT))).let {
                 it.status shouldBe Status.UNPROCESSABLE_ENTITY
-                it.error().message shouldContain "INVALID_GUEST_COUNT"
+                it.error().message shouldContain "must not be negative"
             }
         }
 
@@ -694,21 +613,32 @@ class FinancialDocumentRoutesSpec :
                 application.authorization.unassignRole(admin.id, reader)
                 application.authorization.assignRole(admin.id, CommerceRoles.Administrator)
             }
-            quote(id, 1).status shouldBe Status.OK
-        }
-
-        test("the public estimate preview is unchanged and still records nothing") {
-            val documents = application.database.count("commerce.financial_document_snapshots")
-            val sources = application.database.count("fionas.financial_document_pricing")
-            application
-                .http(
-                    Request(
-                        Method.POST,
-                        "/estimate-preview",
-                    ).asFionasWeb(application).header("Content-Type", "application/json").body(pricingBody(revision)),
-                ).status shouldBe Status.OK
-            application.database.count("commerce.financial_document_snapshots") shouldBe documents
-            application.database.count("fionas.financial_document_pricing") shouldBe sources
+            // Creating documents is not authority over negotiated amounts: lines need fionas.financial-terms.manage too.
+            val creator = RoleKey("fionas.test.financial-creator")
+            application.authorization.createRole(
+                RoleDefinition(
+                    creator,
+                    "Financial creator",
+                    null,
+                    setOf(CommercePermissions.FinancialDocumentCreate, CommercePermissions.FinancialDocumentRead),
+                ),
+            )
+            application.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
+            application.authorization.assignRole(admin.id, creator)
+            try {
+                estimate(inquiryId).status shouldBe Status.FORBIDDEN
+                changeOrder(id, changeOrderBody(1, listOf(CHURROS))).status shouldBe Status.FORBIDDEN
+                application
+                    .adminPost(
+                        "/inquiries/$inquiryId/financial-documents",
+                        """{"stage":"QUOTE","lines":${linesJson(listOf(CHURROS))}}""",
+                    ).status shouldBe Status.FORBIDDEN
+                // Transitions commit no new amounts and keep their ordinary permission.
+                quote(id, 1).status shouldBe Status.OK
+            } finally {
+                application.authorization.unassignRole(admin.id, creator)
+                application.authorization.assignRole(admin.id, CommerceRoles.Administrator)
+            }
         }
 
         test("only the declared methods are allowed") {
@@ -722,5 +652,8 @@ class FinancialDocumentRoutesSpec :
     })
 
 private val USD = Currency.getInstance("USD")
+
+/** This response line as a test line, with its exact committed values. */
+private fun FinancialDocumentLine.test() = TestLine(description, subDescription, quantity, unitPrice, taxAmount, currency)
 
 private fun usd(amount: String) = Money(BigDecimal(amount), USD)

@@ -8,21 +8,21 @@ import java.util.UUID
 
 /**
  * Issues the latest estimate of a RELATED Fiona lineage as a quote, without repricing: the quote is
- * a new immutable snapshot with the same concrete lines. Fiona copies optional legacy
- * pricing metadata when present; the transition does not require it.
+ * a new immutable snapshot with the same concrete lines. Fiona carries the
+ * line authorship forward when present.
  *
  * In one runtime transaction: the lineage must belong to an inquiry, its latest version must
  * be the one the caller acted on ([CommerceFailure.Conflict] otherwise), the runtime appends
  * the quote (`CommerceFailure.IllegalTransition` when the latest snapshot is not an
- * estimate), and any legacy pricing metadata is copied to the new version.
+ * estimate), and the line authorship is carried to the new version.
  */
 class IssueQuote(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    private val pricingSources: FinancialDocumentPricingRepository,
+    authorship: FinancialDocumentAuthorshipRepository,
 ) {
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
     operator fun invoke(
         documentId: UUID,

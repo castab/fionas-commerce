@@ -4,12 +4,8 @@ import io.github.castab.commerce.deposit.DepositRequirementRevision
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
-import io.github.castab.commerce.runtime.http.authenticatedPrincipal
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
-import io.github.castab.commerce.staff.CommercePermissions
-import io.github.castab.commerce.staff.ServiceId
-import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.financial.FIONAS_DEFAULT_DEPOSIT_TERMS
 import io.github.castab.fionas.commerce.financial.InquiryProposal
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
@@ -40,12 +36,14 @@ data class IssueInquiryProposalRequest(
     @Serializable(with = StrictDepositTerms::class) val terms: DepositTermsRequest,
     @ApiProperty(
         description =
-            "Optional reviewed quote composition, exactly as previewed. Absent issues the Estimate unchanged. " +
-                "Present requires `reviewToken`.",
+            "Optional complete final Quote lines, exactly as previewed. Absent issues the Estimate unchanged. Present " +
+                "requires `reviewToken`.",
     )
-    val composition: QuoteCompositionRequest? = null,
+    val lines: List<ProposedLineRequest>? = null,
+    @ApiProperty(description = "Optional service plan, exactly as previewed; only together with `lines`.")
+    val servicePlan: ServicePlanRequest? = null,
     @ApiProperty(
-        description = "The preview's reviewToken for `composition`; required with it and forbidden without it.",
+        description = "The preview's reviewToken for `lines`; required with them and forbidden without them.",
         pattern = "^[0-9a-f]{64}$",
     )
     val reviewToken: String? = null,
@@ -55,8 +53,15 @@ data class IssueInquiryProposalRequest(
 data class ReviseInquiryQuoteProposalRequest(
     @ApiProperty(description = "Exact reviewed current Quote version.") val expectedDocumentVersion: Int,
     @ApiProperty(description = "Exact reviewed active deposit revision.") val expectedDepositRequirementRevision: Int,
-    val pricingInputs: CreateInquiryEstimateRequest,
+    @ApiProperty(
+        description =
+            "The complete revised final Quote lines: existing lines by `lineItemId` (carried or overridden), new lines by " +
+                "`key`; lines left out are removed. Lines equal to the current Quote's are no change.",
+    )
+    val lines: List<ProposedLineRequest>,
     @Serializable(with = StrictDepositTerms::class) val terms: DepositTermsRequest,
+    @ApiProperty(description = "Optional service plan approved with the revised Quote.")
+    val servicePlan: ServicePlanRequest? = null,
 )
 
 @Serializable
@@ -74,8 +79,7 @@ data class InquiryProposalResponse(
     val documentVersion: Int,
     val depositRequirementRevision: Int,
     @ApiProperty(format = "date-time") val issuedAt: String,
-    val principalKind: String,
-    @ApiProperty(format = "uuid") val principalId: String,
+    @ApiProperty(description = "The verified staff user who published the proposal.", format = "uuid") val issuedBy: String,
     @ApiProperty(description = "INITIAL, QUOTE_REVISED, or DEPOSIT_REVISED; never communication delivery.") val issuanceKind: String,
 )
 
@@ -84,7 +88,7 @@ data class IssuedInquiryProposalResponse(
     val proposal: InquiryProposalResponse,
     val financial: FinancialDocumentResponse,
     val depositRequirement: CurrentDepositRequirementResponse,
-    @ApiProperty(description = "The approved service plan of the published Quote; present only when issued with a composition.")
+    @ApiProperty(description = "The service plan approved with the published Quote; present only when one was submitted.")
     val servicePlan: ServicePlanResponse? = null,
 )
 
@@ -96,14 +100,7 @@ internal fun InquiryProposal.toResponse(): InquiryProposalResponse =
         documentReference.version.number,
         depositRequirementRevision.number,
         issuedAt.toString(),
-        when (principalId) {
-            is UserId -> "USER"
-            is ServiceId -> "SERVICE"
-        },
-        when (val actor = principalId) {
-            is UserId -> actor.value.toString()
-            is ServiceId -> actor.value.toString()
-        },
+        issuedBy.value.toString(),
         kind.name,
     )
 
@@ -129,7 +126,6 @@ private val proposalExample =
             2,
             1,
             "2026-10-05T17:00:00Z",
-            "USER",
             "580a28a1-7417-480a-9089-8f5f3c25c1cd",
             "INITIAL",
         ),
@@ -143,6 +139,51 @@ private val proposalExample =
             requiredAmount = DepositMoneyResponse("136.25", "USD"),
             satisfied = false,
         ),
+    )
+
+/** The churro example published: Estimate v2 holds the staff lines, Quote v3 is published with an 80.00 deposit. */
+private val composedProposalExample =
+    proposalExample.copy(
+        proposal = proposalExample.proposal.copy(documentVersion = 3),
+        financial =
+            proposalExample.financial.copy(
+                version = 3,
+                previousVersion = 2,
+                lines =
+                    listOf(
+                        FinancialDocumentLine(
+                            "8f1d2c3b-4a5e-3f60-9a7b-1c2d3e4f5a6b",
+                            "Churro catering service",
+                            "Prepared on site",
+                            "1",
+                            "450.00",
+                            "450.00",
+                            "0.00",
+                            "450.00",
+                            "USD",
+                        ),
+                        FinancialDocumentLine(
+                            "2a3b4c5d-6e7f-3081-92a3-b4c5d6e7f809",
+                            "Courtesy discount",
+                            null,
+                            null,
+                            "-50.00",
+                            "-50.00",
+                            "0.00",
+                            "-50.00",
+                            "USD",
+                        ),
+                    ),
+                subtotal = "400.00",
+                total = "400.00",
+                reconciliation = DocumentReconciliation("0.00", "0.00", "400.00", "USD"),
+            ),
+        depositRequirement =
+            (proposalExample.depositRequirement as CurrentDepositRequirementResponse.Active).copy(
+                approvalDocumentVersion = 3,
+                requiredAmount = DepositMoneyResponse("80.00", "USD"),
+            ),
+        servicePlan = exampleServicePlan,
     )
 
 private val quoteRevisionExample =
@@ -187,28 +228,29 @@ private fun RouteMetaDsl.proposalErrors(
 ) {
     tags += Tag("Staff proposals", "Atomic publication of an exact canonical Quote and approved deposit pair.")
     principalAuthentication()
+    security = staffSessionSecurity
     returning(Status.OK, proposalBody to example)
+    returningError(ErrorCategory.FORBIDDEN, STAFF_COMPOSITION_FORBIDDEN, STAFF_USER_REQUIRED)
     returningError(
-        ErrorCategory.FORBIDDEN,
-        "Requires BOTH commerce.financial-document.create and commerce.deposit-requirement.manage. Unsafe cookie requests require a trusted Origin.",
-        UNTRUSTED_ORIGIN,
+        ErrorCategory.MALFORMED_REQUEST,
+        "Unreadable inquiry or line UUID, a line or note naming both or neither of `lineItemId` and `key`, or request shape.",
+        "Malformed request",
     )
-    returningError(ErrorCategory.MALFORMED_REQUEST, "Unreadable inquiry UUID or request shape.", "Malformed request")
     returningError(
         ErrorCategory.NOT_FOUND,
-        "Inquiry/canonical lineage or catalog revision does not exist.",
+        "Inquiry or canonical lineage does not exist.",
         "Canonical inquiry financial lineage was not found",
     )
     returningError(
         ErrorCategory.CONFLICT,
-        "Stale document version, deposit revision or catalog revision. Reload and review. " +
+        "Stale document version or deposit revision; reload and review, never rebased. " +
             "Also illegal_transition for an ineligible stage or historical applied payment." + conflictExtra,
         "Stale expected version",
     )
     returningError(
         ErrorCategory.VALIDATION_FAILED,
-        "Invalid positive versions, decimal terms, pricing, or a no-op revision. " +
-            "Also invariant_violated for shared financial/pricing invariants." + validationExtra,
+        "Invalid positive versions, decimal terms, lines, or a no-op revision. " +
+            "Also invariant_violated for shared financial invariants." + validationExtra,
         "The revised deposit terms produce no change",
     )
     returningError(
@@ -218,11 +260,6 @@ private fun RouteMetaDsl.proposalErrors(
     )
 }
 
-private fun AccessControl.proposalAccess() =
-    requirePermission(CommercePermissions.FinancialDocumentCreate)
-        .then(requirePermission(CommercePermissions.DepositRequirementManage))
-        .then(catalogRevisionStaleResponses)
-
 internal fun issueInquiryProposalRoute(
     issue: (IssueInquiryProposal.Command) -> IssuedInquiryProposal,
     access: AccessControl,
@@ -231,37 +268,60 @@ internal fun issueInquiryProposalRoute(
         operationId = "issueInquiryProposal"
         summary = "Publish the initial inquiry proposal"
         description =
-            "Derives the canonical lineage from inquiryId. Without `composition`, atomically issues Estimate to Quote without " +
-            "repricing. With a reviewed `composition` and its preview `reviewToken`, re-evaluates it under the canonical " +
-            "association lock and requires the identical result (otherwise 409 QUOTE_REVIEW_STALE); appends an " +
-            "intermediate Estimate only when charges change, then the Quote, its immutable service plan (servicePlan), " +
-            "the deposit approved against that final Quote, and the publication, all in one transaction. A Quote total " +
-            "must be positive. Explicitly approves deposit terms against the new Quote and records INITIAL issuance with " +
-            "authenticated provenance. The suggested deposit is 20%; terms are required. Issued is not sent: no " +
-            "communication, payment or booking follows. Stale attempts conflict. Cache-Control: no-store."
-        receiving(initialBody to IssueInquiryProposalRequest(1, defaultTerms))
+            "Derives the canonical lineage from inquiryId. Without `lines`, atomically issues the Estimate to a Quote " +
+            "unchanged. With the staff user's final `lines` (and optional `servicePlan`) and their preview `reviewToken`, " +
+            "resolves them again under the canonical association lock and requires the identical reviewed result " +
+            "(otherwise 409 QUOTE_REVIEW_STALE); appends an intermediate Estimate only when the lines differ, then the " +
+            "Quote of exactly that version, its immutable service plan, the deposit approved against that final Quote, " +
+            "and the publication, all in one transaction. No catalog or pricing policy is consulted. The Quote total must " +
+            "be positive. Explicitly approves deposit terms and records INITIAL issuance by the authenticated staff user. " +
+            "The suggested deposit is 20%; terms are required. Issued is not sent: no communication, payment or booking " +
+            "follows. Stale attempts conflict. Cache-Control: no-store."
+        receiving(
+            initialBody to
+                IssueInquiryProposalRequest(
+                    1,
+                    defaultTerms,
+                    exampleProposedLines,
+                    exampleServicePlanRequest,
+                    "9f2c4a1b8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b",
+                ),
+        )
         proposalErrors(
-            proposalExample,
-            " With a composition, CATALOG_REVISION_STALE for a stale reviewed catalog revision and QUOTE_REVIEW_STALE when the " +
-                "composition no longer produces the reviewed result; preview again (both no-store).",
-            " With a composition: " + COMPOSITION_REJECTED,
+            composedProposalExample,
+            " With lines, QUOTE_REVIEW_STALE (no-store) when they no longer produce the reviewed result; preview again.",
+            " With lines: " + COMPOSITION_REJECTED,
         )
     } bindContract Method.POST to { id: String, _: String ->
-        access.proposalAccess().then(quoteReviewStaleResponses).then { request: Request ->
+        access.staffComposition().then(quoteReviewStaleResponses).then { request: Request ->
             val inquiry = inquiryId(id)
             val body = initialBody(request)
-            if ((body.composition == null) != (body.reviewToken == null)) {
+            if ((body.lines == null) != (body.reviewToken == null)) {
                 throw LensFailure(Invalid(initialBody.metas.single().copy(name = "reviewToken")))
             }
-            val composition = body.composition?.domain(initialBody)
+            if (body.servicePlan != null && body.lines == null) {
+                throw LensFailure(Invalid(initialBody.metas.single().copy(name = "servicePlan")))
+            }
+            val lineIdentities = body.lines?.identities(initialBody)
+            val noteIdentities =
+                body.servicePlan
+                    ?.lineNotes
+                    ?.identities(initialBody)
+                    .orEmpty()
             val command =
                 validating {
                     IssueInquiryProposal.Command(
                         inquiry,
                         Version.of(body.expectedDocumentVersion),
                         body.terms.domain(),
-                        authenticatedPrincipal(request),
-                        composition?.let { ReviewedQuoteComposition(it, QuoteReviewToken(body.reviewToken!!)) },
+                        staffUser(request),
+                        body.lines?.let { lines ->
+                            ReviewedQuoteComposition(
+                                lines.domain(lineIdentities!!),
+                                body.servicePlan?.domain(noteIdentities),
+                                QuoteReviewToken(body.reviewToken!!),
+                            )
+                        },
                     )
                 }
             Response(Status.OK).header("Cache-Control", "no-store").with(proposalBody of issue(command).toResponse())
@@ -274,42 +334,40 @@ internal fun reviseInquiryQuoteProposalRoute(
 ): ContractRoute =
     "/staff/requests" / inquiryDetailIdPath / "proposals" / "quote-revisions" meta {
         operationId = "reviseInquiryQuoteProposal"
-        summary = "Reprice and reissue an unpaid inquiry proposal"
+        summary = "Revise the lines of an unpaid inquiry proposal and reissue it"
         description =
-            "Exact current Quote/deposit tokens are required. Reprices the current catalog, rejects no-op charges and negative resulting document totals, appends a same-stage Quote and a replacement deposit approved against that new version even when terms are unchanged, then records QUOTE_REVISED issuance atomically. Supersedes every prior payment-link target. Any historical gross allocation blocks revision, including fully refunded payments. A zero-total Quote cannot publish a positive deposit; the complete revision rolls back. Cache-Control: no-store."
+            "Exact current Quote/deposit tokens are required. Commits the staff user's complete revised final lines " +
+            "(existing lines carried or overridden by `lineItemId`, new lines by `key`, omitted lines removed) as a " +
+            "same-stage Quote of exactly the reviewed version, with an optional service plan, a replacement deposit " +
+            "approved against that new version even when terms are unchanged, and QUOTE_REVISED issuance, atomically. " +
+            "No catalog or pricing policy is consulted. Rejects lines equal to the current Quote's (NO_FINANCIAL_CHANGE; " +
+            "use deposit-revisions) and negative or zero totals. Supersedes every prior payment-link target. Any " +
+            "historical gross allocation blocks revision, including fully refunded payments. Cache-Control: no-store."
         receiving(
             quoteRevisionBody to
-                ReviseInquiryQuoteProposalRequest(
-                    2,
-                    1,
-                    CreateInquiryEstimateRequest(20, 100, false, 120, exampleQuote.pricing!!.selections),
-                    defaultTerms,
-                ),
+                ReviseInquiryQuoteProposalRequest(2, 1, exampleProposedLines, defaultTerms, exampleServicePlanRequest),
         )
-        proposalErrors(quoteRevisionExample)
+        proposalErrors(quoteRevisionExample, validationExtra = " " + COMPOSITION_REJECTED)
     } bindContract Method.POST to { id: String, _: String, _: String ->
-        access.proposalAccess().then { request: Request ->
+        access.staffComposition().then { request: Request ->
             val inquiry = inquiryId(id)
             val body = quoteRevisionBody(request)
-            val input = body.pricingInputs
+            val lineIdentities = body.lines.identities(quoteRevisionBody)
+            val noteIdentities =
+                body.servicePlan
+                    ?.lineNotes
+                    ?.identities(quoteRevisionBody)
+                    .orEmpty()
             val command =
                 validating {
                     ReviseInquiryQuoteProposal.Command(
                         inquiry,
                         Version.of(body.expectedDocumentVersion),
                         DepositRequirementRevision.of(body.expectedDepositRequirementRevision),
-                        pricingInputs(
-                            input.catalogRevision,
-                            input.guestCount,
-                            input.guestCountIsMinimum,
-                            input.durationMinutes,
-                            input.selections.map {
-                                it.category to
-                                    it.offerings
-                            },
-                        ),
+                        body.lines.domain(lineIdentities),
                         body.terms.domain(),
-                        authenticatedPrincipal(request),
+                        staffUser(request),
+                        body.servicePlan?.domain(noteIdentities),
                     )
                 }
             Response(Status.OK).header("Cache-Control", "no-store").with(proposalBody of revise(command).toResponse())
@@ -324,11 +382,14 @@ internal fun reviseInquiryProposalDepositRoute(
         operationId = "reviseInquiryProposalDeposit"
         summary = "Reissue an unpaid inquiry proposal with new deposit terms"
         description =
-            "Exact current Quote/deposit tokens are required. Rejects semantically unchanged terms, keeps the Quote version, appends replacement approved deposit and DEPOSIT_REVISED issuance atomically. Different term forms are meaningful even at equal resolved amounts. Supersedes every prior payment-link target. Any historical gross allocation blocks revision even after refunds. Cache-Control: no-store."
+            "Exact current Quote/deposit tokens are required. Rejects semantically unchanged terms, keeps the Quote version, " +
+            "appends replacement approved deposit and DEPOSIT_REVISED issuance by the staff user atomically. Different term " +
+            "forms are meaningful even at equal resolved amounts. Supersedes every prior payment-link target. Any historical " +
+            "gross allocation blocks revision even after refunds. Cache-Control: no-store."
         receiving(depositRevisionBody to ReviseInquiryProposalDepositRequest(2, 1, DepositTermsRequest.Fixed("100.00", "USD")))
         proposalErrors(depositRevisionExample)
     } bindContract Method.POST to { id: String, _: String, _: String ->
-        access.proposalAccess().then { request: Request ->
+        access.staffComposition().then { request: Request ->
             val inquiry = inquiryId(id)
             val body = depositRevisionBody(request)
             val command =
@@ -338,7 +399,7 @@ internal fun reviseInquiryProposalDepositRoute(
                         Version.of(body.expectedDocumentVersion),
                         DepositRequirementRevision.of(body.expectedDepositRequirementRevision),
                         body.terms.domain(),
-                        authenticatedPrincipal(request),
+                        staffUser(request),
                     )
                 }
             Response(Status.OK).header("Cache-Control", "no-store").with(proposalBody of revise(command).toResponse())

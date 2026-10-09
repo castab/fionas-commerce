@@ -10,12 +10,12 @@ import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 
 /**
- * The write-free preview of an initial canonical Quote composition: exactly what
- * [IssueInquiryProposal] would publish for the same intent, including the resolved deposit and
- * the review token its approval must present.
+ * The write-free preview of an initial canonical Quote: exactly what [IssueInquiryProposal]
+ * would publish for the same final lines, service plan and deposit terms, including the
+ * domain-derived totals, the resolved deposit and the review token its approval must present.
  *
- * One unlocked REPEATABLE READ snapshot reads the canonical Estimate, the inquiry, the optional
- * pricing source and the current catalog; nothing is written, even on failure. The same
+ * One unlocked REPEATABLE READ snapshot reads the canonical Estimate and its proposal history;
+ * nothing is written, even on failure, and no catalog or pricing policy is consulted. The same
  * eligibility as issuance applies: the canonical lineage at its exact reviewed Estimate version
  * with no proposal or deposit history.
  */
@@ -24,12 +24,12 @@ class PreviewInquiryQuote(
     private val ledger: FinancialLedger,
     private val associations: InquiryFinancialDocumentRepository,
     private val proposals: InquiryProposalRepository,
-    private val compositions: InquiryQuoteComposition,
 ) {
     data class Command(
         val inquiryId: InquiryId,
         val expectedDocumentVersion: Version,
-        val composition: QuoteComposition,
+        val lines: LineProposal,
+        val servicePlan: ProposedServicePlan?,
         val terms: DepositTerms,
     )
 
@@ -48,6 +48,6 @@ class PreviewInquiryQuote(
             if (estimate !is FinancialDocument.Estimate) throw CommerceFailure.IllegalTransition("Initial proposal requires an Estimate")
             val view = ledger.financialLineages(transaction, listOf(documentId)).single()
             requireCoherentProposal(command.inquiryId, proposals.latest(transaction, command.inquiryId), view)
-            compositions.compose(transaction, command.inquiryId, estimate, command.composition, command.terms)
+            QuoteComposer.compose(command.inquiryId, estimate, command.lines, command.servicePlan, command.terms)
         }
 }

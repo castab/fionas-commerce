@@ -200,9 +200,8 @@ val TEST_SERVICE_TOKENS =
         issuer = "fionas-commerce-test",
     )
 
-/** What the web frontend's role `fionas.web` grants: Fiona's three customer operations, nothing else. */
-val FIONAS_WEB_PERMISSIONS =
-    setOf(FionaPermissions.InquiryFormRead, FionaPermissions.EstimatePreviewCreate, FionaPermissions.InquiriesCreate)
+/** What the web frontend's role `fionas.web` grants: priced inquiry submission, nothing else. */
+val FIONAS_WEB_PERMISSIONS = setOf(FionaPermissions.InquiriesCreate)
 
 /** A provisioned SERVICE principal, its role, and its credential secret. */
 data class TestService(

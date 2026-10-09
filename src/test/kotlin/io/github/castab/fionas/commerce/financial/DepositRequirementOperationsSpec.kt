@@ -10,7 +10,6 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.sqlState
 import io.github.castab.fionas.commerce.testing.testClock
@@ -36,7 +35,7 @@ class DepositRequirementOperationsSpec :
     FunSpec({
         lateinit var app: TestApplication
         val owners = JdbiInquiryFinancialDocumentRepository()
-        val pricing = JdbiFinancialDocumentPricingRepository()
+        val pricing = JdbiFinancialDocumentAuthorshipRepository()
 
         fun money(amount: String) = Money(BigDecimal(amount), Currency.getInstance("USD"))
 
@@ -61,7 +60,6 @@ class DepositRequirementOperationsSpec :
         fun command(id: UUID) = SetDepositRequirement.Command(id, Version.INITIAL, null, DepositTerms.Fixed(money("50.00")))
         beforeSpec {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
             app.adminCookie
         }
         afterSpec { app.close() }

@@ -87,7 +87,6 @@ class AuthRoutesSpec :
                 admin.roles.map { it.role }.toSet() shouldBe setOf(CommerceRoles.Administrator)
                 app.authorization.getRole(CommerceRoles.Administrator)!!.permissions shouldBe
                     setOf(
-                        CommercePermissions.OfferingsManage,
                         CommercePermissions.FinancialDocumentRead,
                         CommercePermissions.FinancialDocumentCreate,
                         CommercePermissions.DepositRequirementManage,
@@ -101,12 +100,12 @@ class AuthRoutesSpec :
                         RuntimePermissions.ServiceCredentialManage,
                         FionaPermissions.CredentialsManage,
                         FionaPermissions.InquiriesRead,
-                        FionaPermissions.InquiriesCreate,
                         FionaPermissions.InquiriesManage,
                         FionaPermissions.CommunicationsAcknowledge,
-                        FionaPermissions.InquiryFormRead,
-                        FionaPermissions.EstimatePreviewCreate,
+                        FionaPermissions.FinancialTermsManage,
                     )
+                // Priced inquiry submission is a SERVICE capability: no human administrator is granted it.
+                (FionaPermissions.InquiriesCreate in app.authorization.getRole(CommerceRoles.Administrator)!!.permissions) shouldBe false
                 val hash = app.database.strings("SELECT password_hash FROM fionas.user_credentials").single()
                 hash.startsWith("\$argon2id\$") shouldBe true
                 hash.contains("test-admin-password") shouldBe false
@@ -122,13 +121,14 @@ class AuthRoutesSpec :
         }
 
         test(
-            "later bootstrap does not add deposit, refund, inquiry-read, fulfillment or communication permissions to an existing Administrator role",
+            "later bootstrap does not add deposit, refund, inquiry-read, fulfillment, communication or financial-terms permissions to an existing Administrator role",
         ) {
             TestApplication.create().use { app ->
                 val role = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator))
                 val previous =
                     role.permissions - CommercePermissions.DepositRequirementManage - CommercePermissions.RefundRecord -
-                        FionaPermissions.InquiriesRead - FionaPermissions.InquiriesManage - FionaPermissions.CommunicationsAcknowledge
+                        FionaPermissions.InquiriesRead - FionaPermissions.InquiriesManage - FionaPermissions.CommunicationsAcknowledge -
+                        FionaPermissions.FinancialTermsManage
                 app.authorization.replaceRolePermissions(CommerceRoles.Administrator, previous)
                 BootstrapFirstAdmin(app.transactor, app.authorization, JdbiCredentialRepository(), PasswordHasher(), testClock).invoke(
                     BootstrapAdmin("other", "Other", null, null, SecretPassword.of("another-test-password")),
@@ -361,22 +361,22 @@ class AuthRoutesSpec :
             }
         }
 
-        test("Offerings public reads and protected writes use live runtime permissions") {
+        test("removed catalog and pricing routes do not exist, and no offerings permission is defined or granted") {
             TestApplication.create().use { app ->
-                val retiredPaths = listOf("/offering-catalog/retired/offerings", "/offering-catalog/retired/categories")
-                retiredPaths.forEach { request(app, Method.GET, it, cookie = null).status shouldBe Status.UNAUTHORIZED }
-                request(app, Method.POST, "/offering-catalog", cookie = null).status shouldBe Status.UNAUTHORIZED
-                request(app, Method.GET, "/offering-catalog", cookie = null).status shouldBe Status.NOT_FOUND
-                val admin = app.authorization.findUserByUsername("admin")!!
-                app.authorization.unassignRole(admin.id, CommerceRoles.Administrator)
-                request(app, Method.POST, "/offering-catalog").status shouldBe Status.FORBIDDEN
-                retiredPaths.forEach { request(app, Method.GET, it).status shouldBe Status.FORBIDDEN }
-                app.authorization.assignRole(admin.id, CommerceRoles.Administrator)
-                request(app, Method.POST, "/offering-catalog").status shouldBe Status.CREATED
-                request(app, Method.GET, "/offering-catalog", cookie = null).status shouldBe Status.OK
-                request(app, Method.GET, "/offering-catalog/categories", cookie = null).status shouldBe Status.OK
-                request(app, Method.GET, "/offering-catalog/offerings", cookie = null).status shouldBe Status.OK
-                retiredPaths.forEach { request(app, Method.GET, it).status shouldBe Status.OK }
+                listOf(
+                    Method.GET to "/offering-catalog",
+                    Method.POST to "/offering-catalog",
+                    Method.GET to "/inquiry-form",
+                    Method.POST to "/estimate-preview",
+                ).forEach { (method, path) ->
+                    request(app, method, path, cookie = null).status shouldBe Status.NOT_FOUND
+                    request(app, method, path).status shouldBe Status.NOT_FOUND
+                }
+                val catalog = request(app, Method.GET, "/admin/access/permissions").bodyString()
+                listOf("commerce.offerings.manage", "fionas.inquiry-form.read", "fionas.estimate-preview.create").forEach {
+                    catalog.contains(it) shouldBe false
+                }
+                app.database.strings("SELECT permission_key FROM commerce.role_permissions").none { "offering" in it } shouldBe true
             }
         }
 
@@ -393,8 +393,7 @@ class AuthRoutesSpec :
                     catalog shouldContain FionaPermissions.CredentialsManage.value
                     catalog shouldContain FionaPermissions.InquiriesRead.value
                     catalog shouldContain FionaPermissions.InquiriesCreate.value
-                    catalog shouldContain FionaPermissions.InquiryFormRead.value
-                    catalog shouldContain FionaPermissions.EstimatePreviewCreate.value
+                    catalog shouldContain FionaPermissions.FinancialTermsManage.value
                     catalog shouldContain RuntimePermissions.ServiceCredentialManage.value
                 }
                 val created =

@@ -1,10 +1,6 @@
 package io.github.castab.fionas.commerce.inquiry
 
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingCategorySelection
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingSelections
-import io.github.castab.commerce.offering.OfferingsRevision
+import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.CommerceJson
@@ -12,29 +8,22 @@ import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.authentication
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
-import io.github.castab.fionas.commerce.customer.CustomerName
-import io.github.castab.fionas.commerce.customer.Email
-import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.InquiryDocumentAssociation
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
 import io.github.castab.fionas.commerce.http.CreateInquiryRequest
 import io.github.castab.fionas.commerce.http.InquiryEventType
-import io.github.castab.fionas.commerce.http.InquiryPricingInputs
 import io.github.castab.fionas.commerce.http.InquiryReceiptResponse
-import io.github.castab.fionas.commerce.http.PricingSelection
+import io.github.castab.fionas.commerce.http.PricedLineRequest
 import io.github.castab.fionas.commerce.http.createInquiryRoute
 import io.github.castab.fionas.commerce.http.fionaOpenApi
-import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
-import io.github.castab.fionas.commerce.offering.FionasPricing
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
-import io.github.castab.fionas.commerce.testing.TOPPINGS
+import io.github.castab.fionas.commerce.http.toResponse
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.asFionasWeb
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.createInquiryOperation
+import io.github.castab.fionas.commerce.testing.inquiryCommand
 import io.github.castab.fionas.commerce.testing.testClock
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.assertions.throwables.shouldThrowAny
@@ -45,7 +34,7 @@ import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
 import org.http4k.core.then
-import java.time.Duration
+import java.math.BigDecimal
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
@@ -56,13 +45,9 @@ import java.util.concurrent.atomic.AtomicInteger
 class InquiryIdempotencySpec :
     FunSpec({
         lateinit var app: TestApplication
-        var revision = 0
         val submissions = JdbiInquirySubmissionRepository()
         val associations = JdbiInquiryFinancialDocumentRepository()
-        beforeSpec {
-            app = TestApplication.create()
-            revision = app.createAcceptanceCatalog()
-        }
+        beforeSpec { app = TestApplication.create() }
         afterSpec { app.close() }
         val tables =
             listOf(
@@ -76,71 +61,40 @@ class InquiryIdempotencySpec :
         fun counts() = tables.associateWith(app.database::count)
 
         fun command(key: InquirySubmissionKey = InquirySubmissionKey(UUID.randomUUID().toString())) =
-            CreateInquiry.Command(
-                CustomerName("Jane"),
-                Email.of("race-${UUID.randomUUID()}@example.com"),
-                InquiryMessage("Birthday"),
-                FionasPricingInputs(
-                    OfferingsRevision.of(revision),
-                    OfferingSelections(
-                        listOf(
-                            OfferingCategorySelection(
-                                OfferingCategoryKey("soft-serve-flavor"),
-                                listOf("vanilla", "horchata").map(::OfferingKey),
-                            ),
-                            OfferingCategorySelection(OfferingCategoryKey("topping"), TOPPINGS.map(::OfferingKey)),
-                            OfferingCategorySelection(OfferingCategoryKey("cone-option"), listOf(OfferingKey("waffle-cone"))),
-                        ),
-                    ),
-                    FionasOfferingsContext(75, false, Duration.ofMinutes(120)),
-                ),
-                ZipCode("02108"),
-                EventDate.of("2026-12-05"),
-                EventType.BIRTHDAY,
-                key,
-            )
+            app.inquiryCommand(email = "race-${UUID.randomUUID()}@example.com", name = "Jane", message = "Birthday", key = key.value)
 
         fun operation(
             claims: InquirySubmissionRepository = submissions,
             owners: InquiryFinancialDocumentRepository = associations,
-            price: PublicInquiryPricing =
-                PublicInquiryPricing(
-                    FionasPricing(
-                        FionasOfferingsEngine(FIONAS_PRICING_POLICY),
-                        app.context.offeringsSnapshotRepository::retrieveLatestVersion,
-                    ),
+            lineIds: () -> UUID = UUID::randomUUID,
+        ) = app.createInquiryOperation(
+            submissions = claims,
+            materialize =
+                MaterializeInquiryFinancialDocument(
+                    app.context.financialLedger,
+                    owners,
+                    JdbiFinancialDocumentAuthorshipRepository(),
+                    newLineId = lineIds,
                 ),
-        ) = CreateInquiry(
-            app.transactor,
-            JdbiCustomerRepository(),
-            JdbiInquiryRepository(),
-            claims,
-            price,
-            testClock,
-            MaterializeInquiryFinancialDocument(app.context.financialLedger, owners, testClock),
         )
 
         fun request(command: CreateInquiry.Command): Request {
-            val pricing =
-                command.pricingInputs.let { input ->
-                    InquiryPricingInputs(
-                        input.catalogRevision.number,
-                        input.context.guestCount,
-                        input.context.guestCountIsMinimum,
-                        input.context.duration
-                            .toMinutes()
-                            .toInt(),
-                        input.selections.categories.map { block ->
-                            PricingSelection(block.category.value, block.offerings.map { it.value })
-                        },
-                    )
-                }
             val dto =
                 CreateInquiryRequest(
                     command.name.value,
                     command.email.value,
                     command.message?.value,
-                    pricing,
+                    command.requestedService.toResponse(),
+                    command.lines.map {
+                        PricedLineRequest(
+                            it.description,
+                            it.subDescription,
+                            it.quantity?.toPlainString(),
+                            it.unitPrice.amount.toPlainString(),
+                            it.taxAmount.amount.toPlainString(),
+                            it.currency.currencyCode,
+                        )
+                    },
                     command.zipCode.value,
                     command.eventDate.value.toString(),
                     InquiryEventType.valueOf(command.eventType.name),
@@ -183,28 +137,19 @@ class InquiryIdempotencySpec :
             error("Expected a PostgreSQL waiter on the owner's unique submission key")
         }
 
-        test("lost response is recovered through the full application HTTP path without any pricing or latest lookup") {
+        test("lost response is recovered through the full application HTTP path without generating or writing anything") {
             val input = command()
-            val latestReads = AtomicInteger()
             val lineIds = AtomicInteger()
-            val price =
-                PublicInquiryPricing(
-                    FionasPricing(
-                        FionasOfferingsEngine(FIONAS_PRICING_POLICY) {
-                            lineIds.incrementAndGet()
-                            UUID.randomUUID()
-                        },
-                    ) { transaction, catalog ->
-                        check(latestReads.incrementAndGet() == 1) { "Replay must not read the catalog" }
-                        app.context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, catalog)
-                    },
-                )
-            val create = operation(price = price)
+            val create =
+                operation(lineIds = {
+                    lineIds.incrementAndGet()
+                    UUID.randomUUID()
+                })
             val inquiry = create(input) // Committed result, as if its transport response was lost.
             val committed = counts()
             val generated = lineIds.get()
+            generated shouldBe input.lines.size
             create(input) shouldBe inquiry
-            latestReads.get() shouldBe 1
             lineIds.get() shouldBe generated
             val recovered = app.http(request(input))
             recovered.status shouldBe Status.CREATED
@@ -240,7 +185,18 @@ class InquiryIdempotencySpec :
                     }
                 val http = handler(operation(claims = pausing))
                 val first = command()
-                val second = if (different) first.copy(email = Email.of("other-${UUID.randomUUID()}@example.com")) else first
+                // A different command differs only in one committed amount: the key can never swap commercial terms.
+                val second =
+                    if (different) {
+                        first.copy(
+                            lines =
+                                first.lines.map {
+                                    if (it.description == "Horchata") it.copy(unitPrice = Money(BigDecimal("0.55"), it.currency)) else it
+                                },
+                        )
+                    } else {
+                        first
+                    }
                 val before = counts()
                 val calls =
                     listOf(first, second).map { input ->
@@ -265,8 +221,13 @@ class InquiryIdempotencySpec :
                     CommerceJson.asA(loser.bodyString(), ErrorResponse.serializer()).code shouldBe "IDEMPOTENCY_KEY_REUSED"
                     val winnerIndex = responses.indexOfFirst { it.status == Status.CREATED }
                     val expected = listOf(first, second)[winnerIndex]
-                    app.database.strings("SELECT email FROM fionas.customers WHERE email = '${expected.email.value}'") shouldBe
-                        listOf(expected.email.value)
+                    val winner = CommerceJson.asA(responses[winnerIndex].bodyString(), InquiryReceiptResponse.serializer()).id
+                    val estimate =
+                        app.transactor.inTransaction {
+                            val id = checkNotNull(associations.initialEstimateOf(it, InquiryId(UUID.fromString(winner))))
+                            app.context.financialLedger.latest(it, id)
+                        }
+                    estimate.lineItems.map { it.price.amount } shouldBe expected.lines.map { it.unitPrice.amount }
                 } else {
                     responses.map { it.status } shouldBe listOf(Status.CREATED, Status.CREATED)
                     responses[0].bodyString() shouldBe responses[1].bodyString()

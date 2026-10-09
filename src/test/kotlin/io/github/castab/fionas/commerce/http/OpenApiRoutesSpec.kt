@@ -68,10 +68,8 @@ class OpenApiRoutesSpec :
                 listOf(
                     "createInquiry",
                     "getInquiry",
-                    "fionasOfferingsCreateCatalog",
-                    "fionasOfferingsAddCategory",
-                    "fionasOfferingsAddOfferings",
-                    "fionasOfferingsGetCatalog",
+                    "previewInquiryQuote",
+                    "createChangeOrder",
                     "getCurrentUser",
                     "authorizationCurrentPrincipal",
                     "authorizationListPermissions",

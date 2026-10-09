@@ -5,10 +5,10 @@ import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.changeOrderBody
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
-import io.github.castab.fionas.commerce.testing.pricingBody
 import io.github.castab.fionas.commerce.testing.proposalId
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -20,11 +20,7 @@ import java.util.UUID
 class InquiryLifecycleRoutesSpec :
     FunSpec({
         lateinit var app: TestApplication
-        var catalogRevision = 0
-        beforeSpec {
-            app = TestApplication.create()
-            catalogRevision = app.createAcceptanceCatalog()
-        }
+        beforeSpec { app = TestApplication.create() }
         afterSpec { app.close() }
         test("staff detail and business actions compose lifecycle; auth, Origin and SERVICE provenance use the existing runtime") {
             val id = app.createInquiry()
@@ -71,7 +67,7 @@ class InquiryLifecycleRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$document/change-orders",
-                    pricingBody(catalogRevision, guests = 80, expectedVersion = 3),
+                    changeOrderBody(3, acceptanceLines(guests = 80)),
                 ).status shouldBe Status.OK
             detail().lifecycle.stage shouldBe InquiryStageResponse.BOOKED
             service("close").status shouldBe Status.CONFLICT

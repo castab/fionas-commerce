@@ -10,21 +10,16 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
-import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.staff.PrincipalStatus
+import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
-import io.github.castab.fionas.commerce.offering.FIONAS_PRICING_POLICY
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasOfferingsEngine
-import io.github.castab.fionas.commerce.offering.FionasPricing
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.createInquiry
-import io.github.castab.fionas.commerce.testing.fionasPricing
-import io.github.castab.fionas.commerce.testing.requestedPricing
+import io.github.castab.fionas.commerce.testing.newLinesProposal
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -32,7 +27,6 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.http4k.core.Status
 import java.math.BigDecimal
-import java.time.Duration
 import java.util.Currency
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -43,10 +37,10 @@ import java.util.concurrent.atomic.AtomicInteger
 class InquiryProposalsSpec :
     FunSpec({
         lateinit var app: TestApplication
-        var revision = 0
         val owners = JdbiInquiryFinancialDocumentRepository()
-        val sources = JdbiFinancialDocumentPricingRepository()
+        val sources = JdbiFinancialDocumentAuthorshipRepository()
         val history = JdbiInquiryProposalRepository()
+        // A real staff user: proposals reference the runtime's published users.
         val actor = UserId(UUID.randomUUID())
         val percent = DepositTerms.Percentage(BigDecimal("20"))
 
@@ -54,7 +48,7 @@ class InquiryProposalsSpec :
 
         fun core(
             repository: InquiryProposalRepository = history,
-            metadata: FinancialDocumentPricingRepository = sources,
+            metadata: FinancialDocumentAuthorshipRepository = sources,
             associations: InquiryFinancialDocumentRepository = owners,
         ) = InquiryProposals(
             app.context.financialLedger,
@@ -62,8 +56,6 @@ class InquiryProposalsSpec :
             metadata,
             repository,
             JdbiInquiryServicePlanRepository(),
-            InquiryQuoteComposition(JdbiInquiryRepository(), metadata, app.fionasPricing()),
-            app.fionasPricing(),
             testClock,
         )
 
@@ -73,7 +65,7 @@ class InquiryProposalsSpec :
             id: InquiryId,
             terms: DepositTerms = percent,
             repository: InquiryProposalRepository = history,
-            metadata: FinancialDocumentPricingRepository = sources,
+            metadata: FinancialDocumentAuthorshipRepository = sources,
         ) = IssueInquiryProposal(
             app.transactor,
             core(repository, metadata),
@@ -98,15 +90,39 @@ class InquiryProposalsSpec :
                 id,
                 Version.of(version),
                 DepositRequirementRevision.of(rev),
-                app.transactor
-                    .inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
-                    .copy(context = FionasOfferingsContext(guests, false, Duration.ofMinutes(120))),
+                newLinesProposal(acceptanceLines(guests = guests)),
                 percent,
                 actor,
             ),
         )
 
         fun persisted(id: InquiryId) = app.transactor.inTransaction { history.history(it, id) }
+
+        /** The canonical lineage's latest lines kept under their own ids, with amounts restated at another scale. */
+        fun keepAllRescaled(id: InquiryId): LineProposal {
+            val lineage = app.transactor.inTransaction { owners.initialEstimateOf(it, id)!! }
+            return LineProposal(
+                app.context.financialLedger.latest(lineage).lineItems.map { line ->
+                    ProposedLine(
+                        ProposedLineIdentity.Existing(line.id),
+                        PricedLine(
+                            line.description,
+                            line.subDescription,
+                            line.quantity?.setScale(4),
+                            Money(line.price.amount.setScale(4), line.currency),
+                            Money(line.taxAmount.amount.setScale(4), line.currency),
+                        ),
+                    )
+                },
+            )
+        }
+
+        fun reviseLines(
+            id: InquiryId,
+            lines: LineProposal,
+        ) = ReviseInquiryQuoteProposal(app.transactor, core())(
+            ReviseInquiryQuoteProposal.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, lines, percent, actor),
+        )
 
         fun current(id: InquiryProposalId) =
             IsCurrentPayableInquiryProposal(app.transactor, app.context.financialLedger, owners, history)(id)
@@ -179,7 +195,7 @@ class InquiryProposalsSpec :
 
         beforeSpec {
             app = TestApplication.create()
-            revision = app.createAcceptanceCatalog()
+            app.authorization.createUser(User(actor, "proposal-actor", null, null, "Proposal actor", PrincipalStatus.ACTIVE, emptySet()))
         }
         afterSpec { app.close() }
 
@@ -202,7 +218,7 @@ class InquiryProposalsSpec :
                 result.proposal.documentReference shouldBe quote.reference
                 result.proposal.depositRequirementRevision shouldBe active.revision
                 result.proposal.issuedAt shouldBe STORED_INSTANT
-                result.proposal.principalId shouldBe actor
+                result.proposal.issuedBy shouldBe actor
                 result.proposal.kind shouldBe ProposalIssuanceKind.INITIAL
                 persisted(id) shouldBe listOf(result.proposal)
                 current(result.proposal.id) shouldBe true
@@ -223,7 +239,7 @@ class InquiryProposalsSpec :
         test("failure after Quote or after deposit rolls back both schemas and the publication") {
             val id = newInquiry()
             val failingMetadata =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun copy(
                         transaction: Transaction,
                         from: FinancialDocumentReference,
@@ -291,7 +307,12 @@ class InquiryProposalsSpec :
             val a = issue(id)
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { quote(id, version = 1) } }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { quote(id, rev = 2) } }
-            unchanged(id) { shouldThrow<CommerceFailure.ValidationFailed> { quote(id, guests = 75) } }
+            // The same ordered ids with numerically equal amounts at another scale are no change.
+            unchanged(id) {
+                shouldThrow<CommerceFailure.ValidationFailed> { reviseLines(id, keepAllRescaled(id)) }
+                    .violations
+                    .map { it.code } shouldBe listOf(LineProposalViolations.NO_FINANCIAL_CHANGE)
+            }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { deposit(id, 1, 1, fixed("200")) } }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { deposit(id, 2, 2, fixed("200")) } }
             unchanged(
@@ -302,6 +323,20 @@ class InquiryProposalsSpec :
             b.proposal.documentReference shouldBe a.proposal.documentReference
             unchanged(id) { shouldThrow<CommerceFailure.ValidationFailed> { deposit(id, 2, 2, fixed(amount + "0")) } }
         }
+        test("identical charges under new keys revise the Quote: identity is part of the snapshot, not only the amounts") {
+            val id = newInquiry()
+            val published = issue(id)
+            val quoteBefore = app.context.financialLedger.get(published.proposal.documentReference)
+            val revised = reviseLines(id, newLinesProposal(acceptanceLines(guests = 75)))
+
+            val quoteAfter = app.context.financialLedger.get(revised.proposal.documentReference)
+            revised.proposal.kind shouldBe ProposalIssuanceKind.QUOTE_REVISED
+            quoteAfter.version shouldBe Version.of(3)
+            quoteAfter.total shouldBe quoteBefore.total
+            quoteAfter.lineItems.map { it.id }.intersect(quoteBefore.lineItems.map { it.id }.toSet()) shouldBe emptySet()
+            app.context.financialLedger.get(published.proposal.documentReference) shouldBe quoteBefore
+        }
+
         test("revision publication failure rolls back repriced Quote, replacement deposit and metadata") {
             val id = newInquiry()
             issue(id)
@@ -322,7 +357,7 @@ class InquiryProposalsSpec :
                             id,
                             Version.of(2),
                             DepositRequirementRevision.INITIAL,
-                            requestedPricing(revision).copy(context = FionasOfferingsContext(100, false, Duration.ofMinutes(120))),
+                            newLinesProposal(acceptanceLines(guests = 100)),
                             percent,
                             actor,
                         ),
@@ -655,18 +690,16 @@ class InquiryProposalsSpec :
                 current(accepted.proposal.id) shouldBe false
             }
             forbidden(4)
-            val inputs =
-                app.transactor
-                    .inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
-                    .copy(context = FionasOfferingsContext(125, false, Duration.ofMinutes(120)))
             CreateChangeOrder(
                 app.transactor,
                 app.context.financialLedger,
                 owners,
                 sources,
-                FionasPricing(FionasOfferingsEngine(FIONAS_PRICING_POLICY), app.context.offeringsSnapshotRepository::retrieveLatestVersion),
                 JdbiInquiryFulfillmentRepository(),
-            )(document, Version.of(4), inputs).latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
+                testClock,
+            )(
+                CreateChangeOrder.Command(document, Version.of(4), newLinesProposal(acceptanceLines(guests = 125)), actor),
+            ).latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
             forbidden(5)
             historyReads shouldBe 6
             val requirement =
@@ -747,14 +780,14 @@ class InquiryProposalsSpec :
                 resume.countDown()
             }
         }
-        test("repository preserves SERVICE provenance, uniqueness, caller rollback and history ordered independently of timestamps") {
+        test("repository preserves staff provenance, uniqueness, caller rollback and history ordered independently of timestamps") {
             val id = newInquiry()
             val a =
                 IssueInquiryProposal(
                     app.transactor,
                     core(),
-                )(IssueInquiryProposal.Command(id, Version.INITIAL, percent, ServiceId(actor.value)))
-            persisted(id).single().principalId shouldBe ServiceId(actor.value)
+                )(IssueInquiryProposal.Command(id, Version.INITIAL, percent, actor))
+            persisted(id).single().issuedBy shouldBe actor
             unchanged(id) {
                 shouldThrow<CommerceFailure.Conflict> {
                     app.transactor.inTransaction {
@@ -788,10 +821,7 @@ class InquiryProposalsSpec :
                             check(resume.await(30, TimeUnit.SECONDS))
                         }
                     }
-                val inputs =
-                    app.transactor
-                        .inTransaction { JdbiInquiryRepository().findRequested(it, id)!!.pricingInputs }
-                        .copy(context = FionasOfferingsContext(100, false, Duration.ofMinutes(120)))
+                val inputs = newLinesProposal(acceptanceLines(guests = 100))
                 val first =
                     CompletableFuture.supplyAsync {
                         if (change == "QUOTE") {

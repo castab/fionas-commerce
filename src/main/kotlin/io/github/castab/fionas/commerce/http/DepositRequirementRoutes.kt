@@ -89,7 +89,7 @@ internal object StrictDepositTerms : KSerializer<DepositTermsRequest> {
     override fun serialize(
         encoder: Encoder,
         value: DepositTermsRequest,
-    ) = delegate.serialize(encoder, value)
+    ) = encoder.encodeSerializableValue(delegate, value) // Through the encoder, so the `type` discriminator is written.
 }
 
 @Serializable
@@ -261,8 +261,11 @@ private fun RouteMetaDsl.depositErrors(
     mutation: Boolean = false,
     validation: String? = null,
     withdrawal: Boolean = false,
+    staffTerms: Boolean = false,
 ) {
-    principalAccess(permission, UNTRUSTED_ORIGIN.takeIf { unsafe })
+    principalAccess(permission, if (staffTerms) STAFF_TERMS_FORBIDDEN else UNTRUSTED_ORIGIN.takeIf { unsafe })
+    // Standalone terms are staff-negotiated values: a staff session only, never a service token.
+    if (staffTerms) security = staffSessionSecurity
     returningError(ErrorCategory.MALFORMED_REQUEST, "unreadable UUID, JSON body, or discriminator.", "Malformed request")
     returningError(
         ErrorCategory.NOT_FOUND,
@@ -334,7 +337,8 @@ fun setDepositRequirementRoute(
         operationId = "setFinancialDocumentDepositRequirement"
         summary = "Approve, replace, or reactivate deposit terms"
         description =
-            "Requires commerce.deposit-requirement.manage. The exact latest Quote/Invoice must match the expected version. Canonical lineages with proposal history reject standalone approval, replacement or reactivation with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain standalone behavior. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen."
+            "Requires a verified staff USER holding commerce.deposit-requirement.manage and fionas.financial-terms.manage; a " +
+            "SERVICE token is refused even with both. The exact latest Quote/Invoice must match the expected version. Canonical lineages with proposal history reject standalone approval, replacement or reactivation with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain standalone behavior. Null expectedRequirementRevision expects no history. Explicit FIXED currency or exact PERCENTAGE terms resolve once; percentages round HALF_UP to minor units and amounts are frozen."
         tags += depositTag
         receiving(setDepositBody to SetDepositRequirementRequest(2, null, exampleTerms))
         returning(Status.OK, currentDepositBody to exampleActive)
@@ -343,9 +347,10 @@ fun setDepositRequirementRoute(
             true,
             mutation = true,
             validation = "invalid caller values, revisions, or deposit terms. Also `invariant_violated`: deposit approval on an Estimate.",
+            staffTerms = true,
         )
     } bindContract Method.PUT to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.DepositRequirementManage).then { request: Request ->
+        access.staffTerms(CommercePermissions.DepositRequirementManage).then { request: Request ->
             val documentId = depositUuid(id)
             val body = setDepositBody(request)
             val command =
@@ -369,7 +374,8 @@ fun withdrawDepositRequirementRoute(
         operationId = "withdrawFinancialDocumentDepositRequirement"
         summary = "Withdraw approved deposit terms"
         description =
-            "Requires commerce.deposit-requirement.manage. Appends WITHDRAWN from an exact active requirement revision. Canonical lineages with proposal history reject standalone withdrawal with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain withdrawal after document stage/version changes. History is retained."
+            "Requires a verified staff USER holding commerce.deposit-requirement.manage and fionas.financial-terms.manage; a " +
+            "SERVICE token is refused even with both. Appends WITHDRAWN from an exact active requirement revision. Canonical lineages with proposal history reject standalone withdrawal with illegal_transition, including Invoice/BOOKED. Unpaid canonical Quotes change deposits only through atomic proposal reissuance; after booking accepted deposit history is immutable. RELATED lineages retain withdrawal after document stage/version changes. History is retained."
         tags += depositTag
         receiving(withdrawDepositBody to WithdrawDepositRequirementRequest(1))
         returning(Status.OK, currentDepositBody to exampleWithdrawn)
@@ -379,9 +385,10 @@ fun withdrawDepositRequirementRoute(
             mutation = true,
             validation = "expectedRequirementRevision must be at least 1.",
             withdrawal = true,
+            staffTerms = true,
         )
     } bindContract (Method.DELETE) to { id: String, _: String ->
-        access.requirePermission(CommercePermissions.DepositRequirementManage).then { request: Request ->
+        access.staffTerms(CommercePermissions.DepositRequirementManage).then { request: Request ->
             val documentId = depositUuid(id)
             val body = withdrawDepositBody(request)
             val command =

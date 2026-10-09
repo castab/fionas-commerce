@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
@@ -8,14 +9,21 @@ import io.github.castab.fionas.commerce.financial.IsCurrentPayableInquiryProposa
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.staff.FionaPermissions
+import io.github.castab.fionas.commerce.testing.CHURROS
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
+import io.github.castab.fionas.commerce.testing.adminId
+import io.github.castab.fionas.commerce.testing.changeLatest
+import io.github.castab.fionas.commerce.testing.changeOrderBody
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
+import io.github.castab.fionas.commerce.testing.replacementLines
 import io.github.castab.fionas.commerce.testing.withBearer
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -27,8 +35,12 @@ import java.util.UUID
 class InquiryProposalRoutesSpec :
     FunSpec({
         lateinit var app: TestApplication
-        var revision = 0
-        val grants = setOf(CommercePermissions.FinancialDocumentCreate, CommercePermissions.DepositRequirementManage)
+        val grants =
+            setOf(
+                CommercePermissions.FinancialDocumentCreate,
+                CommercePermissions.DepositRequirementManage,
+                FionaPermissions.FinancialTermsManage,
+            )
         val initial = """{"expectedDocumentVersion":1,"terms":{"type":"PERCENTAGE","percentage":"20"}}"""
 
         fun path(id: String) = "/staff/requests/$id/proposals"
@@ -36,10 +48,7 @@ class InquiryProposalRoutesSpec :
         fun issue(id: String) = app.adminPost(path(id), initial)
 
         fun response(text: String) = CommerceJson.asA(text, IssuedInquiryProposalResponse.serializer())
-        beforeSpec {
-            app = TestApplication.create()
-            revision = app.createAcceptanceCatalog()
-        }
+        beforeSpec { app = TestApplication.create() }
         afterSpec { app.close() }
 
         test("staff read exposes policy and coherent exact pairs through Quote and deposit revisions and booking") {
@@ -57,8 +66,7 @@ class InquiryProposalRoutesSpec :
             a.proposal.documentId shouldBe requested.financial.id
             a.proposal.documentVersion shouldBe 2
             a.proposal.depositRequirementRevision shouldBe 1
-            a.proposal.principalKind shouldBe "USER"
-            a.proposal.principalId shouldBe
+            a.proposal.issuedBy shouldBe
                 app.authorization
                     .findUserByUsername("admin")!!
                     .id.value
@@ -67,10 +75,8 @@ class InquiryProposalRoutesSpec :
             val revised =
                 app.adminPost(
                     path(id) + "/quote-revisions",
-                    """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,"pricingInputs":${pricingBody(
-                        revision,
-                        guests = 100,
-                    )},"terms":{"type":"PERCENTAGE","percentage":"20"}}""",
+                    """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,""" +
+                        """"lines":${replacementLines(acceptanceLines(guests = 100))},"terms":{"type":"PERCENTAGE","percentage":"20"}}""",
                 )
             revised.status shouldBe Status.OK
             val b = response(revised.bodyString())
@@ -119,7 +125,7 @@ class InquiryProposalRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$document/change-orders",
-                    pricingBody(revision, guests = 80, expectedVersion = 1),
+                    changeOrderBody(1, acceptanceLines(guests = 80)),
                 ).status shouldBe
                 Status.OK
             val publication =
@@ -129,7 +135,7 @@ class InquiryProposalRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$document/change-orders",
-                    pricingBody(revision, guests = 100, expectedVersion = 3),
+                    changeOrderBody(3, acceptanceLines(guests = 100)),
                 ).status shouldBe
                 Status.CONFLICT
             app
@@ -157,10 +163,10 @@ class InquiryProposalRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$document/change-orders",
-                    pricingBody(revision, guests = 100, expectedVersion = 4),
+                    changeOrderBody(4, acceptanceLines(guests = 100)),
                 ).status shouldBe
                 Status.OK
-            val related = app.adminPost("/inquiries/$id/estimates", pricingBody(revision))
+            val related = app.adminPost("/inquiries/$id/estimates", """{"lines":${linesJson(acceptanceLines())}}""")
             val relatedId = CommerceJson.asA(related.bodyString(), FinancialDocumentResponse.serializer()).id
             app.adminPost("/financial-documents/$relatedId/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
             app
@@ -173,7 +179,7 @@ class InquiryProposalRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$relatedId/change-orders",
-                    pricingBody(revision, guests = 100, expectedVersion = 2),
+                    changeOrderBody(2, acceptanceLines(guests = 100)),
                 ).status shouldBe
                 Status.OK
             app
@@ -261,7 +267,7 @@ class InquiryProposalRoutesSpec :
                 ) shouldBe false
             }
         }
-        test("all mutations require the permission intersection for USER and SERVICE, trusted cookie Origin and authenticated provenance") {
+        test("all mutations require a staff USER holding every permission, a trusted cookie Origin, and record that user") {
             val id = app.createInquiry()
             val service = app.provisionService("proposal-publisher", grants)
             val token = app.serviceToken(service)
@@ -272,24 +278,22 @@ class InquiryProposalRoutesSpec :
                 routes.forEach { (url, body) ->
                     app.http(Request(Method.POST, url).body(body)).status shouldBe Status.UNAUTHORIZED
                     app.http(Request(Method.POST, url).header("Cookie", cookie).body(body)).status shouldBe Status.FORBIDDEN
-                    listOf(
-                        emptySet(),
-                        setOf(CommercePermissions.FinancialDocumentCreate),
-                        setOf(CommercePermissions.DepositRequirementManage),
-                    ).forEach { permissions ->
-                        app.authorization.replaceRolePermissions(CommerceRoles.Administrator, permissions)
-                        app.authorization.replaceRolePermissions(service.role, permissions)
+                    grants.forEach { missing ->
+                        app.authorization.replaceRolePermissions(CommerceRoles.Administrator, original - missing)
                         app.adminPost(url, body).status shouldBe Status.FORBIDDEN
-                        app.http(Request(Method.POST, url).withBearer(token).body(body)).status shouldBe Status.FORBIDDEN
                     }
                     app.authorization.replaceRolePermissions(CommerceRoles.Administrator, original)
+                    // A service holding every permission is still not a staff approver.
+                    app.http(Request(Method.POST, url).withBearer(token).body(body)).let {
+                        it.status shouldBe Status.FORBIDDEN
+                        it.bodyString() shouldContain STAFF_USER_REQUIRED
+                    }
                 }
-                app.authorization.replaceRolePermissions(service.role, grants)
-                val result = app.http(Request(Method.POST, path(id)).withBearer(token).body(initial))
+                app.transactor.inTransaction { JdbiInquiryProposalRepository().history(it, InquiryId(UUID.fromString(id))) } shouldBe
+                    emptyList()
+                val result = app.adminPost(path(id), initial)
                 result.status shouldBe Status.OK
-                val issuance = response(result.bodyString()).proposal
-                issuance.principalKind shouldBe "SERVICE"
-                issuance.principalId shouldBe service.id.value.toString()
+                response(result.bodyString()).proposal.issuedBy shouldBe app.adminId.value.toString()
             } finally {
                 app.authorization.replaceRolePermissions(CommerceRoles.Administrator, original)
             }
@@ -336,7 +340,15 @@ class InquiryProposalRoutesSpec :
                 val a = response(issue(id).bodyString())
                 when (corruption) {
                     "missing" -> app.database.execute("DELETE FROM fionas.inquiry_proposals WHERE inquiry_id = '$id'")
-                    "quote" -> app.database.execute("UPDATE fionas.inquiry_proposals SET document_version = 3 WHERE inquiry_id = '$id'")
+                    // The canonical Quote moved on outside the proposal workflow, so the publication names a stale Quote.
+                    "quote" ->
+                        app.transactor.inTransaction {
+                            app.context.financialLedger.changeLatest(
+                                it,
+                                UUID.fromString(a.proposal.documentId),
+                                ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(CHURROS.priced().withId(UUID.randomUUID())))),
+                            )
+                        }
                     "deposit" ->
                         app.database.execute(
                             "UPDATE fionas.inquiry_proposals SET deposit_requirement_revision = 2 WHERE inquiry_id = '$id'",
@@ -346,12 +358,13 @@ class InquiryProposalRoutesSpec :
                 app
                     .adminPost(
                         path(id) + "/deposit-revisions",
-                        """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,"terms":{"type":"PERCENTAGE","percentage":"25"}}""",
+                        """{"expectedDocumentVersion":${if (corruption == "quote") 3 else 2},"expectedDepositRequirementRevision":1,""" +
+                            """"terms":{"type":"PERCENTAGE","percentage":"25"}}""",
                     ).status shouldBe
                     Status.INTERNAL_SERVER_ERROR
                 app.context.financialLedger
                     .history(UUID.fromString(a.proposal.documentId))
-                    .size shouldBe 2
+                    .size shouldBe if (corruption == "quote") 3 else 2
             }
         }
     })

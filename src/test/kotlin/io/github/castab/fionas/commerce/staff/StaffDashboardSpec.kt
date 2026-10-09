@@ -34,12 +34,13 @@ import io.github.castab.fionas.commerce.inquiry.RequestedInquiry
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
 import io.github.castab.fionas.commerce.testing.TEST_INSTANT
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.customer
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.inquiry
-import io.github.castab.fionas.commerce.testing.requestedPricing
+import io.github.castab.fionas.commerce.testing.invoiceLatest
+import io.github.castab.fionas.commerce.testing.quoteLatest
+import io.github.castab.fionas.commerce.testing.requestedService
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -104,7 +105,7 @@ class StaffDashboardSpec :
             app.transactor.inTransaction { transaction ->
                 customers.insert(transaction, person)
                 records.forEach { record ->
-                    inquiries.insert(transaction, record, requestedPricing())
+                    inquiries.insert(transaction, record, requestedService())
                     val usd = Currency.getInstance("USD")
                     val document =
                         FinancialDocument.Estimate.create(
@@ -171,8 +172,8 @@ class StaffDashboardSpec :
                         ),
                     )
                     val document = owners.initialEstimateOf(transaction, record.id)!!
-                    app.context.financialLedger.issueQuote(transaction, document)
-                    app.context.financialLedger.issueInvoice(transaction, document)
+                    app.context.financialLedger.quoteLatest(transaction, document)
+                    app.context.financialLedger.invoiceLatest(transaction, document)
                     facts.serve(transaction, record.id, InquiryMilestone(since, actor))
                 }
             }
@@ -193,7 +194,6 @@ class StaffDashboardSpec :
         }
 
         test("one and twenty inquiries use ten unlocked SQL statements, set enrichment and one Clock evaluation after first read") {
-            app.createAcceptanceCatalog()
             listOf(1, 20).forEach { size ->
                 repeat(if (size == 1) 1 else 19) { app.createInquiry("shared@example.com") }
                 val sql = mutableListOf<String>()
@@ -300,7 +300,6 @@ class StaffDashboardSpec :
 
         listOf("inquiry", "customer").forEach { missing ->
             test("missing $missing enrichment fails the entire projection") {
-                app.createAcceptanceCatalog()
                 app.createInquiry()
                 val records =
                     object : InquiryRepository by inquiries {
@@ -329,7 +328,6 @@ class StaffDashboardSpec :
         }
 
         test("missing canonical financial data is internal corruption rather than a caller not-found") {
-            app.createAcceptanceCatalog()
             val id = InquiryId(UUID.fromString(app.createInquiry()))
             val canonical =
                 object : InquiryFinancialDocumentRepository by owners {
@@ -340,7 +338,6 @@ class StaffDashboardSpec :
         }
 
         test("communication projection outside the complete population fails the whole projection") {
-            app.createAcceptanceCatalog()
             app.createInquiry()
             val invalid =
                 object : InquiryCommunicationRepository by JdbiInquiryCommunicationRepository() {
@@ -354,7 +351,6 @@ class StaffDashboardSpec :
         }
 
         test("concurrent quote and customer/event writer cannot mix operational and enrichment snapshots") {
-            app.createAcceptanceCatalog()
             val id = app.createInquiry()
             val document = UUID.fromString(app.initialEstimateOf(id))
             val paused = CountDownLatch(1)
@@ -376,7 +372,7 @@ class StaffDashboardSpec :
                 CompletableFuture
                     .runAsync {
                         app.transactor.inTransaction { transaction ->
-                            app.context.financialLedger.issueQuote(transaction, document)
+                            app.context.financialLedger.quoteLatest(transaction, document)
                             transaction.handle.createUpdate("UPDATE fionas.customers SET name = 'Changed Customer'").execute()
                             transaction.handle
                                 .createUpdate(

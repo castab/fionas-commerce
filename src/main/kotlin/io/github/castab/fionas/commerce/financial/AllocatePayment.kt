@@ -22,7 +22,7 @@ class AllocatePayment(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    pricingSources: FinancialDocumentPricingRepository,
+    authorship: FinancialDocumentAuthorshipRepository,
     private val clock: Clock,
     private val newAllocationId: () -> UUID = UUID::randomUUID,
 ) {
@@ -33,7 +33,7 @@ class AllocatePayment(
         val amount: BigDecimal,
     )
 
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
     operator fun invoke(command: Command): AllocatedPayment {
         val now = clock.instant().truncatedTo(ChronoUnit.MICROS)

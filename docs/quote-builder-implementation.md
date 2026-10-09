@@ -1,5 +1,12 @@
 # Quote builder implementation: initial composition, preview and atomic publication
 
+> **Superseded (commerce 0.0.23, trusted priced lines).** This record describes the first,
+> catalog-backed quote builder (pricing modes, source overrides, adjustments, catalog revisions).
+> That design was removed: staff now commit complete final lines, and Fiona has no catalog or
+> pricing engine. The current contract is
+> [`AGENTS.md`](../AGENTS.md#quote-builder-staff-committed-lines); consumers migrate with
+> [`trusted-priced-lines-migration.md`](trusted-priced-lines-migration.md). Kept as history.
+
 Staff can start from the persisted canonical Estimate, explicitly compose service selections,
 direct price overrides and separate adjustment lines, obtain a write-free preview, and issue
 the reviewed result through the one existing initial proposal operation. One READ COMMITTED

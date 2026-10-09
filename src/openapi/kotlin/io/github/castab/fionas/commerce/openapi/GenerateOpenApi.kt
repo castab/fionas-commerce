@@ -1,9 +1,5 @@
 package io.github.castab.fionas.commerce.openapi
 
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingsCatalogId
-import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
 import io.github.castab.commerce.runtime.authorization.PermissionCatalog
@@ -14,9 +10,7 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
-import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
-import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
@@ -40,7 +34,6 @@ import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.fionaServiceAuthentication
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
-import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import org.http4k.core.Filter
 import org.http4k.core.Method
@@ -68,12 +61,10 @@ private val notInvoked =
         readStaffDashboard = { error("not called while rendering") },
         markInquiryServed = { error("Rendering never serves an inquiry") },
         closeInquiry = { error("Rendering never closes an inquiry") },
-        getInquiryForm = { error("Rendering the OpenAPI document never reads the inquiry form") },
         createInquiry = { error("Rendering the OpenAPI document never creates an inquiry") },
         listInquiries = { error("Rendering the OpenAPI document never lists inquiries") },
         getInquiry = { error("Rendering the OpenAPI document never reads an inquiry") },
-        previewEstimate = { error("Rendering the OpenAPI document never prices an estimate") },
-        createInquiryEstimate = { _, _ -> error("Rendering the OpenAPI document never persists an estimate") },
+        createInquiryEstimate = { error("Rendering the OpenAPI document never persists an estimate") },
         createInquiryFinancialDocument = { error("Rendering the OpenAPI document never persists a financial document") },
         listInquiryFinancialDocuments = { error("Rendering the OpenAPI document never reads a financial document") },
         getFinancialDocument = { error("Rendering the OpenAPI document never reads a financial document") },
@@ -85,7 +76,7 @@ private val notInvoked =
         queryFinancialLineages = { error("not called while rendering") },
         issueQuote = { _, _ -> error("Rendering the OpenAPI document never issues a quote") },
         issueInvoice = { _, _ -> error("Rendering the OpenAPI document never issues an invoice") },
-        createChangeOrder = { _, _, _ -> error("Rendering the OpenAPI document never applies a change order") },
+        createChangeOrder = { error("Rendering the OpenAPI document never applies a change order") },
         recordPayment = { error("Rendering the OpenAPI document never records a payment") },
         listFinancialDocumentPayments = { error("Rendering the OpenAPI document never reads payments") },
         listUnappliedPayments = { error("Rendering the OpenAPI document never discovers payments") },
@@ -146,7 +137,7 @@ private val renderingOnlyServiceAccessTokens =
  * A `CommerceRuntimeContext` for rendering only: its transactor opens no connection, its
  * repositories refuse every call, and rendering calls none of them.
  *
- * The Offerings, authorization, and service authentication capabilities require a runtime
+ * The authorization and service authentication capabilities require a runtime
  * context even to describe their contract routes. A composed runtime needs a database, so this source set builds a
  * rendering-only context reflectively, including the financial ledger the context carries.
  * The transactor opens no connection, and route rendering invokes no repository or
@@ -165,40 +156,6 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
                 ),
         )
     val transactor = Transactor(Jdbi.create { error("Rendering the OpenAPI document never opens a connection") })
-    val snapshots =
-        object : OfferingsSnapshotRepository {
-            override fun save(
-                transaction: Transaction,
-                snapshot: OfferingsSnapshot,
-            ) = error("Rendering the OpenAPI document never writes a catalog")
-
-            override fun retrieveLatestVersion(
-                transaction: Transaction,
-                catalogId: OfferingsCatalogId,
-            ) = error("Rendering the OpenAPI document never reads a catalog")
-
-            override fun offeringKeyReserved(
-                transaction: Transaction,
-                catalogId: OfferingsCatalogId,
-                key: OfferingKey,
-            ) = error("Rendering the OpenAPI document never checks offering reservation")
-
-            override fun categoryKeyReserved(
-                transaction: Transaction,
-                catalogId: OfferingsCatalogId,
-                key: OfferingCategoryKey,
-            ) = error("Rendering the OpenAPI document never checks category reservation")
-
-            override fun retrieveRetiredOfferings(
-                transaction: Transaction,
-                catalogId: OfferingsCatalogId,
-            ) = error("Rendering the OpenAPI document never discovers retired offerings")
-
-            override fun retrieveRetiredCategories(
-                transaction: Transaction,
-                catalogId: OfferingsCatalogId,
-            ) = error("Rendering the OpenAPI document never discovers retired categories")
-        }
     val documents = refusing<FinancialDocumentRepository>("Rendering the OpenAPI document never touches a financial document")
     val payments = refusing<PaymentRepository>("Rendering the OpenAPI document never touches a payment")
     // The runtime's current internal ledger constructor takes the concrete PostgreSQL repositories.
@@ -226,7 +183,6 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
         .getConstructor(
             CommerceRuntimeConfiguration::class.java,
             Transactor::class.java,
-            OfferingsSnapshotRepository::class.java,
             FinancialDocumentRepository::class.java,
             PaymentRepository::class.java,
             FinancialLedger::class.java,
@@ -237,7 +193,6 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
         ).newInstance(
             configuration,
             transactor,
-            snapshots,
             documents,
             payments,
             ledger,
@@ -262,7 +217,7 @@ private inline fun <reified T : Any> refusing(reason: String): T =
 
 /**
  * The OpenAPI document of the Fiona API, exactly as the running application serves it at
- * [OPENAPI_PATH]: the same [fionaApi] contract, with the same Offerings binding, answers the
+ * [OPENAPI_PATH]: the same [fionaApi] contract answers the
  * same request, with no database, server, or network.
  */
 fun fionaOpenApiDocument(version: String = fionaVersion()): String {
@@ -275,7 +230,6 @@ fun fionaOpenApiDocument(version: String = fionaVersion()): String {
             renderingAccess,
             Filter.NoOp,
         )
-    val offerings = offeringsHttpCapability(context, fionaOfferingsBinding(renderingAccess))
     val authorizationAdmin =
         authorizationAdministrationHttpCapability(context, renderingAccess, "/admin/access", setOf(staffAdministrationTag))
     val currentPrincipal = currentPrincipalHttpCapability(renderingAccess, "/authorization/me", setOf(authorizationTag))
@@ -283,7 +237,6 @@ fun fionaOpenApiDocument(version: String = fionaVersion()): String {
     val response =
         fionaApi(
             notInvoked,
-            offerings,
             authorizationAdmin,
             currentPrincipal,
             serviceAuthentication,

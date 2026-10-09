@@ -2,9 +2,6 @@ package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerId
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
-import io.github.castab.fionas.commerce.offering.restorePersistedPricingInputs
-import io.github.castab.fionas.commerce.offering.toPersistedJson
 import org.jdbi.v3.core.mapper.RowMapper
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -12,7 +9,7 @@ import java.util.UUID
 
 /**
  * [InquiryRepository] on `fionas.inquiries`, through the caller's transaction. The requested
- * pricing inputs are the row's `pricing_inputs` jsonb, in Fiona's persisted representation.
+ * service is the row's `requested_service` jsonb, in Fiona's persisted representation.
  */
 class JdbiInquiryRepository : InquiryRepository {
     override fun findRequestedByIds(
@@ -23,13 +20,13 @@ class JdbiInquiryRepository : InquiryRepository {
         return transaction.handle
             .createQuery(
                 """
-                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type, pricing_inputs
+                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type, requested_service
                 FROM fionas.inquiries WHERE id = ANY(:ids)
                 """.trimIndent(),
             ).bindArray("ids", UUID::class.java, ids.map { it.value })
             .map { row, context ->
                 val inquiry = inquiryRow.map(row, context)
-                RequestedInquiry(inquiry, restorePersistedPricingInputs("inquiry ${inquiry.id.value}", row.getString("pricing_inputs")))
+                RequestedInquiry(inquiry, restoreRequestedService("inquiry ${inquiry.id.value}", row.getString("requested_service")))
             }.list()
             .associateBy { it.inquiry.id }
     }
@@ -44,13 +41,13 @@ class JdbiInquiryRepository : InquiryRepository {
     override fun insert(
         transaction: Transaction,
         inquiry: Inquiry,
-        pricingInputs: FionasPricingInputs,
+        requestedService: RequestedService,
     ) {
         transaction.handle
             .createUpdate(
                 """
-                INSERT INTO fionas.inquiries (id, customer_id, message, created_at, zip_code, event_date, event_type, pricing_inputs)
-                VALUES (:id, :customerId, :message, :createdAt, :zipCode, :eventDate, :eventType, CAST(:pricingInputs AS jsonb))
+                INSERT INTO fionas.inquiries (id, customer_id, message, created_at, zip_code, event_date, event_type, requested_service)
+                VALUES (:id, :customerId, :message, :createdAt, :zipCode, :eventDate, :eventType, CAST(:requestedService AS jsonb))
                 """.trimIndent(),
             ).bind("id", inquiry.id.value)
             .bind("customerId", inquiry.customerId.value)
@@ -59,7 +56,7 @@ class JdbiInquiryRepository : InquiryRepository {
             .bind("zipCode", inquiry.zipCode.value)
             .bind("eventDate", inquiry.eventDate.value)
             .bind("eventType", inquiry.eventType.name)
-            .bind("pricingInputs", pricingInputs.toPersistedJson())
+            .bind("requestedService", requestedService.toPersistedJson())
             .execute()
     }
 
@@ -84,14 +81,14 @@ class JdbiInquiryRepository : InquiryRepository {
         transaction.handle
             .createQuery(
                 """
-                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type, pricing_inputs
+                SELECT id, customer_id, message, created_at, zip_code, event_date, event_type, requested_service
                 FROM fionas.inquiries WHERE id = :id
                 """.trimIndent(),
             ).bind("id", id.value)
             .map { row, context ->
                 RequestedInquiry(
                     inquiryRow.map(row, context),
-                    restorePersistedPricingInputs("inquiry ${id.value}", row.getString("pricing_inputs")),
+                    restoreRequestedService("inquiry ${id.value}", row.getString("requested_service")),
                 )
             }.findOne()
             .orElse(null)

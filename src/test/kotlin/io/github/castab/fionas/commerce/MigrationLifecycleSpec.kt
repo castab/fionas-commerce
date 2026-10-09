@@ -102,36 +102,21 @@ class MigrationLifecycleSpec :
             TestDatabase.create().use { database ->
                 compose(database).close()
 
-                // Both streams have a version 1; neither numbers its migrations after the other's.
-                database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15")
-                database.history(FIONA_MIGRATION_SCHEMA)[0] shouldContain "V1__customers_and_inquiries.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[1] shouldContain "V2__user_credentials.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[2] shouldContain "V3__financial_document_context.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[3] shouldContain "V4__inquiry_list_and_pricing.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[4] shouldContain "V5__inquiry_locations.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[5] shouldContain "V6__required_inquiry_zip_code.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[6] shouldContain "V7__inquiry_event_details.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[7] shouldContain "V8__initial_estimate_relationship.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[8] shouldContain "V9__inquiry_submissions.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[9] shouldContain "V10__required_inquiry_pricing.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[10] shouldContain "V11__aggregate_pricing_inputs.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[11] shouldContain "V12__inquiry_fulfillment.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[12] shouldContain "V13__inquiry_communications.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[13] shouldContain "V14__inquiry_proposals.sql"
-                database.history(FIONA_MIGRATION_SCHEMA)[14] shouldContain "V15__inquiry_service_plans.sql"
+                // Both streams are rebaselined pre-production to a single version 1 each; neither numbers its
+                // migrations after the other's.
+                database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly listOf("1")
+                database.history(FIONA_MIGRATION_SCHEMA).single() shouldContain "V1__fionas_baseline.sql"
+                database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1")
+                database.history("commerce").single() shouldContain "V1__commerce_baseline.sql"
                 database.count("commerce.users") shouldBe 0
-                database.history("commerce").map { it.substringBefore(' ') } shouldContain "1"
-                database.history("commerce").map { it.substringBefore(' ') } shouldContain "7"
-                // Commerce 0.0.20's V9 stores aggregate-owned values in their snapshot rows; Fiona's V11
-                // applies the same principle to its own pricing inputs, after the runtime's stream.
-                database.history("commerce").any { it.contains("V9__aggregate_snapshots.sql") } shouldBe true
-                database.history("commerce").any { it.contains("V10__service_credentials.sql") } shouldBe true
-                database.history("commerce").any { it.contains("V11__offering_badge_and_status_note.sql") } shouldBe true
-                database.history("commerce").any { it.contains("V12__offerings_current_catalogs.sql") } shouldBe true
-                database.history("commerce").last() shouldContain "V13__deposit_requirements.sql"
                 database.strings("SELECT to_regclass('commerce.deposit_requirement_revisions') IS NOT NULL").single() shouldBe "t"
                 database.strings("SELECT to_regclass('fionas.deposit_requirement_revisions') IS NULL").single() shouldBe "t"
+                // No catalog or pricing-input storage survives in either stream.
+                database
+                    .strings(
+                        "SELECT table_schema || '.' || table_name FROM information_schema.tables " +
+                            "WHERE table_schema IN ('commerce', 'fionas') AND (table_name LIKE '%offering%' OR table_name LIKE '%pricing%')",
+                    ).shouldBeEmpty()
                 database
                     .strings(
                         "SELECT is_nullable || ' ' || data_type FROM information_schema.columns " +
@@ -142,13 +127,13 @@ class MigrationLifecycleSpec :
                         "SELECT (SELECT max(installed_on) FROM commerce.flyway_schema_history) <= " +
                             "(SELECT min(installed_on) FROM fionas.flyway_schema_history WHERE type = 'SQL')",
                     ).single() shouldBe "t"
-                // Fiona's V3 depends on the runtime's financial ledger, which is in place first.
+                // Fiona's baseline references the runtime's users and financial snapshots, which are in place first.
                 database
                     .strings(
-                        "SELECT (SELECT installed_rank FROM commerce.flyway_schema_history WHERE script LIKE '%financial_ledger%') " +
-                            "IS NOT NULL AND (SELECT max(installed_on) FROM commerce.flyway_schema_history) <= " +
-                            "(SELECT installed_on FROM fionas.flyway_schema_history WHERE version = '3')",
-                    ).single() shouldBe "t"
+                        "SELECT count(*) FROM pg_constraint WHERE connamespace = 'fionas'::regnamespace AND contype = 'f' " +
+                            "AND confrelid IN ('commerce.users'::regclass, 'commerce.financial_document_snapshots'::regclass)",
+                    ).single()
+                    .toInt() shouldBe 8
             }
         }
 
@@ -162,7 +147,7 @@ class MigrationLifecycleSpec :
             }
         }
 
-        test("starting again against a current database applies nothing and serves") {
+        test("starting again against a current database applies nothing, validates, and serves") {
             TestDatabase.create().use { database ->
                 compose(database).close()
                 val runtimeHistory = database.history("commerce")

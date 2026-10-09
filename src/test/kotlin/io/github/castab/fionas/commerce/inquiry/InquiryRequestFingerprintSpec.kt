@@ -1,52 +1,52 @@
 package io.github.castab.fionas.commerce.inquiry
 
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingCategorySelection
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingSelections
-import io.github.castab.commerce.offering.OfferingsRevision
+import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
-import io.github.castab.fionas.commerce.offering.FionasOfferingsContext
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
+import io.github.castab.fionas.commerce.financial.PricedLine
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
-import java.time.Duration
+import java.math.BigDecimal
+import java.util.Currency
+import java.util.UUID
 
 class InquiryRequestFingerprintSpec :
     FunSpec({
-        val inputs =
-            FionasPricingInputs(
-                OfferingsRevision.of(20),
-                OfferingSelections(
-                    listOf(
-                        OfferingCategorySelection(
-                            OfferingCategoryKey("soft-serve-flavor"),
-                            listOf(OfferingKey("vanilla"), OfferingKey("chocolate")),
-                        ),
-                        OfferingCategorySelection(OfferingCategoryKey("cone-option"), listOf(OfferingKey("cup"))),
-                    ),
-                ),
-                FionasOfferingsContext(75, false, Duration.ofMinutes(120)),
+        val usd = Currency.getInstance("USD")
+
+        fun money(amount: String) = Money(BigDecimal(amount), usd)
+
+        val service = PricedLine("Churro catering service", "Prepared on site", BigDecimal("100"), money("4.50"), money("0.00"))
+        val discount = PricedLine("Courtesy discount", null, null, money("-50.00"), money("0.00"))
+        val requested =
+            RequestedService(
+                75,
+                false,
+                120,
+                listOf(RequestedServiceItem("Churros", "Desserts", "churros"), RequestedServiceItem("Chocolate sauce", null, null)),
+                "fionas-web-pricing@2026-10-01",
             )
         val original =
             CreateInquiry.Command(
                 CustomerName.of("Jane"),
                 Email.of("jane@example.com"),
                 InquiryMessage.ofOptional("Birthday"),
-                inputs,
+                requested,
+                listOf(service, discount),
                 ZipCode.of("02108"),
                 EventDate.of("2026-12-05"),
                 EventType.BIRTHDAY,
                 InquirySubmissionKey("A"),
+                ServiceId(UUID.fromString("00000000-0000-0000-0000-000000000001")),
             )
 
-        fun context(value: FionasOfferingsContext) = original.copy(pricingInputs = inputs.copy(context = value))
+        fun requested(value: RequestedService) = original.copy(requestedService = value)
 
-        fun selections(value: List<OfferingCategorySelection>) =
-            original.copy(pricingInputs = inputs.copy(selections = OfferingSelections(value)))
+        fun lines(vararg value: PricedLine) = original.copy(lines = value.toList())
+
         val differences =
             listOf(
                 "name" to original.copy(name = CustomerName.of("Janet")),
@@ -56,29 +56,40 @@ class InquiryRequestFingerprintSpec :
                 "zip" to original.copy(zipCode = ZipCode.of("92626")),
                 "date" to original.copy(eventDate = EventDate.of("2026-12-06")),
                 "type" to original.copy(eventType = EventType.WEDDING),
-                "revision" to original.copy(pricingInputs = inputs.copy(catalogRevision = OfferingsRevision.of(21))),
-                "guests" to context(inputs.context.copy(guestCount = 76)),
-                "minimum guests" to context(inputs.context.copy(guestCountIsMinimum = true)),
-                "duration" to context(inputs.context.copy(duration = Duration.ofMinutes(90))),
-                "fractional duration" to context(inputs.context.copy(duration = inputs.context.duration.plusNanos(1))),
-                "category order" to selections(inputs.selections.categories.reversed()),
-                "offering order" to
-                    selections(inputs.selections.categories.map { OfferingCategorySelection(it.category, it.offerings.reversed()) }),
-                "offering identity" to
-                    selections(inputs.selections.categories.map { OfferingCategorySelection(it.category, listOf(OfferingKey("other"))) }),
-                "category identity" to
-                    selections(listOf(OfferingCategorySelection(OfferingCategoryKey("other"), listOf(OfferingKey("cup"))))),
-                "empty block versus omission" to
-                    selections(inputs.selections.categories + OfferingCategorySelection(OfferingCategoryKey("topping"), emptyList())),
+                "guests" to requested(requested.copy(guestCount = 76)),
+                "minimum guests" to requested(requested.copy(guestCountIsMinimum = true)),
+                "duration" to requested(requested.copy(durationMinutes = 90)),
+                "absent duration" to requested(requested.copy(durationMinutes = null)),
+                "item order" to requested(requested.copy(items = requested.items.reversed())),
+                "item label" to requested(requested.copy(items = listOf(RequestedServiceItem("Churro", "Desserts", "churros")))),
+                "item group" to requested(requested.copy(items = listOf(RequestedServiceItem("Churros", null, "churros")))),
+                "item key" to requested(requested.copy(items = listOf(RequestedServiceItem("Churros", "Desserts", null)))),
+                "pricing reference" to requested(requested.copy(pricingReference = "fionas-web-pricing@2026-10-02")),
+                "absent pricing reference" to requested(requested.copy(pricingReference = null)),
+                "line order" to lines(discount, service),
+                "missing line" to lines(service),
+                "extra line" to lines(service, discount, discount.copy(description = "Second discount")),
+                "line description" to lines(service.copy(description = "Churro service"), discount),
+                "line sub-description" to lines(service.copy(subDescription = null), discount),
+                "line quantity" to lines(service.copy(quantity = BigDecimal("101")), discount),
+                "flat versus quantity" to lines(service, discount.copy(quantity = BigDecimal.ONE)),
+                "unit price" to lines(service.copy(unitPrice = money("4.51")), discount),
+                "tax amount" to lines(service.copy(taxAmount = money("0.01")), discount),
+                "currency" to
+                    lines(
+                        service.copy(
+                            unitPrice = Money(BigDecimal("4.50"), Currency.getInstance("EUR")),
+                            taxAmount = Money.zero(Currency.getInstance("EUR")),
+                        ),
+                    ),
             )
         differences.forEach { (field, changed) ->
             test("fingerprint includes $field") { changed.fingerprint() shouldNotBe original.fingerprint() }
         }
-        test("the v1 encoding is pinned, so committed submissions keep replaying") {
-            // Computed by the implementation in which pricing was still optional; every priced command keeps it.
-            original.fingerprint() shouldBe "68940eb88234f50a41c92a4154967309210a5862bd531f27c693795640c49285"
+        test("the v2 encoding is pinned, so committed submissions keep replaying") {
+            original.fingerprint() shouldBe PINNED_V2
         }
-        test("canonical normalization and command key do not affect fingerprints") {
+        test("canonical normalization, numeric scale, the submitting principal and the command key do not affect fingerprints") {
             original
                 .copy(
                     name = CustomerName.of(" Jane "),
@@ -86,6 +97,12 @@ class InquiryRequestFingerprintSpec :
                     message = InquiryMessage.ofOptional(" Birthday "),
                     zipCode = ZipCode.of(" 02108 "),
                     submissionKey = InquirySubmissionKey("different"),
+                    submittedBy = ServiceId(UUID.randomUUID()),
+                    lines =
+                        listOf(
+                            service.copy(quantity = BigDecimal("100.000"), unitPrice = money("4.5"), taxAmount = money("0")),
+                            discount.copy(unitPrice = money("-50")),
+                        ),
                 ).fingerprint() shouldBe original.fingerprint()
             original.copy(message = InquiryMessage.ofOptional(" ")).fingerprint() shouldBe original.copy(message = null).fingerprint()
             original.fingerprint().matches(Regex("[0-9a-f]{64}")) shouldBe true
@@ -97,6 +114,8 @@ class InquiryRequestFingerprintSpec :
                 original.copy(name = CustomerName("😁")).fingerprint()
             original.copy(name = CustomerName("ab"), message = InquiryMessage("c")).fingerprint() shouldNotBe
                 original.copy(name = CustomerName("a"), message = InquiryMessage("bc")).fingerprint()
+            lines(service.copy(description = "ab", subDescription = "c")).fingerprint() shouldNotBe
+                lines(service.copy(description = "a", subDescription = "bc")).fingerprint()
         }
 
         test("key spelling is opaque, bounded, UUID compatible and never normalized") {
@@ -109,3 +128,6 @@ class InquiryRequestFingerprintSpec :
             }
         }
     })
+
+/** The v2 fingerprint of the spec's original command; changing it breaks replay of committed submissions. */
+private const val PINNED_V2 = "f99475e6f019d7154c66c634510872a304b9d96c18193411edbc640f7778c226"

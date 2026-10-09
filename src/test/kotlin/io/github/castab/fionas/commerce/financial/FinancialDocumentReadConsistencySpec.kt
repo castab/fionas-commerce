@@ -7,12 +7,11 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.http.FinancialDocumentResponse
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
@@ -32,13 +31,12 @@ import java.util.concurrent.TimeUnit
 class FinancialDocumentReadConsistencySpec :
     FunSpec({
         lateinit var application: TestApplication
-        var revision = 0
         val associations = JdbiInquiryFinancialDocumentRepository()
-        val sources = JdbiFinancialDocumentPricingRepository()
+        val sources = JdbiFinancialDocumentAuthorshipRepository()
 
         fun newEstimate(): Pair<InquiryId, UUID> {
             val inquiryId = InquiryId(UUID.fromString(application.createInquiry()))
-            val response = application.adminPost("/inquiries/${inquiryId.value}/estimates", pricingBody(revision))
+            val response = application.adminPost("/inquiries/${inquiryId.value}/estimates", """{"lines":${linesJson(acceptanceLines())}}""")
             response.status shouldBe Status.CREATED
             val documentId = UUID.fromString(CommerceJson.asA(response.bodyString(), FinancialDocumentResponse.serializer()).id)
             return inquiryId to documentId
@@ -57,7 +55,6 @@ class FinancialDocumentReadConsistencySpec :
 
         beforeSpec {
             application = TestApplication.create()
-            revision = application.createAcceptanceCatalog()
             application.adminCookie
         }
         afterSpec { application.close() }
@@ -67,13 +64,13 @@ class FinancialDocumentReadConsistencySpec :
             application.adminPost("/financial-documents/$id/quote", """{"expectedVersion":1}""").status shouldBe Status.OK
 
             val pause = Pause()
-            // The document and pricing have been read; reconciliation has not.
+            // The document and its authorship have been read; reconciliation has not.
             val pausing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun find(
                         transaction: Transaction,
                         snapshot: FinancialDocumentReference,
-                    ): FionasPricingInputs? = pause.after(sources.find(transaction, snapshot))
+                    ): LineAuthorship? = pause.after(sources.find(transaction, snapshot))
                 }
             val nonLockingAssociations =
                 object : InquiryFinancialDocumentRepository by associations {
@@ -112,16 +109,16 @@ class FinancialDocumentReadConsistencySpec :
                 .compareTo(after.latest.document.total.amount - "300.00".toBigDecimal()) shouldBe 0
         }
 
-        test("a history read keeps pre-quote versions and pricing while a quote commits") {
+        test("a history read keeps pre-quote versions and authorship while a quote commits") {
             val (_, id) = newEstimate()
             val pause = Pause()
-            // Pricing sources establish the snapshot before the ledger history query.
+            // Authorship establishes the snapshot before the ledger history query.
             val pausing =
-                object : FinancialDocumentPricingRepository by sources {
+                object : FinancialDocumentAuthorshipRepository by sources {
                     override fun findAll(
                         transaction: Transaction,
                         documentId: UUID,
-                    ): Map<Version, FionasPricingInputs> = pause.after(sources.findAll(transaction, documentId))
+                    ): Map<Version, LineAuthorship> = pause.after(sources.findAll(transaction, documentId))
                 }
             val nonLockingAssociations =
                 object : InquiryFinancialDocumentRepository by associations {
@@ -149,7 +146,7 @@ class FinancialDocumentReadConsistencySpec :
             val after = GetFinancialDocumentHistory(application.transactor, application.context.financialLedger, associations, sources)(id)
             after.versions.map { it.document.version } shouldContainExactly listOf(Version.INITIAL, Version.of(2))
             after.versions
-                .map { it.pricing }
+                .map { it.authorship }
                 .distinct()
                 .size shouldBe 1
         }
@@ -217,7 +214,7 @@ class FinancialDocumentReadConsistencySpec :
             fun state() =
                 listOf(
                     "fionas.inquiry_financial_documents",
-                    "fionas.financial_document_pricing",
+                    "fionas.financial_document_authorship",
                     "commerce.financial_document_snapshots",
                     "commerce.payment_records",
                 ).map { application.database.count(it) } +

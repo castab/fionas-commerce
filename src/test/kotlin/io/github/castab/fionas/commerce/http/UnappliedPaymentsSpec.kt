@@ -5,9 +5,9 @@ import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.createInquiry
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.http4k.core.Method
@@ -64,14 +64,13 @@ class UnappliedPaymentsSpec :
                 }
                 app.database.count("fionas.inquiries") shouldBe 0
                 app.database.count("fionas.inquiry_financial_documents") shouldBe 0
-                val revision = app.createAcceptanceCatalog()
                 val inquiry = app.createInquiry()
                 val document =
                     CommerceJson.asA(
                         app
                             .adminPost(
                                 "/inquiries/$inquiry/financial-documents",
-                                pricingBody(revision).dropLast(1) + """, "stage":"INVOICE"}""",
+                                """{"stage":"INVOICE","lines":${linesJson(acceptanceLines())}}""",
                             ).also { it.status shouldBe Status.CREATED }
                             .bodyString(),
                         FinancialDocumentResponse.serializer(),

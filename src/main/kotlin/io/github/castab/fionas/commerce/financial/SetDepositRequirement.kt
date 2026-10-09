@@ -13,7 +13,7 @@ class SetDepositRequirement(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    pricingSources: FinancialDocumentPricingRepository,
+    authorship: FinancialDocumentAuthorshipRepository,
     proposals: InquiryProposalRepository,
 ) {
     data class Command(
@@ -23,7 +23,7 @@ class SetDepositRequirement(
         val terms: DepositTerms,
     )
 
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
     private val proposalDeposits = CanonicalProposalDepositPolicy(associations, proposals)
 
     operator fun invoke(command: Command): FinancialLineageView =

@@ -4,7 +4,7 @@ import io.github.castab.commerce.deposit.DepositRequirementRevision
 import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.persistence.Transactor
-import io.github.castab.commerce.staff.PrincipalId
+import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 
 class ReviseInquiryProposalDeposit(
@@ -16,7 +16,7 @@ class ReviseInquiryProposalDeposit(
         val expectedDocumentVersion: Version,
         val expectedDepositRequirementRevision: DepositRequirementRevision,
         val terms: DepositTerms,
-        val principalId: PrincipalId,
+        val issuedBy: UserId,
     )
 
     operator fun invoke(command: Command): IssuedInquiryProposal = transactor.inTransaction { proposals.reviseDeposit(it, command) }

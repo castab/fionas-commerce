@@ -1,16 +1,13 @@
 package io.github.castab.fionas.commerce
 
-import io.github.castab.commerce.offering.OfferingsCatalogId
-import io.github.castab.commerce.runtime.offering.GetOfferingsCatalog
-import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
-import io.github.castab.fionas.commerce.financial.FinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.FinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.InquiryServicePlanRepository
-import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentPricingRepository
+import io.github.castab.fionas.commerce.financial.JdbiFinancialDocumentAuthorshipRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryServicePlanRepository
@@ -24,8 +21,6 @@ import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationReposito
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
-import io.github.castab.fionas.commerce.offering.FIONA_OFFERINGS_CATALOG_ID
-import io.github.castab.fionas.commerce.offering.fionaOfferingsBinding
 import io.github.castab.fionas.commerce.staff.CredentialRepository
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
@@ -42,8 +37,6 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldStartWith
 import java.io.File
-import java.util.UUID
-import java.util.jar.JarFile
 
 /**
  * Structural guards for the boundaries in AGENTS.md. They are deliberately blunt: a
@@ -119,7 +112,7 @@ class ArchitectureSpec :
                 InquiryFinancialDocumentRepository::class.java,
                 InquiryProposalRepository::class.java,
                 InquiryServicePlanRepository::class.java,
-                FinancialDocumentPricingRepository::class.java,
+                FinancialDocumentAuthorshipRepository::class.java,
             ).forEach { repository ->
                 repository.declaredMethods.forEach { method ->
                     method.parameterTypes.first() shouldBe Transaction::class.java
@@ -138,7 +131,7 @@ class ArchitectureSpec :
                 JdbiInquiryFinancialDocumentRepository::class.java,
                 JdbiInquiryProposalRepository::class.java,
                 JdbiInquiryServicePlanRepository::class.java,
-                JdbiFinancialDocumentPricingRepository::class.java,
+                JdbiFinancialDocumentAuthorshipRepository::class.java,
             ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
                 repository.declaredConstructors.single().parameterCount shouldBe 0
@@ -208,41 +201,30 @@ class ArchitectureSpec :
         }
 
         test("repositories and operations know nothing of HTTP") {
-            // FionaOfferings.kt owns the runtime HTTP binding; its pricing operations stay pure.
+            // The only serialization outside http is Fiona's persisted jsonb: database representations, never wire formats.
+            val persisted = setOf("PersistedJson.kt", "RequestedService.kt", "JdbiInquiryServicePlanRepository.kt")
             sources {
                 !it.path.contains("${File.separator}http${File.separator}") &&
                     it.name != "FionaApplication.kt" &&
-                    it.name != "FionaOfferings.kt" &&
-                    it.name != "PersistedPricingInputs.kt" &&
-                    it.name != "PersistedServicePlan.kt"
+                    it.name !in persisted
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
-            // The only serialization outside http is Fiona's persisted pricing-inputs and service-plan JSON:
-            // database representations, never wire formats. They know no HTTP and no HTTP code uses them.
-            listOf(File(mainSources, "offering/PersistedPricingInputs.kt"), File(mainSources, "financial/PersistedServicePlan.kt"))
-                .containing(listOf("org.http4k", ".http.", "CommerceJson"))
-                .shouldBeEmpty()
+            sources { it.name in persisted }.containing(listOf("org.http4k", ".http.", "CommerceJson")).shouldBeEmpty()
             sources { it.path.contains("${File.separator}http${File.separator}") }
-                .containing(
-                    listOf("toPersistedJson", "restorePersistedPricingInputs", "encodeServicePlanContent", "restoreServicePlanContent"),
-                ).shouldBeEmpty()
+                .containing(listOf("toPersistedJson", "restoreRequestedService", "persistedJson", "ServicePlanJson"))
+                .shouldBeEmpty()
         }
 
-        test("persisted pricing inputs are encoded and restored only by the repositories whose rows own them") {
+        test("persisted requested services and service plans are encoded and restored only by the repositories whose rows own them") {
             sources()
                 .filter { file ->
-                    file.name != "PersistedPricingInputs.kt" &&
-                        Regex("""\b(?:toPersistedJson|restorePersistedPricingInputs)\b""").containsMatchIn(file.codeWithoutComments())
-                }.map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactlyInAnyOrder
-                listOf("inquiry/JdbiInquiryRepository.kt", "financial/JdbiFinancialDocumentPricingRepository.kt")
-        }
-
-        test("persisted service plans are encoded and restored only by the repository whose rows own them") {
-            sources()
-                .filter { file ->
-                    file.name != "PersistedServicePlan.kt" &&
-                        Regex("""\b(?:encodeServicePlanContent|restoreServicePlanContent)\b""").containsMatchIn(file.codeWithoutComments())
+                    file.name != "RequestedService.kt" &&
+                        Regex("""\b(?:toPersistedJson|restoreRequestedService)\b""").containsMatchIn(file.codeWithoutComments())
                 }.map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactly
+                listOf("inquiry/JdbiInquiryRepository.kt")
+            sources()
+                .filter { Regex("""\b(?:ServicePlanJson|LineNoteJson)\b""").containsMatchIn(it.codeWithoutComments()) }
+                .map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactly
                 listOf("financial/JdbiInquiryServicePlanRepository.kt")
         }
 
@@ -276,12 +258,10 @@ class ArchitectureSpec :
                         readStaffDashboard = { error("not called") },
                         markInquiryServed = { error("not called") },
                         closeInquiry = { error("not called") },
-                        getInquiryForm = { error("not called") },
                         createInquiry = { error("not called") },
                         listInquiries = { error("not called") },
                         getInquiry = { error("not called") },
-                        previewEstimate = { error("not called") },
-                        createInquiryEstimate = { _, _ -> error("not called") },
+                        createInquiryEstimate = { error("not called") },
                         createInquiryFinancialDocument = { error("not called") },
                         listInquiryFinancialDocuments = { error("not called") },
                         getFinancialDocument = { error("not called") },
@@ -297,7 +277,7 @@ class ArchitectureSpec :
                         reviseInquiryQuoteProposal = { error("not called") },
                         reviseInquiryProposalDeposit = { error("not called") },
                         issueInvoice = { _, _ -> error("not called") },
-                        createChangeOrder = { _, _, _ -> error("not called") },
+                        createChangeOrder = { error("not called") },
                         recordPayment = { error("not called") },
                         listFinancialDocumentPayments = { error("not called") },
                         listUnappliedPayments = { error("not called") },
@@ -329,13 +309,13 @@ class ArchitectureSpec :
                 .shouldBeEmpty()
         }
 
-        test("commerce runtime and transitive domain resolve at the adopted 0.0.22 release") {
+        test("commerce runtime and transitive domain resolve at the adopted 0.0.23 release") {
             listOf(
                 io.github.castab.commerce.runtime.financial.FinancialLedger::class.java to "commerce-runtime",
                 io.github.castab.commerce.financial.Money::class.java to "commerce-domain",
             ).forEach { (type, artifact) ->
                 type.protectionDomain.codeSource.location.path
-                    .substringAfterLast('/') shouldBe "$artifact-0.0.22.jar"
+                    .substringAfterLast('/') shouldBe "$artifact-0.0.23.jar"
             }
             File("gradle/libs.versions.toml").readText().contains("http4k = \"6.58.0.0\"") shouldBe true
         }
@@ -356,115 +336,66 @@ class ArchitectureSpec :
                     .groupValues[1]
         }
 
-        test("Fiona's catalog is commerce-runtime's Offerings capability, bound once to Fiona's stable catalog id") {
-            // The id is data: every revision of Fiona's catalog is recorded under it. Never change it.
-            FIONA_OFFERINGS_CATALOG_ID shouldBe OfferingsCatalogId(UUID.fromString("0cde8e0b-aa9c-4129-9853-8db2cbbb909b"))
-            val binding = fionaOfferingsBinding(metadataAuth.access)
-            binding.catalogId shouldBe FIONA_OFFERINGS_CATALOG_ID
-            binding.basePath shouldBe "/offering-catalog"
-            binding.operationIdPrefix shouldBe "fionasOfferings"
-            binding.tags.map { it.name }.toSet() shouldBe setOf("Offerings catalog")
-            (binding.access is OfferingsHttpAccess.ReadWrite) shouldBe true
-            sources().containing(listOf("offeringsHttpCapability(")) shouldContainExactly
-                listOf("FionaApplication.kt: offeringsHttpCapability(")
-        }
-
-        test("Fiona implements no Offerings mechanics: no repositories, operations, DTOs, or SQL of its own") {
-            // Generic catalog behavior is commerce-runtime's. A need it does not meet is a runtime
-            // requirement (AGENTS.md, commerce-runtime gap rule), never a local copy. No Fiona
-            // type re-declares one of the runtime's Offerings operations, DTOs, or bindings.
-            val runtimeOfferingTypes =
-                JarFile(
-                    File(
-                        GetOfferingsCatalog::class.java.protectionDomain.codeSource.location
-                            .toURI(),
-                    ),
-                ).use { jar ->
-                    val directory = GetOfferingsCatalog::class.java.packageName.replace('.', '/') + "/"
-                    jar
-                        .entries()
-                        .toList()
-                        .map { it.name }
-                        .filter { it.startsWith(directory) && it.endsWith(".class") }
-                        .map { it.removePrefix(directory).removeSuffix(".class").substringBefore('$') }
-                        .filterNot { it.endsWith("Kt") }
-                        .toSet()
-                }
-            runtimeOfferingTypes.shouldNotBeEmpty()
-            sources()
-                .flatMap { file -> Regex("""\b(?:class|interface|object)\s+(\w+)""").findAll(file.readText()).map { it.groupValues[1] } }
-                .filter { it in runtimeOfferingTypes }
-                .shouldBeEmpty()
-            // The runtime's snapshot repository is named only in the composition root, which hands
-            // it to the runtime's own read operation (previews) and its transaction-bound read to
-            // FionasPricing (persisted documents); Fiona never calls it itself.
-            sources()
-                .filter {
-                    Regex(
-                        """\b(?:OfferingsSnapshotRepository|offeringsSnapshotRepository)\b""",
-                    ).containsMatchIn(it.codeWithoutComments())
-                }.map { it.relativeTo(mainSources).invariantSeparatorsPath } shouldContainExactly
-                listOf("FionaApplication.kt")
-            // SQL naming a runtime Offerings table (`commerce.offerings…`), as opposed to the
-            // `io.github.castab.commerce.offering` package.
-            val runtimeOfferingsTable = Regex("""(?<![\w.])commerce\.offering""")
-            sources()
-                .filter { runtimeOfferingsTable.containsMatchIn(it.readText()) }
-                .shouldBeEmpty()
-            // Fiona's migrations create no catalog tables and never reach the runtime's. The keys
-            // a financial snapshot was priced from are Fiona's pricing source, not a catalog.
-            migrations()
-                .filter { migration ->
-                    runtimeOfferingsTable.containsMatchIn(migration.readText()) || createdTables(migration).any { "offering" in it }
-                }.shouldBeEmpty()
-        }
-
-        test("Fiona's pricing is pure policy: it knows nothing of HTTP, persistence, the runtime, or serialization") {
-            // The engine, its policy, and its context depend only on commerce-domain and the JDK.
-            val allowed =
-                listOf(
-                    "io.github.castab.commerce.financial.",
-                    "io.github.castab.commerce.offering.",
-                    "java.math.",
-                    "java.time.",
-                    "java.util.",
-                )
-            listOf("FionasOfferingsEngine.kt", "FionasPricingPolicy.kt", "FionasOfferingsContext.kt", "FionasPricingInputs.kt")
-                .map { File(mainSources, "offering/$it") }
-                .flatMap { file ->
-                    file
-                        .readLines()
-                        .filter { it.startsWith("import ") }
-                        .map { it.removePrefix("import ") }
-                        .filterNot { import -> allowed.any(import::startsWith) }
-                        .map { "${file.name}: $it" }
-                }.shouldBeEmpty()
-        }
-
-        test("Fiona's pricing names no offering: every per-offering price comes from the catalog") {
-            // No `if (offering == "waffle-cone")`: the policy knows the event and the topping
-            // category, never an individual offering, so new surcharges need no deployment.
-            listOf(
-                "FionasOfferingsEngine.kt",
-                "FionasPricingPolicy.kt",
-                "FionasOfferingsContext.kt",
-                "FionasPricingInputs.kt",
-                "FionasPricing.kt",
-                "PreviewEstimate.kt",
-            ).map { File(mainSources, "offering/$it") }
-                .filter { "OfferingKey(" in it.readText() }
-                .shouldBeEmpty()
-        }
-
-        test("an estimate preview reads the catalog through commerce-runtime and records nothing") {
-            File(mainSources, "offering/PreviewEstimate.kt")
-                .readText()
-                .let { preview ->
-                    listOf("Repository", "persistence", "Transactor", "Transaction", "org.jdbi", "SELECT ").filter {
-                        it in
-                            preview
+        test("Fiona owns no product catalog or pricing policy: no offering types, catalog routes, pricing engine or catalog storage") {
+            // Commercial actors price; Fiona records already-priced lines. The removed shared catalog is
+            // never imported, re-declared, mounted, or stored, and no Fiona pricing engine replaces it.
+            val roots = listOf(mainSources, File("src/test/kotlin"), File("src/openapi/kotlin"))
+            roots
+                .flatMap { root -> root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList() }
+                .filter { it.name != "ArchitectureSpec.kt" }
+                .filter { file ->
+                    file.readLines().any {
+                        it.startsWith("import io.github.castab.commerce.offering") ||
+                            it.startsWith("import io.github.castab.commerce.runtime.offering")
                     }
                 }.shouldBeEmpty()
+            File(mainSources, "offering").exists() shouldBe false
+            sources()
+                .flatMap { file -> Regex("""\b(?:class|interface|object)\s+(\w+)""").findAll(file.readText()).map { it.groupValues[1] } }
+                .filter { Regex("(?i)offering|catalog|pricingpolicy|pricingengine|pricinginputs").containsMatchIn(it) }
+                .shouldBeEmpty()
+            sources()
+                .containing(
+                    listOf("offering-catalog", "inquiry-form", "estimate-preview", "offeringsSnapshotRepository"),
+                ).shouldBeEmpty()
+            migrations()
+                .filter { migration ->
+                    Regex("(?i)offering|catalog|pricing_inputs").containsMatchIn(
+                        migration.readLines().filterNot { it.trim().startsWith("--") }.joinToString("\n"),
+                    )
+                }.shouldBeEmpty()
+            File("gradle/libs.versions.toml").readText().contains("http4k-format-jackson") shouldBe false
+        }
+
+        test("every ledger mutation names the version its caller reviewed, never a freshly read latest") {
+            // commerce 0.0.23 has no tokenless overloads; a version read from `latest` just before the
+            // call would silently rebase a stale command, so no mutation derives its token that way.
+            val mutation = Regex("""\bledger\s*\.\s*(?:issueQuote|issueInvoice|changeOrder)\s*\(([^;]*?)\)\s*(?:\n|\.)""")
+            val calls = sources().flatMap { file -> mutation.findAll(file.codeWithoutComments()).map { file.name to it.groupValues[1] } }
+            calls.shouldNotBeEmpty()
+            calls.filter { (_, arguments) -> "latest" in arguments }.shouldBeEmpty()
+        }
+
+        test("public priced submission requires a SERVICE, and staff-negotiated values require a staff USER") {
+            // Formatting-independent: compare the code with all whitespace removed.
+            fun File.compactCode() = codeWithoutComments().replace(Regex("""\s+"""), "")
+            val inquiries = File(mainSources, "http/InquiryRoutes.kt").compactCode()
+            inquiries.contains("access.requirePermission(FionaPermissions.InquiriesCreate).then(requireService)") shouldBe true
+            val financial = File(mainSources, "http/FinancialDocumentRoutes.kt").compactCode()
+            financial.contains(".then(requirePermission(FionaPermissions.FinancialTermsManage)).then(requireStaffUser)") shouldBe true
+            Regex("""access\.staffTerms\(""").findAll(financial).count() shouldBe 3
+            val composition = File(mainSources, "http/QuoteBuilderRoutes.kt").compactCode()
+            composition.contains(".then(requirePermission(FionaPermissions.FinancialTermsManage)).then(requireStaffUser)") shouldBe true
+            listOf("http/QuoteBuilderRoutes.kt", "http/InquiryProposalRoutes.kt")
+                .sumOf { Regex("""access\.staffComposition\(\)""").findAll(File(mainSources, it).codeWithoutComments()).count() } shouldBe 4
+            // The approver and author are always the authenticated principal, never a request value.
+            sources { it.path.contains("${File.separator}http${File.separator}") }
+                .flatMap { file ->
+                    Regex(
+                        """\b(?:issuedBy|author|submittedBy)\s*=\s*([^,\n)]+)""",
+                    ).findAll(file.codeWithoutComments()).map { it.groupValues[1].trim() }
+                }.filterNot { it in setOf("staffUser(request", "servicePrincipal(request") }
+                .shouldBeEmpty()
         }
 
         test("financial documents, payments, and refunds are commerce-runtime's ledger; Fiona stores only its own context") {
@@ -503,13 +434,12 @@ class ArchitectureSpec :
             calls.filterNot { it.endsWith("(transaction") }.shouldBeEmpty()
         }
 
-        test("materialization accepts concrete lines and has no catalog, pricing source, or transaction boundary") {
+        test("materialization accepts already-priced lines and has no catalog, pricing, or transaction boundary") {
             val source = File(mainSources, "financial/MaterializeInquiryFinancialDocument.kt").codeWithoutComments()
-            listOf("FionasPricing", "Offerings", "OfferingKey", "catalogRevision", "FinancialDocumentPricingRepository", "inTransaction")
-                .filter { it in source }
-                .shouldBeEmpty()
-            source.contains("lines: List<LineItem>") shouldBe true
+            listOf("Pricing(", "Offering", "catalog", "inTransaction").filter { it in source }.shouldBeEmpty()
+            source.contains("lines: List<PricedLine>") shouldBe true
             source.contains("ledger.create(transaction, first)") shouldBe true
+            source.contains("authorship.insert(transaction, created.reference, LineAuthorship(author, recordedAt))") shouldBe true
         }
 
         test("recording a refund joins one runtime transaction and reconciles in it") {
@@ -521,9 +451,9 @@ class ArchitectureSpec :
             listOf("Jdbi", "Handle", "DataSource", "jdbc:").filter { it in source }.shouldBeEmpty()
         }
 
-        test("Jackson renders only the Offerings schemas; kotlinx.serialization stays the wire format") {
-            sources().containing(listOf("org.http4k.format.Jackson", "com.fasterxml")) shouldContainExactlyInAnyOrder
-                listOf("http/OpenApi.kt: org.http4k.format.Jackson", "http/OpenApi.kt: com.fasterxml")
+        test("kotlinx.serialization is the only JSON: no Jackson renders or reads anything") {
+            sources().containing(listOf("org.http4k.format.Jackson", "com.fasterxml")).shouldBeEmpty()
+            File("build.gradle.kts").readText().contains("jackson") shouldBe false
         }
 
         test("runtime is the sole session authority and Fiona persists no sessions") {
@@ -547,7 +477,7 @@ class ArchitectureSpec :
                 .map { it.replace(Regex("""\s+"""), " ") }
                 .toSet() shouldBe
                 setOf(
-                    "REFERENCES commerce.users(principal_id)",
+                    "REFERENCES commerce.users (principal_id)",
                     "REFERENCES commerce.financial_document_snapshots (document_id, version)",
                 )
         }
@@ -568,19 +498,18 @@ class ArchitectureSpec :
                     FionaPermissions.InquiriesCreate,
                     FionaPermissions.CommunicationsAcknowledge,
                     FionaPermissions.InquiriesManage,
-                    FionaPermissions.InquiryFormRead,
-                    FionaPermissions.EstimatePreviewCreate,
+                    FionaPermissions.FinancialTermsManage,
                 )
             FionaPermissions.definitions.forEach { it.key.value shouldStartWith "fionas." }
-            // Fresh Administrators can discover inquiries, use the customer operations, and issue
-            // service credentials; existing roles are never changed at startup.
+            // Fresh Administrators can discover inquiries, negotiate financial terms, and issue service
+            // credentials; existing roles are never changed at startup. Priced inquiry submission is a
+            // SERVICE capability, never granted to the human Administrator.
             listOf(
                 "FionaPermissions.InquiriesRead",
-                "FionaPermissions.InquiriesCreate",
-                "FionaPermissions.InquiryFormRead",
-                "FionaPermissions.EstimatePreviewCreate",
+                "FionaPermissions.FinancialTermsManage",
                 "RuntimePermissions.ServiceCredentialManage",
             ).filterNot { it in bootstrap }.shouldBeEmpty()
+            bootstrap.contains("FionaPermissions.InquiriesCreate") shouldBe false
         }
 
         test("no static API key remains: callers authenticate as principals through commerce-runtime") {

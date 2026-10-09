@@ -5,10 +5,10 @@ import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
 import io.github.castab.fionas.commerce.testing.withBearer
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldNotBeNull
@@ -27,7 +27,6 @@ class StaffRequestRoutesSpec :
         val permissions = setOf(FionaPermissions.InquiriesRead, CommercePermissions.FinancialDocumentRead)
         beforeSpec {
             app = TestApplication.create()
-            app.createAcceptanceCatalog()
         }
         afterSpec { app.close() }
 
@@ -65,7 +64,7 @@ class StaffRequestRoutesSpec :
             quoted.financial.id shouldBe document
             quoted.financial.version shouldBe 2
             app.adminPost("/financial-documents/$document/quote", """{"expectedVersion":1}""").status shouldBe Status.CONFLICT
-            app.adminPost("/inquiries/$id/estimates", pricingBody(view.inquiry.pricingInputs.catalogRevision)).status shouldBe
+            app.adminPost("/inquiries/$id/estimates", """{"lines":${linesJson(acceptanceLines())}}""").status shouldBe
                 Status.CREATED
             CommerceJson.asA(app.adminGet(path).bodyString(), StaffRequestResponse.serializer()).financial.id shouldBe document
         }
@@ -199,7 +198,7 @@ class StaffRequestRoutesSpec :
                 app
                     .adminPost(
                         "/inquiries/$id/financial-documents",
-                        """{"stage":"INVOICE",${pricingBody(quoted.inquiry.pricingInputs.catalogRevision).drop(1)}""",
+                        """{"stage":"INVOICE","lines":${linesJson(acceptanceLines())}}""",
                     ).also { it.status shouldBe Status.CREATED }
                     .let { CommerceJson.asA(it.bodyString(), FinancialDocumentResponse.serializer()) }
             val standalone =

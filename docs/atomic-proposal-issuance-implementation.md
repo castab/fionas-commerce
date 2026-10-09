@@ -1,5 +1,12 @@
 # Atomic proposal issuance implementation
 
+> **Update (commerce 0.0.23, trusted priced lines).** Proposal issuance and both revisions now
+> require a staff USER holding `fionas.financial-terms.manage` in addition to the two commerce
+> permissions; the proposal records the approving `UserId` (`issuedBy`), and Quote revision
+> commits staff-authored lines instead of catalog repricing. Migration history V14 is now part
+> of Fiona's single `V1__fionas_baseline`. The atomicity, currentness and payment rules below
+> are unchanged. Current contract: [`AGENTS.md`](../AGENTS.md#atomic-canonical-proposal-publication).
+
 Canonical customer Quote publication now commits the immutable Quote, its explicitly approved
 deposit requirement and a durable Fiona proposal issuance together. Staff can reissue the
 Quote/deposit pair before any payment has been applied; deposit-only reissuance keeps the

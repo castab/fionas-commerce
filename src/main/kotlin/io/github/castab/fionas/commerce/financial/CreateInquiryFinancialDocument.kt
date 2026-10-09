@@ -3,44 +3,49 @@ package io.github.castab.fionas.commerce.financial
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
-import io.github.castab.fionas.commerce.offering.FionasPricing
-import io.github.castab.fionas.commerce.offering.FionasPricingInputs
 import java.time.Clock
-import java.util.UUID
+import java.time.temporal.ChronoUnit
 
-/** Creates the first snapshot of an inquiry-owned lineage at the chosen stage. */
+/**
+ * Creates the first snapshot of a new RELATED inquiry-owned lineage, at the chosen stage, from
+ * the final lines a verified staff user committed. Nothing is priced or checked against a
+ * catalog. The ledger snapshot, inquiry association and line authorship commit or roll back
+ * together.
+ */
 class CreateInquiryFinancialDocument(
     private val transactor: Transactor,
     private val inquiries: InquiryRepository,
     ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
-    private val pricingSources: FinancialDocumentPricingRepository,
-    private val pricing: FionasPricing,
-    clock: Clock,
-    newDocumentId: () -> UUID = UUID::randomUUID,
-    private val materialize: MaterializeInquiryFinancialDocument =
-        MaterializeInquiryFinancialDocument(ledger, associations, clock, newDocumentId),
+    authorship: FinancialDocumentAuthorshipRepository,
+    private val materialize: MaterializeInquiryFinancialDocument,
+    private val clock: Clock,
 ) {
-    enum class Stage { ESTIMATE, QUOTE, INVOICE }
-
     data class Command(
         val inquiryId: InquiryId,
-        val stage: Stage,
-        val inputs: FionasPricingInputs,
-    )
+        val stage: FirstSnapshotStage,
+        val lines: List<PricedLine>,
+        /** The verified staff user committing the lines, from authentication. */
+        val author: UserId,
+    ) {
+        init {
+            requireDocumentLines(lines)
+            requireNonnegativeTotal(lines)
+        }
+    }
 
-    private val documents = FionaFinancialDocuments(ledger, associations, pricingSources)
+    private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
-    /** The ledger snapshot, inquiry association, and pricing source commit or roll back together. */
-    operator fun invoke(command: Command): InquiryFinancialDocument =
-        transactor.inTransaction { transaction ->
+    operator fun invoke(command: Command): InquiryFinancialDocument {
+        val now = clock.instant().truncatedTo(ChronoUnit.MICROS)
+        return transactor.inTransaction { transaction ->
             inquiries.findById(transaction, command.inquiryId)
                 ?: throw CommerceFailure.NotFound("Inquiry ${command.inquiryId.value} was not found")
-            val lines = pricing.price(transaction, command.inputs).lineItems
-            val created = materialize.create(transaction, command.inquiryId, command.stage, lines)
-            pricingSources.insert(transaction, created.reference, command.inputs)
+            val created = materialize.create(transaction, command.inquiryId, command.stage, command.lines, command.author, now)
             documents.describeLocked(transaction, command.inquiryId, created.id)
         }
+    }
 }

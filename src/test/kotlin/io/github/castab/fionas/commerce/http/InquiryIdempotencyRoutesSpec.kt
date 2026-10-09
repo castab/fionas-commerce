@@ -2,11 +2,13 @@ package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.fionas.commerce.testing.COURTESY_DISCOUNT
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.addOffering
+import io.github.castab.fionas.commerce.testing.TestLine
+import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.asFionasWeb
-import io.github.castab.fionas.commerce.testing.createAcceptanceCatalog
-import io.github.castab.fionas.commerce.testing.pricingBody
+import io.github.castab.fionas.commerce.testing.linesJson
+import io.github.castab.fionas.commerce.testing.requestedServiceJson
 import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -20,11 +22,7 @@ import java.util.UUID
 class InquiryIdempotencyRoutesSpec :
     FunSpec({
         lateinit var app: TestApplication
-        var revision = 0
-        beforeSpec {
-            app = TestApplication.create()
-            revision = app.createAcceptanceCatalog()
-        }
+        beforeSpec { app = TestApplication.create() }
         afterSpec { app.close() }
         val tables =
             listOf(
@@ -38,10 +36,10 @@ class InquiryIdempotencyRoutesSpec :
         fun counts() = tables.associateWith(app.database::count)
 
         fun body(
-            pricing: String = pricingBody(revision),
+            lines: List<TestLine> = acceptanceLines(),
             email: String = "retry-${UUID.randomUUID()}@example.com",
         ) = """{"name":"Jane","email":"$email","message":"Birthday","zipCode":"02108","eventDate":"2026-12-05",""" +
-            """"eventType":"BIRTHDAY","pricingInputs":$pricing}"""
+            """"eventType":"BIRTHDAY","requestedService":${requestedServiceJson()},"lines":${linesJson(lines)}}"""
 
         fun request(
             value: String,
@@ -79,24 +77,34 @@ class InquiryIdempotencyRoutesSpec :
             ).forEach { committed.getValue(it) shouldBe before.getValue(it) + 1 }
         }
 
-        test("replay precedes freshness and different current intent conflicts without reprocessing") {
+        test("a committed replay writes nothing, and changed line amounts or order under the key conflict without reprocessing") {
             val key = UUID.randomUUID().toString()
-            val submitted = body(pricingBody(revision))
+            val submitted = body()
             val first = app.http(request(submitted, key))
-            val previous = revision
-            revision = app.addOffering(revision, "mint", "soft-serve-flavor", "Mint")
             val committed = counts()
             sameReceipt(first, app.http(request(submitted, key)))
-            val changed = app.http(request(submitted.replace("\"catalogRevision\":$previous", "\"catalogRevision\":$revision"), key))
-            changed.status shouldBe Status.CONFLICT
-            changed.error().code shouldBe "IDEMPOTENCY_KEY_REUSED"
-            changed.header("Cache-Control") shouldBe "no-store"
+            val lines = acceptanceLines()
+            listOf(
+                body(lines.map { if (it.description == "Horchata") it.copy(unitPrice = "0.49") else it }),
+                body(lines.reversed()),
+                body(lines.dropLast(1)),
+                body(lines + COURTESY_DISCOUNT),
+                body(lines.map { if (it.description == "Waffle cones") it.copy(taxAmount = "1.00") else it }),
+                body(lines.map { if (it.description == "Base service") it.copy(subDescription = "Two hours") else it }),
+                body(lines.map { if (it.description == "Ice cream service") it.copy(quantity = "76") else it }),
+            ).forEach { changed ->
+                app.http(request(changed, key)).let {
+                    it.status shouldBe Status.CONFLICT
+                    it.error().code shouldBe "IDEMPOTENCY_KEY_REUSED"
+                    it.header("Cache-Control") shouldBe "no-store"
+                }
+            }
             counts() shouldBe committed
         }
 
-        test("same key with changed customer, event, pricing context or selections conflicts") {
+        test("same key with changed customer, event or requested service conflicts") {
             val key = UUID.randomUUID().toString()
-            val value = body(pricingBody(revision), "changed-intent@example.com")
+            val value = body(email = "changed-intent@example.com")
             app.http(request(value, key)).status shouldBe Status.CREATED
             val committed = counts()
             listOf(
@@ -107,9 +115,10 @@ class InquiryIdempotencyRoutesSpec :
                 value.replace("2026-12-05", "2026-12-06"),
                 value.replace("BIRTHDAY", "WEDDING"),
                 value.replace("\"guestCount\":75", "\"guestCount\":76"),
+                value.replace("\"guestCountIsMinimum\":false", "\"guestCountIsMinimum\":true"),
                 value.replace("\"durationMinutes\":120", "\"durationMinutes\":90"),
-                value.replace("waffle-cone", "cup"),
-                value.replace("\"catalogRevision\":$revision", "\"catalogRevision\":999"),
+                value.replace("Waffle cones\"}]", "Cups\"}]"),
+                value.replace("test-pricing@1", "test-pricing@2"),
             ).forEach { changed ->
                 app.http(request(changed, key)).let {
                     it.status shouldBe Status.CONFLICT
@@ -124,7 +133,7 @@ class InquiryIdempotencyRoutesSpec :
 
         test("transport differences, normalization, absent optional defaults and untrusted totals do not change intent") {
             val key = UUID.randomUUID().toString()
-            val value = body(pricingBody(revision), "canonical@example.com")
+            val value = body(email = "canonical@example.com")
             val first = app.http(request(value, key))
             val committed = counts()
             val equivalent =
@@ -133,23 +142,27 @@ class InquiryIdempotencyRoutesSpec :
                     .replace("canonical@example.com", " CANONICAL@EXAMPLE.COM ")
                     .replace("\"Birthday\"", "\" Birthday \"")
                     .replace("\"02108\"", "\" 02108 \"")
-                    .replace("\"guestCount\":75", "\"guestCount\":75,\"guestCountIsMinimum\":false")
+                    // Numerically equal amounts and quantities are the same intent, whatever their scale.
+                    .replace("\"unitPrice\":\"4.00\"", "\"unitPrice\":\"4\"")
+                    .replace("\"quantity\":\"75\"", "\"quantity\":\"75.000\"")
             val reordered = CommerceJson.parse(equivalent).toString()
             sameReceipt(first, app.http(request("  $reordered  ", key)))
             sameReceipt(first, app.http(request(value.dropLast(1) + ",\"total\":\"0.01\"}", key)))
             counts() shouldBe committed
         }
 
-        test("stale, missing revision and ordinary validation failures roll back claims and allow corrected same-key retries") {
-            val old = revision
-            revision = app.addOffering(revision, "espresso", "soft-serve-flavor", "Espresso")
-            listOf(pricingBody(old), pricingBody(999), pricingBody(revision, guests = 0)).forEach { invalid ->
+        test("validation failures roll back claims and allow corrected same-key retries") {
+            listOf(
+                body(listOf(TestLine("Service", unitPrice = "-1.00"))),
+                body(listOf(TestLine("Service", unitPrice = "1.001"))),
+                body(acceptanceLines()).replace("\"zipCode\":\"02108\"", "\"zipCode\":\"2108\""),
+            ).forEach { invalid ->
                 val key = UUID.randomUUID().toString()
                 val before = counts()
-                val failed = app.http(request(body(invalid), key))
+                val failed = app.http(request(invalid, key))
                 failed.status.successful shouldBe false
                 counts() shouldBe before
-                app.http(request(body(pricingBody(revision)), key)).status shouldBe Status.CREATED
+                app.http(request(body(), key)).status shouldBe Status.CREATED
             }
         }
 
