@@ -6,10 +6,12 @@ complete, already-priced lines from two authorities, and records who authored th
 | Authority | Principal | What it prices | Where |
 |---|---|---|---|
 | `fionas-web` server | SERVICE with `fionas.inquiries.create` | The customer's configured request → canonical Estimate v1 | `POST /inquiries` |
-| Staff member | USER with the commerce permission **and** `fionas.financial-terms.manage` | Every negotiated document after that | staff document, change-order and proposal routes |
+| Staff member | USER with the commerce permission **and** `fionas.financial-terms.manage` | Every negotiated document after that, and standalone deposit terms | staff document, change-order, proposal and deposit PUT/DELETE routes |
 
 Fiona validates structure and exact arithmetic, derives every total, and never checks prices
-against anything. Contract details: [`README.md`](../README.md#endpoints) and
+against anything. A unit rate may be more precise than the currency (USD `0.125` a guest), but
+every settlement amount must be exact in minor units: `0.125 × 8 = 1.00` is accepted,
+`0.125 × 3 = 0.375` and a flat `0.125` are `422`. Nothing is ever rounded. Contract details: [`README.md`](../README.md#endpoints) and
 [`AGENTS.md`](../AGENTS.md#trusted-priced-lines).
 
 ## What fionas-web must change
@@ -26,8 +28,13 @@ against anything. Contract details: [`README.md`](../README.md#endpoints) and
    with the service token (`403 forbidden`), and there is no on-behalf-of header.
 4. **Build staff editors on final lines.** Load the reviewed version's lines (with ids) from
    `GET /staff/requests/{inquiryId}` or `GET /financial-documents/{id}`, let staff carry, edit,
-   remove and add lines, send the complete ordered set, and preview before publishing.
-5. **Drop catalog-staleness handling.** `CATALOG_REVISION_STALE` no longer exists.
+   remove and add lines, send the complete ordered set, and preview before publishing. Send
+   the id of a line you keep; send a new `key` only for a genuinely new line. A reorder, or
+   removing a line and adding an identical one under a new key, is a real change (a new
+   version), not `NO_FINANCIAL_CHANGE`.
+5. **Round nothing on the client either.** Keep rates exactly as priced; make sure flat prices,
+   `unitPrice × quantity` and tax are exact in the currency's minor units before submitting.
+6. **Drop catalog-staleness handling.** `CATALOG_REVISION_STALE` no longer exists.
 
 ## API changes
 
@@ -46,13 +53,15 @@ against anything. Contract details: [`README.md`](../README.md#endpoints) and
 | `POST /staff/requests/{id}/proposals` `{…, composition?, reviewToken?}` | `{expectedDocumentVersion, terms, lines?, servicePlan?, reviewToken?}`. |
 | `POST …/proposals/quote-revisions` repriced from inputs | `{expectedDocumentVersion, expectedDepositRequirementRevision, lines, terms, servicePlan?}`. |
 | Proposal routes: two commerce permissions, USER or SERVICE | Plus `fionas.financial-terms.manage`, USER only. |
+| `PUT`/`DELETE /financial-documents/{id}/deposit-requirement`: `commerce.deposit-requirement.manage`, USER or SERVICE | Plus `fionas.financial-terms.manage`, staff USER session only (SERVICE `403`). Reads unchanged. |
+| Line amounts: every value at most the currency's minor-unit digits | Per-quantity unit rates up to 12 decimal places; flat prices, extended subtotals and tax exact in minor units. |
 | `InquiryProposalResponse.principalKind`/`principalId` | `issuedBy` (staff user id). |
 | `servicePlan` with pricing basis, selections, line provenance | `{documentId, documentVersion, reviewedDocumentVersion, description, guestCount?, durationMinutes?, items, lineNotes, approvedAt, approvedBy}`. |
 | `409 CATALOG_REVISION_STALE` | Removed. `IDEMPOTENCY_KEY_REUSED` and `QUOTE_REVIEW_STALE` remain. |
 | Quote builder codes `OVERRIDE_*`, `DUPLICATE_ADJUSTMENT_KEY`, `SERVICE_SELECTIONS_*`, offering codes | `LINE_NOT_IN_REVIEWED_DOCUMENT`, `CURRENCY_MISMATCH`, `NO_FINANCIAL_CHANGE`, `NEGATIVE_DOCUMENT_TOTAL`, `QUOTE_TOTAL_NOT_POSITIVE`, `SERVICE_PLAN_LINE_NOT_FOUND`. |
 
 Unchanged: inquiry listing and reads, the dashboard, `GET /staff/requests/{id}` (shape aside
-from `servicePlan`), deposit routes, payments, refunds, served/closed, authentication and
+from `servicePlan`), deposit reads, payments, refunds, served/closed, authentication and
 administration.
 
 ## Removed types and permissions

@@ -109,8 +109,8 @@ object FionaPermissions {
             PermissionDefinition(
                 FinancialTermsManage,
                 "Negotiate financial terms",
-                "As a verified staff user, commit staff-authored financial lines, overrides, adjustments, and proposal " +
-                    "deposit terms",
+                "As a verified staff user, commit staff-authored financial lines, overrides, adjustments, proposal " +
+                    "deposit terms, and standalone deposit terms",
                 PermissionGroup("fionas.financial-terms"),
             ),
         )

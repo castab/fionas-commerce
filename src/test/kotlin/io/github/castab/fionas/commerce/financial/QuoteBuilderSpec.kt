@@ -415,6 +415,73 @@ class QuoteBuilderSpec :
             ledger.history(document).first() shouldBe original
         }
 
+        test("publishing financially identical lines in a new order binds and persists the requested ids, order and notes") {
+            val twin = TestLine("Catering", null, null, "100.00")
+            val id = InquiryId(UUID.fromString(app.createInquiry(lines = listOf(twin, twin))))
+            val original = estimate(id)
+            val (a, b) = original.lineItems
+            val reordered = LineProposal(listOf(existing(b), existing(a), new("travel", TestLine("Travel", null, null, "25.00"))))
+            val notes =
+                ProposedServicePlan(
+                    ServiceCommitment("Two catering stations", null, null, emptyList()),
+                    listOf(ProposedLineNote(ProposedLineIdentity.Existing(a.id), "Second station")),
+                )
+            val keptToken =
+                preview(
+                    id,
+                    LineProposal(listOf(existing(a), existing(b), new("travel", TestLine("Travel", null, null, "25.00")))),
+                ).reviewToken
+
+            val reviewed = preview(id, reordered, notes)
+            reviewed.financialChange shouldBe true
+            reviewed.reviewToken shouldNotBe keptToken
+            val issued = issue(id, reordered, notes, reviewed.reviewToken)
+
+            val quote = app.context.financialLedger.get(issued.proposal.documentReference)
+            quote.version shouldBe Version.of(3)
+            quote.lineItems.map { it.id }.take(2) shouldBe listOf(b.id, a.id)
+            quote.lineItems.map { it.id } shouldBe reviewed.quote.lineItems.map { it.id }
+            quote.total shouldBe money("225.00")
+            issued.servicePlan
+                .shouldNotBeNull()
+                .lineNotes
+                .single()
+                .lineItemId shouldBe a.id
+            app.context.financialLedger
+                .history(lineage(id))
+                .first() shouldBe original
+        }
+
+        test("a precise unit rate survives preview, review token, change order and publication exactly") {
+            val id = newInquiry()
+            val spoons = TestLine("Tasting spoons", null, "8", "0.125")
+            val lines = LineProposal(estimate(id).lineItems.map { existing(it) } + new("spoons", spoons))
+            val reviewed = preview(id, lines)
+            reviewed.quote.lineItems
+                .last()
+                .price.amount
+                .toPlainString() shouldBe "0.125"
+            reviewed.quote.total.amount
+                .compareTo(BigDecimal("682.25")) shouldBe 0
+            // The same rate written at another scale is the same review; another rate is a different one.
+            preview(id, LineProposal(estimate(id).lineItems.map { existing(it) } + new("spoons", spoons.copy(unitPrice = "0.1250"))))
+                .reviewToken shouldBe reviewed.reviewToken
+            preview(id, LineProposal(estimate(id).lineItems.map { existing(it) } + new("spoons", spoons.copy(unitPrice = "0.25"))))
+                .reviewToken shouldNotBe reviewed.reviewToken
+
+            val issued = issue(id, lines, token = reviewed.reviewToken)
+            val quote = app.context.financialLedger.get(issued.proposal.documentReference)
+            quote.lineItems
+                .last()
+                .price.amount
+                .toPlainString() shouldBe "0.125"
+            quote.lineItems
+                .last()
+                .subtotal.amount
+                .compareTo(BigDecimal("1")) shouldBe 0
+            quote.total.amount.compareTo(BigDecimal("682.25")) shouldBe 0
+        }
+
         test("unchanged lines publish Estimate v1 → Quote v2 directly, with a service plan when one is approved") {
             val id = newInquiry()
             val kept = LineProposal(estimate(id).lineItems.map { existing(it) })

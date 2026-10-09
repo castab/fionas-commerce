@@ -292,6 +292,52 @@ class FinancialDocumentRoutesSpec :
             created.lines.map { it.unitPrice } shouldContainExactly listOf("450.00", "-50.00")
         }
 
+        test("precise unit rates are kept exactly while every subtotal, tax and total settles in minor units") {
+            val sampler = TestLine("Tasting spoons", null, "8", "0.125")
+            val created = newEstimate(linesBody(listOf(CHURROS, sampler)))
+            val rated = created.lines[1]
+            rated.unitPrice shouldBe "0.125"
+            rated.subtotal shouldBe "1.00"
+            created.total shouldBe "451.00"
+
+            fun storedRate(documentId: String) =
+                application.database.strings(
+                    "SELECT line ->> 'priceAmount' FROM commerce.financial_document_snapshots, jsonb_array_elements(lines) AS l(line) " +
+                        "WHERE document_id = '$documentId' AND line ->> 'description' = 'Tasting spoons'",
+                )
+            storedRate(created.id) shouldContainExactly listOf("0.125")
+            // The public pricing authority may submit the same precise rate on a customer's Estimate v1.
+            val submitted = application.createInquiry(lines = listOf(CHURROS, sampler))
+            storedRate(application.initialEstimateOf(submitted)) shouldContainExactly listOf("0.125")
+
+            // Editing the rate's quantity keeps its precision; history keeps the original version exactly.
+            val revised =
+                changeOrder(
+                    created.id,
+                    """{"expectedVersion":1,"lines":${proposalJson(
+                        CHURROS.existing(created.lines[0].id),
+                        sampler.copy(quantity = "16").existing(rated.id),
+                    )}}""",
+                ).also { it.status shouldBe Status.OK }.document()
+            revised.lines[1].id shouldBe rated.id
+            revised.lines[1].unitPrice shouldBe "0.125"
+            revised.lines[1].subtotal shouldBe "2.00"
+            revised.total shouldBe "452.00"
+            get("/financial-documents/${created.id}/history").history().versions.map { it.lines[1].unitPrice } shouldContainExactly
+                listOf("0.125", "0.125")
+
+            // Nothing is rounded: an inexact extended subtotal or an over-precise flat price is rejected and writes nothing.
+            val versions = count("SELECT count(*) FROM commerce.financial_document_snapshots WHERE document_id = '${created.id}'")
+            listOf(sampler.copy(quantity = "3"), sampler.copy(quantity = null)).forEach { invalid ->
+                changeOrder(
+                    created.id,
+                    """{"expectedVersion":2,"lines":${proposalJson(CHURROS.existing(created.lines[0].id), invalid.new("spoons"))}}""",
+                ).status shouldBe Status.UNPROCESSABLE_ENTITY
+                estimate(application.createInquiry(), linesBody(listOf(invalid))).status shouldBe Status.UNPROCESSABLE_ENTITY
+            }
+            count("SELECT count(*) FROM commerce.financial_document_snapshots WHERE document_id = '${created.id}'") shouldBe versions
+        }
+
         test("staff edits carry, override, remove, add and reorder lines, keeping every existing line's identity") {
             val created = newEstimate(linesBody(listOf(CHURROS, COURTESY_DISCOUNT, TestLine("Napkins", unitPrice = "5.00"))))
             val (churros, discount, napkins) = created.lines

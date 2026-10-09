@@ -240,6 +240,75 @@ class ChangeOrderFoundationSpec :
         fun changeOrder() =
             CreateChangeOrder(app.transactor, app.context.financialLedger, owners, sources, JdbiInquiryFulfillmentRepository(), testClock)
 
+        fun keep(
+            line: LineItem,
+            scale: Int? = null,
+        ) = ProposedLine(
+            ProposedLineIdentity.Existing(line.id),
+            PricedLine(
+                line.description,
+                line.subDescription,
+                line.quantity,
+                scale?.let { Money(line.price.amount.setScale(it), usd) } ?: line.price,
+                scale?.let { Money(line.taxAmount.amount.setScale(it), usd) } ?: line.taxAmount,
+            ),
+        )
+
+        test(
+            "financially identical staff lines persist their identity: reorder and remove-and-add append versions, a true no-op does not",
+        ) {
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
+            val a = line("100.00")
+            val b = line("100.00")
+            val original = app.context.financialLedger.create(FinancialDocument.Invoice.create(UUID.randomUUID(), listOf(a, b)))
+            app.transactor.inTransaction { owners.associate(it, InquiryDocumentAssociation(id, original.id, STORED_INSTANT)) }
+            val ledger = app.context.financialLedger
+
+            // Reordering equal lines is a real edit: a new immutable version holding [B, A].
+            val reordered =
+                changeOrder()(CreateChangeOrder.Command(original.id, original.version, LineProposal(listOf(keep(b), keep(a))), app.adminId))
+            val v2 = reordered.latest.document
+            v2.version shouldBe Version.of(2)
+            v2.lineItems.map { it.id } shouldBe listOf(b.id, a.id)
+            v2.lineItems shouldBe listOf(b, a)
+            v2.total shouldBe original.total
+            reordered.latest.authorship?.author shouldBe app.adminId
+            ledger.get(original.reference).lineItems shouldBe listOf(a, b)
+
+            // Omitting A and adding an identical new line is a remove-and-add under a new id.
+            val replacement =
+                ProposedLine(
+                    ProposedLineIdentity.New(LineKey("replacement")),
+                    PricedLine("Catering", null, null, money("100.00"), money("0.00")),
+                )
+            val v3 =
+                changeOrder()(
+                    CreateChangeOrder.Command(original.id, v2.version, LineProposal(listOf(keep(b), replacement)), app.adminId),
+                ).latest.document
+            v3.version shouldBe Version.of(3)
+            v3.lineItems.map { it.id }.first() shouldBe b.id
+            val added = v3.lineItems.last().id
+            (added == a.id) shouldBe false
+            added shouldBe proposedLineId(original.id, v2.version, LineKey("replacement"))
+            v3.total shouldBe original.total
+            ledger.get(v2.reference).lineItems shouldBe listOf(b, a)
+
+            // The same ordered ids with numerically equal amounts at another scale: no change, no version.
+            val stored = v3.lineItems
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                changeOrder()(
+                    CreateChangeOrder.Command(original.id, v3.version, LineProposal(stored.map { keep(it, scale = 4) }), app.adminId),
+                )
+            }.violations.map { it.code } shouldBe listOf(LineProposalViolations.NO_FINANCIAL_CHANGE)
+            ledger.versionHistory(original.id).size shouldBe 3
+
+            // A stale reviewed version still conflicts, even for an identity-only edit, and appends nothing.
+            shouldThrow<CommerceFailure.Conflict> {
+                changeOrder()(CreateChangeOrder.Command(original.id, v2.version, LineProposal(listOf(keep(a), keep(b))), app.adminId))
+            }
+            ledger.versionHistory(original.id).map { it.document } shouldBe listOf(original, v2, v3)
+        }
+
         test("a negative staff change order rejects even after full payment; a zero Invoice persists with a negative balance") {
             val id = InquiryId(UUID.fromString(app.createInquiry()))
             val document = invoice()

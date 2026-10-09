@@ -240,7 +240,7 @@ an authorized pricing authority:
 - the web server, authenticated as a SERVICE principal, for the initial Estimate of a customer
   submission;
 - a verified staff USER, holding an explicit financial-terms capability, for every negotiated
-  document after it.
+  document after it, and for any deposit terms approved or withdrawn on such a document.
 
 The kind of principal is part of this authority. A service is never recorded as a staff
 approver, and a staff session cannot submit customer-priced lines. Delegation, on-behalf-of
@@ -248,7 +248,10 @@ headers, and impersonation are not authority.
 
 The backend still owns the authoritative financial facts:
 
-- it validates the structure and exact arithmetic of every line;
+- it validates the structure and exact arithmetic of every line: an authority may state a unit
+  rate more precisely than the currency's minor units, but every amount a customer settles
+  (a flat price, an extended subtotal, a tax, a total) must be exact in them; commerce never
+  rounds a rate or an amount to make it fit;
 - it never accepts a client-supplied total; shared commerce derives every total from the lines;
 - it records who authored each exact snapshot's lines;
 - it turns a staff edit into an explicit, identity-preserving shared change order;
@@ -353,7 +356,9 @@ the publication lock and refuses to publish anything other than what staff previ
 is a query that changes nothing.
 
 Persisted lines are immutable facts. Line identity comes from what the caller names, never from
-descriptions or positions; only a fully equal ordered result proves an unchanged document. An
+descriptions or positions, and identity is part of the snapshot: only the same ordered lines,
+by identity, with equal values prove an unchanged document. Financially identical lines that
+are reordered, or removed and re-added, are a real change. An
 intermediate Estimate is recorded only for an actual financial change, and the shared
 nonnegative-total policy runs before any ledger write.
 

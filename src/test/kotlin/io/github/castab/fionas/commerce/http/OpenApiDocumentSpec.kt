@@ -556,7 +556,30 @@ class OpenApiDocumentSpec :
                 "issueInquiryProposal",
                 "reviseInquiryQuoteProposal",
                 "reviseInquiryProposalDeposit",
+                // Standalone deposit terms are staff-approved too; their reads stay open to either transport.
+                "setFinancialDocumentDepositRequirement",
+                "withdrawFinancialDocumentDepositRequirement",
             )
+
+        test("line amounts document precise unit rates with settlement-exact subtotals and minor-unit tax") {
+            listOf("PricedLineRequest", "ProposedLineRequest").forEach { name ->
+                val properties = schema(name).at("properties")
+                properties.text("unitPrice", "description") shouldContain "12 decimal places"
+                properties.text("unitPrice", "description") shouldContain "minor units"
+                properties.text("taxAmount", "description") shouldContain "minor-unit"
+            }
+            operation("/inquiries", "post").text("responses", "422", "description") shouldContain "unit rate with more than 12"
+        }
+
+        test("standalone deposit mutations advertise staff-session USER authority and its 403 causes; reads do not") {
+            listOf("put", "delete").forEach { method ->
+                val route = operation("/financial-documents/{documentId}/deposit-requirement", method)
+                route.text("description") shouldContain "fionas.financial-terms.manage"
+                route.text("responses", "403", "description") shouldContain "staff USER"
+            }
+            requirements("/financial-documents/{documentId}/deposit-requirement", "get") shouldBe eitherTransport
+            requirements("/financial-documents/{documentId}/deposit-requirement/history", "get") shouldBe eitherTransport
+        }
 
         test("declares the two authentication transports: the staff session cookie and the service bearer token") {
             document.at("components", "securitySchemes").jsonObject.keys shouldBe setOf("staffSession", "serviceAccessToken")

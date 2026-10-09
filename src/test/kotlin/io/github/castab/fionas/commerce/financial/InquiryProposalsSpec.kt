@@ -98,6 +98,32 @@ class InquiryProposalsSpec :
 
         fun persisted(id: InquiryId) = app.transactor.inTransaction { history.history(it, id) }
 
+        /** The canonical lineage's latest lines kept under their own ids, with amounts restated at another scale. */
+        fun keepAllRescaled(id: InquiryId): LineProposal {
+            val lineage = app.transactor.inTransaction { owners.initialEstimateOf(it, id)!! }
+            return LineProposal(
+                app.context.financialLedger.latest(lineage).lineItems.map { line ->
+                    ProposedLine(
+                        ProposedLineIdentity.Existing(line.id),
+                        PricedLine(
+                            line.description,
+                            line.subDescription,
+                            line.quantity?.setScale(4),
+                            Money(line.price.amount.setScale(4), line.currency),
+                            Money(line.taxAmount.amount.setScale(4), line.currency),
+                        ),
+                    )
+                },
+            )
+        }
+
+        fun reviseLines(
+            id: InquiryId,
+            lines: LineProposal,
+        ) = ReviseInquiryQuoteProposal(app.transactor, core())(
+            ReviseInquiryQuoteProposal.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, lines, percent, actor),
+        )
+
         fun current(id: InquiryProposalId) =
             IsCurrentPayableInquiryProposal(app.transactor, app.context.financialLedger, owners, history)(id)
 
@@ -281,7 +307,12 @@ class InquiryProposalsSpec :
             val a = issue(id)
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { quote(id, version = 1) } }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { quote(id, rev = 2) } }
-            unchanged(id) { shouldThrow<CommerceFailure.ValidationFailed> { quote(id, guests = 75) } }
+            // The same ordered ids with numerically equal amounts at another scale are no change.
+            unchanged(id) {
+                shouldThrow<CommerceFailure.ValidationFailed> { reviseLines(id, keepAllRescaled(id)) }
+                    .violations
+                    .map { it.code } shouldBe listOf(LineProposalViolations.NO_FINANCIAL_CHANGE)
+            }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { deposit(id, 1, 1, fixed("200")) } }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { deposit(id, 2, 2, fixed("200")) } }
             unchanged(
@@ -292,6 +323,20 @@ class InquiryProposalsSpec :
             b.proposal.documentReference shouldBe a.proposal.documentReference
             unchanged(id) { shouldThrow<CommerceFailure.ValidationFailed> { deposit(id, 2, 2, fixed(amount + "0")) } }
         }
+        test("identical charges under new keys revise the Quote: identity is part of the snapshot, not only the amounts") {
+            val id = newInquiry()
+            val published = issue(id)
+            val quoteBefore = app.context.financialLedger.get(published.proposal.documentReference)
+            val revised = reviseLines(id, newLinesProposal(acceptanceLines(guests = 75)))
+
+            val quoteAfter = app.context.financialLedger.get(revised.proposal.documentReference)
+            revised.proposal.kind shouldBe ProposalIssuanceKind.QUOTE_REVISED
+            quoteAfter.version shouldBe Version.of(3)
+            quoteAfter.total shouldBe quoteBefore.total
+            quoteAfter.lineItems.map { it.id }.intersect(quoteBefore.lineItems.map { it.id }.toSet()) shouldBe emptySet()
+            app.context.financialLedger.get(published.proposal.documentReference) shouldBe quoteBefore
+        }
+
         test("revision publication failure rolls back repriced Quote, replacement deposit and metadata") {
             val id = newInquiry()
             issue(id)

@@ -53,14 +53,18 @@ data class PricedLineRequest(
     val quantity: String? = null,
     @ApiProperty(
         description =
-            "The price of one unit, or of the flat charge, an exact decimal string with at most the currency's minor-unit " +
-                "digits. Negative for a discount or credit. With a quantity, `unitPrice × quantity` must also be exact in " +
-                "minor units: nothing is rounded.",
+            "The price of one unit, or of the flat charge, an exact decimal string; negative for a discount or credit. " +
+                "With a quantity it is a unit rate of at most ${PricedLine.MAX_UNIT_PRICE_FRACTION_DIGITS} decimal places " +
+                "(USD `0.125`), kept exactly, and the extended subtotal `unitPrice × quantity` must be exact in the " +
+                "currency's minor units (`0.125 × 8 = 1.00`; `0.125 × 3` is rejected). Without a quantity it is the " +
+                "subtotal itself, with at most the currency's minor-unit digits. Nothing is rounded.",
         pattern = SIGNED_DECIMAL,
     )
     val unitPrice: String,
     @ApiProperty(
-        description = "The final tax of the whole line as an amount (never a rate), an exact decimal string; `0.00` when untaxed.",
+        description =
+            "The final tax of the whole line as an amount (never a rate), an exact decimal string with at most the " +
+                "currency's minor-unit digits; `0.00` when untaxed.",
         pattern = SIGNED_DECIMAL,
     )
     val taxAmount: String,
@@ -95,9 +99,18 @@ data class ProposedLineRequest(
     val subDescription: String? = null,
     @ApiProperty(description = "A nonzero exact decimal quantity; absent or null for a flat charge.", pattern = SIGNED_DECIMAL)
     val quantity: String? = null,
-    @ApiProperty(description = "The exact decimal unit (or flat) price; negative for a discount or credit.", pattern = SIGNED_DECIMAL)
+    @ApiProperty(
+        description =
+            "The exact decimal unit rate (with a quantity: at most ${PricedLine.MAX_UNIT_PRICE_FRACTION_DIGITS} decimal " +
+                "places, its extended subtotal exact in minor units) or flat price (minor-unit digits only); negative " +
+                "for a discount or credit.",
+        pattern = SIGNED_DECIMAL,
+    )
     val unitPrice: String,
-    @ApiProperty(description = "The line's final tax amount, an exact decimal; `0.00` when untaxed.", pattern = SIGNED_DECIMAL)
+    @ApiProperty(
+        description = "The line's final tax amount, an exact decimal with at most the currency's minor-unit digits; `0.00` when untaxed.",
+        pattern = SIGNED_DECIMAL,
+    )
     val taxAmount: String,
     @ApiProperty(description = "The ISO 4217 currency of the line; it must be the document's.")
     val currency: String,
@@ -167,6 +180,12 @@ data class LineAuthorshipResponse(
     @ApiProperty(format = "uuid") val principalId: String,
     @ApiProperty(description = "When Fiona recorded the lines.", format = "date-time") val recordedAt: String,
 )
+
+/** The precision rules a line can break, for the documented `422` causes of every line-taking route. */
+internal val LINE_PRECISION_REJECTED =
+    "a flat price or tax amount with more decimal places than the currency's minor units, a unit rate with more than " +
+        "${PricedLine.MAX_UNIT_PRICE_FRACTION_DIGITS} decimal places, an extended subtotal (unit rate × quantity) that is " +
+        "not exact in minor units"
 
 /** An exact decimal string as Fiona reads one: optional sign, digits, optional fraction; never an exponent. */
 internal const val SIGNED_DECIMAL = "^-?[0-9]+(\\.[0-9]+)?$"

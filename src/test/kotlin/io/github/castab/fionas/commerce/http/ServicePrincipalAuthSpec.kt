@@ -236,7 +236,7 @@ class ServicePrincipalAuthSpec :
             }
         }
 
-        test("a service holding every staff permission still cannot commit staff-negotiated lines or proposals") {
+        test("a service holding every staff permission still cannot commit staff-negotiated lines, proposals or deposit terms") {
             TestApplication.create().use { app ->
                 val inquiry = app.createInquiry()
                 val document = app.initialEstimateOf(inquiry)
@@ -267,6 +267,22 @@ class ServicePrincipalAuthSpec :
                     response.status shouldBe Status.FORBIDDEN
                     response.error() shouldBe ErrorResponse("forbidden", STAFF_USER_REQUIRED)
                 }
+                // Standalone deposit terms are staff decisions as well, whatever the service holds.
+                listOf(
+                    Method.PUT to """{"expectedDocumentVersion":1,"terms":{"type":"PERCENTAGE","percentage":"20"}}""",
+                    Method.DELETE to """{"expectedRequirementRevision":1}""",
+                ).forEach { (method, body) ->
+                    val response =
+                        app.http(
+                            Request(method, "/financial-documents/$document/deposit-requirement")
+                                .withBearer(token)
+                                .header("Content-Type", "application/json")
+                                .body(body),
+                        )
+                    response.status shouldBe Status.FORBIDDEN
+                    response.error() shouldBe ErrorResponse("forbidden", STAFF_USER_REQUIRED)
+                }
+                app.database.count("commerce.deposit_requirement_revisions") shouldBe 0
                 // Reads remain available to an explicitly authorized service.
                 app.http(Request(Method.GET, "/staff/requests/$inquiry").withBearer(token)).status shouldBe Status.OK
                 app.database.count("commerce.financial_document_snapshots") shouldBe 1

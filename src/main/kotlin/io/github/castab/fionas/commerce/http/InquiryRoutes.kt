@@ -392,7 +392,8 @@ fun createInquiryRoute(
             "Fiona records those lines exactly; it never reprices them, requests a catalog revision, checks option " +
             "eligibility, or infers a price from the guest count or requested items. `requestedService` is descriptive " +
             "history for staff. Lines must form a valid document: 1 to $MAX_DOCUMENT_LINES lines, one currency, exact " +
-            "decimal strings with at most the currency's minor-unit digits, and a nonnegative total, which Fiona derives. " +
+            "decimal strings (precise unit rates allowed; every subtotal, tax and total exact in minor units), and a " +
+            "nonnegative total, which Fiona derives. " +
             "Idempotency-Key is required: a successful same-key/same-intent replay returns the original 201 receipt and " +
             "Location without writing anything. The fingerprint binds every value, including each line's amounts and " +
             "order; a successful key reused for different intent fails with 409 IDEMPOTENCY_KEY_REUSED. Failed attempts " +
@@ -414,9 +415,9 @@ fun createInquiryRoute(
             ErrorCategory.VALIDATION_FAILED,
             "a value is invalid: a blank name, an email without `@`, a ZIP code without five digits, an invalid event " +
                 "date, an invalid requested service, no lines or too many, a line with a blank description, a malformed " +
-                "or overlong decimal, more fraction digits than the currency allows, an inexact subtotal, mixed " +
-                "currencies, or a negative document total. Nothing is written.",
-            "A line's unit price in USD has at most 2 decimal places",
+                "or overlong decimal, $LINE_PRECISION_REJECTED, mixed currencies, or a negative document total. " +
+                "Nothing is written.",
+            "A line's subtotal (unit price × quantity) must be exact in USD minor units; nothing is rounded",
         )
         returning(
             Status.CONFLICT,

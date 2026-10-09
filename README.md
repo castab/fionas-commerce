@@ -90,7 +90,8 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md) and
   lines. A staff USER session can never submit priced inquiries: the route requires a SERVICE
   principal in addition to `fionas.inquiries.create` (`403 forbidden` otherwise).
 - **A verified staff USER** authors every later negotiated amount: staff document creation,
-  change orders, Quote preview and publication, Quote and deposit revisions. These routes
+  change orders, Quote preview and publication, Quote and deposit revisions, and standalone
+  deposit approval and withdrawal. These routes
   require the commerce permission, `fionas.financial-terms.manage`, **and** a USER principal.
   A SERVICE token is refused (`403`) even when it holds every permission, so a SERVICE is never
   recorded as a staff approver. A backend-for-frontend proxying staff requests must forward the
@@ -134,15 +135,18 @@ Routes that author amounts ("staff terms") require a staff USER holding the list
 |---|---|---|---|
 | `GET /financial-documents/{documentId}/deposit-requirement` | `getFinancialDocumentDepositRequirement` | `commerce.financial-document.read` | `200` current `NONE`, `ACTIVE`, or `WITHDRAWN`. |
 | `GET /financial-documents/{documentId}/deposit-requirement/history` | `getFinancialDocumentDepositRequirementHistory` | `commerce.financial-document.read` | `200 {revisions: [...]}`, oldest first. |
-| `PUT /financial-documents/{documentId}/deposit-requirement` | `setFinancialDocumentDepositRequirement` | `commerce.deposit-requirement.manage` | `200` new `ACTIVE` state: activation, replacement, or reactivation. |
-| `DELETE /financial-documents/{documentId}/deposit-requirement` | `withdrawFinancialDocumentDepositRequirement` | `commerce.deposit-requirement.manage` | `200` new immutable `WITHDRAWN` revision. |
+| `PUT /financial-documents/{documentId}/deposit-requirement` | `setFinancialDocumentDepositRequirement` | staff terms: `commerce.deposit-requirement.manage` | `200` new `ACTIVE` state: activation, replacement, or reactivation. |
+| `DELETE /financial-documents/{documentId}/deposit-requirement` | `withdrawFinancialDocumentDepositRequirement` | staff terms: `commerce.deposit-requirement.manage` | `200` new immutable `WITHDRAWN` revision. |
 | `POST /financial-documents/query` | `queryFinancialDocumentLineages` | `commerce.financial-document.read` | `200 {lineages: [...]}`, in request order. |
 
 All requested documents must belong to Fiona through `fionas.inquiry_financial_documents`;
-missing and unowned runtime lineages both return `404`. These routes use the same `AccessControl`:
-USER session or SERVICE token, with trusted Origin on cookie-bearing PUT/DELETE/POST, including
-the query POST. Token-only calls need no browser Origin. Deposit management does not require
-`commerce.financial-document.create`.
+missing and unowned runtime lineages both return `404`. These routes use the same `AccessControl`.
+The reads (both GETs and the query POST) accept a USER session or a SERVICE token. Approving and
+withdrawing deposit terms (PUT/DELETE) are staff decisions: they require a **staff USER session**
+holding `commerce.deposit-requirement.manage` **and** `fionas.financial-terms.manage`; a SERVICE
+token is `403 forbidden` even with both, and the approver comes only from authentication.
+Cookie-bearing PUT/DELETE/POST requests need a trusted Origin; token-only reads need none. Deposit
+management does not require `commerce.financial-document.create`.
 
 PUT takes `expectedDocumentVersion`, nullable `expectedRequirementRevision`, and a strict terms
 union. For example:
@@ -314,10 +318,17 @@ response is a receipt of the new inquiry only: it never contains the stored cust
 name, or email.
 
 **`lines` are the authoritative financial input.** One to 100 lines, all in one currency.
-Every amount and quantity is an exact decimal string, never a JSON number: `unitPrice` and
-`taxAmount` have at most the currency's minor-unit digits, `quantity` (absent for a flat
-charge) is nonzero, and `unitPrice × quantity` must itself be exact in minor units. Nothing
-is rounded. Negative lines (discounts, credits) are allowed, but the document total must not
+Every amount and quantity is an exact decimal string, never a JSON number. A precise **unit
+rate** is allowed, but every **settlement amount** is exact in the currency's minor units:
+
+- with a `quantity` (nonzero), `unitPrice` is a rate of at most 12 decimal places, kept exactly
+  in the ledger and every response, and the extended subtotal `unitPrice × quantity` must be
+  exact in minor units: USD `0.125 × 8 = 1.00` is valid, `0.125 × 3 = 0.375` is rejected;
+- without a `quantity` (a flat charge), `unitPrice` is the subtotal itself, so it has at most
+  the currency's minor-unit digits (USD `0.125` flat is rejected);
+- `taxAmount` is the whole line's tax, always in minor units.
+
+Nothing is rounded. Negative lines (discounts, credits) are allowed, but the document total must not
 be negative. There is no `total`, `subtotal` or line id in the request: Fiona assigns line
 ids and commerce-domain derives every total. Fiona checks the shape and arithmetic, never the
 prices: it has no catalog to compare against. Invalid lines are `422 validation_failed` and
@@ -439,7 +450,7 @@ the runtime permission catalog, each naming a capability rather than a kind of c
 | `fionas.inquiries.create` | `fionas.inquiries` | `POST /inquiries` (priced submission; a SERVICE principal only) |
 | `fionas.inquiries.manage` | `fionas.inquiries` | Mark inquiries served and close them |
 | `fionas.communications.acknowledge` | `fionas.communications` | Explicitly acknowledge customer email attention |
-| `fionas.financial-terms.manage` | `fionas.financial-terms` | As a verified staff USER, commit staff-authored lines, overrides, adjustments and proposal deposit terms |
+| `fionas.financial-terms.manage` | `fionas.financial-terms` | As a verified staff USER, commit staff-authored lines, overrides, adjustments, proposal deposit terms and standalone deposit terms |
 
 `fionas.inquiry-form.read`, `fionas.estimate-preview.create` (and its `fionas.pricing`
 group) no longer exist, and Fiona no longer uses the runtime's `commerce.offerings.manage`.
@@ -673,7 +684,9 @@ Reviewed lines left out are **removed**. Order is the final order. Every line ca
 same exact-decimal fields as an inquiry line (`description`, optional `subDescription` and
 `quantity`, `unitPrice`, `taxAmount`, `currency`); there is never a total. Fiona derives one
 commerce-domain `ChangeOrder` (remove, replace in place, add) that turns the reviewed lines
-into exactly these, keeping ids wherever the line survives, even when it moves.
+into exactly these, keeping ids wherever the line survives, even when it moves. Only the same
+ordered ids with numerically equal values are "no change"; a reorder or a remove-and-add of
+financially identical lines is a real change, reviewed and published as such.
 
 The churro example: the customer asked for soft serve (Estimate v1, $681.25), and staff agree
 on churros instead, with a courtesy discount:
@@ -1039,10 +1052,12 @@ The lines follow the [Quote builder](#quote-builder) rules: `lineItemId` carries
 a reviewed line in place, `key` adds one, omitted lines are removed. Fiona derives the
 commerce-domain `ChangeOrder`, applies it through the domain to prove it yields exactly these
 lines, rejects a negative total, and appends the successor through the ledger's
-expected-version `changeOrder`. Lines that charge exactly what the version already charges
-(descriptions, quantities, prices, tax, currency and order, ignoring ids and decimal scale) are
-`422 NO_FINANCIAL_CHANGE`. Lines are never matched by description or position: identity is
-the id the caller names.
+expected-version `changeOrder`. Only the reviewed snapshot itself, the same line ids in the same
+order with numerically equal values (`100`, `100.0` and `100.00` are equal), is
+`422 NO_FINANCIAL_CHANGE`. Identity is part of the snapshot: reordering financially identical
+lines, or omitting a line and adding an identical one under a new `key`, appends a new version
+with exactly the requested ids and order. Lines are never matched by description or position:
+identity is the id the caller names.
 
 **Every document-lineage mutation names the version it acts on.** `expectedVersion` (transitions and change
 orders) and `documentVersion` (allocations and combined payments) must be the latest version; otherwise the request is
@@ -1704,6 +1719,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `InquiryRoutesSpec` | The inquiry API through the complete handler: the receipt never reveals an existing customer; required event and ZIP fields; missing/null `requestedService` or `lines` malformed; invalid lines `422` with nothing recorded; caller totals ignored; requested service descriptive only; SERVICE-priced inquiry → staff read → Estimate v1 authored by the service; keyset inbox pages; runtime error bodies and `405` |
 | `ServicePrincipalAuthSpec` | SERVICE principals end to end: token issuance, `401`/`403`/authorized for priced submission, live permissions, a staff session refused priced submission even with the permission, a SERVICE holding every staff permission refused staff terms (`403 forbidden`), session precedence, Origin only for cookies, session-only logout, provisioning and rotation |
 | `AuthRoutesSpec`, `LoginRateLimitSpec`, `BootstrapAdminEnvironmentSpec` | Fresh bootstrap grants (financial terms, no catalog or submission grant), the removed permissions absent from the catalog, removed routes `404`, login failures and limiting, session lifecycle, administration, credentials and Origin checks |
+| `LineProposalSpec`, `PricedLineSpec` | Pure staff line resolution with identity: financially identical lines reordered or removed-and-re-added are real changes with exactly the requested ids, a true no-op ignores only decimal scale, review tokens and plan notes bind the actual final ids; precise unit rates (USD `0.125 × 8`) kept exactly while flat prices, extended subtotals and tax settle in each currency's minor units (USD, JPY, BHD), nothing rounded |
 | `ChangeOrderFoundationSpec` | Signed flat credits, ordered granular changes keeping untouched identities, exact tax arithmetic, numeric total validation with negative lines allowed, allocations staying on their snapshots, negative staff change orders rejected after payment, concurrent staff edits of one version (one succeeds, the stale writer conflicts), and Quote revisions that would be negative or zero preserving the approved proposal |
 | `QuoteBuilderSpec`, `QuoteBuilderRoutesSpec` | Staff composition on PostgreSQL and through the handler: keeping every line (Estimate v1 → Quote v2), **the churro example** (soft serve removed, bespoke service and optional discount added, no catalog, deposit, exact payment, booked Invoice, served, closed), overrides keeping line ids, deterministic tokens binding lines/order/plan/terms/version, stable rejection codes, tampered or stale reviews writing nothing, rollback at the plan, deposit or publication, concurrent approvals, Quote and deposit revisions, a non-user approver refused by the database, malformed shapes, no-store, staff-USER-only authority and Origin, corrupt plans failing closed |
 | `InquiryProposalsSpec`, `InquiryProposalRoutesSpec` | Exact full deposit acceptance, zero-write partial/excess/stale rejection, deposit-only republication, Quote revisions from staff lines, gross-allocation guard after refunds, rollback at late writes, association contention, ordered history with USER provenance, currentness, canonical deposit mutation rejected before/after booking, booked Invoice change orders, permission intersection and corrupt-pair failures |
@@ -1715,7 +1731,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `FinancialDocumentRepositoriesSpec` | Associations (several lineages per inquiry, one inquiry per lineage, first-snapshot FK) and line authorship (USER/SERVICE round trips, copies to successors, exact-snapshot FK, once per version, transactional rollback, kind check) |
 | `FinancialDocumentReadConsistencySpec` | Current-document, history, and inquiry-list reads keep their snapshot while a payment or quote commits; ownership lookups never take the mutation lock |
 | `FinancialDocumentPaymentsSpec`, `UnappliedPaymentsSpec` | Canonical deposit acceptance and rejection; document payment histories rediscovered after their responses are gone; split payments whole; runtime ordering; unapplied receipts; permission boundaries |
-| `DepositRequirementRoutesSpec`, `DepositRequirementOperationsSpec` | Deposit unions, history, frozen amounts, payment/refund satisfaction, ownership, permissions, bulk facts and activity, set-based reads, REPEATABLE READ coherence and NOWAIT rollback |
+| `DepositRequirementRoutesSpec`, `DepositRequirementOperationsSpec` | Reads for USER or SERVICE; standalone PUT/DELETE only for a staff USER with both `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage` (a SERVICE with both, or a USER with either alone, is `403` and writes nothing); deposit unions, history, frozen amounts, payment/refund satisfaction, ownership, permissions, bulk facts and activity, set-based reads, REPEATABLE READ coherence and NOWAIT rollback |
 | `PaymentSmokeScriptSpec` | The actual Node payment script against a running backend: service-priced submission with no catalog, staff Invoice, payments, refund and zero balance; stops before writing without a pricing-authority credential or permission |
 | `OpenApiDocumentSpec` | The OpenAPI document: every Fiona route, operationIds, statuses, schemas and no host; exact decimal strings for every amount and no request total; no catalog, preview or pricing-input schema; `serviceAccessToken` alone on `createInquiry`, `staffSession` alone on staff-terms routes, both elsewhere; the runtime routes' metadata gap pinned |
 | `OpenApiRoutesSpec`, `GenerateOpenApiSpec` | `/openapi.json` and `/docs` through the complete handler, parity with the generator, no external assets; the generated file byte-identical on every run |

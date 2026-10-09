@@ -503,14 +503,16 @@ Also:
 - **Permissions describe capabilities, never callers**: no `fionas.ui`, `fionas.frontend`, or
   `fionas.trusted`, no route allow-lists for services, no union of a session's and a token's
   grants, no role-name checks. Most routes accept whichever principal holds the permission.
-- **Exactly two routes classes also require a principal kind, explicitly and after the
+- **Exactly two classes of routes also require a principal kind, explicitly and after the
   permission:**
   - **Priced inquiry submission is SERVICE-only.** `POST /inquiries` applies
     `access.requirePermission(FionaPermissions.InquiriesCreate).then(requireService)`. The
     web server is the customer pricing authority; a USER session, even an Administrator,
     is `403 forbidden`, so staff cannot inject customer-priced lines.
   - **Staff-authored amounts are USER-only.** Staff document creation, change orders, Quote
-    preview, proposal issuance and both revisions apply the commerce permission(s), then
+    preview, proposal issuance and both revisions, and standalone deposit approval and
+    withdrawal (PUT/DELETE `/financial-documents/{documentId}/deposit-requirement`) apply the
+    commerce permission(s), then
     `requirePermission(FionaPermissions.FinancialTermsManage)`, then `requireStaffUser`
     (`AccessControl.staffTerms(...)` in `FinancialDocumentRoutes.kt`,
     `AccessControl.staffComposition()` in `QuoteBuilderRoutes.kt`). A SERVICE holding every
@@ -740,7 +742,8 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   `fionas.inquiries.create` and `fionas.inquiries.manage` (group `fionas.inquiries`);
   `fionas.communications.acknowledge` (group `fionas.communications`); and
   `fionas.financial-terms.manage` (group `fionas.financial-terms`): a verified staff user may
-  commit staff-authored lines, overrides, adjustments and proposal deposit terms. The removed
+  commit staff-authored lines, overrides, adjustments, proposal deposit terms and standalone
+  deposit terms. The removed
   `fionas.inquiry-form.read`, `fionas.estimate-preview.create` and group `fionas.pricing` must
   not return. The runtime permission catalog and live resolver remain the only authorization
   source.
@@ -799,8 +802,14 @@ fionas-commerce        line validation, proposal resolution, authorship, ownersh
 1. **`PricedLine` is the boundary value** (`financial/PricedLines.kt`): description (trimmed,
    nonblank, ≤200), optional sub-description (≤500), optional nonzero quantity (≤9 integer and
    ≤6 fraction digits; absent for a flat charge), unit price and line tax amount as `Money` in
-   one currency with at most the currency's minor-unit digits (≤12 integer digits), and an
-   exact `unitPrice × quantity` in minor units. Nothing is rounded, converted or defaulted.
+   one currency (≤12 integer digits). A **unit rate** is distinct from a **settlement amount**:
+   with a quantity, `unitPrice` may have up to `MAX_UNIT_PRICE_FRACTION_DIGITS` (12) decimal
+   places and is kept exactly, but the extended subtotal `unitPrice × quantity` must be exact in
+   the currency's minor units (USD `0.125 × 8 = 1.00` valid, `0.125 × 3` rejected); a flat
+   `unitPrice` is the subtotal and `taxAmount` is the whole line's tax, both in minor units.
+   Nothing is rounded, converted or defaulted: never `setScale(…, rounding)` an amount to make it
+   fit, and never round a rate for storage, responses, tokens or fingerprints (`Money.decimal()`
+   pads, never truncates).
    `PricedLine.of` trims submitted text; `withId` makes the commerce-domain `LineItem`.
 2. **Document rules.** `requireDocumentLines`: 1 to `MAX_DOCUMENT_LINES` (100) lines, one
    currency. `requireNonnegativeTotal`: the derived total is not negative (negative lines,
@@ -825,9 +834,13 @@ fionas-commerce        line validation, proposal resolution, authorship, ownersh
    of existing lines in increasing reviewed order stays in place (replaced when edited), every
    other reviewed line is removed, the rest are appended, so a moved line keeps its id. It then
    applies the change through the domain and checks the result equals the proposal exactly.
-   Complete ordered `sameCharges` equality (ids and decimal scale ignored) means no change:
-   `changes == null`, and committing it is `NO_FINANCIAL_CHANGE`. Never match lines by
-   description or position, and never add a generic patch language.
+   Only **snapshot equivalence** (`sameSnapshot`: the same ordered line ids, each charging
+   numerically the same) means no change: `changes == null`, and committing it is
+   `NO_FINANCIAL_CHANGE`. Identity is part of the snapshot: reordering financially identical
+   lines, or omitting a line and adding an identical one under a new key, is a real change order
+   producing exactly the requested ids and order. `sameChargesIgnoringIds` compares charges only
+   and must never decide whether a snapshot changed. Never match lines by description or
+   position, and never add a generic patch language.
 6. **Stable codes** (`LineProposalViolations`, in runtime `ValidationErrorResponse.violations`):
    `LINE_NOT_IN_REVIEWED_DOCUMENT`, `CURRENCY_MISMATCH`, `NO_FINANCIAL_CHANGE`,
    `NEGATIVE_DOCUMENT_TOTAL`; the Quote builder adds `QUOTE_TOTAL_NOT_POSITIVE` and
@@ -1295,7 +1308,10 @@ event dates remain LocalDate. Event calendar interpretation never derives from `
   Every document must first be owned through `InquiryFinancialDocumentRepository`;
   missing and unowned commerce lineages both return the same Fiona `404`.
 - PUT `/financial-documents/{documentId}/deposit-requirement` approves, replaces or
-  reactivates with `DepositRequirementManage`, never document-create. One transaction uses
+  reactivates with `DepositRequirementManage`, never document-create, plus
+  `fionas.financial-terms.manage` and a staff USER (`AccessControl.staffTerms`): standalone
+  deposit terms are staff-negotiated values, so a SERVICE is `403` even with both permissions.
+  The approver comes only from authentication. One transaction uses
   `FionaFinancialDocuments.expectLatest` to lock ownership and check expectedDocumentVersion,
   rejects canonical lineages with proposal history through `CanonicalProposalDepositPolicy`
   and `InquiryProposalRepository.latest` in that same transaction, including Invoice/BOOKED,
@@ -1307,7 +1323,7 @@ event dates remain LocalDate. Event calendar interpretation never derives from `
   upstream enforces positivity, matching currency, total bounds, `(0,100]`, HALF_UP resolution
   and positive resolved amount. No Double, percentage rounding, defaults, conversion or
   clamping. Original terms and frozen amounts survive later document changes.
-- DELETE at that path takes only expectedRequirementRevision, locks ownership and calls
+- DELETE at that path (the same staff-USER authority as PUT) takes only expectedRequirementRevision, locks ownership and calls
   transaction-taking withdrawal, rejecting canonical lineages with proposal history under
   the same association lock regardless of stage, with no document-version check for other lineages. Return the new
   WITHDRAWN revision (`200`); never delete history or copy prior terms. Missing history is
@@ -1336,8 +1352,9 @@ event dates remain LocalDate. Event calendar interpretation never derives from `
   No lastRelevantActivityAt, age, dashboard labels or workflow interpretation.
 - All five are ContractRoutes with operationIds getFinancialDocumentDepositRequirement,
   getFinancialDocumentDepositRequirementHistory, setFinancialDocumentDepositRequirement,
-  withdrawFinancialDocumentDepositRequirement, queryFinancialDocumentLineages. Same AccessControl,
-  session OR SERVICE token, trusted Origin for unsafe cookies (query POST included), none for
+  withdrawFinancialDocumentDepositRequirement, queryFinancialDocumentLineages. Same AccessControl;
+  the three reads accept a session OR SERVICE token, while PUT/DELETE are staff-session USER only
+  (`staffSessionSecurity`); trusted Origin for unsafe cookies (query POST included), none for
   token-only calls, and runtime errors. OpenAPI derives unions, closed terms variants and null
   revision semantics from serializers/transport annotations, never maintained JSON.
 - New bootstrap Administrator roles include DepositRequirementManage. Startup never modifies
@@ -1512,7 +1529,11 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   customer reuse, rollback inside the ledger, canonical uniqueness, bespoke lines and credits
   evolving without any catalog), `InquiryOperationsSpec`, `FinancialDocumentRepositoriesSpec`
   (associations and authorship), `ChangeOrderFoundationSpec` (granular identity-preserving
-  changes, signed lines, nonnegative totals, concurrent staff edits), `FinancialDocumentReadConsistencySpec`,
+  changes, signed lines, nonnegative totals, concurrent staff edits, and financially identical
+  lines whose reorder or remove-and-add appends a version while a true no-op does not),
+  `LineProposalSpec` (pure identity-bearing resolution: reorders, remove-and-add, moved reused
+  ids, scale-insensitive no-ops, tokens and notes bound to the actual final ids),
+  `PricedLineSpec` (unit-rate versus settlement precision, per-currency minor units, bounds), `FinancialDocumentReadConsistencySpec`,
   `FinancialDocumentRoutesSpec` (the whole inquiry → staff estimate → line edits → quote →
   deposit → invoice → payment workflow through the complete handler; carry/override/remove/
   add/reorder identities; caller totals never authoritative; codes, conflicts, transitions,
@@ -1525,7 +1546,9 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   `ServicePrincipalAuthSpec` (SERVICE end to end; staff sessions refused priced submission; a
   SERVICE with every staff permission refused staff terms; session precedence; Origin only for
   cookies; session-only logout; provisioning and rotation), `AuthRoutesSpec` (bootstrap grants,
-  removed routes `404` and permissions absent), `MigrationLifecycleSpec`, `DatabaseSchemaSpec`
+  removed routes `404` and permissions absent), `DepositRequirementRoutesSpec` (reads for USER or
+  SERVICE; standalone deposit mutations only for a staff USER holding both
+  `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage`, refusals writing nothing), `MigrationLifecycleSpec`, `DatabaseSchemaSpec`
   (single baselines, eight published runtime FKs, no catalog or ledger-fact columns),
   `OpenApiDocumentSpec` (paths, operationIds, statuses, decimal-string schemas, no catalog or
   pricing schemas, per-route security including SERVICE-only `createInquiry` and staff-only

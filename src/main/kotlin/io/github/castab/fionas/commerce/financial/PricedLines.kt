@@ -19,14 +19,23 @@ import java.util.UUID
  * of the whole line, already decided by the actor; never a rate. Signed amounts express
  * discounts and credits.
  *
- * Fiona's well-formedness policy, so that every amount is exact and settleable:
+ * Fiona's well-formedness policy separates a precise **unit rate** from the **settlement amounts**
+ * a customer pays, so that rates keep their authority and every payable amount is exact:
  * - [description] is trimmed, nonblank text of at most [DESCRIPTION_MAX_LENGTH] characters, and
  *   [subDescription], when present, of at most [SUB_DESCRIPTION_MAX_LENGTH];
- * - [unitPrice] and [taxAmount] share one currency, have at most its minor-unit digits and at
- *   most [MAX_AMOUNT_INTEGER_DIGITS] integer digits;
- * - a [quantity] is nonzero with at most [MAX_QUANTITY_INTEGER_DIGITS] integer and
- *   [MAX_QUANTITY_FRACTION_DIGITS] fraction digits, and the resulting subtotal still has at
- *   most the currency's minor-unit digits, because nothing is ever rounded.
+ * - [unitPrice] and [taxAmount] share one currency and have at most
+ *   [MAX_AMOUNT_INTEGER_DIGITS] integer digits;
+ * - with a [quantity], [unitPrice] is a rate of at most [MAX_UNIT_PRICE_FRACTION_DIGITS] decimal
+ *   places (USD `0.125` a guest is valid), the quantity is nonzero with at most
+ *   [MAX_QUANTITY_INTEGER_DIGITS] integer and [MAX_QUANTITY_FRACTION_DIGITS] fraction digits, and
+ *   the extended subtotal `unitPrice × quantity` must be exact in the currency's minor units
+ *   (`0.125 × 8 = 1.00` is valid, `0.125 × 3 = 0.375` is rejected);
+ * - without a quantity, [unitPrice] is itself the subtotal, so it is a settlement amount with at
+ *   most the currency's minor-unit digits;
+ * - [taxAmount] is always a whole-line settlement amount in minor units.
+ *
+ * Nothing is ever rounded: a rate keeps exactly the precision its authority gave it, in the
+ * ledger and in every response, and an amount that cannot settle exactly is rejected.
  *
  * The constructor accepts only that canonical form; [of] trims submitted text first.
  */
@@ -41,8 +50,18 @@ data class PricedLine(
         requireCanonicalText(description, DESCRIPTION_MAX_LENGTH, "A line description")
         subDescription?.let { requireCanonicalText(it, SUB_DESCRIPTION_MAX_LENGTH, "A line sub-description") }
         require(unitPrice.currency == taxAmount.currency) { "A line's unit price and tax must use one currency" }
-        requireAmount(unitPrice, "A line's unit price")
+        requireIntegerDigits(unitPrice, "A line's unit price")
         requireAmount(taxAmount, "A line's tax amount")
+        if (quantity == null) {
+            require(minorUnits(unitPrice.amount, unitPrice.currency)) {
+                "A flat line's price is its subtotal, so in ${unitPrice.currency.currencyCode} it has at most " +
+                    "${unitPrice.currency.defaultFractionDigits} decimal places; nothing is rounded"
+            }
+        } else {
+            require(unitPrice.amount.stripTrailingZeros().scale() <= MAX_UNIT_PRICE_FRACTION_DIGITS) {
+                "A line's unit rate has at most $MAX_UNIT_PRICE_FRACTION_DIGITS decimal places"
+            }
+        }
         quantity?.let { quantity ->
             require(quantity.signum() != 0) { "A line quantity must not be zero; omit it for a flat charge" }
             require(quantity.integerDigits() <= MAX_QUANTITY_INTEGER_DIGITS) {
@@ -67,12 +86,15 @@ data class PricedLine(
     fun withId(id: UUID): LineItem = LineItem(id, description, subDescription, quantity, unitPrice, taxAmount)
 
     /** Whether this line charges exactly what [line] does, ignoring its id; amounts compare numerically. */
-    fun charges(line: LineItem): Boolean = sameCharges(listOf(withId(line.id)), listOf(line))
+    fun charges(line: LineItem): Boolean = sameChargesIgnoringIds(listOf(withId(line.id)), listOf(line))
 
     companion object {
         const val DESCRIPTION_MAX_LENGTH = 200
         const val SUB_DESCRIPTION_MAX_LENGTH = 500
         const val MAX_AMOUNT_INTEGER_DIGITS = 12
+
+        /** The most decimal places of a per-quantity unit rate; its extended subtotal must still settle in minor units. */
+        const val MAX_UNIT_PRICE_FRACTION_DIGITS = 12
         const val MAX_QUANTITY_INTEGER_DIGITS = 9
         const val MAX_QUANTITY_FRACTION_DIGITS = 6
 
@@ -113,13 +135,19 @@ internal fun requireCanonicalText(
     require(value.length <= maximum) { "$what must be at most $maximum characters" }
 }
 
+private fun requireIntegerDigits(
+    money: Money,
+    what: String,
+) = require(money.amount.integerDigits() <= PricedLine.MAX_AMOUNT_INTEGER_DIGITS) {
+    "$what has at most ${PricedLine.MAX_AMOUNT_INTEGER_DIGITS} integer digits"
+}
+
+/** A settlement amount: bounded, and exact in the currency's minor units. */
 private fun requireAmount(
     money: Money,
     what: String,
 ) {
-    require(money.amount.integerDigits() <= PricedLine.MAX_AMOUNT_INTEGER_DIGITS) {
-        "$what has at most ${PricedLine.MAX_AMOUNT_INTEGER_DIGITS} integer digits"
-    }
+    requireIntegerDigits(money, what)
     require(minorUnits(money.amount, money.currency)) {
         "$what in ${money.currency.currencyCode} has at most ${money.currency.defaultFractionDigits} decimal places"
     }

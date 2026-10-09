@@ -186,9 +186,9 @@ internal val quoteReviewStaleResponses =
 internal val compositionViolationExamples =
     listOf(LineProposalViolations.LINE_NOT_IN_REVIEWED_DOCUMENT, QUOTE_TOTAL_NOT_POSITIVE).map(::ValidationViolationResponse)
 
-internal const val COMPOSITION_REJECTED =
-    "invalid lines (no lines or more than 100, a blank description, a malformed decimal, more fraction digits than the " +
-        "currency allows, an inexact subtotal), invalid service plan values, deposit terms the Quote cannot satisfy, or a " +
+internal val COMPOSITION_REJECTED =
+    "invalid lines (no lines or more than 100, a blank description, a malformed decimal, $LINE_PRECISION_REJECTED), " +
+        "invalid service plan values, deposit terms the Quote cannot satisfy, or a " +
         "rejection with stable `violations` codes: `LINE_NOT_IN_REVIEWED_DOCUMENT`, `CURRENCY_MISMATCH`, " +
         "`NEGATIVE_DOCUMENT_TOTAL`, `$QUOTE_TOTAL_NOT_POSITIVE`, `$SERVICE_PLAN_LINE_NOT_FOUND`."
 

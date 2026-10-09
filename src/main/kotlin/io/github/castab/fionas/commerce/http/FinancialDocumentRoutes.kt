@@ -815,17 +815,20 @@ private fun RouteMetaDsl.staleVersion(extra: String) =
         STALE_DOCUMENT,
     )
 
-private const val LINES_REJECTED =
+private val LINES_REJECTED =
     "a value is invalid: no lines or more than $MAX_DOCUMENT_LINES, a blank description, a malformed or overlong decimal, " +
-        "more fraction digits than the currency allows, an inexact subtotal, mixed currencies, or a negative total."
+        "$LINE_PRECISION_REJECTED, mixed currencies, or a negative total."
 
 /** The `403` causes of a route that commits staff-negotiated financial values, beyond missing permissions. */
-private const val STAFF_TERMS_FORBIDDEN =
+internal const val STAFF_TERMS_FORBIDDEN =
     "or the principal lacks `fionas.financial-terms.manage`, or is not a staff USER (a SERVICE token never commits " +
         "staff-negotiated values), $UNTRUSTED_ORIGIN"
 
-/** Every route that commits staff-negotiated lines: the commerce permission, Fiona's terms authority, and a staff USER. */
-private fun AccessControl.staffTerms(permission: PermissionKey) =
+/**
+ * Every route that commits staff-negotiated financial values (lines, standalone deposit terms): the
+ * commerce permission, Fiona's terms authority, and a staff USER.
+ */
+internal fun AccessControl.staffTerms(permission: PermissionKey) =
     requirePermission(permission).then(requirePermission(FionaPermissions.FinancialTermsManage)).then(requireStaffUser)
 
 /**

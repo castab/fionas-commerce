@@ -136,7 +136,10 @@ data class ResolvedLineProposal(
  * small diff, never a generic patch language.
  *
  * Existing lines keep their ids (numerically equal values keep the stored line exactly); new
- * lines get [proposedLineId]s. The change order respects commerce-domain's semantics: a
+ * lines get [proposedLineId]s. The result is no change (`changes == null`) only when the final
+ * lines are the reviewed snapshot itself: the same ordered ids with equal values
+ * ([sameSnapshot]). Financially identical lines in another order, or a removed line re-added
+ * under a new key, are changes. The change order respects commerce-domain's semantics: a
  * replacement keeps its line's position and an addition appends. The longest leading run of
  * proposed existing lines already in reviewed order stays in place (replaced when edited);
  * every other reviewed line is removed, and the remaining proposed lines, including existing
@@ -172,11 +175,10 @@ internal fun LineProposal.resolveAgainst(reviewed: FinancialDocument): ResolvedL
             }
         }
     val finalLines = resolved.map { it.line }
-    if (sameCharges(finalLines, reviewed.lineItems)) {
-        // Complete ordered equality proves each proposed line is the reviewed line at its position:
-        // keep the stored lines and their ids, so re-entered identical charges are no change.
-        val carried = resolved.zip(reviewed.lineItems) { line, stored -> ResolvedLine(stored, ResolvedLineOrigin.CARRIED, line.key) }
-        return ResolvedLineProposal(reviewed, carried, null)
+    if (sameSnapshot(finalLines, reviewed.lineItems)) {
+        // The same ordered ids with numerically equal values: every line is the stored line itself
+        // (carried lines keep the stored object), so there is nothing to change.
+        return ResolvedLineProposal(reviewed, resolved, null)
     }
 
     // The longest leading run of existing lines whose reviewed positions increase stays in place.
@@ -233,11 +235,24 @@ internal fun lineProposalFailure(
 ) = CommerceFailure.ValidationFailed(message, codes.distinct().map(::ValidationViolation))
 
 /**
- * Whether [first] and [second] charge exactly the same, line by line in order: descriptions,
- * quantities, prices, tax and currency, ignoring line ids. Amounts compare numerically, whatever
- * their scale. An equal total alone is not equal charges.
+ * Whether [first] and [second] are the same snapshot lines: the same ordered line ids, each
+ * charging exactly the same. This, never a charge-only comparison, decides that a proposal
+ * changes nothing: a reordered, removed-and-re-added or otherwise re-identified line is a change
+ * even when every amount is equal.
  */
-internal fun sameCharges(
+internal fun sameSnapshot(
+    first: List<LineItem>,
+    second: List<LineItem>,
+): Boolean = first.map { it.id } == second.map { it.id } && sameChargesIgnoringIds(first, second)
+
+/**
+ * Whether [first] and [second] charge exactly the same, line by line in order: descriptions,
+ * quantities, prices, tax and currency, deliberately **ignoring line ids**. Amounts compare
+ * numerically, whatever their scale. An equal total alone is not equal charges. Use it only to
+ * compare charges (for example one proposed line with the stored line of the same id); whether a
+ * snapshot changed is [sameSnapshot]'s question.
+ */
+internal fun sameChargesIgnoringIds(
     first: List<LineItem>,
     second: List<LineItem>,
 ): Boolean = first.map(::chargeOf) == second.map(::chargeOf)
