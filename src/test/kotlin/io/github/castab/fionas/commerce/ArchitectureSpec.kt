@@ -201,15 +201,18 @@ class ArchitectureSpec :
         }
 
         test("repositories and operations know nothing of HTTP") {
-            // The only serialization outside http is Fiona's persisted jsonb: database representations, never wire formats.
+            // Explicit application wire contract, plus the existing private persisted JSON representations.
             val persisted = setOf("PersistedJson.kt", "RequestedService.kt", "JdbiInquiryServicePlanRepository.kt")
             sources {
                 !it.path.contains("${File.separator}http${File.separator}") &&
                     it.name != "FionaApplication.kt" &&
+                    it.name != "InquiryPersisted.kt" &&
                     it.name !in persisted
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
-            sources { it.name in persisted }.containing(listOf("org.http4k", ".http.", "CommerceJson")).shouldBeEmpty()
+            sources { it.name in persisted || it.name == "InquiryPersisted.kt" }
+                .containing(listOf("org.http4k", ".http.", "CommerceJson"))
+                .shouldBeEmpty()
             sources { it.path.contains("${File.separator}http${File.separator}") }
                 .containing(listOf("toPersistedJson", "restoreRequestedService", "persistedJson", "ServicePlanJson"))
                 .shouldBeEmpty()
@@ -309,15 +312,24 @@ class ArchitectureSpec :
                 .shouldBeEmpty()
         }
 
-        test("commerce runtime and transitive domain resolve at the adopted 0.0.23 release") {
+        test("commerce runtime and transitive domain resolve at the adopted 0.0.24 release") {
             listOf(
                 io.github.castab.commerce.runtime.financial.FinancialLedger::class.java to "commerce-runtime",
                 io.github.castab.commerce.financial.Money::class.java to "commerce-domain",
             ).forEach { (type, artifact) ->
                 type.protectionDomain.codeSource.location.path
-                    .substringAfterLast('/') shouldBe "$artifact-0.0.23.jar"
+                    .substringAfterLast('/') shouldBe "$artifact-0.0.24.jar"
             }
             File("gradle/libs.versions.toml").readText().contains("http4k = \"6.58.0.0\"") shouldBe true
+        }
+
+        test("NATS and runtime share exactly one Bouncy Castle provider artifact") {
+            Thread
+                .currentThread()
+                .contextClassLoader
+                .getResources("org/bouncycastle/jce/provider/BouncyCastleProvider.class")
+                .toList()
+                .size shouldBe 1
         }
 
         test("every http4k module is the one version commerce-runtime is built against") {

@@ -10,6 +10,7 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.outbox.Outbox
 import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.PaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
@@ -190,6 +191,7 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
             AuthorizationDirectory::class.java,
             ServiceCredentials::class.java,
             ServiceAccessTokens::class.java,
+            Outbox::class.java,
         ).newInstance(
             configuration,
             transactor,
@@ -200,6 +202,10 @@ private fun renderingOnlyContext(): CommerceRuntimeContext {
             authorization,
             refusing<ServiceCredentials>("Rendering the OpenAPI document never touches a service credential"),
             renderingOnlyServiceAccessTokens,
+            Outbox::class.java.constructors.single { it.parameterCount == 2 }.newInstance(
+                transactor,
+                Class.forName("io.github.castab.commerce.runtime.persistence.OutboxRepository").getConstructor().newInstance(),
+            ),
         )
 }
 

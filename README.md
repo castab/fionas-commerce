@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.23/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.23/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.24/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.24/domain)
 artifacts.
 
 > **Status: early slices.** Fiona records inquiries and their customers, owns which inquiry
@@ -38,8 +38,8 @@ fionas-web (separate) the customer catalog, its pricing, and the staff UI; calls
                        a SERVICE for submissions and on behalf of a verified staff session
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.23`, which brings
-`commerce-domain:0.0.23` with it. It contributes its migration schema and location,
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.24`, which brings
+`commerce-domain:0.0.24` with it. It contributes its migration schema and location,
 permissions, and routes to the runtime through `ApplicationContributions`, and every write
 goes through the runtime's shared `Transactor`:
 
@@ -1217,7 +1217,7 @@ canonical Quote receipts must equal the complete deposit exactly. The balance ma
 response names the payment, the allocation, the exact version, and the settlement after it.
 The two facts are committed atomically. All payment amounts remain exact decimal strings,
 never JSON floating-point numbers. Provider SDKs, webhooks, stored payment status,
-stored document balance, separate Booking aggregates, events/outbox/CQRS, and allocation
+stored document balance, separate Booking aggregates, further lifecycle events/CQRS, and allocation
 reversals remain outside this workflow.
 
 **One transaction per operation.** Each operation opens one runtime transaction and passes
@@ -1342,6 +1342,23 @@ repository read access.
 
 ## Configuration
 
+Commerce also owns `InquiryPersisted v2`: new submissions atomically commit the inquiry,
+initial Estimate, associations/authorship and immutable event in the runtime outbox.
+An HTTP 201 confirms that commit; NATS publication happens asynchronously. Replays append
+nothing. The event uses subject `fionas.events.inquiry.persisted.v2`, source
+`fionas-commerce`, a stable event UUID and the exact submission key as correlation.
+See the [AsyncAPI contract](asyncapi.json) and
+[publisher operations/cutover guide](docs/inquiry-outbox.md), including event-worker PR #3.
+
+Publication is disabled by default. Enable with `FIONAS_OUTBOX_PUBLISHER_ENABLED=true`
+and `FIONAS_NATS_URL`; optionally use a mounted `FIONAS_NATS_CREDS_FILE` or the
+`FIONAS_NATS_USER`/`FIONAS_NATS_PASSWORD` pair. The dedicated identity publishes only the
+v2 subject and subscribes to `_INBOX.>` for PubAck; it needs no stream administration.
+Disabled or unavailable publication leaves events durable and does not prevent inquiry
+commit. Broker acceptance plus database confirmation is at least once: consumers must
+deduplicate. Contact name/email are personal data; the guide documents restricted access,
+stream retention and the runtime's lack of automatic PostgreSQL outbox purging.
+
 The application's configuration is [`src/main/resources/application.conf`](src/main/resources/application.conf),
 loaded by commerce-runtime's `CommerceRuntimeConfiguration.load()` and overridden by the
 environment. Bootstrap staff credentials and the service token signing key are supplied through
@@ -1374,6 +1391,11 @@ Logging is Logback ([`logback.xml`](src/main/resources/logback.xml)): `key=value
 on stdout, with library logging at `WARN`/`INFO`. The database password is never logged.
 
 ## Database and migrations
+
+Commerce 0.0.24 adds runtime-owned `V2__transactional_outbox.sql` after its unchanged V1.
+This additive migration upgrades current V1 databases normally. Fiona's schema/migration
+stays unchanged; the historical 0.0.23 rebaseline instructions below apply only to databases
+that predate that rebaseline. No reset is required for the 0.0.23 → 0.0.24 upgrade.
 
 > **Rebaseline for the trusted priced-line release (commerce 0.0.23).** commerce-runtime
 > 0.0.23 replaces its migration history with a single `V1__commerce_baseline`, and Fiona
@@ -1460,8 +1482,8 @@ java -jar build/libs/fionas-commerce-all.jar
 
 On Windows use `.\gradlew.bat` and set the variables with `$env:NAME = "value"`.
 
-The process runs until it receives SIGTERM or SIGINT; its shutdown hook stops the server
-and closes the connection pool.
+The process runs until it receives SIGTERM or SIGINT; its shutdown hook stops the server,
+closes the optional outbox dispatcher and NATS transport, then closes the connection pool.
 
 ### Smoke test Invoice payments and a refund locally
 
@@ -1701,6 +1723,13 @@ the Docker CLI and removes it when the build ends. To use an existing server ins
 `TEST_DATABASE_JDBC_URL`, `TEST_DATABASE_USERNAME`, and `TEST_DATABASE_PASSWORD` (the user
 must be allowed to `CREATE DATABASE`). Each spec creates and drops its own database, and
 commerce-runtime applies the real migrations. There is no H2 and no test schema.
+The NATS outbox integration suite also starts an isolated authenticated `nats:2.14.7`
+JetStream container with random localhost port and removes it afterwards. No production
+streams, credentials or contact data are used. It exercises least-privilege publish,
+exact bytes/identity/headers, duplicate and invalid PubAck, permission denial, outages,
+timeout/reconnect, failed database confirmation and application restart. Transaction tests
+cover event append rollback, canonical contact payload/schema and historical replay;
+existing materialization/idempotency tests also count outbox rows.
 Node.js 20 or newer must also be on PATH: `PaymentSmokeScriptSpec` runs the actual payment
 script against a started test runtime. CI provisions Node.js 24 without npm dependencies or
 caching; Gradle tracks the script as a test input. Test lines come from a test-only pricing

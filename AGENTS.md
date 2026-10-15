@@ -279,12 +279,15 @@ them upstream as generic types; upstream deliberately removed customers in `0.0.
 - `Transactor` and `Transaction`;
 - the JDBI root and the HikariCP connection pool;
 - migration orchestration (`MigrationLifecycle`, run by `commerceRuntime(...)`), the
-  runtime's own migrations (a single `V1__commerce_baseline` since 0.0.23), and the
+  runtime's own migrations (`V1__commerce_baseline` since 0.0.23 plus the additive
+  `V2__transactional_outbox` in 0.0.24), and the
   `commerce` schema;
 - the error model (`CommerceFailure`, `validating`, `CommerceErrorHandling`,
   `ErrorResponse`);
 - http4k/Jetty composition (`commerceRuntime(...)`), `CommerceJson`, `jsonBody`;
 - configuration loading (`CommerceRuntimeConfiguration.load()`);
+- transactional outbox persistence, aggregate sequencing, claims/leases/fencing, retries,
+  backlog diagnostics, `OutboxDispatcher` and managed background-service lifecycle;
 - `/health` and `/ready`;
 - principal session lifecycle and persistence (`context.sessions`, `SessionManager`,
   `commerce.principal_sessions`, `SessionCookie`, `sessionAuthentication`), the
@@ -310,6 +313,38 @@ Never create another connection pool, another `Jdbi` instance, another transacti
 manager, Spring transactions, a nested transaction abstraction, a second configuration
 loader, or a second error/response framework. Tests may build their own infrastructure
 only to *observe* the database from outside the runtime (see `TestDatabase`).
+
+## Inquiry events and asynchronous publication
+
+`CreateInquiry` appends exactly one `InquiryPersisted v2` through `context.outbox.append`
+after initial Estimate materialization, using that same caller transaction. Its existing
+replay return stays before all business/event writes, including historical replays.
+The event owns a fresh UUID (injected ID source), exact submission-key correlation,
+persisted inquiry creation time, inquiry UUID, canonical stored customer name/email and
+recorded event date. No message, ZIP, requested service or money enters the payload.
+Metadata uses producer `fionas-commerce`, aggregate type `inquiry`, aggregate ID the inquiry
+UUID, type `fionas.inquiry.persisted`, version `2`, destination
+`fionas.events.inquiry.persisted.v2`. Runtime allocates sequence; Fiona never sequences locally.
+
+The `events` package owns the separate typed event DTO/serialization, NATS configuration,
+JetStream transport and managed-service composition. [AsyncAPI](asyncapi.json) owns this
+asynchronous contract; executable contract routes remain the only OpenAPI source.
+`fionaApplication(outboxPublisher = …)` loads opt-in `FIONAS_OUTBOX_PUBLISHER_ENABLED`
+and the scoped NATS settings. Disabled means no service/connection but durable appends.
+Enabled contributes `InquiryOutboxPublisher` through `backgroundServices`, using the
+runtime `OutboxDispatcher` and existing context. It constructs without network I/O,
+starts with runtime start, closes dispatcher then transport before the runtime pool.
+It uses stable producer and distinct instance UUID publisher IDs, batch 1, poll 1s,
+lease 60s, publish timeout 5s, retry 1s–5m. Ordinary broker outages never reject inquiries.
+
+`NatsOutboxTransport` sends persisted destination and exact UTF-8 payload with outbox UUID
+as `Nats-Msg-Id`, `Nats-Expected-Stream: FIONAS_EVENTS`, plus documented `Fionas-*`
+aggregate/producer headers. Only a valid PubAck for that stream with positive sequence
+confirms; duplicates count. No stream administration, local delivery state, additional
+pool, scheduler or retry loop is allowed. Runtime owns all leases, fencing and retries.
+No other lifecycle events are emitted. [Operations and cutover](docs/inquiry-outbox.md)
+cover least privilege, settings, diagnostics, PII/retention and event-worker PR #3.
+No public administration endpoint or row purger is added.
 
 ## Composition
 
@@ -377,8 +412,10 @@ Routes translate transport. Operations orchestrate. Repositories persist.
 - No SQL in routes. No HTTP in repositories or operations. No persistence in routes.
 - Transport DTOs are `@Serializable` classes in the `http` package. Never put
   serialization annotations on application types, and never let DTOs leak into
-  operations or repositories. The only other `@Serializable` types are the private
-  persistence DTOs of [Persisted JSON](#persisted-json), never wire DTOs.
+  operations or repositories. The other `@Serializable` types are the private persistence
+  DTOs of [Persisted JSON](#persisted-json) and the dedicated application event DTOs in
+  `events/InquiryPersisted.kt`. Event DTOs remain separate from application/domain models
+  and HTTP DTOs; event construction uses kotlinx `Json`, never HTTP `CommerceJson`.
 - Expected failures are `CommerceFailure`s with caller-safe messages. SQL text,
   constraint names, stack traces, and exception details never reach a response.
   Repositories translate a unique violation into `CommerceFailure.Conflict`
@@ -1393,6 +1430,7 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root), `PersistedJson.kt` (strict persisted-JSON configuration shared by the owning repositories) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
+| `...events` | Separate `InquiryPersistedV2` event DTOs/serialization, scoped NATS configuration, JetStream `OutboxTransport`, and the managed runtime dispatcher/transport contribution |
 | `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
@@ -1412,8 +1450,8 @@ real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
-webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, event dispatch beyond durable proposal issuance,
-outbox, NATS, persisted financial projections, CQRS, separate Booking aggregates,
+webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v2,
+persisted financial projections, CQRS, separate Booking aggregates,
 cancellation, decline, archive, reopen, unserve, zero-deposit booking, email provider integration and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),
 on-behalf-of headers or delegated staff identity,
@@ -1445,9 +1483,12 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (last audited at commerce 0.0.23)
+### Known upstream gaps (last audited at commerce 0.0.24)
 
-The application consumes commerce-runtime 0.0.23, with matching commerce-domain transitively.
+The application consumes commerce-runtime 0.0.24, with matching commerce-domain transitively.
+Version 0.0.24 adds runtime-owned transactional outbox persistence, sequencing, leases,
+retry coordination, backlog diagnostics and managed background-service lifecycle. Fiona
+consumes those capabilities for InquiryPersisted v2; it owns no delivery persistence or scheduler.
 Commerce 0.0.23 removes the Offerings catalog capability (Fiona no longer needs it), replaces
 the runtime migration history with a single `V1__commerce_baseline`, and makes every ledger
 lifecycle mutation take the caller's expected document version (`changeOrder`, `issueQuote`,
@@ -1455,7 +1496,7 @@ lifecycle mutation take the caller's expected document version (`changeOrder`, `
 the application history schema gap (0.0.15), the payment read gap (0.0.16), unapplied
 discovery, persisted version timestamps and structured validation errors (0.0.17), and added
 service credentials and tokens (0.0.20) and versioned deposits with bulk lineage facts (0.0.22).
-Audit source: the tagged `v0.0.23` sources of castab/commerce-domain (domain financial types,
+Audit source: the tagged `v0.0.24` sources of castab/commerce-domain (domain financial types,
 runtime ledger, capabilities, configuration, migrations, error and health routes). The gaps
 below were rechecked and remain open; they do not justify Fiona workarounds.
 
@@ -1485,8 +1526,8 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
 - **Capability routes need a composed runtime.** The administration and service-token
   capabilities take a `CommerceRuntimeContext`, whose constructor is `internal`, and only
   `commerceRuntime(...)`, which needs a database, creates one. The generator (`src/openapi`,
-  never the deployable jar) builds a rendering-only context reflectively against the 0.0.23
-  constructor, with a transactor that opens no connection and a reflectively assembled
+  never the deployable jar) builds a rendering-only context reflectively against the 0.0.24
+  constructor, including its outbox, with a transactor that opens no connection and a reflectively assembled
   `FinancialLedger` and authorization directory that refuse every call. This is provisional:
   commerce-runtime may eventually need a first-class contract composition seam.
 - **Runtime capability routes carry no security metadata.** The authorization administration
@@ -1569,6 +1610,13 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   configuration. Keep `StaffRequestSpec`/`StaffRequestRoutesSpec` paused-snapshot coherence,
   integrity failures and permission intersection.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
+- Keep `InquiryOutboxSpec`, `InquiryEventContractSpec`, `NatsOutboxConfigurationSpec` and
+  `NatsOutboxIntegrationSpec`: real transactional append rollback, canonical contact and
+  exact opaque correlation, AsyncAPI payload parity, historical replay without backfill,
+  configuration/lazy construction, isolated authenticated JetStream with least-privilege
+  grants, identity/bytes/sequence headers, duplicate/invalid PubAck, denied publication,
+  broker outage/reconnect, pending-publication shutdown, failed confirmation and application
+  restart recovery. Test infrastructure uses Docker CLI, never production streams/secrets.
 - Node.js 20 or newer must be on PATH for `PaymentSmokeScriptSpec`, which runs the actual
   payment script against a started test runtime and throwaway PostgreSQL. CI provisions
   Node.js 24 without npm packages or caching.

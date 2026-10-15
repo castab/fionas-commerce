@@ -1,0 +1,101 @@
+{
+  "asyncapi": "3.0.0",
+  "info": {
+    "title": "Fiona commerce events",
+    "version": "2.0.0",
+    "description": "Commerce owns InquiryPersisted v2. An HTTP 201 commits the inquiry, initial Estimate, associations, authorship and event atomically; JetStream acceptance happens asynchronously. At-least-once publication requires durable consumer deduplication by event id. Late duplicates may follow later aggregate sequences. Contact name and email are personal data: restrict account access and consumers, enforce stream retention, and establish a separate PostgreSQL retention policy (runtime does not purge outbox rows)."
+  },
+  "defaultContentType": "application/json",
+  "channels": {
+    "inquiryPersistedV2": {
+      "address": "fionas.events.inquiry.persisted.v2",
+      "description": "Existing FIONAS_EVENTS stream, subjects fionas.events.>. Operator-provisioned file storage, limits retention, default max age 30 days and duplicate window 24 hours; verify actual deployment values independently. Commerce never administers this stream.",
+      "x-jetstream-stream": "FIONAS_EVENTS",
+      "messages": {
+        "inquiryPersistedV2": { "$ref": "#/components/messages/InquiryPersistedV2" }
+      }
+    }
+  },
+  "operations": {
+    "publishInquiryPersisted": {
+      "action": "send",
+      "channel": { "$ref": "#/channels/inquiryPersistedV2" },
+      "description": "Publishes the immutable persisted UTF-8 payload with stable UUID Nats-Msg-Id, expecting FIONAS_EVENTS. Only a PubAck naming FIONAS_EVENTS with positive sequence confirms delivery; duplicate PubAck is accepted. Runtime retries all failures. JetStream duplicate windows do not provide permanent deduplication. Consumers must persist processed ids and use aggregate sequence metadata where ordering matters."
+    }
+  },
+  "components": {
+    "messages": {
+      "InquiryPersistedV2": {
+        "name": "InquiryPersistedV2",
+        "title": "Commerce committed a new inquiry and its initial Estimate",
+        "correlationId": {
+          "location": "$message.payload#/correlationId",
+          "description": "Exact original Idempotency-Key; opaque case-sensitive text, not necessarily a UUID. Distinct from event identity."
+        },
+        "headers": {
+          "type": "object",
+          "required": ["Nats-Msg-Id", "Nats-Expected-Stream", "Fionas-Producer-Id", "Fionas-Aggregate-Type", "Fionas-Aggregate-Id", "Fionas-Aggregate-Sequence"],
+          "properties": {
+            "Nats-Msg-Id": { "type": "string", "format": "uuid", "description": "Equals payload id and runtime outbox UUID, unchanged on every retry." },
+            "Nats-Expected-Stream": { "type": "string", "enum": ["FIONAS_EVENTS"] },
+            "Fionas-Producer-Id": { "type": "string", "enum": ["fionas-commerce"] },
+            "Fionas-Aggregate-Type": { "type": "string", "enum": ["inquiry"] },
+            "Fionas-Aggregate-Id": { "type": "string", "format": "uuid", "description": "Payload data.inquiryId." },
+            "Fionas-Aggregate-Sequence": { "type": "string", "pattern": "^[1-9][0-9]*$", "description": "Runtime business sequence for (producer, inquiry, inquiryId), normally 1 for creation; distinct from the broker stream sequence." }
+          }
+        },
+        "payload": { "$ref": "#/components/schemas/InquiryPersistedV2" },
+        "examples": [
+          {
+            "payload": {
+              "schemaVersion": 2,
+              "type": "fionas.inquiry.persisted",
+              "id": "7d4e9d50-4958-46d2-bcab-e3e921cceab7",
+              "correlationId": "Case_Sensitive-key-001",
+              "occurredAt": "2026-10-15T18:00:00.123456Z",
+              "source": "fionas-commerce",
+              "data": {
+                "inquiryId": "0a6e8577-e811-487f-aa5d-3d30b74b25bd",
+                "customer": { "name": "Jane Doe", "email": "jane@example.com" },
+                "eventDate": "2026-12-05"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "schemas": {
+      "InquiryPersistedV2": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "type", "id", "correlationId", "occurredAt", "source", "data"],
+        "properties": {
+          "schemaVersion": { "type": "integer", "enum": [2] },
+          "type": { "type": "string", "enum": ["fionas.inquiry.persisted"] },
+          "id": { "type": "string", "format": "uuid" },
+          "correlationId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+          "occurredAt": { "type": "string", "format": "date-time", "description": "Authoritative persisted inquiry.createdAt in UTC, PostgreSQL microsecond precision; never publication time." },
+          "source": { "type": "string", "enum": ["fionas-commerce"] },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["inquiryId", "customer", "eventDate"],
+            "properties": {
+              "inquiryId": { "type": "string", "format": "uuid" },
+              "customer": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "email"],
+                "properties": {
+                  "name": { "type": "string", "description": "Canonical stored customer name, including when a returning customer's submitted name differs. Personal data." },
+                  "email": { "type": "string", "description": "Canonical trimmed lowercase recipient address. Shallow business validation, no email format guarantee. Personal data." }
+                }
+              },
+              "eventDate": { "type": "string", "format": "date" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

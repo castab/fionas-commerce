@@ -10,6 +10,8 @@ import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthentic
 import io.github.castab.commerce.runtime.session.SessionAuthenticator
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.events.InquiryOutboxPublisher
+import io.github.castab.fionas.commerce.events.NatsOutboxConfiguration
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.CreateChangeOrder
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
@@ -130,6 +132,7 @@ fun fionaApplication(
             ?: emptySet(),
     loginRateLimit: LoginRateLimit = LoginRateLimit(),
     eventCalendarZone: ZoneId = fionaEventCalendarZone(),
+    outboxPublisher: NatsOutboxConfiguration? = NatsOutboxConfiguration.fromEnvironment(),
 ): ApplicationContributions =
     ApplicationContributions(
         migrations =
@@ -138,6 +141,10 @@ fun fionaApplication(
                 locations = listOf(FIONA_MIGRATION_LOCATION),
             ),
         permissionDefinitions = FionaPermissions.definitions,
+        backgroundServices =
+            outboxPublisher?.let { configuration ->
+                listOf({ context -> InquiryOutboxPublisher(context, configuration) })
+            } ?: emptyList(),
         routes = { context ->
             val customers = JdbiCustomerRepository()
             val inquiries = JdbiInquiryRepository()
@@ -202,6 +209,7 @@ fun fionaApplication(
                         JdbiInquirySubmissionRepository(),
                         clock,
                         materialize,
+                        context.outbox,
                     )::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
                     getInquiry = getInquiry::invoke,

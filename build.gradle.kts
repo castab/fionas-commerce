@@ -62,6 +62,11 @@ dependencies {
 
     // Fiona-owned human credentials. Argon2id hashes are encoded by the maintained JVM binding.
     implementation(libs.argon2.jvm)
+    implementation(libs.jnats) {
+        // The runtime already supplies bcprov-jdk18on. NATS' LTS artifact defines the
+        // same classes under another module name; including both breaks jar uniqueness.
+        exclude(group = "org.bouncycastle", module = "bcprov-lts8on")
+    }
 
     // The application's SLF4J provider, configured by src/main/resources/logback.xml.
     // commerce-runtime deliberately selects none.
@@ -150,7 +155,7 @@ tasks.named("ktlintMainSourceSetFormat") {
 
 tasks.test {
     useJUnitPlatform()
-    inputs.files("scripts/spoof-payment.mjs")
+    inputs.files("scripts/spoof-payment.mjs", "asyncapi.json")
     testLogging {
         events("passed", "skipped", "failed")
     }

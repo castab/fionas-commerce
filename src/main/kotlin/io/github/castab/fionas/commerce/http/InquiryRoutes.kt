@@ -397,8 +397,10 @@ fun createInquiryRoute(
             "Idempotency-Key is required: a successful same-key/same-intent replay returns the original 201 receipt and " +
             "Location without writing anything. The fingerprint binds every value, including each line's amounts and " +
             "order; a successful key reused for different intent fails with 409 IDEMPOTENCY_KEY_REUSED. Failed attempts " +
-            "do not consume keys. Customer, inquiry, requested service, Estimate v1, its association and line authorship " +
-            "commit together or not at all. The customer is found by normalized email, or created; an existing " +
+            "do not consume keys. Customer, inquiry, requested service, Estimate v1, its association, line authorship " +
+            "and an authoritative InquiryPersisted v2 outbox event commit together or not at all. A new submission's " +
+            "201 confirms their durable commit; it does not confirm NATS publication, which is asynchronous. " +
+            "Replay never backfills historical events. The customer is found by normalized email, or created; an existing " +
             "customer's stored name is never changed. The response is a receipt of the new inquiry alone: it describes " +
             "no stored customer and does not expose the Estimate. `Location` holds `/inquiries/{inquiryId}`."
         tags += inquiries

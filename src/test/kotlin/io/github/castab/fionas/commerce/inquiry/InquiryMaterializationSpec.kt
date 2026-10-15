@@ -83,6 +83,7 @@ class InquiryMaterializationSpec :
                 "fionas.inquiry_submissions",
                 "fionas.inquiries",
                 "commerce.financial_document_snapshots",
+                "commerce.outbox_events",
                 "fionas.inquiry_financial_documents",
                 "fionas.financial_document_authorship",
             )
