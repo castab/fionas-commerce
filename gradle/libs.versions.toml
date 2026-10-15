@@ -1,10 +1,10 @@
 [versions]
 # The commerce artifacts this application is built on. commerce-runtime exposes the
 # matching commerce-domain version transitively, so the domain is not declared separately.
-commerce = "0.0.23"
+commerce = "0.0.24"
 
 # http4k arrives with commerce-runtime; the contract/OpenAPI modules Fiona adds on top must
-# be exactly the version commerce-runtime 0.0.23 is built against, never a newer one (Gradle
+# be exactly the version commerce-runtime 0.0.24 is built against, never a newer one (Gradle
 # would silently upgrade the runtime's http4k-core to match). Change it only together with
 # the commerce version. ArchitectureSpec fails if two http4k versions meet on the classpath.
 http4k = "6.58.0.0"
@@ -20,6 +20,7 @@ shadow = "9.6.1"
 logback = "1.6.3"
 kotlin-logging = "8.0.4"
 argon2 = "2.12"
+jnats = "2.26.4"
 
 [libraries]
 commerce-runtime = { module = "io.github.castab:commerce-runtime", version.ref = "commerce" }
@@ -28,6 +29,7 @@ http4k-api-ui-swagger = { module = "org.http4k:http4k-api-ui-swagger", version.r
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 kotlin-logging-jvm = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = "kotlin-logging" }
 argon2-jvm = { module = "de.mkammerer:argon2-jvm", version.ref = "argon2" }
+jnats = { module = "io.nats:jnats", version.ref = "jnats" }
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
 

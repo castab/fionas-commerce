@@ -30,6 +30,7 @@ class InquiryIdempotencyRoutesSpec :
                 "fionas.inquiries",
                 "fionas.inquiry_submissions",
                 "commerce.financial_document_snapshots",
+                "commerce.outbox_events",
                 "fionas.inquiry_financial_documents",
             )
 
@@ -73,6 +74,7 @@ class InquiryIdempotencyRoutesSpec :
                 "fionas.inquiries",
                 "fionas.inquiry_submissions",
                 "commerce.financial_document_snapshots",
+                "commerce.outbox_events",
                 "fionas.inquiry_financial_documents",
             ).forEach { committed.getValue(it) shouldBe before.getValue(it) + 1 }
         }
@@ -194,6 +196,7 @@ class InquiryIdempotencyRoutesSpec :
             second.status shouldBe Status.CREATED
             (first.bodyString() != second.bodyString()) shouldBe true
             app.database.count("fionas.inquiries") shouldBe before.getValue("fionas.inquiries") + 2
+            app.database.count("commerce.outbox_events") shouldBe before.getValue("commerce.outbox_events") + 2
             app.database.count("fionas.customers") shouldBe before.getValue("fionas.customers") + 1
         }
     })

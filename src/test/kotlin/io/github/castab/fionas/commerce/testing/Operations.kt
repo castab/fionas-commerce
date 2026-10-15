@@ -41,7 +41,19 @@ fun TestApplication.createInquiryOperation(
     clock: Clock = testClock,
     newCustomerId: () -> CustomerId = { CustomerId(UUID.randomUUID()) },
     newInquiryId: () -> InquiryId = { InquiryId(UUID.randomUUID()) },
-) = CreateInquiry(transactor, customers, inquiries, submissions, clock, materialize, newCustomerId, newInquiryId)
+    newEventId: () -> UUID = UUID::randomUUID,
+) = CreateInquiry(
+    transactor,
+    customers,
+    inquiries,
+    submissions,
+    clock,
+    materialize,
+    context.outbox,
+    newCustomerId,
+    newInquiryId,
+    newEventId,
+)
 
 /** A public inquiry command submitted by the web server's SERVICE principal with [lines] it priced. */
 fun TestApplication.inquiryCommand(

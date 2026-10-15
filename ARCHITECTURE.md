@@ -679,6 +679,21 @@ Business meaning should survive a frontend framework change.
 
 # 19. Schema and Migration Ownership
 
+Fiona is the authoritative producer of events asserting its own committed business facts.
+An inquiry creation commits its integration event with its business and financial writes
+through the shared runtime transaction. External publication happens after commit and
+does not participate in the HTTP transaction. A receipt confirms durable intent to publish;
+broker unavailability must not prevent valid inquiry creation.
+
+Fiona owns business event contracts, routing, transport adapters and deployment settings.
+The runtime owns generic outbox persistence, per-aggregate sequencing, leases, fencing,
+retry coordination and dispatcher lifecycle. Consumers must handle at-least-once delivery
+with durable event deduplication; broker deduplication windows do not establish exactly-once
+effects. Events are immutable historical assertions, never rebuilt from current state at
+delivery. Personal data included for downstream business purposes requires explicit access
+and independent database/broker retention policy. Concrete event and lifecycle mechanics
+are in [AGENTS.md](AGENTS.md#inquiry-events-and-asynchronous-publication).
+
 Fiona owns its application schema and migration stream.
 
 Runtime owns the `commerce` schema and runtime migration stream.

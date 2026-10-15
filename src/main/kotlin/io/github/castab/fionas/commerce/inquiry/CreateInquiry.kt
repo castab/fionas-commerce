@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.outbox.Outbox
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.fionas.commerce.customer.Customer
@@ -8,6 +9,7 @@ import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.Email
+import io.github.castab.fionas.commerce.events.inquiryPersistedEvent
 import io.github.castab.fionas.commerce.financial.FirstSnapshotStage
 import io.github.castab.fionas.commerce.financial.InquiryDocumentPurpose
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
@@ -37,7 +39,7 @@ import java.util.UUID
  * The command key is claimed first, in this same transaction. A committed command with the same
  * fingerprint (all intent, including every line's values in order) returns its existing Inquiry
  * immediately, writing nothing; different intent under that key conflicts. Customer, inquiry,
- * requested service, Estimate v1 and its association and authorship then commit together or not
+ * requested service, Estimate v1, its association and authorship, and InquiryPersisted v2 then commit together or not
  * at all, releasing the key on any failure.
  *
  * The result is the recorded [Inquiry] alone. It never carries the customer's stored record,
@@ -50,8 +52,10 @@ class CreateInquiry(
     private val submissions: InquirySubmissionRepository,
     private val clock: Clock,
     private val materialize: MaterializeInquiryFinancialDocument,
+    private val outbox: Outbox,
     private val newCustomerId: () -> CustomerId = { CustomerId(UUID.randomUUID()) },
     private val newInquiryId: () -> InquiryId = { InquiryId(UUID.randomUUID()) },
+    private val newEventId: () -> UUID = UUID::randomUUID,
 ) {
     /** A validated request to record an inquiry, with the exact lines its pricing authority committed. */
     data class Command(
@@ -105,6 +109,7 @@ class CreateInquiry(
                 now,
                 InquiryDocumentPurpose.INITIAL_ESTIMATE,
             )
+            outbox.append(transaction, inquiryPersistedEvent(newEventId(), inquiry, customer, command.submissionKey))
             inquiry
         }
     }

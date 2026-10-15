@@ -55,6 +55,7 @@ class InquiryIdempotencySpec :
                 "fionas.inquiries",
                 "fionas.inquiry_submissions",
                 "commerce.financial_document_snapshots",
+                "commerce.outbox_events",
                 "fionas.inquiry_financial_documents",
             )
 
@@ -239,6 +240,7 @@ class InquiryIdempotencySpec :
                     "fionas.inquiries",
                     "fionas.inquiry_submissions",
                     "commerce.financial_document_snapshots",
+                    "commerce.outbox_events",
                     "fionas.inquiry_financial_documents",
                 ).forEach {
                     after.getValue(it) shouldBe before.getValue(it) + 1

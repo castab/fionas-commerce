@@ -102,12 +102,12 @@ class MigrationLifecycleSpec :
             TestDatabase.create().use { database ->
                 compose(database).close()
 
-                // Both streams are rebaselined pre-production to a single version 1 each; neither numbers its
-                // migrations after the other's.
+                // Independent histories: the runtime's additive outbox V2 needs no Fiona migration.
                 database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly listOf("1")
                 database.history(FIONA_MIGRATION_SCHEMA).single() shouldContain "V1__fionas_baseline.sql"
-                database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1")
-                database.history("commerce").single() shouldContain "V1__commerce_baseline.sql"
+                database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2")
+                database.history("commerce").first() shouldContain "V1__commerce_baseline.sql"
+                database.history("commerce").last() shouldContain "V2__transactional_outbox.sql"
                 database.count("commerce.users") shouldBe 0
                 database.strings("SELECT to_regclass('commerce.deposit_requirement_revisions') IS NOT NULL").single() shouldBe "t"
                 database.strings("SELECT to_regclass('fionas.deposit_requirement_revisions') IS NULL").single() shouldBe "t"
