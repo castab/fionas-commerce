@@ -2,7 +2,7 @@
 
 `POST /inquiries` now commits the submission-key claim, customer association, inquiry and
 requested service, canonical initial Estimate, financial association, line authorship,
-and one `InquiryPersisted v2` event in the same PostgreSQL transaction. A valid **201
+and one `InquiryPersisted v3` event in the same PostgreSQL transaction. A valid **201
 confirms all of these durable facts**. It does not confirm NATS publication. The request
 does no network I/O to NATS. Failed business writes or failed event append roll everything
 back, including the submission key. Identical replay returns the original receipt and
@@ -13,7 +13,7 @@ flowchart TD
   Worker[Intake worker: SERVICE, Idempotency-Key] --> HTTP[POST /inquiries]
   HTTP --> Tx[One runtime PostgreSQL transaction]
   Tx --> Facts[Inquiry + initial Estimate + associations + authorship]
-  Tx --> Event[Runtime outbox: immutable InquiryPersisted v2]
+  Tx --> Event[Runtime outbox: immutable InquiryPersisted v3]
   Tx --> Receipt[Commit then HTTP 201]
   Event --> Dispatcher[Runtime OutboxDispatcher: committed lease]
   Dispatcher --> Adapter[Fiona JetStream transport: network outside DB transaction]
@@ -22,30 +22,60 @@ flowchart TD
   Ack --> Confirm[Runtime confirms publication in a short DB transaction]
 ```
 
-Fiona consumes `commerce-runtime:0.0.24`, including its additive
-`commerce/V2__transactional_outbox.sql`. Existing V1 databases upgrade normally; no new
-Fiona migration, database reset, copied runtime migration, or local outbox table is needed.
+Fiona consumes released `commerce-runtime:0.0.25` and its matching transitive domain.
+Runtime owns additive `commerce/V2__transactional_outbox.sql` and
+`commerce/V3__outbox_jsonb_payload.sql`. V3 converts the existing payload column from text
+to JSONB, requiring top-level objects. Valid historical v2 objects retain their business
+meaning, identities, destinations and delivery state. Invalid JSON, non-object values,
+unsupported Unicode or JSONB numeric ranges fail migration; inspect and resolve such
+history under an explicit operator policy before deployment. Never silently delete it.
+No Fiona migration, copied runtime SQL, extra pool or local outbox table is needed.
 Runtime migrations still precede Fiona migrations and composition.
 
 ## Contract and delivery
 
-The application-owned [AsyncAPI contract](../asyncapi.json) describes exactly one event:
+The application-owned [AsyncAPI contract](../asyncapi.json) describes the active v3 event and the immutable historical v2 contract:
 
 | Fact | Value |
 |---|---|
-| Subject | `fionas.events.inquiry.persisted.v2` |
-| Type / schema version | `fionas.inquiry.persisted` / `2` |
+| Subject | `fionas.events.inquiry.persisted.v3` |
+| Type / schema version | `fionas.inquiry.persisted` / `3` |
 | Source / runtime producer | `fionas-commerce` |
 | Aggregate | type `inquiry`, ID = inquiry UUID |
 | Event ID | Fresh globally unique UUID, equal to runtime outbox ID and `Nats-Msg-Id` |
 | Correlation ID | Original exact opaque, case-sensitive `Idempotency-Key`, including non-UUID keys |
 | Occurrence | Persisted inquiry `createdAt` (UTC, microseconds), never delivery time |
-| Data | inquiry UUID, canonical stored customer name and normalized email, recorded event date |
+| Aggregate sequence | Runtime-assigned positive sequence in payload `aggregate.sequence`, equal to outbox `aggregate_sequence` and `Fionas-Aggregate-Sequence` |
+| Data | Inquiry (ID, event date/type, ZIP, nullable message), canonical customer (ID/name/email), complete requested service, exact initial Estimate |
 
-No message, ZIP, requested-service selections, money, priced lines, credentials, or totals
-are included. Returning customers retain their stored name; the event describes that
-canonical record rather than their newly submitted name. The serialized payload is stored
-once as opaque immutable text. Delivery sends its exact UTF-8 bytes.
+The snapshot is constructed synchronously by `outbox.append(transaction, draft) { sequence ->
+... }`, using the runtime's authoritative sequence. It uses the recorded inquiry, canonical
+customer, accepted requested service and the exact document returned by initial Estimate
+materialization, all within the same operation transaction. The callback performs no
+repository reads, network I/O, nested transaction or independent retry. A construction,
+validation or append failure rolls back all writes, including the key and sequence.
+Replay returns before generating event IDs or invoking the callback, including historical
+submissions; it never backfills v3.
+
+Returning customers retain their stored name; the event uses that canonical customer,
+without exposing the record in the public HTTP receipt. Requested service retains guest
+count/minimum flag, nullable duration and pricing reference, and ordered item labels with
+nullable group/key. These are descriptive history, never catalog or pricing inputs.
+
+The initial Estimate contains its actual document ID, version, stage, currency and ordered
+lines with generated persisted IDs, descriptions, nullable sub-descriptions and quantities,
+unit prices, whole-line tax amounts and domain-derived total. Currency comes from the
+actual document (USD for web estimates); existing currency acceptance is unchanged.
+Every monetary amount and quantity is an exact plain decimal **string**. A rate such as
+`0.125` multiplied by `4` remains exact; event creation never rounds or reprices. This is
+an Estimate, with no Quote, Invoice, booking, deposit or payment implications.
+
+All payload properties are required; legitimate absences serialize explicitly as JSON null.
+Dedicated versioned event DTOs own the wire shape, separate from HTTP and repository DTOs.
+The event is a `JsonObject` persisted as JSONB. PostgreSQL may normalize whitespace and
+object-key order; original Kotlin serialization bytes are not the persistence contract.
+The adapter publishes exactly `record.payloadJson` encoded as UTF-8 on every attempt,
+without reserialization, enrichment or current-state lookup.
 
 The adapter sends these headers:
 
@@ -70,10 +100,27 @@ artifact name. Dependency uniqueness and NATS NKey signing/verification are test
 
 Delivery is **at least once**, including broker acceptance followed by process failure or
 failed database confirmation. Broker deduplication is finite: consumers must persist their
-own processed event IDs before irreversible effects. The runtime sequences events within
-`(producerId, aggregateType, aggregateId)` and will not attempt a successor before confirming
-its predecessor. Late duplicate sends may still arrive out of order. Consumers should use
-aggregate sequence where appropriate; JetStream stream sequence is a separate broker fact.
+own processed event IDs before irreversible effects.
+
+Event UUID is global identity. `occurredAt` is when Fiona recorded the business fact, not
+when delivery happened. Runtime sequence orders events within
+`(producerId, aggregateType, aggregateId)`; it is neither global across inquiries nor a
+financial document revision nor the JetStream stream sequence. The sequence in v3 JSON,
+outbox storage and NATS aggregate-sequence header must agree.
+
+The runtime will not attempt an aggregate successor before confirming its predecessor.
+This does not guarantee consumer processing order. Consumers must tolerate duplicates,
+delays, out-of-order processing, missing predecessors, restarts and retries after newer
+events have been processed. Consumers own their correctness strategy:
+
+- A latest-state projection may ignore stale snapshots after accepting newer state.
+- A payment consumer must retain every unique financial fact even at an older sequence.
+- A notification consumer may consult authoritative current state before acting on an old event.
+- An observational history preserves every unique fact and its business occurrence time.
+
+A business event contains the authoritative snapshot needed to understand its intended
+meaning without replaying earlier events. Decisions that depend on what is true now may
+still require current authoritative state. No consumer sequencing infrastructure lives here.
 
 ## Enablement and lifecycle
 
@@ -130,11 +177,18 @@ plain JetStream publish request/reply path, the complete required allow-list is:
   user: "fionas-commerce-outbox"
   password: $COMMERCE_OUTBOX_NATS_PASSWORD
   permissions: {
-    publish: ["fionas.events.inquiry.persisted.v2"]
+    publish: ["fionas.events.inquiry.persisted.v3"]
     subscribe: ["_INBOX.>"]
   }
 }
 ```
+
+The normal new-event grant is v3-only. During upgrade, if unpublished v2 rows remain,
+temporarily grant **both** `fionas.events.inquiry.persisted.v2` and
+`fionas.events.inquiry.persisted.v3`. The dispatcher continues publishing stored v2 rows
+to their original destination with their original identity and JSONB content; it never
+rewrites, suppresses, re-appends or dual-publishes them. Remove the v2 grant only after
+its pending backlog drains. JSONB formatting changes do not change historical meaning.
 
 For JWT/NKey accounts express the same publish and subscribe allow-lists in the user JWT.
 The client's synchronous publish creates a reply inbox and publishes directly to the
@@ -176,8 +230,13 @@ delivery. On increasing backlog, inspect safe failure codes, NATS reachability, 
 stream existence and storage limits. Repair the cause and let the dispatcher reclaim/retry.
 Never clear pending rows to silence alerts.
 
-Name and email are personal data in **both** PostgreSQL outbox payloads and NATS. Restrict
-database and NATS account access, authorize only intended consumers, and protect backups.
+Customer ID/name/email, customer-written messages, ZIP codes, service selections and detailed
+Estimate prices/lines are sensitive personal and commercial information in **both** PostgreSQL
+outbox payloads and NATS. This is a deliberate business snapshot, not a public notification.
+Restrict `FIONAS_EVENTS` consumers to trusted systems with an actual need for the data,
+limit database and account access, and protect backups. Never log full payloads, contact
+information, messages or pricing details. Credentials, tokens, raw HTTP headers, client IPs
+and unrelated customer history are excluded.
 The event-worker stream provisioning defaults are file storage, limits retention, **30 days**
 max age, **24 hours** duplicate window and disabled deletion/purge/rollup; operators must
 verify the actual stream settings and align retention with the deployment's policy.
@@ -193,19 +252,28 @@ Companion: [fionas-event-workers PR #3](https://github.com/castab/fionas-event-w
 Its worker ACKs input after a valid commerce HTTP 201 and no longer publishes success.
 It deliberately does not verify NATS success delivery: the committed commerce outbox owns it.
 
-1. Verify the released runtime dependency and this integration's build/tests.
-2. Provision/verify `FIONAS_EVENTS` and the dedicated commerce publisher identity.
-3. Deploy commerce; allow runtime V2 migration and transactional event append.
-4. Enable the commerce publisher. Verify v2 messages in JetStream and draining backlog.
-5. Deploy worker PR #3 only after verifying commerce publication.
-6. Remove the retired v1 success publish permission from the intake worker and verify it
-   no longer publishes success. Commerce is the sole authoritative success producer.
+1. Confirm the deployable artifact resolves released runtime/domain v0.0.25; run the build,
+   OpenAPI generation, event contract and packaging checks.
+2. Preflight historical payloads for the runtime V3 JSONB migration. Ensure every payload is
+   a valid JSON object compatible with PostgreSQL JSONB; take the normal deployment backup.
+3. Verify existing `FIONAS_EVENTS` covers `fionas.events.>`; do not create a new stream.
+4. Provision the dedicated publisher's v3 grant and `_INBOX.>` subscription. Temporarily retain
+   v2 publish permission if historical unpublished v2 events remain.
+5. Deploy commerce and let runtime V3 migrate before serving; enable its outbox dispatcher.
+6. Submit a synthetic inquiry. Verify v3 subject, event identity, complete snapshot against
+   committed state, and agreement between JSON/outbox/header aggregate sequence.
+7. Verify backlog drainage, including historical v2 rows on their original subject. Inspect
+   safe failure diagnostics; HTTP health alone is insufficient.
+8. Deploy worker PR #3 only after commerce publication has been verified. Never remove the
+   worker's success publication first.
+9. Remove obsolete worker v1 grants after ownership cutover; remove commerce v2 grants after
+   historical v2 drainage. Retain only normal v3 permission and unrelated required grants.
 
-Short overlap can expose both worker-owned v1 and commerce-owned v2 for one inquiry;
-these are not two business creations. Consumers must account for the version transition.
-There is no permanent legacy mode or compatibility bridge. An old retained submission
-may replay an inquiry committed before event append existed: replay still writes nothing.
-Historical events, if needed, require a separate explicit backfill decision.
+An ownership overlap can expose worker-owned v1 and commerce-owned success events for the
+same inquiry; these are not separate creations. There is no permanent legacy adapter or
+dual publication. Historical submissions under v2 or before outbox adoption replay without
+new events. Any backfill requires a separate explicit operation. This PR changes no
+production configuration and does not deploy either application.
 
 No other lifecycle events or notification consumers are implemented. Proposal issuance and
 revision are intended follow-up event slices, followed separately by booking, payment,

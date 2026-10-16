@@ -690,7 +690,13 @@ The runtime owns generic outbox persistence, per-aggregate sequencing, leases, f
 retry coordination and dispatcher lifecycle. Consumers must handle at-least-once delivery
 with durable event deduplication; broker deduplication windows do not establish exactly-once
 effects. Events are immutable historical assertions, never rebuilt from current state at
-delivery. Personal data included for downstream business purposes requires explicit access
+delivery. Each event carries the authoritative state needed to interpret its particular
+business meaning independently of preceding events; this immutable historical snapshot is
+not another operational source of truth. Event identity, business occurrence time and
+per-aggregate ordering are distinct. Ordered producer publication does not guarantee consumer
+processing order; consumers own correctness under duplicates, delays, missing predecessors
+and retries after newer facts. Decisions depending on current truth may still query authority.
+Personal data included for downstream business purposes requires explicit access
 and independent database/broker retention policy. Concrete event and lifecycle mechanics
 are in [AGENTS.md](AGENTS.md#inquiry-events-and-asynchronous-publication).
 

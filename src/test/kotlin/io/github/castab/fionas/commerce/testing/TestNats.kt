@@ -33,6 +33,9 @@ class TestNats : AutoCloseable {
                 { user: "commerce", password: "test-commerce", permissions: {
                     publish: ["$INQUIRY_PERSISTED_SUBJECT"], subscribe: ["_INBOX.>"]
                 } },
+                { user: "transition", password: "test-transition", permissions: {
+                    publish: ["$INQUIRY_PERSISTED_SUBJECT", "fionas.events.inquiry.persisted.v2"], subscribe: ["_INBOX.>"]
+                } },
                 { user: "denied", password: "test-denied", permissions: {
                     publish: ["unrelated.subject"], subscribe: ["_INBOX.>"]
                 } }
