@@ -9,7 +9,8 @@ import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.Email
-import io.github.castab.fionas.commerce.events.inquiryPersistedEvent
+import io.github.castab.fionas.commerce.events.inquiryPersistedDraft
+import io.github.castab.fionas.commerce.events.inquiryPersistedPayload
 import io.github.castab.fionas.commerce.financial.FirstSnapshotStage
 import io.github.castab.fionas.commerce.financial.InquiryDocumentPurpose
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
@@ -39,7 +40,7 @@ import java.util.UUID
  * The command key is claimed first, in this same transaction. A committed command with the same
  * fingerprint (all intent, including every line's values in order) returns its existing Inquiry
  * immediately, writing nothing; different intent under that key conflicts. Customer, inquiry,
- * requested service, Estimate v1, its association and authorship, and InquiryPersisted v2 then commit together or not
+ * requested service, Estimate v1, its association and authorship, and InquiryPersisted v3 then commit together or not
  * at all, releasing the key on any failure.
  *
  * The result is the recorded [Inquiry] alone. It never carries the customer's stored record,
@@ -100,16 +101,28 @@ class CreateInquiry(
                         .also { customers.insert(transaction, it) }
             val inquiry = Inquiry(inquiryId, customer.id, command.message, now, command.zipCode, command.eventDate, command.eventType)
             inquiries.insert(transaction, inquiry, command.requestedService)
-            materialize.create(
-                transaction,
-                inquiry.id,
-                FirstSnapshotStage.ESTIMATE,
-                command.lines,
-                command.submittedBy,
-                now,
-                InquiryDocumentPurpose.INITIAL_ESTIMATE,
-            )
-            outbox.append(transaction, inquiryPersistedEvent(newEventId(), inquiry, customer, command.submissionKey))
+            val initialEstimate =
+                materialize.create(
+                    transaction,
+                    inquiry.id,
+                    FirstSnapshotStage.ESTIMATE,
+                    command.lines,
+                    command.submittedBy,
+                    now,
+                    InquiryDocumentPurpose.INITIAL_ESTIMATE,
+                )
+            val draft = inquiryPersistedDraft(newEventId(), inquiry)
+            outbox.append(transaction, draft) { sequence ->
+                inquiryPersistedPayload(
+                    draft,
+                    sequence,
+                    inquiry,
+                    customer,
+                    command.requestedService,
+                    initialEstimate,
+                    command.submissionKey,
+                )
+            }
             inquiry
         }
     }

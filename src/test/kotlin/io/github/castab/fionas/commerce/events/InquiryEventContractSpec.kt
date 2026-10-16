@@ -1,15 +1,19 @@
 package io.github.castab.fionas.commerce.events
 
+import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -23,7 +27,20 @@ fun validateInquiryEventContract(payload: String) {
         value: JsonElement,
         schema: JsonObject,
     ) {
-        when (schema.getValue("type").jsonPrimitive.content) {
+        val type = schema.getValue("type")
+        val types =
+            if (type is JsonArray) {
+                type.map { it.jsonPrimitive.content }
+            } else {
+                listOf(
+                    type.jsonPrimitive.content,
+                )
+            }
+        if (value == JsonNull) {
+            types.contains("null") shouldBe true
+            return
+        }
+        when (types.first()) {
             "object" -> {
                 val obj = value.jsonObject
                 val properties = schema.getValue("properties").jsonObject
@@ -36,7 +53,22 @@ fun validateInquiryEventContract(payload: String) {
                 schema.getValue("additionalProperties") shouldBe JsonPrimitive(false)
                 obj.forEach { (key, child) -> validate(child, properties.getValue(key).jsonObject) }
             }
-            "integer" -> value.jsonPrimitive.intOrNull shouldBe 2
+            "integer" -> {
+                value.jsonPrimitive.isString shouldBe false
+                val number = checkNotNull(value.jsonPrimitive.longOrNull)
+                schema["minimum"]?.jsonPrimitive?.longOrNull?.let { (number >= it) shouldBe true }
+                schema["maximum"]?.jsonPrimitive?.longOrNull?.let { (number <= it) shouldBe true }
+            }
+            "boolean" -> {
+                checkNotNull(value.jsonPrimitive.booleanOrNull)
+                value.jsonPrimitive.isString shouldBe false
+            }
+            "array" -> {
+                val items = value.jsonArray
+                schema["minItems"]?.jsonPrimitive?.longOrNull?.let { (items.size >= it) shouldBe true }
+                schema["maxItems"]?.jsonPrimitive?.longOrNull?.let { (items.size <= it) shouldBe true }
+                items.forEach { validate(it, schema.getValue("items").jsonObject) }
+            }
             "string" -> value.jsonPrimitive.isString shouldBe true
             else -> error("Unsupported event contract type")
         }
@@ -55,7 +87,7 @@ fun validateInquiryEventContract(payload: String) {
             .jsonObject
             .getValue("schemas")
             .jsonObject
-            .getValue("InquiryPersistedV2")
+            .getValue("InquiryPersistedV3")
             .jsonObject,
     )
 }
@@ -69,7 +101,7 @@ class InquiryEventContractSpec :
                 document
                     .getValue("channels")
                     .jsonObject
-                    .getValue("inquiryPersistedV2")
+                    .getValue("inquiryPersistedV3")
                     .jsonObject
             channel.getValue("address").jsonPrimitive.content shouldBe INQUIRY_PERSISTED_SUBJECT
             channel.getValue("x-jetstream-stream").jsonPrimitive.content shouldBe FIONA_EVENTS_STREAM
@@ -79,7 +111,7 @@ class InquiryEventContractSpec :
                     .jsonObject
                     .getValue("messages")
                     .jsonObject
-                    .getValue("InquiryPersistedV2")
+                    .getValue("InquiryPersistedV3")
                     .jsonObject
             val example =
                 message
@@ -88,12 +120,15 @@ class InquiryEventContractSpec :
                     .single()
                     .jsonObject
                     .getValue("payload")
-            val dto = Json.decodeFromJsonElement(InquiryPersistedV2.serializer(), example)
-            val serialized = Json.encodeToString(InquiryPersistedV2.serializer(), dto)
-            serialized shouldBe
-                """{"schemaVersion":2,"type":"fionas.inquiry.persisted","id":"7d4e9d50-4958-46d2-bcab-e3e921cceab7","correlationId":"Case_Sensitive-key-001","occurredAt":"2026-10-15T18:00:00.123456Z","source":"fionas-commerce","data":{"inquiryId":"0a6e8577-e811-487f-aa5d-3d30b74b25bd","customer":{"name":"Jane Doe","email":"jane@example.com"},"eventDate":"2026-12-05"}}"""
+            val dto = Json.decodeFromJsonElement(InquiryPersistedV3.serializer(), example)
+            val serialized = Json.encodeToString(InquiryPersistedV3.serializer(), dto)
             Json.parseToJsonElement(serialized) shouldBe example
             validateInquiryEventContract(serialized)
+            val root = example.jsonObject
+            shouldThrowAny { validateInquiryEventContract(JsonObject(root - "aggregate").toString()) }
+            shouldThrowAny { validateInquiryEventContract(JsonObject(root + ("unexpected" to JsonPrimitive(true))).toString()) }
+            shouldThrowAny { validateInquiryEventContract(JsonObject(root + ("schemaVersion" to JsonPrimitive(2))).toString()) }
+            shouldThrowAny { validateInquiryEventContract(JsonObject(root + ("id" to JsonNull)).toString()) }
             val headers =
                 message
                     .getValue("headers")

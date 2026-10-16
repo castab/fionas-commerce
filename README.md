@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.24/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.24/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.25/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.25/domain)
 artifacts.
 
 > **Status: early slices.** Fiona records inquiries and their customers, owns which inquiry
@@ -38,8 +38,8 @@ fionas-web (separate) the customer catalog, its pricing, and the staff UI; calls
                        a SERVICE for submissions and on behalf of a verified staff session
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.24`, which brings
-`commerce-domain:0.0.24` with it. It contributes its migration schema and location,
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.25`, which brings
+`commerce-domain:0.0.25` with it. It contributes its migration schema and location,
 permissions, and routes to the runtime through `ApplicationContributions`, and every write
 goes through the runtime's shared `Transactor`:
 
@@ -1342,21 +1342,28 @@ repository read access.
 
 ## Configuration
 
-Commerce also owns `InquiryPersisted v2`: new submissions atomically commit the inquiry,
+Commerce also owns `InquiryPersisted v3`: new submissions atomically commit the inquiry,
 initial Estimate, associations/authorship and immutable event in the runtime outbox.
 An HTTP 201 confirms that commit; NATS publication happens asynchronously. Replays append
-nothing. The event uses subject `fionas.events.inquiry.persisted.v2`, source
+nothing. The event uses subject `fionas.events.inquiry.persisted.v3`, source
 `fionas-commerce`, a stable event UUID and the exact submission key as correlation.
+Its self-contained snapshot includes inquiry facts, canonical customer, requested service,
+and the materialized initial Estimate with generated line IDs and exact decimal strings.
+The synchronous append factory embeds the runtime-assigned aggregate sequence. JSONB owns
+the persisted representation; NATS sends `record.payloadJson` UTF-8 bytes unchanged.
+Historical v2 rows keep their identity, content and original subject; temporarily retain
+v2 publisher permission until that backlog drains. No replay backfill or dual publication.
 See the [AsyncAPI contract](asyncapi.json) and
 [publisher operations/cutover guide](docs/inquiry-outbox.md), including event-worker PR #3.
 
 Publication is disabled by default. Enable with `FIONAS_OUTBOX_PUBLISHER_ENABLED=true`
 and `FIONAS_NATS_URL`; optionally use a mounted `FIONAS_NATS_CREDS_FILE` or the
 `FIONAS_NATS_USER`/`FIONAS_NATS_PASSWORD` pair. The dedicated identity publishes only the
-v2 subject and subscribes to `_INBOX.>` for PubAck; it needs no stream administration.
+v3 subject and subscribes to `_INBOX.>` for PubAck; it needs no stream administration.
 Disabled or unavailable publication leaves events durable and does not prevent inquiry
 commit. Broker acceptance plus database confirmation is at least once: consumers must
-deduplicate. Contact name/email are personal data; the guide documents restricted access,
+deduplicate and tolerate delayed/out-of-order processing. Customer contact, message, ZIP,
+service selections and Estimate details are sensitive; the guide documents restricted access,
 stream retention and the runtime's lack of automatic PostgreSQL outbox purging.
 
 The application's configuration is [`src/main/resources/application.conf`](src/main/resources/application.conf),
@@ -1393,9 +1400,12 @@ on stdout, with library logging at `WARN`/`INFO`. The database password is never
 ## Database and migrations
 
 Commerce 0.0.24 adds runtime-owned `V2__transactional_outbox.sql` after its unchanged V1.
-This additive migration upgrades current V1 databases normally. Fiona's schema/migration
+Commerce 0.0.25 adds `V3__outbox_jsonb_payload.sql`, converting valid historical JSON objects
+from text to JSONB without changing their business meaning or destination; invalid/non-object
+history fails migration and needs an explicit operator decision.
+These additive migrations upgrade current V1/V2 databases normally. Fiona's schema/migration
 stays unchanged; the historical 0.0.23 rebaseline instructions below apply only to databases
-that predate that rebaseline. No reset is required for the 0.0.23 → 0.0.24 upgrade.
+that predate that rebaseline. No reset is required for a valid 0.0.23/0.0.24 → 0.0.25 upgrade.
 
 > **Rebaseline for the trusted priced-line release (commerce 0.0.23).** commerce-runtime
 > 0.0.23 replaces its migration history with a single `V1__commerce_baseline`, and Fiona
@@ -1726,9 +1736,12 @@ commerce-runtime applies the real migrations. There is no H2 and no test schema.
 The NATS outbox integration suite also starts an isolated authenticated `nats:2.14.7`
 JetStream container with random localhost port and removes it afterwards. No production
 streams, credentials or contact data are used. It exercises least-privilege publish,
-exact bytes/identity/headers, duplicate and invalid PubAck, permission denial, outages,
-timeout/reconnect, failed database confirmation and application restart. Transaction tests
-cover event append rollback, canonical contact payload/schema and historical replay;
+persisted JSONB bytes/identity/sequence headers, duplicate and invalid PubAck, permission
+denial, outages, timeout/reconnect, failed database confirmation and application restart.
+Historical v2 text migrates through the real runtime V3 migration and publishes unchanged
+to its original subject using a temporary transition grant. Transaction tests cover full v3
+snapshot/schema accuracy, precise rates and persisted IDs, explicit nulls, authoritative
+sequences, event-construction/append rollback and historical replay without backfill;
 existing materialization/idempotency tests also count outbox rows.
 Node.js 20 or newer must also be on PATH: `PaymentSmokeScriptSpec` runs the actual payment
 script against a started test runtime. CI provisions Node.js 24 without npm dependencies or

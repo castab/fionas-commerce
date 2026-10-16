@@ -102,12 +102,12 @@ class MigrationLifecycleSpec :
             TestDatabase.create().use { database ->
                 compose(database).close()
 
-                // Independent histories: the runtime's additive outbox V2 needs no Fiona migration.
+                // Independent histories: the runtime's additive outbox V2 and JSONB V3 needs no Fiona migration.
                 database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly listOf("1")
                 database.history(FIONA_MIGRATION_SCHEMA).single() shouldContain "V1__fionas_baseline.sql"
-                database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2")
+                database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2", "3")
                 database.history("commerce").first() shouldContain "V1__commerce_baseline.sql"
-                database.history("commerce").last() shouldContain "V2__transactional_outbox.sql"
+                database.history("commerce").last() shouldContain "V3__outbox_jsonb_payload.sql"
                 database.count("commerce.users") shouldBe 0
                 database.strings("SELECT to_regclass('commerce.deposit_requirement_revisions') IS NOT NULL").single() shouldBe "t"
                 database.strings("SELECT to_regclass('fionas.deposit_requirement_revisions') IS NULL").single() shouldBe "t"
