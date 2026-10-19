@@ -342,7 +342,9 @@ The `events` package owns the separate typed event DTO/serialization, NATS confi
 JetStream transport and managed-service composition. [AsyncAPI](asyncapi.json) owns this
 asynchronous contract; executable contract routes remain the only OpenAPI source.
 `fionaApplication(outboxPublisher = …)` loads opt-in `FIONAS_OUTBOX_PUBLISHER_ENABLED`
-and the scoped NATS settings. Disabled means no service/connection but durable appends.
+and the scoped NATS settings. It authenticates with at most one of a mounted creds file,
+user/password, or preshared `FIONAS_NATS_TOKEN`; a token forfeits per-identity least privilege,
+and no secret enters `toString`, errors or logs. Disabled means no service/connection but durable appends.
 Enabled contributes `InquiryOutboxPublisher` through `backgroundServices`, using the
 runtime `OutboxDispatcher` and existing context. It constructs without network I/O,
 starts with runtime start, closes dispatcher then transport before the runtime pool.

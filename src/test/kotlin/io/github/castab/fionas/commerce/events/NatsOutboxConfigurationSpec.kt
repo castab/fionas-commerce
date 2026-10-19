@@ -5,6 +5,7 @@ import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.nats.client.NKey
+import java.nio.file.Files
 import java.security.SecureRandom
 
 class NatsOutboxConfigurationSpec :
@@ -33,19 +34,37 @@ class NatsOutboxConfigurationSpec :
             fionaApplication(bootstrap = null, outboxPublisher = config).backgroundServices.size shouldBe 1
             NatsOutboxTransport(checkNotNull(config)).use { /* close before start is safe */ }
         }
+        test("a preshared token composes without contacting a broker") {
+            val config = NatsOutboxConfiguration.fromEnvironment(enabled + ("FIONAS_NATS_TOKEN" to "token-secret"))
+            fionaApplication(bootstrap = null, outboxPublisher = config).backgroundServices.size shouldBe 1
+            NatsOutboxTransport(checkNotNull(config)).use { /* close before start is safe */ }
+        }
         test("invalid deployment settings fail clearly without echoing secrets") {
-            listOf(
-                enabled - "FIONAS_NATS_URL",
-                enabled + ("FIONAS_OUTBOX_PUBLISHER_ENABLED" to "yes"),
-                enabled + ("FIONAS_NATS_URL" to "nats://user:secret@localhost:4222"),
-                enabled + ("FIONAS_NATS_URL" to "https://localhost"),
-                enabled + ("FIONAS_NATS_USER" to "user"),
-                enabled + ("FIONAS_NATS_PASSWORD" to "secret"),
-                enabled + ("FIONAS_NATS_CREDS_FILE" to "missing-secret-file"),
-            ).forEach { environment ->
-                val failure = shouldThrowAny { NatsOutboxConfiguration.fromEnvironment(environment) }
-                failure.message.orEmpty().contains("secret") shouldBe false
-                failure.cause shouldBe null
+            // A real readable file, so the combinations below fail on exclusivity rather than readability.
+            val credentials = Files.createTempFile("nats-secret", ".creds")
+            try {
+                val token = "FIONAS_NATS_TOKEN" to "token-secret"
+                val userPassword = mapOf("FIONAS_NATS_USER" to "user", "FIONAS_NATS_PASSWORD" to "secret")
+                val credentialsFile = "FIONAS_NATS_CREDS_FILE" to credentials.toString()
+                listOf(
+                    enabled - "FIONAS_NATS_URL",
+                    enabled + ("FIONAS_OUTBOX_PUBLISHER_ENABLED" to "yes"),
+                    enabled + ("FIONAS_NATS_URL" to "nats://user:secret@localhost:4222"),
+                    enabled + ("FIONAS_NATS_URL" to "https://localhost"),
+                    enabled + ("FIONAS_NATS_USER" to "user"),
+                    enabled + ("FIONAS_NATS_PASSWORD" to "secret"),
+                    enabled + ("FIONAS_NATS_CREDS_FILE" to "missing-secret-file"),
+                    enabled + ("FIONAS_NATS_TOKEN" to " "),
+                    enabled + userPassword + credentialsFile,
+                    enabled + userPassword + token,
+                    enabled + credentialsFile + token,
+                ).forEach { environment ->
+                    val failure = shouldThrowAny { NatsOutboxConfiguration.fromEnvironment(environment) }
+                    failure.message.orEmpty().contains("secret") shouldBe false
+                    failure.cause shouldBe null
+                }
+            } finally {
+                Files.deleteIfExists(credentials)
             }
         }
     })

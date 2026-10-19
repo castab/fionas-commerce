@@ -15,8 +15,14 @@ import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/** Disposable authenticated JetStream with the exact publisher grant documented for operators. */
-class TestNats : AutoCloseable {
+/**
+ * Disposable authenticated JetStream with the exact publisher grant documented for operators.
+ * With [token], the server instead accepts only that preshared token, which grants every client
+ * the same unscoped identity (NATS does not combine a token with a users list).
+ */
+class TestNats(
+    private val token: String? = null,
+) : AutoCloseable {
     private val name = "fionas-test-nats-${UUID.randomUUID()}"
     private val directory = Files.createDirectories(Path.of("build", name).toAbsolutePath())
     private val config = directory.resolve("nats.conf")
@@ -25,23 +31,7 @@ class TestNats : AutoCloseable {
     init {
         Files.writeString(
             config,
-            """
-            jetstream { store_dir: "/data" }
-            authorization {
-              users: [
-                { user: "admin", password: "test-admin", permissions: { publish: ">", subscribe: ">" } },
-                { user: "commerce", password: "test-commerce", permissions: {
-                    publish: ["$INQUIRY_PERSISTED_SUBJECT"], subscribe: ["_INBOX.>"]
-                } },
-                { user: "transition", password: "test-transition", permissions: {
-                    publish: ["$INQUIRY_PERSISTED_SUBJECT", "fionas.events.inquiry.persisted.v2"], subscribe: ["_INBOX.>"]
-                } },
-                { user: "denied", password: "test-denied", permissions: {
-                    publish: ["unrelated.subject"], subscribe: ["_INBOX.>"]
-                } }
-              ]
-            }
-            """.trimIndent(),
+            if (token != null) tokenConfiguration(token) else usersConfiguration(),
         )
         try {
             val port = ServerSocket(0).use { it.localPort }
@@ -66,25 +56,51 @@ class TestNats : AutoCloseable {
         }
     }
 
+    private fun tokenConfiguration(token: String) =
+        """
+        jetstream { store_dir: "/data" }
+        authorization { token: "$token" }
+        """.trimIndent()
+
+    private fun usersConfiguration() =
+        """
+        jetstream { store_dir: "/data" }
+        authorization {
+          users: [
+            { user: "admin", password: "test-admin", permissions: { publish: ">", subscribe: ">" } },
+            { user: "commerce", password: "test-commerce", permissions: {
+                publish: ["$INQUIRY_PERSISTED_SUBJECT"], subscribe: ["_INBOX.>"]
+            } },
+            { user: "transition", password: "test-transition", permissions: {
+                publish: ["$INQUIRY_PERSISTED_SUBJECT", "fionas.events.inquiry.persisted.v2"], subscribe: ["_INBOX.>"]
+            } },
+            { user: "denied", password: "test-denied", permissions: {
+                publish: ["unrelated.subject"], subscribe: ["_INBOX.>"]
+            } }
+          ]
+        }
+        """.trimIndent()
+
     fun admin(): Connection =
         Nats.connect(
             Options
                 .builder()
                 .server(url)
-                .userInfo("admin", "test-admin")
-                .connectionTimeout(Duration.ofSeconds(1))
+                .also { builder ->
+                    if (token == null) builder.userInfo("admin", "test-admin") else builder.token(token.toCharArray())
+                }.connectionTimeout(Duration.ofSeconds(1))
                 .build(),
         )
 
     fun publisherConfiguration(user: String = "commerce") =
+        configurationWith("FIONAS_NATS_USER" to user, "FIONAS_NATS_PASSWORD" to "test-$user")
+
+    fun tokenPublisherConfiguration(token: String) = configurationWith("FIONAS_NATS_TOKEN" to token)
+
+    private fun configurationWith(vararg authentication: Pair<String, String>) =
         checkNotNull(
             NatsOutboxConfiguration.fromEnvironment(
-                mapOf(
-                    "FIONAS_OUTBOX_PUBLISHER_ENABLED" to "true",
-                    "FIONAS_NATS_URL" to url,
-                    "FIONAS_NATS_USER" to user,
-                    "FIONAS_NATS_PASSWORD" to "test-$user",
-                ),
+                mapOf("FIONAS_OUTBOX_PUBLISHER_ENABLED" to "true", "FIONAS_NATS_URL" to url) + authentication,
             ),
         )
 

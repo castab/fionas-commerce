@@ -128,14 +128,19 @@ still require current authoritative state. No consumer sequencing infrastructure
 |---|---|
 | `FIONAS_OUTBOX_PUBLISHER_ENABLED` | Exactly `true` or `false`; absent defaults to `false` |
 | `FIONAS_NATS_URL` | Required when enabled: one `nats://` or `tls://` server URL, without embedded credentials, path, query or fragment |
-| `FIONAS_NATS_CREDS_FILE` | Optional readable mounted JWT/NKey credentials file; exclusive with user/password |
+| `FIONAS_NATS_CREDS_FILE` | Optional readable mounted JWT/NKey credentials file |
 | `FIONAS_NATS_USER`, `FIONAS_NATS_PASSWORD` | Optional nonblank pair for a dedicated per-user identity |
+| `FIONAS_NATS_TOKEN` | Optional nonblank preshared server token |
 
+Configure at most one authentication method: credentials file, user/password, or token.
 Use a dedicated NATS publisher identity in the same account as `FIONAS_EVENTS`. Prefer
 mounted credentials and `tls://` with certificates trusted by the JVM in nonlocal
-environments. Unauthenticated connections are supported for isolated local development.
-No preshared token mode or trust-all TLS option is introduced. Do not embed credentials in
-the URL, image, JAR, source, or logging configuration.
+environments. A token server (`authorization { token: ... }`) gives every client the same
+unscoped identity, so the least-privilege allow-list below cannot be enforced for the
+publisher; use a token only where the server offers no per-identity credentials.
+Unauthenticated connections are supported for isolated local development. No trust-all
+TLS option is introduced. Do not embed credentials in the URL, image, JAR, source, or
+logging configuration.
 
 Disabled publication still appends events. There is no background service or connection;
 pending events remain durable until enabled. When enabled, missing/invalid settings fail
