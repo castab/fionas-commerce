@@ -9,6 +9,7 @@ import io.github.castab.commerce.runtime.outbox.PublicationResult
 import io.github.castab.fionas.commerce.fionaApplication
 import io.github.castab.fionas.commerce.testing.TEST_SERVICE_TOKENS
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.TestDatabase
 import io.github.castab.fionas.commerce.testing.TestNats
 import io.github.castab.fionas.commerce.testing.createInquiryOperation
 import io.github.castab.fionas.commerce.testing.inquiryCommand
@@ -18,10 +19,15 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.nats.client.Message
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
+import java.io.File
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
@@ -54,13 +60,22 @@ class NatsOutboxIntegrationSpec :
                         transport.publish(claim.record) shouldBe PublicationResult.CONFIRMED
                         val received = sub.nextMessage(Duration.ofSeconds(5))
                         received.subject shouldBe event.destination
-                        received.data.toList() shouldBe event.payload.toByteArray(Charsets.UTF_8).toList()
+                        received.data.toList() shouldBe
+                            claim.record.payloadJson
+                                .toByteArray(Charsets.UTF_8)
+                                .toList()
                         received.headers.getFirst("Nats-Msg-Id") shouldBe event.id.toString()
                         received.headers.getFirst("Nats-Expected-Stream") shouldBe FIONA_EVENTS_STREAM
                         received.headers.getFirst(PRODUCER_HEADER) shouldBe FIONA_EVENT_PRODUCER
                         received.headers.getFirst(AGGREGATE_TYPE_HEADER) shouldBe "inquiry"
                         received.headers.getFirst(AGGREGATE_ID_HEADER) shouldBe inquiry.id.value.toString()
                         received.headers.getFirst(AGGREGATE_SEQUENCE_HEADER) shouldBe "1"
+                        Json
+                            .decodeFromString(
+                                InquiryPersistedV3.serializer(),
+                                received.data.toString(Charsets.UTF_8),
+                            ).aggregate.sequence shouldBe
+                            claim.record.aggregateSequence
                         observer
                             .jetStreamManagement()
                             .getStreamInfo(FIONA_EVENTS_STREAM)
@@ -71,6 +86,106 @@ class NatsOutboxIntegrationSpec :
                             .unpublished shouldBe 0L
                     }
                     sub.unsubscribe()
+                }
+            }
+        }
+
+        test("historical v2 text migrates to JSONB and publishes its original destination and content") {
+            TestDatabase.create().use { database ->
+                // Test-only setup uses the actual released runtime migrations, stopping before JSONB.
+                val configuration = database.configuration
+                // Flyway is runtime-only, so this setup deliberately adds no application dependency.
+                val flywayType = Class.forName("org.flywaydb.core.Flyway")
+                val migration = flywayType.getMethod("configure").invoke(null)
+                val fluent = migration.javaClass
+                fluent
+                    .getMethod("dataSource", String::class.java, String::class.java, String::class.java)
+                    .invoke(migration, configuration.jdbcUrl, configuration.username, configuration.password)
+                fluent.getMethod("defaultSchema", String::class.java).invoke(migration, "commerce")
+                fluent.getMethod("schemas", Array<String>::class.java).invoke(migration, arrayOf("commerce") as Any)
+                fluent.getMethod("locations", Array<String>::class.java).invoke(migration, arrayOf("classpath:db/commerce") as Any)
+                fluent.getMethod("target", String::class.java).invoke(migration, "2")
+                flywayType.getMethod("migrate").invoke(fluent.getMethod("load").invoke(migration))
+                val historical =
+                    Json
+                        .parseToJsonElement(File("asyncapi.json").readText())
+                        .jsonObject
+                        .getValue("components")
+                        .jsonObject
+                        .getValue("messages")
+                        .jsonObject
+                        .getValue("InquiryPersistedV2")
+                        .jsonObject
+                        .getValue(
+                            "examples",
+                        ).let { it as JsonArray }
+                        .single()
+                        .jsonObject
+                        .getValue("payload")
+                        .jsonObject
+                val eventId = historical.getValue("id").jsonPrimitive.content
+                val aggregateId =
+                    historical
+                        .getValue("data")
+                        .jsonObject
+                        .getValue("inquiryId")
+                        .toString()
+                        .trim('"')
+                database.execute("INSERT INTO commerce.outbox_aggregates VALUES ('fionas-commerce', 'inquiry', '$aggregateId', 1)")
+                database.connect { connection ->
+                    connection
+                        .prepareStatement(
+                            """INSERT INTO commerce.outbox_events
+                        (id, producer_id, aggregate_type, aggregate_id, aggregate_sequence, event_type, schema_version, destination, payload, occurred_at)
+                        VALUES (?, 'fionas-commerce', 'inquiry', ?, 1, 'fionas.inquiry.persisted', 2, 'fionas.events.inquiry.persisted.v2', ?, '2026-10-15T18:00:00.123456Z')""",
+                        ).use {
+                            it.setObject(1, UUID.fromString(eventId))
+                            it.setString(2, aggregateId)
+                            it.setString(3, historical.toString())
+                            it.executeUpdate()
+                        }
+                }
+                lateinit var context: CommerceRuntimeContext
+                commerceRuntime(
+                    CommerceRuntimeConfiguration(
+                        server = CommerceRuntimeConfiguration.Server(port = 0),
+                        database = configuration,
+                        migrations =
+                            CommerceRuntimeConfiguration.Migrations(
+                                onStartup = CommerceRuntimeConfiguration.Migrations.OnStartup.MIGRATE,
+                            ),
+                        serviceTokens = TEST_SERVICE_TOKENS,
+                    ),
+                    ApplicationContributions(routes = {
+                        context = it
+                        emptyList()
+                    }),
+                ).use {
+                    database.strings("SELECT pg_typeof(payload)::text FROM commerce.outbox_events").single() shouldBe "jsonb"
+                    val publisher = context.outbox.publisher(FIONA_EVENT_PRODUCER, "v2-transition")
+                    val claim = publisher.claim(1, Duration.ofMinutes(1)).single()
+                    claim.record.event.payload shouldBe historical
+                    claim.record.event.id
+                        .toString() shouldBe eventId
+                    claim.record.event.schemaVersion shouldBe 2
+                    claim.record.event.destination shouldBe "fionas.events.inquiry.persisted.v2"
+                    // The normal identity is v3-only; the temporary transition identity can drain v2.
+                    NatsOutboxTransport(broker.publisherConfiguration()).use { transport ->
+                        transport.publish(claim.record) shouldBe PublicationResult.UNCONFIRMED
+                    }
+                    NatsOutboxTransport(broker.publisherConfiguration("transition")).use { transport ->
+                        transport.publish(claim.record) shouldBe PublicationResult.CONFIRMED
+                    }
+                    broker.admin().use { observer ->
+                        val stored = observer.jetStreamManagement().getMessage(FIONA_EVENTS_STREAM, 1)
+                        stored.subject shouldBe "fionas.events.inquiry.persisted.v2"
+                        checkNotNull(stored.data).toList() shouldBe
+                            claim.record.payloadJson
+                                .toByteArray(Charsets.UTF_8)
+                                .toList()
+                        Json.parseToJsonElement(checkNotNull(stored.data).toString(Charsets.UTF_8)) shouldBe historical
+                    }
+                    publisher.confirm(claim) shouldBe true
                 }
             }
         }
@@ -141,7 +256,7 @@ class NatsOutboxIntegrationSpec :
                             claim.record.event.id
                                 .toString()
                         original.data.toList() shouldBe
-                            claim.record.event.payload
+                            claim.record.payloadJson
                                 .toByteArray()
                                 .toList()
                         publisher.fail(claim, OutboxFailureCode.UNCONFIRMED, Duration.ofMillis(1)) shouldBe true
@@ -152,6 +267,7 @@ class NatsOutboxIntegrationSpec :
                         broker.start()
                         val retry = publisher.claim(1, Duration.ofMinutes(1)).single()
                         retry.record.event shouldBe claim.record.event
+                        retry.record.payloadJson shouldBe claim.record.payloadJson
                         waitUntil { transport.publish(retry.record) == PublicationResult.CONFIRMED }
                         publisher.confirm(retry) shouldBe true
                     }
@@ -221,6 +337,7 @@ class NatsOutboxIntegrationSpec :
                     }
                     val retry = recovered.claim(1, Duration.ofMinutes(1)).single()
                     retry.record.event shouldBe claim.record.event
+                    retry.record.payloadJson shouldBe claim.record.payloadJson
                     retry.record.aggregateSequence shouldBe claim.record.aggregateSequence
                     transport.publish(retry.record) shouldBe PublicationResult.CONFIRMED
                     recovered.confirm(retry) shouldBe true
@@ -285,7 +402,9 @@ class NatsOutboxIntegrationSpec :
                             (1L..2L).map { sequence ->
                                 val stored = observer.jetStreamManagement().getMessage(FIONA_EVENTS_STREAM, sequence)
                                 val payload = checkNotNull(stored.data).toString(Charsets.UTF_8)
-                                Json.decodeFromString(InquiryPersistedV2.serializer(), payload).data.inquiryId
+                                Json
+                                    .decodeFromString(InquiryPersistedV3.serializer(), payload)
+                                    .data.inquiry.id
                             }
                         ids.contains(inquiry.id.value.toString()) shouldBe true
                     }

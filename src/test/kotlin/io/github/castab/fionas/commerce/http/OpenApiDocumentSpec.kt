@@ -885,7 +885,7 @@ class OpenApiDocumentSpec :
             key.text("description") shouldContain "SAME key"
             create.text("description") shouldContain "without writing anything"
             create.text("description") shouldContain "Failed attempts do not consume keys"
-            create.text("description") shouldContain "InquiryPersisted v2 outbox event commit together"
+            create.text("description") shouldContain "InquiryPersisted v3 outbox event commit together"
             create.text("description") shouldContain "does not confirm NATS publication"
             create.text("description") shouldContain "Replay never backfills historical events"
             // Neither staff routes nor other public operations acquire this header.

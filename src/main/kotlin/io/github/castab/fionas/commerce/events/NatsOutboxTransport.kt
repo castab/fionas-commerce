@@ -76,7 +76,7 @@ class NatsOutboxTransport(
                 active.jetStream(JetStreamOptions.builder().requestTimeout(Duration.ofSeconds(3)).build()).publish(
                     envelope.destination,
                     headers,
-                    envelope.payload.toByteArray(Charsets.UTF_8),
+                    event.payloadJson.toByteArray(Charsets.UTF_8),
                     PublishOptions
                         .builder()
                         .expectedStream(FIONA_EVENTS_STREAM)

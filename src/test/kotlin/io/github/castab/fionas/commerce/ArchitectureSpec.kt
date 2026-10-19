@@ -312,13 +312,13 @@ class ArchitectureSpec :
                 .shouldBeEmpty()
         }
 
-        test("commerce runtime and transitive domain resolve at the adopted 0.0.24 release") {
+        test("commerce runtime and transitive domain resolve at the adopted 0.0.25 release") {
             listOf(
                 io.github.castab.commerce.runtime.financial.FinancialLedger::class.java to "commerce-runtime",
                 io.github.castab.commerce.financial.Money::class.java to "commerce-domain",
             ).forEach { (type, artifact) ->
                 type.protectionDomain.codeSource.location.path
-                    .substringAfterLast('/') shouldBe "$artifact-0.0.24.jar"
+                    .substringAfterLast('/') shouldBe "$artifact-0.0.25.jar"
             }
             File("gradle/libs.versions.toml").readText().contains("http4k = \"6.58.0.0\"") shouldBe true
         }
