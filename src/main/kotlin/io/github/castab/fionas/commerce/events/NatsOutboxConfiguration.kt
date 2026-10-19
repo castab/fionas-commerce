@@ -12,10 +12,12 @@ class NatsOutboxConfiguration private constructor(
     val credentialsFile: Path?,
     private val user: String?,
     private val password: String?,
+    private val token: String?,
 ) {
     internal fun authenticate(builder: Options.Builder) {
         credentialsFile?.let { builder.authHandler(Nats.credentials(it.toString())) }
         user?.let { builder.userInfo(it.toCharArray(), checkNotNull(password).toCharArray()) }
+        token?.let { builder.token(it.toCharArray()) }
     }
 
     companion object {
@@ -60,8 +62,12 @@ class NatsOutboxConfiguration private constructor(
             require((user == null) == (password == null) && (user == null || user.isNotBlank() && !password.isNullOrBlank())) {
                 "FIONAS_NATS_USER and FIONAS_NATS_PASSWORD must both be nonblank when configured"
             }
-            require(file == null || user == null) { "Use mounted NATS credentials or user/password, never both" }
-            return NatsOutboxConfiguration(checkNotNull(url), file, user, password)
+            val token = environment["FIONAS_NATS_TOKEN"]
+            require(token == null || token.isNotBlank()) { "FIONAS_NATS_TOKEN must be nonblank when configured" }
+            require(listOfNotNull(file, user, token).size <= 1) {
+                "Use one NATS authentication method: mounted credentials, user/password, or token"
+            }
+            return NatsOutboxConfiguration(checkNotNull(url), file, user, password, token)
         }
     }
 }

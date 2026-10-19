@@ -1357,9 +1357,11 @@ See the [AsyncAPI contract](asyncapi.json) and
 [publisher operations/cutover guide](docs/inquiry-outbox.md), including event-worker PR #3.
 
 Publication is disabled by default. Enable with `FIONAS_OUTBOX_PUBLISHER_ENABLED=true`
-and `FIONAS_NATS_URL`; optionally use a mounted `FIONAS_NATS_CREDS_FILE` or the
-`FIONAS_NATS_USER`/`FIONAS_NATS_PASSWORD` pair. The dedicated identity publishes only the
-v3 subject and subscribes to `_INBOX.>` for PubAck; it needs no stream administration.
+and `FIONAS_NATS_URL`; optionally use exactly one of a mounted `FIONAS_NATS_CREDS_FILE`, the
+`FIONAS_NATS_USER`/`FIONAS_NATS_PASSWORD` pair, or a preshared `FIONAS_NATS_TOKEN`. The
+dedicated identity publishes only the v3 subject and subscribes to `_INBOX.>` for PubAck; it
+needs no stream administration. A token server has no per-client permissions, so a token
+publisher holds full access rather than that grant; prefer per-identity credentials.
 Disabled or unavailable publication leaves events durable and does not prevent inquiry
 commit. Broker acceptance plus database confirmation is at least once: consumers must
 deduplicate and tolerate delayed/out-of-order processing. Customer contact, message, ZIP,

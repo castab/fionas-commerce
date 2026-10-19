@@ -90,6 +90,35 @@ class NatsOutboxIntegrationSpec :
             }
         }
 
+        test("a preshared token server confirms publication; a wrong token never does") {
+            TestNats(token = "test-token").use { tokenBroker ->
+                tokenBroker.resetStream()
+                TestApplication.create().use { app ->
+                    app.createInquiryOperation()(app.inquiryCommand())
+                    val publisher = app.context.outbox.publisher(FIONA_EVENT_PRODUCER, "token-test")
+                    val claim = publisher.claim(1, Duration.ofMinutes(1)).single()
+                    NatsOutboxTransport(tokenBroker.tokenPublisherConfiguration("wrong-token")).use { transport ->
+                        transport.publish(claim.record) shouldBe PublicationResult.UNCONFIRMED
+                    }
+                    NatsOutboxTransport(tokenBroker.tokenPublisherConfiguration("test-token")).use { transport ->
+                        transport.publish(claim.record) shouldBe PublicationResult.CONFIRMED
+                    }
+                    tokenBroker.admin().use { observer ->
+                        val stored = observer.jetStreamManagement().getMessage(FIONA_EVENTS_STREAM, 1)
+                        stored.subject shouldBe claim.record.event.destination
+                        checkNotNull(stored.headers).getFirst("Nats-Msg-Id") shouldBe
+                            claim.record.event.id
+                                .toString()
+                        checkNotNull(stored.data).toList() shouldBe
+                            claim.record.payloadJson
+                                .toByteArray(Charsets.UTF_8)
+                                .toList()
+                    }
+                    publisher.confirm(claim) shouldBe true
+                }
+            }
+        }
+
         test("historical v2 text migrates to JSONB and publishes its original destination and content") {
             TestDatabase.create().use { database ->
                 // Test-only setup uses the actual released runtime migrations, stopping before JSONB.
