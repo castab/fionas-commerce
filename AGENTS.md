@@ -397,6 +397,12 @@ broker tokens support development but cannot isolate publishers or enforce per-u
 
 Enabled intake requires the existing runtime pool's connection timeout <=5000ms and JDBC
 `socketTimeout=1..5` with `options=-c transaction_timeout=50000 -c statement_timeout=5000`.
+Validation compares the two timeout values semantically: either assignment order and
+integer millisecond/second units are accepted, with the same exact 50s/5s limits. Duplicate
+query parameters/assignments, additional options, disabled/longer bounds and malformed
+encoding fail closed. Diagnostics identify the setting (and effective numeric pool timeout)
+without echoing URL/query values or decoder causes. Keep configuration regression tests
+and a real PostgreSQL startup-options parity check with this contract.
 Fiona validates these explicit settings; it adds no transaction/cancellation infrastructure.
 They bound PostgreSQL 18 transactions and driver I/O for shutdown and apply to the shared
 pool, including HTTP/migrations. Worker close stops pulls, allows 55s completion, then closes

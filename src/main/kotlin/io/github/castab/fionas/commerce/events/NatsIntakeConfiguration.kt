@@ -37,21 +37,66 @@ class NatsIntakeConfiguration private constructor(
  * These are explicit enablement prerequisites, never silently changed by Fiona.
  */
 internal fun requireIntakeDatabaseBounds(database: CommerceRuntimeConfiguration.Database) {
+    requireIntakeSetting(database.connectionTimeoutMs in 1..5_000) {
+        "DATABASE_CONNECTION_TIMEOUT_MS must be 1..5000; the runtime's effective value is ${database.connectionTimeoutMs}ms"
+    }
     val parameters =
-        database.jdbcUrl.substringAfter('?', "").split('&').filter(String::isNotEmpty).map {
-            URLDecoder.decode(it.substringBefore('='), StandardCharsets.UTF_8) to
-                URLDecoder.decode(it.substringAfter('=', ""), StandardCharsets.UTF_8)
+        try {
+            database.jdbcUrl.substringAfter('?', "").split('&').filter(String::isNotEmpty).map {
+                URLDecoder.decode(it.substringBefore('='), StandardCharsets.UTF_8) to
+                    URLDecoder.decode(it.substringAfter('=', ""), StandardCharsets.UTF_8)
+            }
+        } catch (_: IllegalArgumentException) {
+            // Decoder errors and URL/query values can contain credentials. Never retain their cause.
+            throw IllegalArgumentException("Intake database configuration: DATABASE_JDBC_URL has malformed query encoding")
         }
 
-    fun parameter(name: String): String? = parameters.filter { it.first == name }.singleOrNull()?.second
-    val socket = parameter("socketTimeout")?.toIntOrNull()
-    val options = parameter("options")
-    require(
-        socket != null &&
-            socket in 1..5 &&
-            options == "-c transaction_timeout=50000 -c statement_timeout=5000" &&
-            database.connectionTimeoutMs <= 5_000,
-    ) {
-        "Intake requires DATABASE_CONNECTION_TIMEOUT_MS <= 5000 and JDBC socketTimeout=1..5 plus options=-c transaction_timeout=50000 -c statement_timeout=5000; see docs/inquiry-intake.md"
+    fun parameter(name: String): String {
+        val matches = parameters.filter { it.first == name }
+        requireIntakeSetting(matches.size == 1) {
+            "DATABASE_JDBC_URL must contain exactly one $name query parameter; found ${matches.size}"
+        }
+        return matches.single().second
+    }
+    val socket = parameter("socketTimeout").toIntOrNull()
+    requireIntakeSetting(socket != null && socket in 1..5) { "DATABASE_JDBC_URL socketTimeout must be 1..5 seconds" }
+    val tokens = parameter("options").trim().split(Regex("\\s+"))
+    requireIntakeSetting(tokens.size == 4 && tokens[0] == "-c" && tokens[2] == "-c") {
+        "DATABASE_JDBC_URL options must contain two -c timeout assignments; check URL encoding and avoid surrounding quotes"
+    }
+    val assignments = listOf(tokens[1], tokens[3]).map { it.substringBefore('=') to it.substringAfter('=', "") }
+    val settings = assignments.toMap()
+    requireIntakeSetting(settings.keys == setOf("transaction_timeout", "statement_timeout")) {
+        "DATABASE_JDBC_URL options must set transaction_timeout and statement_timeout once each, without additional assignments"
+    }
+    requireIntakeSetting(timeoutMillis(settings.getValue("transaction_timeout")) == 50_000L) {
+        "DATABASE_JDBC_URL options transaction_timeout must be 50000ms (50s)"
+    }
+    requireIntakeSetting(timeoutMillis(settings.getValue("statement_timeout")) == 5_000L) {
+        "DATABASE_JDBC_URL options statement_timeout must be 5000ms (5s)"
+    }
+}
+
+private inline fun requireIntakeSetting(
+    condition: Boolean,
+    message: () -> String,
+) {
+    require(condition) { "Intake database configuration: ${message()}. See docs/inquiry-intake.md" }
+}
+
+/** The supported integer PostgreSQL timeout forms; overflow and unsupported/quoted values fail closed. */
+private fun timeoutMillis(value: String): Long? {
+    val match = Regex("([0-9]+)(ms|s|min)?").matchEntire(value) ?: return null
+    val amount = match.groupValues[1].toLongOrNull() ?: return null
+    val multiplier =
+        when (match.groupValues[2]) {
+            "s" -> 1_000L
+            "min" -> 60_000L
+            else -> 1L
+        }
+    return try {
+        Math.multiplyExact(amount, multiplier)
+    } catch (_: ArithmeticException) {
+        null
     }
 }

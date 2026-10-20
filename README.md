@@ -27,7 +27,10 @@ standalone worker. No deployment or broker change happens automatically.
 Enablement uses `FIONAS_INTAKE_ENABLED=true`, independent `FIONAS_INTAKE_NATS_*` credentials
 and `FIONAS_INTAKE_AUTHOR_SERVICE_ID` (prefer the existing worker's SERVICE UUID). It requires
 the bounded JDBC URL/pool settings and at least 100s termination grace described in the
-guide. Per-delivery live authorization still requires an ACTIVE SERVICE with
+guide. Database validation reports the specific rejected setting; equivalent timeout option
+order and millisecond/second units are accepted. Both JDBC query parameters belong in the
+commerce service's `DATABASE_JDBC_URL`, not separate environment variables.
+Per-delivery live authorization still requires an ACTIVE SERVICE with
 `fionas.inquiries.create`; no HTTP credential secret is needed for local operation calls.
 Permanent failures publish minimal `InquiryProcessingFailed v2` before TERM. Operator
 monitoring must observe intake logs/broker state separately from HTTP health and outbox
