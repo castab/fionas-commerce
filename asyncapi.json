@@ -2,8 +2,8 @@
   "asyncapi": "3.0.0",
   "info": {
     "title": "Fiona commerce events",
-    "version": "3.0.0",
-    "description": "Commerce owns InquiryPersisted v3: an independently meaningful initial inquiry, canonical customer, requested service and Estimate snapshot. HTTP 201 commits all business facts and the event atomically. JSONB preserves structured content, not producer whitespace or key order; publication sends the stored PostgreSQL JSONB text as UTF-8. Delivery is at least once: consumers durably deduplicate event IDs and tolerate delays, missing predecessors and out-of-order processing. Payloads contain personal and commercial data: restrict consumers and establish separate broker and PostgreSQL retention policies."
+    "version": "3.1.0",
+    "description": "Commerce owns InquiryPersisted v3: an independently meaningful initial inquiry, canonical customer, requested service and Estimate snapshot. HTTP 201 commits all business facts and the event atomically. JSONB preserves structured content, not producer whitespace or key order; publication sends the stored PostgreSQL JSONB text as UTF-8. Delivery is at least once: consumers durably deduplicate event IDs and tolerate delays, missing predecessors and out-of-order processing. Payloads contain personal and commercial data: restrict consumers and establish separate broker and PostgreSQL retention policies. Optional managed intake consumes producer-owned InquirySubmitted v1 directly. Transport diagnostics InquiryProcessingFailed v2 are independently confirmed before TERM and never assert whether business effects committed."
   },
   "defaultContentType": "application/json",
   "channels": {
@@ -26,6 +26,36 @@
           "$ref": "#/components/messages/InquiryPersistedV3"
         }
       }
+    },
+    "inquiryProcessingFailedV1": {
+      "address": "fionas.events.inquiry.processing-failed.v1",
+      "description": "Historical standalone-worker diagnostics; immutable.",
+      "x-jetstream-stream": "FIONAS_EVENTS",
+      "messages": {
+        "InquiryProcessingFailedV1": {
+          "$ref": "#/components/messages/InquiryProcessingFailedV1"
+        }
+      }
+    },
+    "inquiryProcessingFailedV2": {
+      "address": "fionas.events.inquiry.processing-failed.v2",
+      "description": "Minimal transport diagnostic, not an authoritative business event. Confirm PubAck before TERM. Retained original may already have committed effects.",
+      "x-jetstream-stream": "FIONAS_EVENTS",
+      "messages": {
+        "InquiryProcessingFailedV2": {
+          "$ref": "#/components/messages/InquiryProcessingFailedV2"
+        }
+      }
+    },
+    "inquirySubmittedV1": {
+      "address": "fionas.inquiries.submitted.v1",
+      "x-jetstream-stream": "FIONAS_INQUIRIES",
+      "description": "Producer contract is authoritative in castab/fionas-web/asyncapi.yaml. Ignore compatible unknown fields; validate known envelope and data, project priceRevision out, retain event UUID verbatim as command key. No duration is manufactured.",
+      "messages": {
+        "InquirySubmittedV1": {
+          "$ref": "#/components/messages/InquirySubmittedV1"
+        }
+      }
     }
   },
   "operations": {
@@ -42,6 +72,20 @@
         "$ref": "#/channels/inquiryPersistedV2"
       },
       "description": "Drain existing historical v2 records unchanged using their persisted destination and JSONB content. No new v2 events."
+    },
+    "publishInquiryProcessingFailed": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/inquiryProcessingFailedV2"
+      },
+      "description": "Direct confirmed JetStream publication outside any database transaction, followed by source TERM. Never uses the commerce business outbox."
+    },
+    "consumeInquirySubmitted": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/inquirySubmittedV1"
+      },
+      "description": "Bind existing inquiry-to-commerce durable without mutation; validate, invoke the shared CreateInquiry operation under configured active authorized SERVICE, then confirm input ACK after commit. Outbox success delivery proceeds independently."
     }
   },
   "components": {
@@ -255,6 +299,94 @@
           }
         ],
         "description": "Self-contained initial business snapshot; all properties are required, nullable fields are explicitly null. Includes sensitive contact, message, location, service and Estimate information for trusted consumers."
+      },
+      "InquiryProcessingFailedV1": {
+        "name": "InquiryProcessingFailedV1",
+        "payload": {
+          "$ref": "#/components/schemas/InquiryProcessingFailedV1"
+        },
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Msg-Id",
+            "Nats-Expected-Stream"
+          ],
+          "properties": {
+            "Nats-Msg-Id": {
+              "type": "string",
+              "description": "Deterministic identity equal to payload.id; duplicate window is finite."
+            },
+            "Nats-Expected-Stream": {
+              "type": "string",
+              "enum": [
+                "FIONAS_EVENTS"
+              ]
+            }
+          }
+        },
+        "examples": [
+          {
+            "payload": {
+              "schemaVersion": 1,
+              "type": "fionas.inquiry.processing-failed",
+              "id": "fionas.inquiry.processing-failed.v1:FIONAS_INQUIRIES:42",
+              "occurredAt": "2026-10-09T18:22:03.123Z",
+              "source": "fionas-event-workers",
+              "data": {
+                "inputStream": "FIONAS_INQUIRIES",
+                "inputSequence": 42,
+                "errorCode": "invalid_event_json"
+              }
+            }
+          }
+        ]
+      },
+      "InquiryProcessingFailedV2": {
+        "name": "InquiryProcessingFailedV2",
+        "payload": {
+          "$ref": "#/components/schemas/InquiryProcessingFailedV2"
+        },
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Msg-Id",
+            "Nats-Expected-Stream"
+          ],
+          "properties": {
+            "Nats-Msg-Id": {
+              "type": "string",
+              "description": "Deterministic identity equal to payload.id; duplicate window is finite."
+            },
+            "Nats-Expected-Stream": {
+              "type": "string",
+              "enum": [
+                "FIONAS_EVENTS"
+              ]
+            }
+          }
+        },
+        "examples": [
+          {
+            "payload": {
+              "schemaVersion": 2,
+              "type": "fionas.inquiry.processing-failed",
+              "id": "fionas.inquiry.processing-failed.v2:FIONAS_INQUIRIES:42",
+              "occurredAt": "2026-10-09T18:22:03.123Z",
+              "source": "fionas-commerce",
+              "data": {
+                "inputStream": "FIONAS_INQUIRIES",
+                "inputSequence": 42,
+                "errorCode": "invalid_event_json"
+              }
+            }
+          }
+        ]
+      },
+      "InquirySubmittedV1": {
+        "name": "InquirySubmittedV1",
+        "payload": {
+          "$ref": "https://raw.githubusercontent.com/castab/fionas-web/main/asyncapi.yaml#/components/schemas/InquirySubmittedV1"
+        }
       }
     },
     "schemas": {
@@ -641,6 +773,148 @@
                     "description": "Exact plain decimal string, never floating point. No event-time rounding; unit rates can exceed currency minor-unit precision."
                   }
                 }
+              }
+            }
+          }
+        }
+      },
+      "InquiryProcessingFailedV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "type",
+          "id",
+          "occurredAt",
+          "source",
+          "data"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "fionas.inquiry.processing-failed"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^fionas\\.inquiry\\.processing-failed\\.v1:FIONAS_INQUIRIES:[1-9][0-9]*$"
+          },
+          "correlationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Original source stored timestamp; stable across attempts, never disposition time."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fionas-event-workers"
+            ]
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "inputStream",
+              "inputSequence",
+              "errorCode"
+            ],
+            "properties": {
+              "inputStream": {
+                "type": "string",
+                "enum": [
+                  "FIONAS_INQUIRIES"
+                ]
+              },
+              "inputSequence": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807
+              },
+              "errorCode": {
+                "type": "string",
+                "description": "Static failure code; no payload or exception details."
+              }
+            }
+          }
+        }
+      },
+      "InquiryProcessingFailedV2": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "type",
+          "id",
+          "occurredAt",
+          "source",
+          "data"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "enum": [
+              2
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "fionas.inquiry.processing-failed"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^fionas\\.inquiry\\.processing-failed\\.v2:FIONAS_INQUIRIES:[1-9][0-9]*$"
+          },
+          "correlationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Original source stored timestamp; stable across attempts, never disposition time."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fionas-commerce"
+            ]
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "inputStream",
+              "inputSequence",
+              "errorCode"
+            ],
+            "properties": {
+              "inputStream": {
+                "type": "string",
+                "enum": [
+                  "FIONAS_INQUIRIES"
+                ]
+              },
+              "inputSequence": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807
+              },
+              "errorCode": {
+                "type": "string",
+                "description": "Static failure code; no payload or exception details."
               }
             }
           }

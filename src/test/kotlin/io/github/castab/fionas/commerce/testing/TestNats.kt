@@ -74,6 +74,17 @@ class TestNats(
             { user: "transition", password: "test-transition", permissions: {
                 publish: ["$INQUIRY_PERSISTED_SUBJECT", "fionas.events.inquiry.persisted.v2"], subscribe: ["_INBOX.>"]
             } },
+            { user: "intake", password: "test-intake", permissions: {
+                publish: ["${'$'}JS.API.CONSUMER.INFO.FIONAS_INQUIRIES.inquiry-to-commerce",
+                  "${'$'}JS.API.CONSUMER.MSG.NEXT.FIONAS_INQUIRIES.inquiry-to-commerce",
+                  "${'$'}JS.ACK.FIONAS_INQUIRIES.inquiry-to-commerce.>",
+                  "fionas.events.inquiry.processing-failed.v2"], subscribe: ["_INBOX.>"]
+            } },
+            { user: "intake-no-diagnostic", password: "test-intake-no-diagnostic", permissions: {
+                publish: ["${'$'}JS.API.CONSUMER.INFO.FIONAS_INQUIRIES.inquiry-to-commerce",
+                  "${'$'}JS.API.CONSUMER.MSG.NEXT.FIONAS_INQUIRIES.inquiry-to-commerce",
+                  "${'$'}JS.ACK.FIONAS_INQUIRIES.inquiry-to-commerce.>"], subscribe: ["_INBOX.>"]
+            } },
             { user: "denied", password: "test-denied", permissions: {
                 publish: ["unrelated.subject"], subscribe: ["_INBOX.>"]
             } }

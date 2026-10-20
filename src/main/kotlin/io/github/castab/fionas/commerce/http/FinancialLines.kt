@@ -6,6 +6,7 @@ import io.github.castab.commerce.runtime.http.authenticatedPrincipal
 import io.github.castab.commerce.runtime.http.errorResponse
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.financial.EXACT_DECIMAL_PATTERN
 import io.github.castab.fionas.commerce.financial.InquiryServicePlan
 import io.github.castab.fionas.commerce.financial.LineAuthorship
 import io.github.castab.fionas.commerce.financial.LineKey
@@ -17,6 +18,7 @@ import io.github.castab.fionas.commerce.financial.ProposedLineNote
 import io.github.castab.fionas.commerce.financial.ProposedServicePlan
 import io.github.castab.fionas.commerce.financial.ServiceCommitment
 import io.github.castab.fionas.commerce.financial.ServicePlanLineNote
+import io.github.castab.fionas.commerce.financial.parseExactDecimal
 import kotlinx.serialization.Serializable
 import org.http4k.core.Filter
 import org.http4k.core.Request
@@ -188,23 +190,13 @@ internal val LINE_PRECISION_REJECTED =
         "not exact in minor units"
 
 /** An exact decimal string as Fiona reads one: optional sign, digits, optional fraction; never an exponent. */
-internal const val SIGNED_DECIMAL = "^-?[0-9]+(\\.[0-9]+)?$"
-
-private val SIGNED_DECIMAL_TEXT = Regex(SIGNED_DECIMAL)
-
-/** At most this many characters of decimal text are read; longer text is rejected before parsing. */
-private const val MAX_DECIMAL_TEXT = 40
+internal const val SIGNED_DECIMAL = EXACT_DECIMAL_PATTERN
 
 /** The exact decimal in [text], or a validation failure naming [what]. Call inside `validating`. */
 internal fun exactDecimal(
     text: String,
     what: String,
-): BigDecimal {
-    require(text.length <= MAX_DECIMAL_TEXT && SIGNED_DECIMAL_TEXT.matches(text)) {
-        "$what must be an exact decimal string, for example 450.00"
-    }
-    return BigDecimal(text)
-}
+): BigDecimal = parseExactDecimal(text, what)
 
 internal fun currencyOf(text: String): Currency =
     try {

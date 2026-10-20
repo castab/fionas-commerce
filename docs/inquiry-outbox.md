@@ -1,6 +1,7 @@
 # Commerce-owned inquiry events
 
-`POST /inquiries` now commits the submission-key claim, customer association, inquiry and
+Both `POST /inquiries` and optional [integrated intake](inquiry-intake.md) invoke
+`CreateInquiry`, which commits the submission-key claim, customer association, inquiry and
 requested service, canonical initial Estimate, financial association, line authorship,
 and one `InquiryPersisted v3` event in the same PostgreSQL transaction. A valid **201
 confirms all of these durable facts**. It does not confirm NATS publication. The request
@@ -10,8 +11,9 @@ appends nothing; changed intent retains `409 IDEMPOTENCY_KEY_REUSED`.
 
 ```mermaid
 flowchart TD
-  Worker[Intake worker: SERVICE, Idempotency-Key] --> HTTP[POST /inquiries]
+  Worker[Standalone intake worker: SERVICE, Idempotency-Key] --> HTTP[POST /inquiries]
   HTTP --> Tx[One runtime PostgreSQL transaction]
+  Integrated[Optional managed intake: authorized SERVICE] --> Tx
   Tx --> Facts[Inquiry + initial Estimate + associations + authorship]
   Tx --> Event[Runtime outbox: immutable InquiryPersisted v3]
   Tx --> Receipt[Commit then HTTP 201]
@@ -155,7 +157,8 @@ No coordinated identity service is needed; runtime leases and fencing tokens arb
 concurrency. Runtime `start()` starts HTTP and then dispatch. Runtime `close()` stops HTTP,
 closes the service (dispatcher first, owned transport next), and closes the pool last.
 Transport close is safe before start and idempotent. Graceful supervisor termination should
-allow at least 30 seconds for bounded dispatcher/database and connection shutdown.
+allow at least 30 seconds for bounded dispatcher/database and connection shutdown with
+intake disabled, and at least 100 seconds with integrated intake enabled.
 
 Initial deployment settings are explicit Kotlin composition values: batch size `1`, poll
 interval `1s`, lease `60s`, outer publish timeout `5s`, exponential retry starting at `1s`
@@ -251,7 +254,11 @@ backups remain until an explicit future retention policy is approved and impleme
 That policy must retain all unpublished events and aggregate counters. This milestone adds
 no cleanup scheduler or purge operation.
 
-## Coordinated cutover
+## Historical cutover to commerce-owned success publication
+
+For the subsequent intake ownership transfer into commerce, use the
+[integrated intake deployment/cutover/rollback checklist](inquiry-intake.md#deployment-cutover-and-rollback-checklist).
+The sequence below records the earlier success-publication ownership migration.
 
 Companion: [fionas-event-workers PR #3](https://github.com/castab/fionas-event-workers/pull/3).
 Its worker ACKs input after a valid commerce HTTP 201 and no longer publishes success.

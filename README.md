@@ -18,6 +18,23 @@ artifacts.
 
 ## How it fits together
 
+Optional [integrated JetStream intake](docs/inquiry-intake.md) consumes `InquirySubmitted v1`
+from the existing `inquiry-to-commerce` durable and invokes the same transactional inquiry
+operation as HTTP. HTTP, intake and the outbox publisher run independently in one JVM.
+Intake defaults to disabled; enable it only after the documented ownership cutover from the
+standalone worker. No deployment or broker change happens automatically.
+
+Enablement uses `FIONAS_INTAKE_ENABLED=true`, independent `FIONAS_INTAKE_NATS_*` credentials
+and `FIONAS_INTAKE_AUTHOR_SERVICE_ID` (prefer the existing worker's SERVICE UUID). It requires
+the bounded JDBC URL/pool settings and at least 100s termination grace described in the
+guide. Per-delivery live authorization still requires an ACTIVE SERVICE with
+`fionas.inquiries.create`; no HTTP credential secret is needed for local operation calls.
+Permanent failures publish minimal `InquiryProcessingFailed v2` before TERM. Operator
+monitoring must observe intake logs/broker state separately from HTTP health and outbox
+backlog. The packaged `events.InquiryRecovery` CLI retries an exact retained sequence without
+changing the primary durable. See the guide for least-privilege grants, recovery, dormant
+deployment, ownership transfer, retirement and rollback checklists.
+
 ```text
 commerce-domain       reusable commerce vocabulary and invariants
       │                (financial documents, line items, money, change orders, payments,

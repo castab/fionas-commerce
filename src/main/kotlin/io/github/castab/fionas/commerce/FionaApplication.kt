@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.ApplicationContributions
+import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.authorization.authorizationAdministrationHttpCapability
 import io.github.castab.commerce.runtime.authorization.currentPrincipalHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
@@ -11,7 +12,9 @@ import io.github.castab.commerce.runtime.session.SessionAuthenticator
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.events.InquiryOutboxPublisher
+import io.github.castab.fionas.commerce.events.NatsIntakeConfiguration
 import io.github.castab.fionas.commerce.events.NatsOutboxConfiguration
+import io.github.castab.fionas.commerce.events.inquiryIntake
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.CreateChangeOrder
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
@@ -133,6 +136,7 @@ fun fionaApplication(
     loginRateLimit: LoginRateLimit = LoginRateLimit(),
     eventCalendarZone: ZoneId = fionaEventCalendarZone(),
     outboxPublisher: NatsOutboxConfiguration? = NatsOutboxConfiguration.fromEnvironment(),
+    intake: NatsIntakeConfiguration? = NatsIntakeConfiguration.fromEnvironment(),
 ): ApplicationContributions =
     ApplicationContributions(
         migrations =
@@ -142,9 +146,10 @@ fun fionaApplication(
             ),
         permissionDefinitions = FionaPermissions.definitions,
         backgroundServices =
-            outboxPublisher?.let { configuration ->
-                listOf({ context -> InquiryOutboxPublisher(context, configuration) })
-            } ?: emptyList(),
+            buildList {
+                outboxPublisher?.let { configuration -> add { context -> InquiryOutboxPublisher(context, configuration) } }
+                intake?.let { configuration -> add { context -> inquiryIntake(context, configuration, clock) } }
+            },
         routes = { context ->
             val customers = JdbiCustomerRepository()
             val inquiries = JdbiInquiryRepository()
@@ -202,15 +207,7 @@ fun fionaApplication(
                         communications,
                         eventCalendarZone,
                     )::invoke,
-                    createInquiry = CreateInquiry(
-                        context.transactor,
-                        customers,
-                        inquiries,
-                        JdbiInquirySubmissionRepository(),
-                        clock,
-                        materialize,
-                        context.outbox,
-                    )::invoke,
+                    createInquiry = createInquiryOperation(context, clock)::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
                     getInquiry = getInquiry::invoke,
                     acknowledgeInquiryCommunication = RecordInquiryCommunication(
@@ -302,3 +299,22 @@ fun fionaVersion(): String {
     check(version != null && !version.contains("\${")) { "$BUILD_INFO has no version; it is written by the Gradle build" }
     return version
 }
+
+/** Common composition seam for HTTP, managed intake and the operator recovery command. */
+internal fun createInquiryOperation(
+    context: CommerceRuntimeContext,
+    clock: Clock,
+): CreateInquiry =
+    CreateInquiry(
+        context.transactor,
+        JdbiCustomerRepository(),
+        JdbiInquiryRepository(),
+        JdbiInquirySubmissionRepository(),
+        clock,
+        MaterializeInquiryFinancialDocument(
+            context.financialLedger,
+            JdbiInquiryFinancialDocumentRepository(),
+            JdbiFinancialDocumentAuthorshipRepository(),
+        ),
+        context.outbox,
+    )
