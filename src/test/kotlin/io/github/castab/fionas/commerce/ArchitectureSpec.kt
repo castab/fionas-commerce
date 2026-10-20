@@ -206,11 +206,11 @@ class ArchitectureSpec :
             sources {
                 !it.path.contains("${File.separator}http${File.separator}") &&
                     it.name != "FionaApplication.kt" &&
-                    it.name != "InquiryPersisted.kt" &&
+                    it.name !in setOf("InquiryPersisted.kt", "InquirySubmitted.kt", "IntakeDelivery.kt") &&
                     it.name !in persisted
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
-            sources { it.name in persisted || it.name == "InquiryPersisted.kt" }
+            sources { it.name in persisted || it.name in setOf("InquiryPersisted.kt", "InquirySubmitted.kt", "IntakeDelivery.kt") }
                 .containing(listOf("org.http4k", ".http.", "CommerceJson"))
                 .shouldBeEmpty()
             sources { it.path.contains("${File.separator}http${File.separator}") }

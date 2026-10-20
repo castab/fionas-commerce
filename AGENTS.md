@@ -377,6 +377,76 @@ No public administration endpoint or row purger is added.
 
 ## Composition
 
+### Integrated inquiry intake
+
+The optional incoming boundary lives in `events`, composed through the runtime's existing
+`ApplicationContributions.backgroundServices`. `ManagedJetStreamWorker` separates one
+sequential delivery/transport lifecycle from `inquiryIntakeHandler`; no coroutine dependency,
+prefetch queue, localhost HTTP, second pool or business persistence is introduced.
+`createInquiryOperation(context, clock)` in the composition root builds the same operation
+for HTTP, intake and the packaged exact-sequence recovery CLI.
+
+`FIONAS_INTAKE_ENABLED` defaults false. Enabled settings are independent
+`FIONAS_INTAKE_NATS_URL`, exactly one of `..._CREDS_FILE`, `..._USER`/`..._PASSWORD`, or
+`..._TOKEN`, plus `FIONAS_INTAKE_AUTHOR_SERVICE_ID`. The shared scoped NATS parser retains
+the outbox's existing validation/secret-handling behavior. Each accepted command checks the
+configured SERVICE is ACTIVE and holds live `fionas.inquiries.create` through runtime APIs.
+The payload cannot choose authorship; its `source` is validation, not authentication.
+Prefer preserving the standalone worker SERVICE UUID, without its HTTP secret. Shared
+broker tokens support development but cannot isolate publishers or enforce per-user ACLs.
+
+Enabled intake requires the existing runtime pool's connection timeout <=5000ms and JDBC
+`socketTimeout=1..5` with `options=-c transaction_timeout=50000 -c statement_timeout=5000`.
+Fiona validates these explicit settings; it adds no transaction/cancellation infrastructure.
+They bound PostgreSQL 18 transactions and driver I/O for shutdown and apply to the shared
+pool, including HTTP/migrations. Worker close stops pulls, allows 55s completion, then closes
+transport/interrupts/joins for up to 15s; no deliberate detached database work survives.
+Runtime shuts services in reverse order (intake, outbox, pool). Deployment grace >=100s.
+See [operations](docs/inquiry-intake.md) for migration/timeouts/proxy constraints.
+
+`NatsIntakeTransport` binds, never creates or mutates, `FIONAS_INQUIRIES` /
+`inquiry-to-commerce` using `PullSubscribeOptions.bind`. Only named consumer INFO/NEXT,
+ACK/NAK/TERM, failure-v2 publication and inbox subscription are granted. Consumer INFO is
+verified before each pull: exact name/durable and single v1 subject, explicit/all/instant,
+90s ACK wait, 10 deliveries, one ACK pending, max_waiting 2, max_batch 1, max_expires 5s,
+no push subject/backoff/inactivity expiry. No stream INFO or administration grant is needed.
+
+`InquirySubmitted.kt` is a dedicated producer event boundary using kotlinx Json, never
+HTTP DTOs/CommerceJson. Match the current worker projection against producer AsyncAPI:
+strict UTF-8/JSON, envelope type/version/UUID/UTC calendar timestamp/source, structural
+types, omitted (not null) optional text. Ignore compatible unknown fields; ordered lines
+remain exact decimal strings through the shared `financial/ExactDecimal` validator and
+existing value objects. Require then omit `priceRevision`; retain pricingReference; do not
+manufacture duration. Use the event UUID verbatim as submission key. `CreateInquiry` alone
+owns the existing atomic inquiry/Estimate/authorship/submission/outbox business writes.
+
+After commit/replay, confirm ACK within 5s. Permanent malformed/unsupported input, definitive
+validation or changed-intent failure requires confirmed minimal `InquiryProcessingFailed v2`
+before TERM. Direct diagnostic publication is separate from the business outbox. Its ID is
+`fionas.inquiry.processing-failed.v2:FIONAS_INQUIRIES:<sequence>`, source `fionas-commerce`,
+timestamp is original source storage time, data only stream/sequence/static code, optional
+extractable UUID correlation. PubAck must name FIONAS_EVENTS with positive sequence.
+Historical worker v1 diagnostics remain unchanged; AsyncAPI describes both.
+
+Database availability/serialization/lock conflicts, unconfirmed ACK and transient broker
+failures NAK 10s/30s/2m/5m/15m with max 10 deliveries. Observed exhaustion, missing authority,
+consumer mismatch, auth/permission failure and unknown application/persistence defects halt
+intake without stopping HTTP/outbox. Never classify unknown exceptions as customer mistakes.
+Failed diagnostic publication never permits TERM. Logs and in-process `IntakeStatus` expose
+halt/retry/running state privately; HTTP health alone is insufficient. Capture broker max
+delivery advisories with operator monitoring, since crashes can exhaust deliveries unseen.
+
+`events.InquiryRecovery` in the executable JAR uses separate operator credentials to read
+one exact retained source via STREAM.MSG.GET. It uses the existing runtime loader with
+`inquiry-recovery.conf`, DATABASE_* overrides and no SERVICE_TOKENS_* settings or signing key.
+It requires migration validation, composes
+the same handler without starting HTTP/bootstrap/services, and preserves bytes/key. It
+creates no consumer and performs no primary ACK/NAK/TERM; only successful persistence/replay
+exits zero. Missing/expired sources fail. Never invent keys, rewrite input or backfill success.
+The full grant, monitoring, retention, dormant deployment, cutover and rollback contract is
+in [docs/inquiry-intake.md](docs/inquiry-intake.md). Never deploy/stop the old worker or alter
+production configuration as part of this source change.
+
 `FionaApplication.kt` is the composition root. `fionaApplication()` returns the
 `ApplicationContributions` (Fiona's migration schema and location, permission definitions,
 and route factory); the route factory builds repositories and operations from the
@@ -443,7 +513,9 @@ Routes translate transport. Operations orchestrate. Repositories persist.
   serialization annotations on application types, and never let DTOs leak into
   operations or repositories. The other `@Serializable` types are the private persistence
   DTOs of [Persisted JSON](#persisted-json) and the dedicated application event DTOs in
-  `events/InquiryPersisted.kt`. Event DTOs remain separate from application/domain models
+  `events/InquiryPersisted.kt`. The incoming `events/InquirySubmitted.kt` and transport
+  diagnostic `events/IntakeDelivery.kt` separately own their kotlinx Json wire boundaries.
+  Event DTOs remain separate from application/domain models
   and HTTP DTOs; event construction uses kotlinx `Json`, never HTTP `CommerceJson`.
 - Expected failures are `CommerceFailure`s with caller-safe messages. SQL text,
   constraint names, stack traces, and exception details never reach a response.
@@ -1459,7 +1531,7 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root), `PersistedJson.kt` (strict persisted-JSON configuration shared by the owning repositories) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
-| `...events` | Separate `InquiryPersistedV3` event DTOs/serialization, scoped NATS configuration, JetStream `OutboxTransport`, and the managed runtime dispatcher/transport contribution |
+| `...events` | Separate outgoing/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream intake worker/handler and the exact-sequence recovery CLI |
 | `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |

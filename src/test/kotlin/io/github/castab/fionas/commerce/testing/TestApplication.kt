@@ -157,7 +157,16 @@ class TestApplication private constructor(
         ): TestApplication {
             val database = TestDatabase.create()
             try {
-                val fiona = fionaApplication(clock, bootstrap, trustedOrigins, loginRateLimit, eventCalendarZone, outboxPublisher = null)
+                val fiona =
+                    fionaApplication(
+                        clock,
+                        bootstrap,
+                        trustedOrigins,
+                        loginRateLimit,
+                        eventCalendarZone,
+                        outboxPublisher = null,
+                        intake = null,
+                    )
                 var context: CommerceRuntimeContext? = null
                 val runtime =
                     commerceRuntime(

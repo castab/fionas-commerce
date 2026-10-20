@@ -679,6 +679,22 @@ Business meaning should survive a frontend framework change.
 
 # 19. Schema and Migration Ownership
 
+Fiona also owns its incoming inquiry transport boundary. A managed asynchronous consumer
+may invoke the same application operation as HTTP under an explicitly configured, live
+authorized SERVICE authority; message metadata does not authenticate that authority.
+Transport and business operations remain separate. Acknowledging input follows committed
+business facts; success publication belongs to the existing transactional outbox and does
+not gate input acknowledgment. The process shares runtime infrastructure while HTTP,
+incoming transport and outbox publication retain independent execution/resource lifecycles.
+
+Invalid-input diagnostics are transport facts, distinct from authoritative business events.
+They may be confirmed directly by the broker before input termination, even when no business
+transaction exists. They never assert absence of committed effects. Recovery preserves
+original command identity and immutable input, without rewinding the primary consumer or
+fabricating business events. Runtime still owns transactions, generic outbox coordination
+and process resource ordering. Concrete configuration, disposition and shutdown contracts
+are in [AGENTS.md](AGENTS.md#integrated-inquiry-intake).
+
 Fiona is the authoritative producer of events asserting its own committed business facts.
 An inquiry creation commits its integration event with its business and financial writes
 through the shared runtime transaction. External publication happens after commit and

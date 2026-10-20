@@ -69,7 +69,7 @@ class CreateInquiry(
         val eventDate: EventDate,
         val eventType: EventType,
         val submissionKey: InquirySubmissionKey,
-        /** The authenticated SERVICE principal whose authority the lines rest on. */
+        /** The trusted SERVICE principal established by the entry point, never by an event/request payload. */
         val submittedBy: ServiceId,
     ) {
         init {
