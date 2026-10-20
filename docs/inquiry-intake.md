@@ -65,6 +65,26 @@ socketTimeout=5&options=-c%20transaction_timeout%3D50000%20-c%20statement_timeou
 ```
 
 The options string decodes to `-c transaction_timeout=50000 -c statement_timeout=5000`.
+The two `-c` assignments may appear in either order with ordinary whitespace; explicit
+integer units such as `50s`/`5s` or `50000ms`/`5000ms` are equivalent. Disabled, longer,
+duplicate, quoted or additional assignments are rejected. `socketTimeout` and `options`
+must be query parameters in `DATABASE_JDBC_URL`, not separate environment variables.
+Set them on the commerce application deployment and restart after changing its environment.
+
+For example, retaining any existing connection parameters:
+
+```text
+jdbc:postgresql://HOST:PORT/DATABASE?socketTimeout=5&options=-c%20transaction_timeout%3D50000%20-c%20statement_timeout%3D5000
+jdbc:postgresql://HOST:PORT/DATABASE?sslmode=require&socketTimeout=5&options=-c%20statement_timeout%3D5000%20-c%20transaction_timeout%3D50000
+```
+
+Startup diagnostics identify the failed setting, including the runtime's effective pool
+connection timeout. Missing or duplicated query parameters are reported by name and count.
+URL, query values and decoder exception details are never echoed. If a deployment still
+prints the old combined error, it is running the earlier validator: compare its effective
+pool timeout and only the `socketTimeout`/`options` parameters privately, without sharing
+the full database URL or credentials.
+
 `socketTimeout` may be 1–5 seconds; the whole transaction is bounded to 50s and each statement
 to 5s. Intake refuses enablement without these explicit settings. These options apply to
 **the existing shared pool**, including HTTP and migrations: verify migration and workload
