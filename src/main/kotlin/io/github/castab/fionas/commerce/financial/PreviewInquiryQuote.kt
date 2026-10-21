@@ -7,7 +7,9 @@ import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.fionas.commerce.inquiry.InquiryDeclineRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
 
 /**
  * The write-free preview of an initial canonical Quote: exactly what [IssueInquiryProposal]
@@ -17,13 +19,14 @@ import io.github.castab.fionas.commerce.inquiry.InquiryId
  * One unlocked REPEATABLE READ snapshot reads the canonical Estimate and its proposal history;
  * nothing is written, even on failure, and no catalog or pricing policy is consulted. The same
  * eligibility as issuance applies: the canonical lineage at its exact reviewed Estimate version
- * with no proposal or deposit history.
+ * with no proposal or deposit history, and not declined.
  */
 class PreviewInquiryQuote(
     private val transactor: Transactor,
     private val ledger: FinancialLedger,
     private val associations: InquiryFinancialDocumentRepository,
     private val proposals: InquiryProposalRepository,
+    private val declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
 ) {
     data class Command(
         val inquiryId: InquiryId,
@@ -46,6 +49,7 @@ class PreviewInquiryQuote(
                 )
             }
             if (estimate !is FinancialDocument.Estimate) throw CommerceFailure.IllegalTransition("Initial proposal requires an Estimate")
+            if (declines.find(transaction, command.inquiryId) != null) throw DeclinedInquiryPolicy.declined()
             val view = ledger.financialLineages(transaction, listOf(documentId)).single()
             requireCoherentProposal(command.inquiryId, proposals.latest(transaction, command.inquiryId), view)
             QuoteComposer.compose(command.inquiryId, estimate, command.lines, command.servicePlan, command.terms)

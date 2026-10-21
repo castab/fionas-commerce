@@ -97,7 +97,7 @@ class ReadStaffDashboard(
                 asOf,
                 snapshot.counts,
                 StaffDashboardWorkQueue(
-                    queue { policy.needsReply(communication(it)) },
+                    queue { policy.needsReply(it, communication(it)) },
                     queue { policy.needsQuote(it, records.getValue(it.inquiryId).createdAt) },
                     queue {
                         policy.needsResolution(

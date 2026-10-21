@@ -9,6 +9,9 @@ does no network I/O to NATS. Failed business writes or failed event append roll 
 back, including the submission key. Identical replay returns the original receipt and
 appends nothing; changed intent retains `409 IDEMPOTENCY_KEY_REUSED`.
 
+`DeclineInquiry` (`POST /inquiries/{inquiryId}/decline`) likewise commits the decline fact and
+one `InquiryDeclined v1` event in one transaction; see [InquiryDeclined v1](#inquirydeclined-v1).
+
 ```mermaid
 flowchart TD
   Worker[Standalone intake worker: SERVICE, Idempotency-Key] --> HTTP[POST /inquiries]
@@ -124,6 +127,37 @@ A business event contains the authoritative snapshot needed to understand its in
 meaning without replaying earlier events. Decisions that depend on what is true now may
 still require current authoritative state. No consumer sequencing infrastructure lives here.
 
+## InquiryDeclined v1
+
+A staff user's decline of a REQUESTED inquiry appends exactly one `InquiryDeclined v1` in the
+same transaction that inserts the decline, after the canonical association lock and the
+REQUESTED check. A stale, repeated or illegal decline (`409`) and any rollback append nothing.
+The same runtime dispatcher, `NatsOutboxTransport`, headers, PubAck validation and retry policy
+publish it unchanged; nothing about delivery is specific to this event.
+
+| Fact | Value |
+|---|---|
+| Subject | `fionas.events.inquiry.declined.v1` |
+| Type / schema version | `fionas.inquiry.declined` / `1` |
+| Source / runtime producer | `fionas-commerce` |
+| Aggregate | type `inquiry`, ID = inquiry UUID: the **same** aggregate as InquiryPersisted |
+| Event ID | Fresh UUID, equal to runtime outbox ID and `Nats-Msg-Id` (broker deduplication identity) |
+| Correlation ID | None: a decline has no submission key |
+| Occurrence | Decline time (UTC, microseconds), equal to `data.decline.declinedAt` |
+| Aggregate sequence | The runtime's next sequence for the inquiry, normally `2` after InquiryPersisted's `1`; never assumed or hardcoded |
+| Data | Inquiry (ID, `createdAt`, `stage` `DECLINED`, event date/type, ZIP, nullable message), decline (`declinedAt`, `declinedBy` `{kind: USER, id}`, internal `reason`), canonical customer, complete requested service, the exact declined canonical Estimate |
+
+The Estimate is the canonical snapshot the staff user reviewed (`expectedDocumentVersion`),
+which may be a later Estimate version after staff edits; its lines keep their persisted IDs and
+exact decimal strings. The snapshot is independently interpretable: a consumer that never saw
+InquiryPersisted v3 can still record the decline. Its DTOs (`events/InquiryDeclined.kt`) are
+separate from the v3 DTOs, so neither contract constrains the other.
+
+Because the runtime publishes an aggregate's successor only after confirming its predecessor,
+a decline is not published before its inquiry's InquiryPersisted. Consumers still deduplicate
+by event UUID and must tolerate a decline arriving before they processed the persisted event
+(for example after their own restart), and duplicates after either.
+
 ## Enablement and lifecycle
 
 | Variable | Meaning |
@@ -185,13 +219,16 @@ plain JetStream publish request/reply path, the complete required allow-list is:
   user: "fionas-commerce-outbox"
   password: $COMMERCE_OUTBOX_NATS_PASSWORD
   permissions: {
-    publish: ["fionas.events.inquiry.persisted.v3"]
+    publish: ["fionas.events.inquiry.persisted.v3", "fionas.events.inquiry.declined.v1"]
     subscribe: ["_INBOX.>"]
   }
 }
 ```
 
-The normal new-event grant is v3-only. During upgrade, if unpublished v2 rows remain,
+The normal new-event grant is the two current subjects. **Add
+`fionas.events.inquiry.declined.v1` before the first decline:** without it the decline still
+commits, but its event stays pending and retrying, and because successors wait for their
+predecessors, any later event of that inquiry waits behind it. During upgrade, if unpublished v2 rows remain,
 temporarily grant **both** `fionas.events.inquiry.persisted.v2` and
 `fionas.events.inquiry.persisted.v3`. The dispatcher continues publishing stored v2 rows
 to their original destination with their original identity and JSONB content; it never
@@ -238,9 +275,10 @@ delivery. On increasing backlog, inspect safe failure codes, NATS reachability, 
 stream existence and storage limits. Repair the cause and let the dispatcher reclaim/retry.
 Never clear pending rows to silence alerts.
 
-Customer ID/name/email, customer-written messages, ZIP codes, service selections and detailed
-Estimate prices/lines are sensitive personal and commercial information in **both** PostgreSQL
-outbox payloads and NATS. This is a deliberate business snapshot, not a public notification.
+Customer ID/name/email, customer-written messages, ZIP codes, service selections, detailed
+Estimate prices/lines and internal decline reasons are sensitive personal and commercial
+information in **both** PostgreSQL outbox payloads and NATS. A decline reason is a staff note,
+never a customer message; no consumer should forward it to customers. This is a deliberate business snapshot, not a public notification.
 Restrict `FIONAS_EVENTS` consumers to trusted systems with an actual need for the data,
 limit database and account access, and protect backups. Never log full payloads, contact
 information, messages or pricing details. Credentials, tokens, raw HTTP headers, client IPs

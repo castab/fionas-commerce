@@ -309,13 +309,21 @@ internal fun LineAuthorship.toResponse() =
  * already established. Routes that commit staff-negotiated financial values use it, so a
  * service credential can never stand in for, or be recorded as, a staff approver.
  */
-internal val requireStaffUser: Filter =
+internal val requireStaffUser: Filter = staffUserOnly(STAFF_USER_REQUIRED)
+
+/**
+ * Allows only a staff USER to record a staff business decision, such as declining an inquiry; a
+ * SERVICE principal is `403` whatever it holds, so no service is ever recorded as the decider.
+ */
+internal val requireStaffDecision: Filter = staffUserOnly(STAFF_DECISION_REQUIRED)
+
+private fun staffUserOnly(message: String): Filter =
     Filter { next ->
         { request: Request ->
             if (authenticatedPrincipal(request) is UserId) {
                 next(request)
             } else {
-                errorResponse(ErrorCategory.FORBIDDEN, STAFF_USER_REQUIRED)
+                errorResponse(ErrorCategory.FORBIDDEN, message)
             }
         }
     }
@@ -337,9 +345,10 @@ internal val requireService: Filter =
     }
 
 internal const val STAFF_USER_REQUIRED = "Committing negotiated financial terms requires a verified staff user"
+internal const val STAFF_DECISION_REQUIRED = "Declining an inquiry requires a verified staff user"
 internal const val SERVICE_REQUIRED = "Priced inquiry submission requires the public pricing authority's service principal"
 
-/** The authenticated staff user; [requireStaffUser] has already admitted the request. */
+/** The authenticated staff user; [requireStaffUser] or [requireStaffDecision] has already admitted the request. */
 internal fun staffUser(request: Request): UserId = authenticatedPrincipal(request) as UserId
 
 /** The authenticated service; [requireService] has already admitted the request. */

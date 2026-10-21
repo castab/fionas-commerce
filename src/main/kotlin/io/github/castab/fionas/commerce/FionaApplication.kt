@@ -53,8 +53,10 @@ import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.fionaServiceAuthentication
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
+import io.github.castab.fionas.commerce.inquiry.DeclineInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquirySubmissionRepository
@@ -172,17 +174,29 @@ fun fionaApplication(
             val authorship = JdbiFinancialDocumentAuthorshipRepository()
             val communications = JdbiInquiryCommunicationRepository()
             val fulfillment = JdbiInquiryFulfillmentRepository()
-            val lifecycle = ReadInquiryLifecycle(ledger, documentOwners, fulfillment)
-            val manageFulfillment = ManageInquiryFulfillment(context.transactor, inquiries, documentOwners, ledger, fulfillment, clock)
+            // A decline is terminal: every lifecycle read projects it and every commercial progression checks it.
+            val declines = JdbiInquiryDeclineRepository()
+            val lifecycle = ReadInquiryLifecycle(ledger, documentOwners, fulfillment, declines)
+            val manageFulfillment =
+                ManageInquiryFulfillment(context.transactor, inquiries, documentOwners, ledger, fulfillment, clock, declines)
             val materialize = MaterializeInquiryFinancialDocument(ledger, documentOwners, authorship)
             val createDocument =
-                CreateInquiryFinancialDocument(context.transactor, inquiries, ledger, documentOwners, authorship, materialize, clock)
+                CreateInquiryFinancialDocument(
+                    context.transactor,
+                    inquiries,
+                    ledger,
+                    documentOwners,
+                    authorship,
+                    materialize,
+                    clock,
+                    declines,
+                )
             val getInquiry = GetInquiry(context.transactor, customers, inquiries, lifecycle)
             val getFinancialDocument = GetFinancialDocument(context.transactor, ledger, documentOwners, authorship)
             val paymentHistories = ListFinancialDocumentPaymentHistories(context.transactor, ledger, documentOwners)
             val proposalHistory = JdbiInquiryProposalRepository()
             val servicePlans = JdbiInquiryServicePlanRepository()
-            val proposals = InquiryProposals(ledger, documentOwners, authorship, proposalHistory, servicePlans, clock)
+            val proposals = InquiryProposals(ledger, documentOwners, authorship, proposalHistory, servicePlans, clock, declines)
             val operations =
                 FionaOperations(
                     readStaffRequest = ReadStaffRequest(
@@ -195,12 +209,18 @@ fun fionaApplication(
                         servicePlans,
                     )::invoke,
                     issueInquiryProposal = IssueInquiryProposal(context.transactor, proposals)::invoke,
-                    previewInquiryQuote = PreviewInquiryQuote(context.transactor, ledger, documentOwners, proposalHistory)::invoke,
+                    previewInquiryQuote = PreviewInquiryQuote(
+                        context.transactor,
+                        ledger,
+                        documentOwners,
+                        proposalHistory,
+                        declines,
+                    )::invoke,
                     reviseInquiryQuoteProposal = ReviseInquiryQuoteProposal(context.transactor, proposals)::invoke,
                     reviseInquiryProposalDeposit = ReviseInquiryProposalDeposit(context.transactor, proposals)::invoke,
                     readStaffDashboard = ReadStaffDashboard(
                         context.transactor,
-                        ReadInquiryOperationalStates(context.transactor, inquiries, documentOwners, ledger, fulfillment),
+                        ReadInquiryOperationalStates(context.transactor, inquiries, documentOwners, ledger, fulfillment, declines),
                         inquiries,
                         customers,
                         clock,
@@ -217,6 +237,17 @@ fun fionaApplication(
                     )::acknowledge,
                     markInquiryServed = manageFulfillment::markServed,
                     closeInquiry = manageFulfillment::close,
+                    declineInquiry = DeclineInquiry(
+                        context.transactor,
+                        inquiries,
+                        customers,
+                        documentOwners,
+                        ledger,
+                        fulfillment,
+                        declines,
+                        context.outbox,
+                        clock,
+                    )::invoke,
                     createInquiryEstimate = createDocument::invoke,
                     createInquiryFinancialDocument = createDocument::invoke,
                     listInquiryFinancialDocuments =
@@ -232,6 +263,7 @@ fun fionaApplication(
                         documentOwners,
                         authorship,
                         proposalHistory,
+                        declines,
                     )::invoke,
                     withdrawDepositRequirement = WithdrawDepositRequirement(
                         context.transactor,
@@ -240,8 +272,8 @@ fun fionaApplication(
                         proposalHistory,
                     )::invoke,
                     queryFinancialLineages = QueryFinancialLineages(context.transactor, ledger, documentOwners)::invoke,
-                    issueQuote = IssueQuote(context.transactor, ledger, documentOwners, authorship)::invoke,
-                    issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, authorship)::invoke,
+                    issueQuote = IssueQuote(context.transactor, ledger, documentOwners, authorship, declines)::invoke,
+                    issueInvoice = IssueInvoice(context.transactor, ledger, documentOwners, authorship, declines)::invoke,
                     createChangeOrder = CreateChangeOrder(
                         context.transactor,
                         ledger,
@@ -249,6 +281,7 @@ fun fionaApplication(
                         authorship,
                         fulfillment,
                         clock,
+                        declines,
                     )::invoke,
                     recordPayment = RecordDocumentPayment(
                         context.transactor,

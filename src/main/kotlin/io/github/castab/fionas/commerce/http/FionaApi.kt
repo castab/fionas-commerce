@@ -37,6 +37,7 @@ import io.github.castab.fionas.commerce.financial.ReviseInquiryQuoteProposal
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
+import io.github.castab.fionas.commerce.inquiry.DeclineInquiry
 import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -85,6 +86,7 @@ class FionaOperations(
     val getInquiry: (InquiryId) -> InquiryDetails,
     val markInquiryServed: (ManageInquiryFulfillment.Command) -> InquiryLifecycle,
     val closeInquiry: (ManageInquiryFulfillment.Command) -> InquiryLifecycle,
+    val declineInquiry: (DeclineInquiry.Command) -> InquiryLifecycle,
     val createInquiryEstimate: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
     val createInquiryFinancialDocument: (CreateInquiryFinancialDocument.Command) -> InquiryFinancialDocument,
     val listInquiryFinancialDocuments: (InquiryId) -> List<InquiryFinancialDocument>,
@@ -139,6 +141,7 @@ fun fionaApiRoutes(
         getInquiryRoute(operations.getInquiry, auth.access),
         inquiryFulfillmentRoute("served", "markInquiryServed", operations.markInquiryServed, auth.access),
         inquiryFulfillmentRoute("close", "closeInquiry", operations.closeInquiry, auth.access),
+        declineInquiryRoute(operations.declineInquiry, auth.access),
         createInquiryEstimateRoute(operations.createInquiryEstimate, auth.access),
         createInquiryFinancialDocumentRoute(operations.createInquiryFinancialDocument, auth.access),
         listInquiryFinancialDocumentsRoute(operations.listInquiryFinancialDocuments, auth.access),

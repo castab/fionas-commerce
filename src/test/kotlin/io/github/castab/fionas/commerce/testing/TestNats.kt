@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce.testing
 
 import io.github.castab.fionas.commerce.events.FIONA_EVENTS_STREAM
+import io.github.castab.fionas.commerce.events.INQUIRY_DECLINED_SUBJECT
 import io.github.castab.fionas.commerce.events.INQUIRY_PERSISTED_SUBJECT
 import io.github.castab.fionas.commerce.events.NatsOutboxConfiguration
 import io.nats.client.Connection
@@ -69,10 +70,14 @@ class TestNats(
           users: [
             { user: "admin", password: "test-admin", permissions: { publish: ">", subscribe: ">" } },
             { user: "commerce", password: "test-commerce", permissions: {
+                publish: ["$INQUIRY_PERSISTED_SUBJECT", "$INQUIRY_DECLINED_SUBJECT"], subscribe: ["_INBOX.>"]
+            } },
+            { user: "persisted-only", password: "test-persisted-only", permissions: {
                 publish: ["$INQUIRY_PERSISTED_SUBJECT"], subscribe: ["_INBOX.>"]
             } },
             { user: "transition", password: "test-transition", permissions: {
-                publish: ["$INQUIRY_PERSISTED_SUBJECT", "fionas.events.inquiry.persisted.v2"], subscribe: ["_INBOX.>"]
+                publish: ["$INQUIRY_PERSISTED_SUBJECT", "$INQUIRY_DECLINED_SUBJECT", "fionas.events.inquiry.persisted.v2"],
+                subscribe: ["_INBOX.>"]
             } },
             { user: "intake", password: "test-intake", permissions: {
                 publish: ["${'$'}JS.API.CONSUMER.INFO.FIONAS_INQUIRIES.inquiry-to-commerce",

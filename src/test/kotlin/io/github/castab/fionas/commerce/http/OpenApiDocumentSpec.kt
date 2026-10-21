@@ -227,7 +227,9 @@ class OpenApiDocumentSpec :
             listOf("inquiryCreatedAt", "latestDocumentVersionAt", "servedAt", "attentionSince").forEach {
                 item.text("properties", it, "format") shouldBe "date-time"
             }
-            item.strings("properties", "stage", "enum") shouldContainExactly listOf("REQUESTED", "QUOTED", "BOOKED", "SERVED", "CLOSED")
+            // The shared enum names DECLINED, though declined inquiries never enter a work queue.
+            item.strings("properties", "stage", "enum") shouldContainExactly
+                listOf("REQUESTED", "QUOTED", "BOOKED", "SERVED", "CLOSED", "DECLINED")
             item.strings("properties", "reasons", "items", "enum") shouldContainExactly
                 listOf(
                     "CUSTOMER_COMMUNICATION_UNACKNOWLEDGED",
@@ -272,6 +274,8 @@ class OpenApiDocumentSpec :
                     listOf("200", "400", "401", "403", "404", "409", "500"),
                 Triple("/inquiries/{inquiryId}/close", "post", "closeInquiry") to
                     listOf("200", "400", "401", "403", "404", "409", "500"),
+                Triple("/inquiries/{inquiryId}/decline", "post", "declineInquiry") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/inquiries/{inquiryId}/financial-documents", "get", "listInquiryFinancialDocuments") to
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/financial-documents/{documentId}", "get", "getFinancialDocument") to
@@ -330,6 +334,7 @@ class OpenApiDocumentSpec :
                 "getInquiry" to "Inquiries",
                 "markInquiryServed" to "Inquiries",
                 "closeInquiry" to "Inquiries",
+                "declineInquiry" to "Inquiries",
                 "createInquiryEstimate" to "Financial documents",
                 "createInquiryFinancialDocument" to "Financial documents",
                 "listInquiryFinancialDocuments" to "Financial documents",
@@ -445,6 +450,8 @@ class OpenApiDocumentSpec :
                 "InquiryResponse",
                 "InquiryLifecycleResponse",
                 "InquiryMilestoneResponse",
+                "InquiryDeclineResponse",
+                "DeclineInquiryRequest",
                 "InquiryListResponse",
                 "InquiryListItem",
                 "CreateInquiryEstimateRequest",
@@ -559,6 +566,8 @@ class OpenApiDocumentSpec :
                 // Standalone deposit terms are staff-approved too; their reads stay open to either transport.
                 "setFinancialDocumentDepositRequirement",
                 "withdrawFinancialDocumentDepositRequirement",
+                // Declining is a staff USER decision, never a service's.
+                "declineInquiry",
             )
 
         test("line amounts document precise unit rates with settlement-exact subtotals and minor-unit tax") {
@@ -964,9 +973,28 @@ class OpenApiDocumentSpec :
             val lifecycle = schema("InquiryLifecycleResponse")
             lifecycle.strings("required") shouldContainExactly listOf("documentId", "stage")
             lifecycle.strings("properties", "stage", "enum") shouldContainExactly
-                listOf("REQUESTED", "QUOTED", "BOOKED", "SERVED", "CLOSED")
+                listOf("REQUESTED", "QUOTED", "BOOKED", "SERVED", "CLOSED", "DECLINED")
             lifecycle.text("properties", "served", "\$ref") shouldBe "#/components/schemas/InquiryMilestoneResponse"
             lifecycle.text("properties", "closed", "\$ref") shouldBe "#/components/schemas/InquiryMilestoneResponse"
+            lifecycle.text("properties", "declined", "\$ref") shouldBe "#/components/schemas/InquiryDeclineResponse"
+            val declined = schema("InquiryDeclineResponse")
+            declined.strings("required") shouldContainExactly
+                listOf("occurredAt", "principalKind", "principalId", "reason", "documentVersion")
+            declined.text("properties", "occurredAt", "format") shouldBe "date-time"
+            declined.text("properties", "principalId", "format") shouldBe "uuid"
+            declined.text("properties", "reason", "maxLength") shouldBe "500"
+            val request = schema("DeclineInquiryRequest")
+            request.strings("required") shouldContainExactly listOf("expectedDocumentVersion", "reason")
+            request.at("properties").jsonObject.keys shouldBe setOf("expectedDocumentVersion", "reason")
+            request.text("properties", "reason", "maxLength") shouldBe "500"
+            val decline = operation("/inquiries/{inquiryId}/decline", "post")
+            decline.text("requestBody", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/DeclineInquiryRequest"
+            decline.text("responses", "200", "content", "application/json", "schema", "\$ref") shouldBe
+                "#/components/schemas/InquiryLifecycleResponse"
+            decline.text("responses", "409", "description") shouldContain "illegal_transition"
+            decline.text("responses", "403", "description") shouldContain "SERVICE"
+            listOf("REQUESTED", "never both", "InquiryDeclined v1", "no-store").forEach { decline.text("description") shouldContain it }
             val milestone = schema("InquiryMilestoneResponse")
             milestone.strings("required") shouldContainExactly listOf("occurredAt", "principalKind", "principalId")
             milestone.text("properties", "occurredAt", "format") shouldBe "date-time"

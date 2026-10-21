@@ -484,7 +484,7 @@ class InquiryOperationalStatesSpec :
             shouldThrow<IllegalStateException> { read() }.message shouldBe "Inquiry fulfillment requires a canonical Invoice"
         }
 
-        test("one and twenty inquiries use seven SQL statements, one bulk runtime call and the same unlocked transaction") {
+        test("one and twenty inquiries use eight SQL statements, one bulk runtime call and the same unlocked transaction") {
             listOf(1, 20).forEach { size ->
                 repeat(if (size == 1) 1 else 19) { requested() }
                 val sql = mutableListOf<String>()
@@ -574,10 +574,11 @@ class InquiryOperationalStatesSpec :
                 snapshot.states.associate { it.inquiryId to it.financial.latestVersion.document.id } shouldBe
                     app.transactor.inTransaction { owners.initialEstimates(it) }
                 listOf(populationCalls, associationCalls, financialCalls, fulfillmentCalls) shouldBe listOf(1, 1, 1, 1)
-                sql.size shouldBe 7
+                sql.size shouldBe 8
                 sql.count { it.contains("FROM fionas.inquiries") } shouldBe 1
                 sql.count { it.contains("FROM fionas.inquiry_financial_documents") } shouldBe 1
                 sql.count { it.contains("FROM fionas.inquiry_fulfillment") } shouldBe 1
+                sql.count { it.contains("FROM fionas.inquiry_declines WHERE inquiry_id IN") } shouldBe 1
                 sql.none { it.contains("FOR UPDATE") || it.contains("FOR NO KEY UPDATE") } shouldBe true
             }
         }

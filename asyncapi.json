@@ -2,8 +2,8 @@
   "asyncapi": "3.0.0",
   "info": {
     "title": "Fiona commerce events",
-    "version": "3.1.0",
-    "description": "Commerce owns InquiryPersisted v3: an independently meaningful initial inquiry, canonical customer, requested service and Estimate snapshot. HTTP 201 commits all business facts and the event atomically. JSONB preserves structured content, not producer whitespace or key order; publication sends the stored PostgreSQL JSONB text as UTF-8. Delivery is at least once: consumers durably deduplicate event IDs and tolerate delays, missing predecessors and out-of-order processing. Payloads contain personal and commercial data: restrict consumers and establish separate broker and PostgreSQL retention policies. Optional managed intake consumes producer-owned InquirySubmitted v1 directly. Transport diagnostics InquiryProcessingFailed v2 are independently confirmed before TERM and never assert whether business effects committed."
+    "version": "3.2.0",
+    "description": "Commerce owns InquiryPersisted v3: an independently meaningful initial inquiry, canonical customer, requested service and Estimate snapshot. HTTP 201 commits all business facts and the event atomically. Commerce also owns InquiryDeclined v1: a staff user's terminal decline of a REQUESTED inquiry, committed atomically with the decline fact on the same inquiry aggregate. JSONB preserves structured content, not producer whitespace or key order; publication sends the stored PostgreSQL JSONB text as UTF-8. Delivery is at least once: consumers durably deduplicate event IDs and tolerate delays, missing predecessors and out-of-order processing. Payloads contain personal and commercial data: restrict consumers and establish separate broker and PostgreSQL retention policies. Optional managed intake consumes producer-owned InquirySubmitted v1 directly. Transport diagnostics InquiryProcessingFailed v2 are independently confirmed before TERM and never assert whether business effects committed."
   },
   "defaultContentType": "application/json",
   "channels": {
@@ -24,6 +24,16 @@
       "messages": {
         "inquiryPersistedV3": {
           "$ref": "#/components/messages/InquiryPersistedV3"
+        }
+      }
+    },
+    "inquiryDeclinedV1": {
+      "address": "fionas.events.inquiry.declined.v1",
+      "description": "Existing FIONAS_EVENTS stream, subjects fionas.events.>. Operator-provisioned file storage, limits retention, default max age 30 days and duplicate window 24 hours; verify actual deployment values independently. Commerce never administers this stream.",
+      "x-jetstream-stream": "FIONAS_EVENTS",
+      "messages": {
+        "inquiryDeclinedV1": {
+          "$ref": "#/components/messages/InquiryDeclinedV1"
         }
       }
     },
@@ -65,6 +75,13 @@
         "$ref": "#/channels/inquiryPersistedV3"
       },
       "description": "Publish immutable record.payloadJson UTF-8 bytes from PostgreSQL JSONB, without enrichment or reserialization. Stable UUID Nats-Msg-Id. Only a valid FIONAS_EVENTS positive-sequence PubAck confirms, including duplicate acknowledgements; runtime retries ambiguous failures. Consumers deduplicate by event UUID and own correctness under delays, restarts and out-of-order processing."
+    },
+    "publishInquiryDeclined": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/inquiryDeclinedV1"
+      },
+      "description": "Published by the same runtime outbox dispatcher and transport as InquiryPersisted v3: immutable record.payloadJson UTF-8 bytes from PostgreSQL JSONB, stable UUID Nats-Msg-Id, and only a valid FIONAS_EVENTS positive-sequence PubAck confirms, including duplicate acknowledgements. Appended only in the transaction that commits the decline; a rejected or rolled-back decline appends nothing. Consumers deduplicate by event UUID and own correctness under delays, restarts and out-of-order processing."
     },
     "publishHistoricalInquiryPersistedV2": {
       "action": "send",
@@ -299,6 +316,143 @@
           }
         ],
         "description": "Self-contained initial business snapshot; all properties are required, nullable fields are explicitly null. Includes sensitive contact, message, location, service and Estimate information for trusted consumers."
+      },
+      "InquiryDeclinedV1": {
+        "name": "InquiryDeclinedV1",
+        "title": "A staff user declined a requested inquiry",
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Msg-Id",
+            "Nats-Expected-Stream",
+            "Fionas-Producer-Id",
+            "Fionas-Aggregate-Type",
+            "Fionas-Aggregate-Id",
+            "Fionas-Aggregate-Sequence"
+          ],
+          "properties": {
+            "Nats-Msg-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload id and runtime outbox UUID, unchanged on every retry."
+            },
+            "Nats-Expected-Stream": {
+              "type": "string",
+              "enum": [
+                "FIONAS_EVENTS"
+              ]
+            },
+            "Fionas-Producer-Id": {
+              "type": "string",
+              "enum": [
+                "fionas-commerce"
+              ]
+            },
+            "Fionas-Aggregate-Type": {
+              "type": "string",
+              "enum": [
+                "inquiry"
+              ]
+            },
+            "Fionas-Aggregate-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload.aggregate.id and payload.data.inquiry.id: the same inquiry aggregate as InquiryPersisted."
+            },
+            "Fionas-Aggregate-Sequence": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Equals payload.aggregate.sequence and outbox aggregate_sequence; distinct from broker sequence."
+            }
+          }
+        },
+        "payload": {
+          "$ref": "#/components/schemas/InquiryDeclinedV1"
+        },
+        "description": "Self-contained terminal snapshot: the inquiry, decline provenance and internal reason, canonical customer, requested service and the exact declined canonical Estimate, interpretable without InquiryPersisted v3. All properties are required, nullable fields are explicitly null. Decline is not Quote withdrawal or booking cancellation and has no reopening. The reason is an internal staff note, never a customer message: together with contact, message, location, service and Estimate information it is sensitive, for trusted consumers only.",
+        "examples": [
+          {
+            "payload": {
+              "schemaVersion": 1,
+              "type": "fionas.inquiry.declined",
+              "id": "5b0f8b0e-3c7f-4f5e-9a0e-7f1f3f3a2b61",
+              "occurredAt": "2026-10-20T20:00:00.123456Z",
+              "source": "fionas-commerce",
+              "aggregate": {
+                "type": "inquiry",
+                "id": "0a6e8577-e811-487f-aa5d-3d30b74b25bd",
+                "sequence": 2
+              },
+              "data": {
+                "inquiry": {
+                  "id": "0a6e8577-e811-487f-aa5d-3d30b74b25bd",
+                  "createdAt": "2026-10-15T18:00:00.123456Z",
+                  "stage": "DECLINED",
+                  "eventDate": "2026-12-05",
+                  "eventType": "BIRTHDAY",
+                  "zipCode": "09262",
+                  "message": "Please use the side entrance."
+                },
+                "decline": {
+                  "declinedAt": "2026-10-20T20:00:00.123456Z",
+                  "declinedBy": {
+                    "kind": "USER",
+                    "id": "602df298-8d54-45b6-a40c-bbf80949a3b8"
+                  },
+                  "reason": "Requested date is unavailable."
+                },
+                "customer": {
+                  "id": "393ef8ac-5aca-4bdf-a445-537bf2d611d0",
+                  "name": "Jane Doe",
+                  "email": "jane@example.com"
+                },
+                "requestedService": {
+                  "guestCount": 75,
+                  "guestCountIsMinimum": true,
+                  "durationMinutes": 120,
+                  "items": [
+                    {
+                      "label": "Horchata soft serve",
+                      "group": "Soft serve",
+                      "key": "horchata"
+                    },
+                    {
+                      "label": "Waffle cones",
+                      "group": null,
+                      "key": null
+                    }
+                  ],
+                  "pricingReference": "fionas-web-pricing@2026-10-01"
+                },
+                "estimate": {
+                  "id": "7cfa7a85-7f6c-4bc0-b6f3-c8a33e46d50f",
+                  "version": 1,
+                  "stage": "ESTIMATE",
+                  "currency": "USD",
+                  "lineItems": [
+                    {
+                      "id": "0a0bc2ab-c017-4ef1-b2e9-4c550707869c",
+                      "description": "Horchata service",
+                      "subDescription": "Exact unit rate",
+                      "quantity": "4",
+                      "unitPrice": "0.125",
+                      "taxAmount": "0.00"
+                    },
+                    {
+                      "id": "ea9fe1ef-6491-4946-a879-899e509225d5",
+                      "description": "Flat service",
+                      "subDescription": null,
+                      "quantity": null,
+                      "unitPrice": "250.00",
+                      "taxAmount": "20.00"
+                    }
+                  ],
+                  "total": "270.500"
+                }
+              }
+            }
+          }
+        ]
       },
       "InquiryProcessingFailedV1": {
         "name": "InquiryProcessingFailedV1",
@@ -712,6 +866,364 @@
                     "enum": [
                       "ESTIMATE"
                     ]
+                  },
+                  "currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3}$",
+                    "description": "Actual domain ISO 4217 currency; USD for Fiona web estimates. Event construction preserves the existing financial currency policy."
+                  },
+                  "lineItems": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "description",
+                        "subDescription",
+                        "quantity",
+                        "unitPrice",
+                        "taxAmount"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "subDescription": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "quantity": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$",
+                          "description": "Exact plain decimal string, never floating point. No event-time rounding; unit rates can exceed currency minor-unit precision."
+                        },
+                        "unitPrice": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$",
+                          "description": "Exact plain decimal string, never floating point. No event-time rounding; unit rates can exceed currency minor-unit precision."
+                        },
+                        "taxAmount": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$",
+                          "description": "Exact plain decimal string, never floating point. No event-time rounding; unit rates can exceed currency minor-unit precision."
+                        }
+                      }
+                    },
+                    "minItems": 1
+                  },
+                  "total": {
+                    "type": "string",
+                    "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$",
+                    "description": "Exact plain decimal string, never floating point. No event-time rounding; unit rates can exceed currency minor-unit precision."
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "InquiryDeclinedV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "type",
+          "id",
+          "occurredAt",
+          "source",
+          "aggregate",
+          "data"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "fionas.inquiry.declined"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Decline time in UTC at microsecond precision; equals data.decline.declinedAt. Not delivery time."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fionas-commerce"
+            ]
+          },
+          "aggregate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "sequence"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "inquiry"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "format": "int64",
+                "description": "Authoritative runtime aggregate_sequence of the same inquiry aggregate as InquiryPersisted (normally 2 after its 1, never assumed); equals Fionas-Aggregate-Sequence header. Ordered within (producerId, aggregateType, aggregateId), not global, financial revision or broker sequence."
+              }
+            }
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "inquiry",
+              "decline",
+              "customer",
+              "requestedService",
+              "estimate"
+            ],
+            "properties": {
+              "inquiry": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "createdAt",
+                  "stage",
+                  "eventDate",
+                  "eventType",
+                  "zipCode",
+                  "message"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Persisted inquiry creation time in UTC at microsecond precision."
+                  },
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "DECLINED"
+                    ],
+                    "description": "Terminal projected lifecycle stage after this event."
+                  },
+                  "eventDate": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "enum": [
+                      "BIRTHDAY",
+                      "WEDDING",
+                      "CORPORATE",
+                      "SCHOOL_EVENT",
+                      "NEIGHBORHOOD_EVENT",
+                      "OTHER"
+                    ]
+                  },
+                  "zipCode": {
+                    "type": "string",
+                    "pattern": "^[0-9]{5}$"
+                  },
+                  "message": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "decline": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "declinedAt",
+                  "declinedBy",
+                  "reason"
+                ],
+                "properties": {
+                  "declinedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Server time of the committed decline, UTC, microsecond precision."
+                  },
+                  "declinedBy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "USER"
+                        ],
+                        "description": "Only an authenticated staff user declines."
+                      },
+                      "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "The staff user's runtime principal identity."
+                      }
+                    }
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Immutable internal staff reason: trimmed, 1 to 500 characters. Sensitive operational information, never a customer-facing message."
+                  }
+                }
+              },
+              "customer": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "name",
+                  "email"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Canonical stored name, even when the submitted replacement name differs."
+                  },
+                  "email": {
+                    "type": "string",
+                    "description": "Canonical trimmed lowercase email; personal data, no email-format guarantee."
+                  }
+                }
+              },
+              "requestedService": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "guestCount",
+                  "guestCountIsMinimum",
+                  "durationMinutes",
+                  "items",
+                  "pricingReference"
+                ],
+                "properties": {
+                  "guestCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100000
+                  },
+                  "guestCountIsMinimum": {
+                    "type": "boolean"
+                  },
+                  "durationMinutes": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1,
+                    "maximum": 1440
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "label",
+                        "group",
+                        "key"
+                      ],
+                      "properties": {
+                        "label": {
+                          "type": "string"
+                        },
+                        "group": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      }
+                    },
+                    "maxItems": 100
+                  },
+                  "pricingReference": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "estimate": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "version",
+                  "stage",
+                  "currency",
+                  "lineItems",
+                  "total"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "format": "int32",
+                    "description": "Exact canonical Estimate version the staff user reviewed and declined, which may follow staff edits of version 1."
+                  },
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "ESTIMATE"
+                    ],
+                    "description": "The canonical lineage is still an Estimate: decline never changes financial documents."
                   },
                   "currency": {
                     "type": "string",

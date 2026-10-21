@@ -8,8 +8,12 @@ class InquiryOperationalState(
     val inquiryId: InquiryId,
     val financial: FinancialLineageView,
     fulfillment: InquiryFulfillment?,
+    decline: InquiryDecline? = null,
 ) {
-    val lifecycle: InquiryLifecycle = InquiryLifecycle.project(financial.latestVersion.document, fulfillment)
+    val lifecycle: InquiryLifecycle = InquiryLifecycle.project(financial.latestVersion.document, fulfillment, decline)
+
+    /** DECLINED is terminal history: no queue, count or attention applies to it. */
+    val active: Boolean get() = lifecycle.stage != InquiryStage.DECLINED
 
     val needsQuote: Boolean get() = lifecycle.stage == InquiryStage.REQUESTED
     val awaitingQuoteReply: Boolean get() = lifecycle.stage == InquiryStage.QUOTED
@@ -19,7 +23,7 @@ class InquiryOperationalState(
                 .signum() == 0
 }
 
-/** Overlapping operational counts, derived only from canonical lifecycle and runtime reconciliation. */
+/** Overlapping operational counts, derived only from canonical lifecycle and runtime reconciliation; DECLINED counts nowhere. */
 data class InquiryOperationalCounts(
     val new: Int,
     val quoted: Int,

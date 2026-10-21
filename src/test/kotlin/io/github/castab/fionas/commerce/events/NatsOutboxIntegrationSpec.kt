@@ -11,6 +11,7 @@ import io.github.castab.fionas.commerce.testing.TEST_SERVICE_TOKENS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.TestDatabase
 import io.github.castab.fionas.commerce.testing.TestNats
+import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.createInquiryOperation
 import io.github.castab.fionas.commerce.testing.inquiryCommand
 import io.github.castab.fionas.commerce.testing.requestedServiceJson
@@ -87,6 +88,56 @@ class NatsOutboxIntegrationSpec :
                     }
                     sub.unsubscribe()
                 }
+            }
+        }
+
+        test(
+            "the existing transport publishes InquiryDeclined v1 after InquiryPersisted v3 on the same aggregate; v3-only grants retain it",
+        ) {
+            TestApplication.create().use { app ->
+                val id = app.createInquiry()
+                app
+                    .adminPost("/inquiries/$id/decline", """{"expectedDocumentVersion":1,"reason":"Requested date is unavailable."}""")
+                    .status shouldBe Status.OK
+                val publisher = app.context.outbox.publisher(FIONA_EVENT_PRODUCER, "decline-publication-test")
+
+                fun claim() = publisher.claim(10, Duration.ofMinutes(1)).filter { it.record.event.aggregateId == id }
+                val claimed = claim()
+                val persisted = claimed.first()
+                (persisted.record.event.eventType to persisted.record.aggregateSequence) shouldBe (INQUIRY_PERSISTED_TYPE to 1L)
+                publisher.confirm(persisted) shouldBe true
+                // The runtime may hold a later aggregate event until its predecessor is confirmed.
+                val declined = claimed.getOrNull(1) ?: claim().single()
+                (declined.record.event.eventType to declined.record.aggregateSequence) shouldBe (INQUIRY_DECLINED_TYPE to 2L)
+                declined.record.event.destination shouldBe INQUIRY_DECLINED_SUBJECT
+                NatsOutboxTransport(broker.publisherConfiguration("persisted-only")).use {
+                    it.publish(declined.record) shouldBe PublicationResult.UNCONFIRMED
+                }
+                broker.admin().use { observer ->
+                    val sub = observer.subscribe(INQUIRY_DECLINED_SUBJECT)
+                    observer.flush(Duration.ofSeconds(1))
+                    NatsOutboxTransport(broker.publisherConfiguration()).use { transport ->
+                        transport.publish(declined.record) shouldBe PublicationResult.CONFIRMED
+                        // A duplicate publication of the same outbox UUID is deduplicated and still confirms.
+                        transport.publish(declined.record) shouldBe PublicationResult.CONFIRMED
+                        val received = sub.nextMessage(Duration.ofSeconds(5))
+                        received.subject shouldBe INQUIRY_DECLINED_SUBJECT
+                        received.data.toString(Charsets.UTF_8) shouldBe declined.record.payloadJson
+                        received.headers.getFirst("Nats-Msg-Id") shouldBe
+                            declined.record.event.id
+                                .toString()
+                        received.headers.getFirst("Nats-Expected-Stream") shouldBe FIONA_EVENTS_STREAM
+                        received.headers.getFirst(AGGREGATE_ID_HEADER) shouldBe id
+                        received.headers.getFirst(AGGREGATE_SEQUENCE_HEADER) shouldBe "2"
+                        validateInquiryEventContract(received.data.toString(Charsets.UTF_8), "InquiryDeclinedV1")
+                        observer
+                            .jetStreamManagement()
+                            .getStreamInfo(FIONA_EVENTS_STREAM)
+                            .streamState.msgCount shouldBe 1L
+                    }
+                    sub.unsubscribe()
+                }
+                publisher.confirm(declined) shouldBe true
             }
         }
 

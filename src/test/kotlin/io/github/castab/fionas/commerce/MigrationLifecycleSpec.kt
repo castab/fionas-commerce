@@ -102,9 +102,11 @@ class MigrationLifecycleSpec :
             TestDatabase.create().use { database ->
                 compose(database).close()
 
-                // Independent histories: the runtime's additive outbox V2 and JSONB V3 needs no Fiona migration.
-                database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly listOf("1")
-                database.history(FIONA_MIGRATION_SCHEMA).single() shouldContain "V1__fionas_baseline.sql"
+                // Independent histories: the runtime's additive outbox V2 and JSONB V3 needs no Fiona migration,
+                // and Fiona's additive V2 is the next integer of Fiona's own history.
+                database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2")
+                database.history(FIONA_MIGRATION_SCHEMA).first() shouldContain "V1__fionas_baseline.sql"
+                database.history(FIONA_MIGRATION_SCHEMA).last() shouldContain "V2__inquiry_declines.sql"
                 database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2", "3")
                 database.history("commerce").first() shouldContain "V1__commerce_baseline.sql"
                 database.history("commerce").last() shouldContain "V3__outbox_jsonb_payload.sql"
@@ -127,13 +129,13 @@ class MigrationLifecycleSpec :
                         "SELECT (SELECT max(installed_on) FROM commerce.flyway_schema_history) <= " +
                             "(SELECT min(installed_on) FROM fionas.flyway_schema_history WHERE type = 'SQL')",
                     ).single() shouldBe "t"
-                // Fiona's baseline references the runtime's users and financial snapshots, which are in place first.
+                // Fiona's baseline and V2 reference the runtime's users and financial snapshots, which are in place first.
                 database
                     .strings(
                         "SELECT count(*) FROM pg_constraint WHERE connamespace = 'fionas'::regnamespace AND contype = 'f' " +
                             "AND confrelid IN ('commerce.users'::regclass, 'commerce.financial_document_snapshots'::regclass)",
                     ).single()
-                    .toInt() shouldBe 8
+                    .toInt() shouldBe 10
             }
         }
 
