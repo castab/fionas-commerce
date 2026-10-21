@@ -376,11 +376,12 @@ proposal; publication is still not delivery. See
 The inquiry's unique `INITIAL_ESTIMATE` lineage drives its operational lifecycle. Other
 `RELATED` lineages remain financial artifacts, including first-snapshot Invoices, and
 never make the inquiry booked. There is no separate Booking aggregate or persisted
-five-state status.
+lifecycle status.
 
 | Canonical latest stage and Fiona facts | Projected inquiry stage |
 |---|---|
 | Estimate, no fulfillment facts | REQUESTED |
+| Estimate, its exact decline recorded | DECLINED |
 | Quote, no fulfillment facts | QUOTED |
 | Invoice, no served fact | BOOKED |
 | Invoice, served and not closed | SERVED |
@@ -431,6 +432,49 @@ Staff detail exposes this projection with `fionas.inquiries.read`. Business-acti
 `POST /inquiries/{inquiryId}/close` (`closeInquiry`) require `fionas.inquiries.manage`, using
 the existing AccessControl, session/SERVICE authentication and cookie Origin policy.
 New bootstrap Administrators receive the permission; existing role grants are unchanged.
+
+## Declining an inquiry
+
+Declining records Fiona's decision not to pursue an inquiry that is still REQUESTED. It is a
+staff business disposition, distinct from two workflows Fiona does not have yet:
+
+- **Withdrawing a published Quote** retracts a commercial offer the customer may already be
+  relying on; it involves communication and the proposal history.
+- **Cancelling a booking** unwinds an accepted commitment: an Invoice, an accepted deposit,
+  possibly refunds or fees.
+
+Neither is a decline, and neither may be approximated by one. Only REQUESTED → DECLINED exists;
+QUOTED, BOOKED, SERVED and CLOSED inquiries reject it, and nothing reopens a declined inquiry.
+
+A decline is an immutable operational fact beside the canonical lineage, like served and closed:
+who decided (always a verified staff USER), when (server time), why (an internal note), and the
+exact canonical Estimate snapshot they reviewed. It is not a status column and not a financial
+mutation. The customer, inquiry, requested service and canonical Estimate stay exactly as they
+were and stay readable; the lifecycle projection derives DECLINED from the Estimate and the
+decline together. A decline beside a Quote, an Invoice, fulfillment or a different Estimate
+version is contradictory authoritative state and fails loudly instead of choosing a stage.
+
+Decline is terminal for commercial progression across every lineage the inquiry owns: no initial
+Quote, new lineage, change order, Quote or Invoice issuance, proposal or deposit approval.
+Settling what already exists (payments, refunds, deposit withdrawal) and all reads remain, so
+the guard never blocks history or money already owed. The guard is Fiona application policy;
+commerce-runtime knows nothing of declines.
+
+Decline and every progression serialize on the inquiry's canonical association row, the same
+row Quote publication and booking already use, under READ COMMITTED. Whichever transaction
+waits observes the other's committed result, so a decline and an initial Quote can never both
+commit, on any number of application instances. RELATED progressions take their own lineage
+lock first and then the canonical one; nothing takes them in the opposite order.
+
+A declined inquiry is history, not work: it leaves every dashboard queue and count, including
+needs-reply, without acknowledging or erasing its communication record, and it remains in the
+inquiry list and detail. The decline commits atomically with a commerce-owned integration event
+on the inquiry aggregate through the existing transactional outbox.
+
+Adding a lifecycle stage widens a cross-repository contract: clients that interpret the stage
+strictly must understand DECLINED before any production decline is recorded. See
+[the decline contract in `AGENTS.md`](AGENTS.md#inquiry-decline) for the concrete table, guard
+placement, HTTP route, event and rollout mechanics.
 
 ---
 
@@ -553,11 +597,13 @@ Items retain high-level customer/event and canonical financial facts, and add
 `attentionSince`, stable `reasons`, and semantic `totalQualifier`. `FROM` applies only
 to a current canonical Estimate with requested `guestCountIsMinimum=true`; exact-count
 Estimates and all Quotes/Invoices are `EXACT`. Queue membership does not change this rule.
+DECLINED inquiries stay in the population, whose integrity is still checked, but belong to no
+queue and no count.
 Clients format currency and the localized `from` label without another inquiry request.
 Every queue sorts by onset ascending then lexical inquiry UUID. Queues may overlap; each inquiry appears only once within a queue. Clients
 format durations from `asOf` and `attentionSince`; no pagination or preformatted age.
 
-- `needsReply`: CUSTOMER_COMMUNICATION_UNACKNOWLEDGED when inbound customer email is
+- `needsReply`: CUSTOMER_COMMUNICATION_UNACKNOWLEDGED when a non-DECLINED inquiry's inbound customer email is
   durably recorded after the latest staff reply or acknowledgement's `recordedOrder`.
   Anchor: minimum actual `occurredAt` among outstanding inbound. Earlier-recorded inbound
   is cleared regardless of business timestamp; later-ingested backdated or equal-time
@@ -611,7 +657,7 @@ historical communication rows never reach the dashboard. Returned communication 
 O(inquiries), even as append-only history grows. Requested service restoration remains strict;
 corrupt data fails the whole read rather than defaulting the minimum flag. Complete
 population integrity is mandatory, including records outside queues. Nonempty populations
-use exactly ten SQL statements for one or many inquiries. Concurrent commits cannot mix
+use exactly eleven SQL statements for one or many inquiries. Concurrent commits cannot mix
 financial, fulfillment, enrichment and communication snapshots. One injected Clock `asOf`
 truncated to microseconds evaluates policy, not a database commit watermark. Read permissions
 remain BOTH `fionas.inquiries.read` and `commerce.financial-document.read`; GET statuses stay

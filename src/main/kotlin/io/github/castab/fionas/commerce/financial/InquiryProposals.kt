@@ -10,7 +10,9 @@ import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.inquiry.InquiryDeclineRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
 import java.time.Clock
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -34,9 +36,11 @@ class InquiryProposals(
     private val proposals: InquiryProposalRepository,
     private val servicePlans: InquiryServicePlanRepository,
     private val clock: Clock,
+    declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
     private val newId: () -> InquiryProposalId = { InquiryProposalId(UUID.randomUUID()) },
 ) {
     private val documents = FionaFinancialDocuments(ledger, associations, authorship)
+    private val declined = DeclinedInquiryPolicy(associations, declines)
 
     /**
      * Publishes the initial proposal. Without a composition the Estimate is issued unchanged.
@@ -127,7 +131,8 @@ class InquiryProposals(
         val id =
             associations.initialEstimateOf(transaction, inquiryId)
                 ?: throw CommerceFailure.NotFound("Canonical inquiry financial lineage was not found")
-        return documents.expectLatest(transaction, id, version)
+        // Under the canonical association lock: a committed decline wins over any publication.
+        return documents.expectLatest(transaction, id, version).also { declined.rejectProgression(transaction, inquiryId, id) }
     }
 
     private fun reviewed(

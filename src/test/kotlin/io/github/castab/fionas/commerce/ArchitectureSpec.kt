@@ -164,6 +164,7 @@ class ArchitectureSpec :
                     "inquiry/GetInquiry.kt: inTransaction",
                     "inquiry/ReadInquiryOperationalStates.kt: inTransaction",
                     "inquiry/ManageInquiryFulfillment.kt: inTransaction",
+                    "inquiry/DeclineInquiry.kt: inTransaction",
                     "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
                     "staff/ReadStaffRequest.kt: inTransaction",
@@ -206,12 +207,14 @@ class ArchitectureSpec :
             sources {
                 !it.path.contains("${File.separator}http${File.separator}") &&
                     it.name != "FionaApplication.kt" &&
-                    it.name !in setOf("InquiryPersisted.kt", "InquirySubmitted.kt", "IntakeDelivery.kt") &&
+                    it.name !in setOf("InquiryPersisted.kt", "InquiryDeclined.kt", "InquirySubmitted.kt", "IntakeDelivery.kt") &&
                     it.name !in persisted
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
-            sources { it.name in persisted || it.name in setOf("InquiryPersisted.kt", "InquirySubmitted.kt", "IntakeDelivery.kt") }
-                .containing(listOf("org.http4k", ".http.", "CommerceJson"))
+            sources {
+                it.name in persisted ||
+                    it.name in setOf("InquiryPersisted.kt", "InquiryDeclined.kt", "InquirySubmitted.kt", "IntakeDelivery.kt")
+            }.containing(listOf("org.http4k", ".http.", "CommerceJson"))
                 .shouldBeEmpty()
             sources { it.path.contains("${File.separator}http${File.separator}") }
                 .containing(listOf("toPersistedJson", "restoreRequestedService", "persistedJson", "ServicePlanJson"))
@@ -261,6 +264,7 @@ class ArchitectureSpec :
                         readStaffDashboard = { error("not called") },
                         markInquiryServed = { error("not called") },
                         closeInquiry = { error("not called") },
+                        declineInquiry = { error("not called") },
                         createInquiry = { error("not called") },
                         listInquiries = { error("not called") },
                         getInquiry = { error("not called") },
@@ -400,11 +404,15 @@ class ArchitectureSpec :
             composition.contains(".then(requirePermission(FionaPermissions.FinancialTermsManage)).then(requireStaffUser)") shouldBe true
             listOf("http/QuoteBuilderRoutes.kt", "http/InquiryProposalRoutes.kt")
                 .sumOf { Regex("""access\.staffComposition\(\)""").findAll(File(mainSources, it).codeWithoutComments()).count() } shouldBe 4
+            // Declining an inquiry is a staff USER decision: a SERVICE is never recorded as the decider.
+            File(mainSources, "http/InquiryLifecycleRoutes.kt")
+                .compactCode()
+                .contains("access.requirePermission(FionaPermissions.InquiriesManage).then(requireStaffDecision)") shouldBe true
             // The approver and author are always the authenticated principal, never a request value.
             sources { it.path.contains("${File.separator}http${File.separator}") }
                 .flatMap { file ->
                     Regex(
-                        """\b(?:issuedBy|author|submittedBy)\s*=\s*([^,\n)]+)""",
+                        """\b(?:issuedBy|author|submittedBy|declinedBy)\s*=\s*([^,\n)]+)""",
                     ).findAll(file.codeWithoutComments()).map { it.groupValues[1].trim() }
                 }.filterNot { it in setOf("staffUser(request", "servicePrincipal(request") }
                 .shouldBeEmpty()

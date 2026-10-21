@@ -4,6 +4,8 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
+import io.github.castab.fionas.commerce.inquiry.InquiryDeclineRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
 import java.util.UUID
 
 /**
@@ -17,15 +19,18 @@ import java.util.UUID
  * and the line authorship is carried to the new version. Payments applied to earlier
  * snapshots stay attached to them and still count toward the lineage's settlement.
  * Canonical INITIAL_ESTIMATE lineages reject manual invoicing; their deposit-satisfaction
- * booking policy reuses the same transaction-taking Invoice mechanics.
+ * booking policy reuses the same transaction-taking Invoice mechanics. A declined inquiry's
+ * RELATED lineages are never invoiced.
  */
 class IssueInvoice(
     private val transactor: Transactor,
     ledger: FinancialLedger,
     associations: InquiryFinancialDocumentRepository,
     authorship: FinancialDocumentAuthorshipRepository,
+    declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
 ) {
     private val documents = FionaFinancialDocuments(ledger, associations, authorship)
+    private val declined = DeclinedInquiryPolicy(associations, declines)
 
     operator fun invoke(
         documentId: UUID,
@@ -33,6 +38,7 @@ class IssueInvoice(
     ): InquiryFinancialDocument =
         transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, documentId, expectedVersion)
+            declined.rejectProgression(transaction, current.inquiryId, current.document.id)
             if (documents.isCanonical(transaction, current)) {
                 throw CommerceFailure.IllegalTransition(
                     "The canonical inquiry lineage is invoiced automatically when its active deposit is satisfied",

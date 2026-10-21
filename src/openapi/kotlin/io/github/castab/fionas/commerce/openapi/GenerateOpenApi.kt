@@ -62,6 +62,7 @@ private val notInvoked =
         readStaffDashboard = { error("not called while rendering") },
         markInquiryServed = { error("Rendering never serves an inquiry") },
         closeInquiry = { error("Rendering never closes an inquiry") },
+        declineInquiry = { error("Rendering never declines an inquiry") },
         createInquiry = { error("Rendering the OpenAPI document never creates an inquiry") },
         listInquiries = { error("Rendering the OpenAPI document never lists inquiries") },
         getInquiry = { error("Rendering the OpenAPI document never reads an inquiry") },

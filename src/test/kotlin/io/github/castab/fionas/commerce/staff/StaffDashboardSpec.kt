@@ -193,7 +193,7 @@ class StaffDashboardSpec :
             }
         }
 
-        test("one and twenty inquiries use ten unlocked SQL statements, set enrichment and one Clock evaluation after first read") {
+        test("one and twenty inquiries use eleven unlocked SQL statements, set enrichment and one Clock evaluation after first read") {
             listOf(1, 20).forEach { size ->
                 repeat(if (size == 1) 1 else 19) { app.createInquiry("shared@example.com") }
                 val sql = mutableListOf<String>()
@@ -290,7 +290,8 @@ class StaffDashboardSpec :
                 result.workQueue.needsQuote.items.size shouldBe size
                 listOf(inquiryCalls, customerCalls, clockCalls) shouldBe listOf(1, 1, 1)
                 communicationCalls shouldBe 1
-                sql.size shouldBe 10
+                sql.size shouldBe 11
+                sql.count { it.contains("FROM fionas.inquiry_declines WHERE inquiry_id IN") } shouldBe 1
                 sql.none { it.contains("FOR UPDATE") || it.contains("FOR NO KEY UPDATE") } shouldBe true
                 sql.count { it.contains("FROM fionas.inquiries") } shouldBe 2
                 sql.count { it.contains("FROM fionas.customers") } shouldBe 1

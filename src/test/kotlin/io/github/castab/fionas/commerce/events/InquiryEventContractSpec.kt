@@ -22,7 +22,10 @@ import java.util.UUID
 private fun contract() = Json.parseToJsonElement(File("asyncapi.json").readText()).jsonObject
 
 /** Validate the exact schema's closed objects, required keys, types, enums, patterns and formats. */
-fun validateInquiryEventContract(payload: String) {
+fun validateInquiryEventContract(
+    payload: String,
+    schemaName: String = "InquiryPersistedV3",
+) {
     fun validate(
         value: JsonElement,
         schema: JsonObject,
@@ -87,7 +90,7 @@ fun validateInquiryEventContract(payload: String) {
             .jsonObject
             .getValue("schemas")
             .jsonObject
-            .getValue("InquiryPersistedV3")
+            .getValue(schemaName)
             .jsonObject,
     )
 }
@@ -138,6 +141,72 @@ class InquiryEventContractSpec :
                     .map { it.jsonPrimitive.content }
                     .toSet()
             headers shouldBe
+                setOf(
+                    "Nats-Msg-Id",
+                    "Nats-Expected-Stream",
+                    PRODUCER_HEADER,
+                    AGGREGATE_TYPE_HEADER,
+                    AGGREGATE_ID_HEADER,
+                    AGGREGATE_SEQUENCE_HEADER,
+                )
+        }
+
+        test("the InquiryDeclined v1 example serializes exactly as the Kotlin event on its own subject and closed schema") {
+            val document = contract()
+            val channel =
+                document
+                    .getValue("channels")
+                    .jsonObject
+                    .getValue("inquiryDeclinedV1")
+                    .jsonObject
+            channel.getValue("address").jsonPrimitive.content shouldBe INQUIRY_DECLINED_SUBJECT
+            channel.getValue("x-jetstream-stream").jsonPrimitive.content shouldBe FIONA_EVENTS_STREAM
+            document
+                .getValue("operations")
+                .jsonObject
+                .getValue("publishInquiryDeclined")
+                .jsonObject
+                .getValue("action")
+                .jsonPrimitive.content shouldBe "send"
+            val message =
+                document
+                    .getValue("components")
+                    .jsonObject
+                    .getValue("messages")
+                    .jsonObject
+                    .getValue("InquiryDeclinedV1")
+                    .jsonObject
+            val example =
+                message
+                    .getValue("examples")
+                    .jsonArray
+                    .single()
+                    .jsonObject
+                    .getValue("payload")
+            val serialized =
+                Json.encodeToString(InquiryDeclinedV1.serializer(), Json.decodeFromJsonElement(InquiryDeclinedV1.serializer(), example))
+            Json.parseToJsonElement(serialized) shouldBe example
+            validateInquiryEventContract(serialized, "InquiryDeclinedV1")
+            val root = example.jsonObject
+            val data = root.getValue("data").jsonObject
+            val decline = data.getValue("decline").jsonObject
+            listOf(
+                JsonObject(root - "data"),
+                JsonObject(root + ("schemaVersion" to JsonPrimitive(2))),
+                JsonObject(root + ("type" to JsonPrimitive(INQUIRY_PERSISTED_TYPE))),
+                JsonObject(root + ("data" to JsonObject(data - "estimate"))),
+                JsonObject(root + ("data" to JsonObject(data + ("decline" to JsonObject(decline + ("reason" to JsonNull)))))),
+                JsonObject(
+                    root + ("data" to JsonObject(data + ("decline" to JsonObject(decline + ("declinedBy" to JsonPrimitive("SERVICE")))))),
+                ),
+            ).forEach { invalid -> shouldThrowAny { validateInquiryEventContract(invalid.toString(), "InquiryDeclinedV1") } }
+            message
+                .getValue("headers")
+                .jsonObject
+                .getValue("required")
+                .jsonArray
+                .map { it.jsonPrimitive.content }
+                .toSet() shouldBe
                 setOf(
                     "Nats-Msg-Id",
                     "Nats-Expected-Stream",

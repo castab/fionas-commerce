@@ -99,7 +99,8 @@ class DepositRequirementOperationsSpec :
                     pricing,
                     JdbiInquiryProposalRepository(),
                 )(command(id))
-            ownershipCalls shouldBe 1
+            // The RELATED lineage's own association, then its inquiry's canonical one, where decline serializes.
+            ownershipCalls shouldBe 2
             sql.first().contains("fionas.inquiry_financial_documents") shouldBe true
             sql.any { it.contains("commerce.financial_document_snapshots") && it.contains("LIMIT 1") } shouldBe true
             val writes = sql.withIndex().filter { it.value.startsWith("INSERT INTO commerce.deposit_requirement_revisions") }

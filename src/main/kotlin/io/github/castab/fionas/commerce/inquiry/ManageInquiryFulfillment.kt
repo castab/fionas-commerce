@@ -17,6 +17,7 @@ class ManageInquiryFulfillment(
     private val ledger: FinancialLedger,
     private val fulfillment: InquiryFulfillmentRepository,
     private val clock: Clock,
+    private val declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
 ) {
     data class Command(
         val inquiryId: InquiryId,
@@ -39,7 +40,8 @@ class ManageInquiryFulfillment(
             check(associations.lockInquiryOf(transaction, documentId) == id) { "Canonical inquiry ownership changed" }
             val document = ledger.latest(transaction, documentId)
             val facts = fulfillment.find(transaction, id)
-            val lifecycle = InquiryLifecycle.project(document, facts)
+            val declined = declines.find(transaction, id)
+            val lifecycle = InquiryLifecycle.project(document, facts, declined)
             if (document !is FinancialDocument.Invoice) {
                 throw CommerceFailure.IllegalTransition("Inquiry must be booked before service or closeout")
             }
@@ -57,6 +59,6 @@ class ManageInquiryFulfillment(
                 }
                 fulfillment.serve(transaction, id, milestone)
             }
-            InquiryLifecycle.project(document, fulfillment.find(transaction, id))
+            InquiryLifecycle.project(document, fulfillment.find(transaction, id), declined)
         }
 }

@@ -96,6 +96,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md) and
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, its requested service, and its lifecycle. `404` when unknown, `400` when the id is not a UUID. |
 | `POST /inquiries/{inquiryId}/communications/acknowledge` | `fionas.communications.acknowledge` | Record explicit customer-email acknowledgement; repeated calls return `204`. |
+| `POST /inquiries/{inquiryId}/decline` | `fionas.inquiries.manage`, **staff USER only** | Terminally decline a REQUESTED inquiry with a required internal `reason` and the reviewed `expectedDocumentVersion`. See [Declining an inquiry](#declining-an-inquiry). |
 | `GET /staff/dashboard` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | One coherent snapshot of operational counts and enriched staff work queues. USER sessions and SERVICE tokens are supported. |
 | `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review, with the published Quote's optional `servicePlan`. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
 | `POST /staff/requests/{inquiryId}/quote-preview` | `commerce.financial-document.create`, `commerce.deposit-requirement.manage`, `fionas.financial-terms.manage`, **staff USER only** | Write-free preview of the initial Quote from staff-committed final lines: resolved lines, domain totals, deposit, service plan and `reviewToken`. See [Quote builder](#quote-builder). |
@@ -468,7 +469,7 @@ the runtime permission catalog, each naming a capability rather than a kind of c
 | `fionas.credentials.manage` | `fionas.credentials` | Set or reset staff password credentials |
 | `fionas.inquiries.read` | `fionas.inquiries` | List and read inquiries |
 | `fionas.inquiries.create` | `fionas.inquiries` | `POST /inquiries` (priced submission; a SERVICE principal only) |
-| `fionas.inquiries.manage` | `fionas.inquiries` | Mark inquiries served and close them |
+| `fionas.inquiries.manage` | `fionas.inquiries` | Mark inquiries served and close them; as a verified staff USER, decline requested inquiries |
 | `fionas.communications.acknowledge` | `fionas.communications` | Explicitly acknowledge customer email attention |
 | `fionas.financial-terms.manage` | `fionas.financial-terms` | As a verified staff USER, commit staff-authored lines, overrides, adjustments, proposal deposit terms and standalone deposit terms |
 
@@ -802,12 +803,14 @@ Use inquiryId and financial.version to explicitly issue approved terms through t
 proposal operation. Reading never changes state or sends a communication.
 Staff `GET /inquiries/{inquiryId}` includes `lifecycle`: canonical `documentId`, projected
 `stage`, and optional `served`/`closed` facts. Each fact has `occurredAt`, `principalKind`
-(`USER` or `SERVICE`) and `principalId`. Detail requires only `fionas.inquiries.read` and
+(`USER` or `SERVICE`) and `principalId`. A declined inquiry adds `declined` (`occurredAt`,
+`principalKind` USER, `principalId`, `reason`, declined `documentVersion`). Detail requires only `fionas.inquiries.read` and
 reads inquiry, canonical latest stage and operational facts in one REPEATABLE READ snapshot.
 
 | Canonical latest document and fulfillment | Lifecycle stage |
 |---|---|
 | Estimate, no fulfillment | REQUESTED |
+| Estimate, its exact decline recorded | DECLINED |
 | Quote, no fulfillment | QUOTED |
 | Invoice, no served fact | BOOKED |
 | Invoice, served, not closed | SERVED |
@@ -843,7 +846,7 @@ balance means overpayment and is permitted; refunds require explicit refund/allo
 operations. Zero canonical Quotes cannot satisfy the existing positive-deposit publication
 policy. Change orders carry, replace, remove and add individual lines by id, so manual
 adjustments survive later edits.
-There is no zero-deposit booking, separate Booking aggregate or stored five-state status.
+There is no zero-deposit booking, separate Booking aggregate or stored lifecycle status.
 
 | Action | operationId | Eligibility |
 |---|---|---|
@@ -867,15 +870,57 @@ overpayment both prevent closure; equality uses exact decimal semantics. There i
 automatic close, date-driven progression, unserve or reopen. Later ledger mutations after
 closure remain allowed. Impossible fulfillment before a canonical Invoice fails internally.
 
+#### Declining an inquiry
+
+`POST /inquiries/{inquiryId}/decline` (`declineInquiry`) records a staff user's terminal decision
+not to pursue a REQUESTED inquiry. It is neither withdrawing a published Quote nor cancelling a
+booking; those are separate future workflows. Only REQUESTED → DECLINED exists: QUOTED,
+BOOKED, SERVED, CLOSED and DECLINED answer `409 illegal_transition`, and nothing reopens.
+
+```json
+{ "expectedDocumentVersion": 1, "reason": "Requested date is unavailable." }
+```
+
+- **Who.** `fionas.inquiries.manage` **and** a staff USER session with a trusted `Origin`; a
+  SERVICE token is `403` whatever it holds. The decider and the time come from authentication
+  and the server clock; body properties such as `declinedBy` are ignored.
+- **Values.** `expectedDocumentVersion` is the canonical Estimate version reviewed (the staff
+  request's `financial.version`); a stale one is `409 conflict`, never rebased. `reason` is a
+  required internal note, trimmed, 1–500 characters (`422 validation_failed` otherwise), never
+  sent to the customer.
+- **Result.** `200` no-store `InquiryLifecycleResponse` with stage `DECLINED` and `declined`.
+  The customer, inquiry, requested service and canonical Estimate are untouched and remain
+  readable: the staff request still shows the Estimate with its actual reconciliation, and the
+  inquiry list still includes it. A repeated decline writes nothing; after a lost response,
+  reload the inquiry instead of retrying.
+- **Afterwards.** No initial Quote, preview, new financial document, change order, Quote or
+  Invoice issuance, or deposit approval is accepted for any lineage of the inquiry
+  (`409 illegal_transition`). Payments, refunds and deposit withdrawal on existing RELATED
+  documents, and all reads, remain. The inquiry leaves every dashboard queue and count, even
+  with unacknowledged customer email, whose history is kept as it was.
+- **Concurrency.** Decline and Quote publication lock the same canonical association row, so
+  they never both succeed on any number of instances: whichever waits observes the other.
+- **Event.** The decline and `InquiryDeclined v1` commit together in the transactional outbox
+  (see [Configuration](#configuration)).
+- **Rollout.** DECLINED is a new lifecycle stage in every response that carries one. Deploy a
+  `fionas-web` that understands it before recording any production decline, and grant the
+  outbox publisher `fionas.events.inquiry.declined.v1` first.
+
+`fionas.inquiry_declines` (Fiona `V2`) holds one immutable row per declined inquiry: the
+declined canonical Estimate snapshot, `declined_at`, the USER `declined_by` and the reason.
+There is no status column; the lifecycle stays a projection.
+
+#### Operational states and the staff dashboard
+
 `ReadInquiryOperationalStates` provides an application-only operational snapshot of all
-inquiries. Set-based canonical association, runtime financial lineage and fulfillment reads
+inquiries. Set-based canonical association, runtime financial lineage, fulfillment and decline reads
 share one unlocked REPEATABLE READ transaction; an additional inquiry-ID read checks that
 every inquiry has its canonical relationship. Missing relationships fail instead of omitting
 inquiries. Each state retains the runtime's authoritative `FinancialLineageView` and uses
 `InquiryLifecycle.project`. Pure counts classify New as REQUESTED, Quoted as QUOTED,
 Booked as BOOKED or SERVED, and Needs closing as SERVED with an exactly-zero current
 Invoice balance, independent of decimal scale. Booked and Needs closing overlap; CLOSED
-contributes to neither. Event dates and deposit satisfaction do not affect these counts.
+contributes to neither, nor does DECLINED. Event dates and deposit satisfaction do not affect these counts.
 Operational states and counts are never persisted. The standalone reader retains its own
 transaction; its transaction-taking core also composes with `ReadStaffDashboard`.
 
@@ -892,11 +937,13 @@ Items retain high-level customer/event and canonical financial facts, and add
 `attentionSince`, stable `reasons`, and semantic `totalQualifier`. `FROM` applies only
 to a current canonical Estimate with requested `guestCountIsMinimum=true`; exact-count
 Estimates and all Quotes/Invoices are `EXACT`. Queue membership does not change this rule.
+DECLINED inquiries stay in the population, whose integrity is still checked, but belong to no
+queue and no count.
 Clients format currency and the localized `from` label without another inquiry request.
 Every queue sorts by onset ascending then lexical inquiry UUID. Queues may overlap; each inquiry appears only once within a queue. Clients
 format durations from `asOf` and `attentionSince`; no pagination or preformatted age.
 
-- `needsReply`: CUSTOMER_COMMUNICATION_UNACKNOWLEDGED when inbound customer email is
+- `needsReply`: CUSTOMER_COMMUNICATION_UNACKNOWLEDGED when a non-DECLINED inquiry's inbound customer email is
   durably recorded after the latest staff reply or acknowledgement's `recordedOrder`.
   Anchor: minimum actual `occurredAt` among outstanding inbound. Earlier-recorded inbound
   is cleared regardless of business timestamp; later-ingested backdated or equal-time
@@ -950,7 +997,7 @@ historical communication rows never reach the dashboard. Returned communication 
 O(inquiries), even as append-only history grows. Requested service restoration remains strict;
 corrupt data fails the whole read rather than defaulting the minimum flag. Complete
 population integrity is mandatory, including records outside queues. Nonempty populations
-use exactly ten SQL statements for one or many inquiries. Concurrent commits cannot mix
+use exactly eleven SQL statements for one or many inquiries. Concurrent commits cannot mix
 financial, fulfillment, enrichment and communication snapshots. One injected Clock `asOf`
 truncated to microseconds evaluates policy, not a database commit watermark. Read permissions
 remain BOTH `fionas.inquiries.read` and `commerce.financial-document.read`; GET statuses stay
@@ -1373,6 +1420,13 @@ The synchronous append factory embeds the runtime-assigned aggregate sequence. J
 the persisted representation; NATS sends `record.payloadJson` UTF-8 bytes unchanged.
 Historical v2 rows keep their identity, content and original subject; temporarily retain
 v2 publisher permission until that backlog drains. No replay backfill or dual publication.
+`InquiryDeclined v1` (subject `fionas.events.inquiry.declined.v1`, type
+`fionas.inquiry.declined`) commits in the same transaction as a decline, on the same
+`inquiry` aggregate with the runtime's next sequence. Its self-contained snapshot carries the
+inquiry, the decline (time, staff USER, internal reason), canonical customer, requested service
+and the exact declined Estimate; rejected or rolled-back declines append nothing. The reason is
+sensitive internal information: restrict consumers. The publisher's NATS grant must include
+this subject.
 See the [AsyncAPI contract](asyncapi.json) and
 [publisher operations/cutover guide](docs/inquiry-outbox.md), including event-worker PR #3.
 
@@ -1425,8 +1479,9 @@ Commerce 0.0.24 adds runtime-owned `V2__transactional_outbox.sql` after its unch
 Commerce 0.0.25 adds `V3__outbox_jsonb_payload.sql`, converting valid historical JSON objects
 from text to JSONB without changing their business meaning or destination; invalid/non-object
 history fails migration and needs an explicit operator decision.
-These additive migrations upgrade current V1/V2 databases normally. Fiona's schema/migration
-stays unchanged; the historical 0.0.23 rebaseline instructions below apply only to databases
+These additive migrations upgrade current V1/V2 databases normally. Fiona's additive
+`V2__inquiry_declines.sql` likewise only creates `fionas.inquiry_declines` and upgrades a deployed
+`V1` database in place, preserving every inquiry; the historical 0.0.23 rebaseline instructions below apply only to databases
 that predate that rebaseline. No reset is required for a valid 0.0.23/0.0.24 → 0.0.25 upgrade.
 
 > **Rebaseline for the trusted priced-line release (commerce 0.0.23).** commerce-runtime
@@ -1464,7 +1519,7 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   not create the schema (its SQL still qualifies every object, `fionas.customers`). Nothing
   of Fiona's migrations, tables, or history is in `public`. The runtime's migrations come
   inside the `commerce-runtime` jar; Fiona never lists or copies them.
-- The two streams have independent version spaces: Fiona's next migration is `V2`,
+- The two streams have independent version spaces: Fiona's next migration is `V3`,
   regardless of the runtime's numbering.
 - `V1__fionas_baseline` creates, in `fionas`: `customers` (unique email), `inquiries`
   (customer, message, ZIP, event date/type, `requested_service` jsonb, and the
@@ -1478,6 +1533,9 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   eight foreign keys into `commerce` reference only published runtime contracts
   (`commerce.users` and `commerce.financial_document_snapshots`). No Fiona table holds an
   amount, total, stage, balance, catalog or pricing input.
+- `V2__inquiry_declines` adds `inquiry_declines` (one row per inquiry → the declined canonical
+  Estimate snapshot, its association and the deciding `commerce.users` row; a checked trimmed
+  1–500 character reason), bringing the published runtime foreign keys to ten.
 - Composing the runtime runs the migration phase before anything is served. By default
   (`MIGRATIONS_ON_STARTUP=migrate`) it applies the runtime's pending migrations, then
   Fiona's; re-running against a current database applies nothing. A deployment that
@@ -1773,7 +1831,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | Spec | Proves |
 |---|---|
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
-| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates; nothing Fiona-owned in `commerce` or `public`; one baseline per stream; exactly eight foreign keys into published runtime tables; no catalog/offering/pricing table anywhere; no Fiona table or column restates a ledger fact |
+| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates; nothing Fiona-owned in `commerce` or `public`; one baseline per stream; Fiona's additive V2; exactly ten foreign keys into published runtime tables; no catalog/offering/pricing table anywhere; no Fiona table or column restates a ledger fact |
 | `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: the runtime baseline first, Fiona's `V1` second, independent version spaces, each history in its own schema, repeat startup applies nothing, failures prevent composition |
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested service round trips strictly |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer and inquiry roll back together, and nothing is visible before commit |
@@ -1788,7 +1846,8 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `QuoteBuilderSpec`, `QuoteBuilderRoutesSpec` | Staff composition on PostgreSQL and through the handler: keeping every line (Estimate v1 → Quote v2), **the churro example** (soft serve removed, bespoke service and optional discount added, no catalog, deposit, exact payment, booked Invoice, served, closed), overrides keeping line ids, deterministic tokens binding lines/order/plan/terms/version, stable rejection codes, tampered or stale reviews writing nothing, rollback at the plan, deposit or publication, concurrent approvals, Quote and deposit revisions, a non-user approver refused by the database, malformed shapes, no-store, staff-USER-only authority and Origin, corrupt plans failing closed |
 | `InquiryProposalsSpec`, `InquiryProposalRoutesSpec` | Exact full deposit acceptance, zero-write partial/excess/stale rejection, deposit-only republication, Quote revisions from staff lines, gross-allocation guard after refunds, rollback at late writes, association contention, ordered history with USER provenance, currentness, canonical deposit mutation rejected before/after booking, booked Invoice change orders, permission intersection and corrupt-pair failures |
 | `InquiryLifecycleSpec`, `InquiryLifecycleRoutesSpec` | Canonical projection; exact deposit booking; RELATED isolation; refund stability; served/closed provenance, exact-zero closeout and closed change-order rejection through the handler |
-| `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; the three attention queues and onset ordering; durable-order clearing with PostgreSQL contention; SQL/pure projection parity; EXACT/FROM qualifiers from the requested service; event-zone and DST boundaries; ten set-based SQL reads; snapshot coherence; strict corrupt-data failures; live USER/SERVICE permissions |
+| `InquiryDeclineSpec`, `InquiryDeclineRoutesSpec` | DECLINED projection and fail-loud contradictions; persisted staff provenance and trimmed reason with history untouched; stale/repeated/illegal declines writing nothing; decline and InquiryDeclined v1 rolling back together; real PostgreSQL contention in both orders against initial Quote issuance, between declines and against RELATED creation; every progression path rejected while reads and settlement remain; dashboard exclusion with outstanding email; staff-USER authority, Origin, codes and ignored client provenance |
+| `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; the three attention queues and onset ordering; durable-order clearing with PostgreSQL contention; SQL/pure projection parity; EXACT/FROM qualifiers from the requested service; event-zone and DST boundaries; eleven set-based SQL reads; declined inquiries in no queue or count; snapshot coherence; strict corrupt-data failures; live USER/SERVICE permissions |
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after issuance, RELATED exclusion, integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, nested response parity, permission intersection and no-store |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: staff Estimate, line edits, Quote, deposit, Invoice and final payment; several lineages per inquiry; caller totals never authoritative; carry, override, remove, add and reorder keeping identities; change orders in every stage; stable rejection codes; stale versions; illegal transitions; payment policy and validation; duplicate references; non-Fiona documents `404`; staff-only routes with live permissions; declared methods |
 | `FinancialLedgerExpansionSpec`, `FinancialDocumentAtomicitySpec` | Direct first-snapshot stages from staff lines; invalid line sets append nothing; standalone receipts, partial and split allocations, runtime limits and Fiona stage/version policy; every cross-boundary write (creation, change orders, combined payments, allocations) rolls back the ledger with Fiona's rows |

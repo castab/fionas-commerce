@@ -28,8 +28,17 @@ data class DashboardAttentionPolicy(
         require(!quoteStaleAfter.isNegative && !quoteStaleAfter.isZero)
     }
 
-    fun needsReply(communication: InquiryCommunicationAttention): StaffAttention? =
-        communication.unacknowledgedSince?.let { StaffAttention(mapOf(StaffAttentionReason.CUSTOMER_COMMUNICATION_UNACKNOWLEDGED to it)) }
+    /**
+     * Outstanding customer email of an active inquiry. A DECLINED inquiry's communication history
+     * stays recorded, never acknowledged or erased on its behalf, but is no longer staff work.
+     */
+    fun needsReply(
+        state: InquiryOperationalState,
+        communication: InquiryCommunicationAttention,
+    ): StaffAttention? =
+        communication.unacknowledgedSince
+            ?.takeIf { state.active }
+            ?.let { StaffAttention(mapOf(StaffAttentionReason.CUSTOMER_COMMUNICATION_UNACKNOWLEDGED to it)) }
 
     fun needsQuote(
         state: InquiryOperationalState,

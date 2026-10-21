@@ -5,7 +5,9 @@ import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.inquiry.InquiryDeclineRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
 import java.time.Clock
 import java.time.temporal.ChronoUnit
 import java.util.UUID
@@ -20,6 +22,7 @@ import java.util.UUID
  * In one runtime transaction: the lineage must belong to an inquiry and its latest version must
  * be the one the caller reviewed ([CommerceFailure.Conflict] otherwise); canonical Quotes require
  * the atomic proposal workflow; a CLOSED canonical lineage needs a separate post-close workflow;
+ * no lineage of a declined inquiry changes;
  * the resulting total must not be negative; lines identical to the current ones are no change.
  */
 class CreateChangeOrder(
@@ -29,6 +32,7 @@ class CreateChangeOrder(
     authorship: FinancialDocumentAuthorshipRepository,
     private val fulfillment: InquiryFulfillmentRepository,
     private val clock: Clock,
+    declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
 ) {
     data class Command(
         val documentId: UUID,
@@ -39,12 +43,14 @@ class CreateChangeOrder(
     )
 
     private val documents = FionaFinancialDocuments(ledger, associations, authorship)
+    private val declined = DeclinedInquiryPolicy(associations, declines)
 
     operator fun invoke(command: Command): InquiryFinancialDocument {
         val now = clock.instant().truncatedTo(ChronoUnit.MICROS)
         return transactor.inTransaction { transaction ->
             val current = documents.expectLatest(transaction, command.documentId, command.expectedVersion)
             documents.rejectCanonicalQuoteMutation(transaction, current)
+            declined.rejectProgression(transaction, current.inquiryId, current.document.id)
             if (documents.isCanonical(transaction, current) && fulfillment.find(transaction, current.inquiryId)?.closed != null) {
                 throw CommerceFailure.IllegalTransition("A closed inquiry requires a separate post-close adjustment workflow")
             }

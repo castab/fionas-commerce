@@ -49,6 +49,7 @@ class DatabaseSchemaSpec :
                     "customers",
                     "inquiries",
                     "inquiry_fulfillment",
+                    "inquiry_declines",
                     "inquiry_communications",
                     "inquiry_proposals",
                     "inquiry_service_plans",
@@ -107,6 +108,31 @@ class DatabaseSchemaSpec :
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_proposals'::regclass AND contype = 'u'",
             ) shouldContainExactlyInAnyOrder
                 listOf("UNIQUE (recorded_order)", "UNIQUE (document_id, document_version, deposit_requirement_revision)")
+        }
+
+        test("a decline is one immutable row per inquiry naming its exact canonical Estimate and staff user, holding no status") {
+            application.database.foreignKeys("inquiry_declines") shouldContainExactlyInAnyOrder
+                listOf(
+                    "inquiry_id → fionas.inquiries(id)",
+                    "inquiry_id, document_id → fionas.inquiry_financial_documents(inquiry_id, document_id)",
+                    "document_id, document_version → commerce.financial_document_snapshots(document_id, version)",
+                    "declined_by → commerce.users(principal_id)",
+                )
+            application.database.strings(
+                "SELECT column_name || ' ' || is_nullable || ' ' || data_type FROM information_schema.columns " +
+                    "WHERE table_schema = 'fionas' AND table_name = 'inquiry_declines' ORDER BY ordinal_position",
+            ) shouldContainExactly
+                listOf(
+                    "inquiry_id NO uuid",
+                    "document_id NO uuid",
+                    "document_version NO integer",
+                    "declined_at NO timestamp with time zone",
+                    "declined_by NO uuid",
+                    "reason NO text",
+                )
+            application.database.strings(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_declines'::regclass AND contype = 'p'",
+            ) shouldContainExactly listOf("PRIMARY KEY (inquiry_id)")
         }
 
         test("an approved service plan is one immutable row per exact canonical Quote, holding no money") {
@@ -376,14 +402,16 @@ class DatabaseSchemaSpec :
                     """
                     SELECT table_name || '.' || column_name FROM information_schema.columns
                     WHERE table_schema = 'fionas'
-                      AND column_name ~ '(line|amount|price|total|tax|balance|stage|status|payment|refund|allocation|reconciliation|currency)'
+                      AND regexp_replace(table_name || '.' || column_name, 'decline', '', 'g')
+                        ~ '(line|amount|price|total|tax|balance|stage|status|payment|refund|allocation|reconciliation|currency)'
                     """.trimIndent(),
                 ).shouldBeEmpty()
             application.database
                 .strings(
                     """
                     SELECT table_name FROM information_schema.tables
-                    WHERE table_schema = 'fionas' AND table_name ~ '(line|payment|refund|allocation|reconciliation|balance|status|snapshot)'
+                    WHERE table_schema = 'fionas'
+                      AND regexp_replace(table_name, 'decline', '', 'g') ~ '(line|payment|refund|allocation|reconciliation|balance|status|snapshot)'
                     """.trimIndent(),
                 ).shouldBeEmpty()
         }

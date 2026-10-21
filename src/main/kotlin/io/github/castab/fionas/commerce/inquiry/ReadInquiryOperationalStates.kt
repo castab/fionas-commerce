@@ -15,6 +15,7 @@ class ReadInquiryOperationalStates(
     private val associations: InquiryFinancialDocumentRepository,
     ledger: FinancialLedger,
     private val fulfillment: InquiryFulfillmentRepository,
+    private val declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
     private val readLineages: (Transaction, Collection<UUID>) -> List<FinancialLineageView> = ledger::financialLineages,
 ) {
     operator fun invoke(): InquiryOperationalSnapshot =
@@ -35,8 +36,12 @@ class ReadInquiryOperationalStates(
         }
         val facts = fulfillment.findAll(transaction, ids)
         check(ids.containsAll(facts.keys)) { "Fulfillment returned an inquiry outside the operational population" }
+        val declined = declines.findAll(transaction, ids)
+        check(ids.containsAll(declined.keys)) { "Declines returned an inquiry outside the operational population" }
         return InquiryOperationalSnapshot(
-            canonical.map { (inquiry, document) -> InquiryOperationalState(inquiry, financial.getValue(document), facts[inquiry]) },
+            canonical.map { (inquiry, document) ->
+                InquiryOperationalState(inquiry, financial.getValue(document), facts[inquiry], declined[inquiry])
+            },
         )
     }
 }

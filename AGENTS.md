@@ -113,6 +113,8 @@ Fiona owns, and persists in its own tables:
 - the immutable, money-free service plan a staff user approved with a canonical Quote (see
   [Quote builder: staff-committed lines](#quote-builder-staff-committed-lines));
 - inquiry served/closed operational facts with authenticated principal provenance;
+- the terminal staff decision to decline a REQUESTED inquiry, with its staff USER provenance
+  and internal reason (see [Inquiry decline](#inquiry-decline));
 - inquiry communication activity (inbound email, staff-sent email, acknowledgement) and dashboard attention policy;
 - contacts (future);
 - event and service details, and service locations (future);
@@ -371,6 +373,16 @@ A snapshot is independently interpretable but current-state decisions may still 
 Customer contact, message, ZIP, service and prices require trusted consumers and separate
 NATS/PostgreSQL retention policies. Keep diagnostics payload-free; no purger here.
 
+`DeclineInquiry` appends exactly one `InquiryDeclined v1` (type `fionas.inquiry.declined`,
+destination `fionas.events.inquiry.declined.v1`) in the decline's own transaction, after the
+decline insert, on the same `inquiry` aggregate; the runtime assigns the next sequence (normally
+2 after InquiryPersisted's 1; never hardcoded). Its DTOs in `events/InquiryDeclined.kt` are
+separate from the v3 DTOs. The payload envelope is v3's without `correlationId`; data carries the
+inquiry (with `createdAt` and terminal `stage` DECLINED), the decline (`declinedAt`, `declinedBy`
+USER kind and id, internal `reason`), canonical customer, requested service and the exact
+declined canonical Estimate with persisted line ids and exact decimal strings. The same
+dispatcher and transport publish it unchanged; publisher grants must include its subject.
+
 No other lifecycle events are emitted. [Operations and cutover](docs/inquiry-outbox.md)
 cover least privilege, settings, diagnostics, PII/retention and event-worker PR #3.
 No public administration endpoint or row purger is added.
@@ -519,7 +531,7 @@ Routes translate transport. Operations orchestrate. Repositories persist.
   serialization annotations on application types, and never let DTOs leak into
   operations or repositories. The other `@Serializable` types are the private persistence
   DTOs of [Persisted JSON](#persisted-json) and the dedicated application event DTOs in
-  `events/InquiryPersisted.kt`. The incoming `events/InquirySubmitted.kt` and transport
+  `events/InquiryPersisted.kt` and `events/InquiryDeclined.kt`. The incoming `events/InquirySubmitted.kt` and transport
   diagnostic `events/IntakeDelivery.kt` separately own their kotlinx Json wire boundaries.
   Event DTOs remain separate from application/domain models
   and HTTP DTOs; event construction uses kotlinx `Json`, never HTTP `CommerceJson`.
@@ -647,7 +659,7 @@ Also:
 - **Permissions describe capabilities, never callers**: no `fionas.ui`, `fionas.frontend`, or
   `fionas.trusted`, no route allow-lists for services, no union of a session's and a token's
   grants, no role-name checks. Most routes accept whichever principal holds the permission.
-- **Exactly two classes of routes also require a principal kind, explicitly and after the
+- **Exactly three classes of routes also require a principal kind, explicitly and after the
   permission:**
   - **Priced inquiry submission is SERVICE-only.** `POST /inquiries` applies
     `access.requirePermission(FionaPermissions.InquiriesCreate).then(requireService)`. The
@@ -665,7 +677,11 @@ Also:
     `servicePrincipal(request)`, never from the body. There is no on-behalf-of header,
     actor delegation or impersonation; a BFF proxying staff requests forwards the staff
     member's own session cookie with a trusted `Origin`.
-  `ArchitectureSpec` pins both guards. `GET /auth/me` additionally requires a USER (`as? UserId`).
+  - **Staff decisions are USER-only.** `POST /inquiries/{inquiryId}/decline` applies
+    `access.requirePermission(FionaPermissions.InquiriesManage).then(requireStaffDecision)`:
+    a SERVICE holding `fionas.inquiries.manage` (which may mark served/closed) is still `403`,
+    and the decider is `staffUser(request)`.
+  `ArchitectureSpec` pins all three guards. `GET /auth/me` additionally requires a USER (`as? UserId`).
 - **OpenAPI states the transports, separately from enforcement.** `http/OpenApi.kt` declares the
   `staffSession` scheme (API key in the `__Host-fionas_session` cookie) beside the runtime's
   `serviceAccessToken` bearer scheme, combined by Fiona's documentation-only `DocumentedSecurity`
@@ -788,7 +804,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V2__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V3__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -806,7 +822,9 @@ after runtime-owned migrations.
   `inquiry_proposals.issued_by` and `inquiry_service_plans.approved_by` reference
   `commerce.users(principal_id)` (so only a real USER can approve); the lineage association,
   line authorship, the proposal's Quote, and the service plan's Quote and reviewed snapshot
-  reference `commerce.financial_document_snapshots(document_id, version)`.
+  reference `commerce.financial_document_snapshots(document_id, version)`. `V2__inquiry_declines`
+  adds two: `inquiry_declines.declined_by` → `commerce.users(principal_id)` and its declined
+  Estimate → `commerce.financial_document_snapshots(document_id, version)`, ten in all.
   `ArchitectureSpec` and `DatabaseSchemaSpec` confine runtime schema references to these.
 - **`V1__fionas_baseline` contents**: `customers` (unique email); `inquiries` (customer FK,
   message, `zip_code`, `event_date`, checked `event_type`, `NOT NULL` JSON-object
@@ -821,6 +839,12 @@ after runtime-owned migrations.
   `issued_by`); and immutable `inquiry_service_plans` (money-free `plan` jsonb, USER
   `approved_by`). No table holds an amount, total, stage, balance, catalog, offering or
   pricing input.
+- **`V2__inquiry_declines`** (additive, existing rows untouched): `inquiry_declines`, one row per
+  inquiry (primary key), its declined canonical Estimate `(document_id, document_version)` with
+  composite FKs to Fiona's association and the runtime snapshot, `declined_at` timestamptz(6),
+  USER `declined_by`, and a `reason` checked trimmed and 1–500 characters. No status column.
+  `DatabaseSchemaSpec`'s ledger-fact name check exempts only the word `decline`, which contains
+  `line` but names a disposition.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
@@ -1126,8 +1150,9 @@ fionas-commerce     inquiry → document relationship, line authorship, the trus
     invalid values retain domain errors.
 12. **One transaction per operation** (see [Transaction rule](#transaction-rule)).
 13. **Lifecycle is projected, never duplicated.** The unique `INITIAL_ESTIMATE` lineage
-    drives REQUESTED (Estimate), QUOTED (Quote), BOOKED (Invoice without served), SERVED
-    (Invoice with served, without closed), CLOSED (Invoice with served and closed).
+    drives REQUESTED (Estimate), DECLINED (Estimate with its exact decline), QUOTED (Quote),
+    BOOKED (Invoice without served), SERVED (Invoice with served, without closed), CLOSED
+    (Invoice with served and closed).
     RELATED lineages never drive it. No separate Booking aggregate or stored status exists.
     `RecordDocumentPayment` validates canonical deposit acceptance before any money write and
     uses transaction-taking `FionaFinancialDocuments.bookIfDepositSatisfied` after mutation.
@@ -1155,6 +1180,67 @@ fionas-commerce     inquiry → document relationship, line authorship, the trus
     previous committed allocation; REPEATABLE READ would pin an earlier snapshot before
     waiting. Under that lock documents, allocations and deposit terms are stable against
     Fiona writers. No runtime-table SQL, nested transactions, JVM locks or automatic retry loops.
+
+## Inquiry decline
+
+Staff decline a REQUESTED inquiry Fiona's will not pursue. The principles (decline versus Quote
+withdrawal versus booking cancellation, terminality, serialization, frontend compatibility) are
+in [ARCHITECTURE.md](ARCHITECTURE.md#declining-an-inquiry); the mechanics are these.
+
+- **Model.** `inquiry/InquiryDecline.kt`: `DeclineReason` (`of` trims; nonblank, at most
+  `MAX_LENGTH` 500, internal punctuation kept), `InquiryDecline(inquiryId, estimate, declinedAt,
+  declinedBy: UserId, reason)` and `InquiryDeclineRepository` (`find`, set-based `findAll`,
+  `insert`; a second insert is `Conflict`). `JdbiInquiryDeclineRepository` alone touches
+  `fionas.inquiry_declines`. There is no update, delete, reopen or reason taxonomy.
+- **Projection.** `InquiryLifecycle.project(document, fulfillment, decline)` yields DECLINED only
+  for the Estimate whose reference equals `decline.estimate`; a decline beside a Quote, an
+  Invoice, fulfillment or another snapshot is an `IllegalStateException`. Every lifecycle read
+  passes the decline: `ReadInquiryLifecycle` (hence `GetInquiry`, `ReadStaffRequest`),
+  `ManageInquiryFulfillment`, and `ReadInquiryOperationalStates` through one `findAll` for the
+  whole population (an eighth statement; the dashboard's eleventh). `ListInquiries` carries no
+  lifecycle and keeps listing declined inquiries.
+- **Operation.** `DeclineInquiry` owns one READ COMMITTED transaction: inquiry (`404`),
+  canonical lineage, `lockInquiryOf` on its association row, latest snapshot, the command's
+  `expectedDocumentVersion` (stale is `409 conflict`, never rebased), fulfillment and decline,
+  then REQUESTED or `409 illegal_transition` (QUOTED, BOOKED, SERVED, CLOSED and DECLINED alike).
+  It inserts the decline with Clock time truncated to microseconds and the authenticated USER,
+  then appends InquiryDeclined v1. Any failure rolls back both; rejection appends nothing.
+- **Serialization.** Quote publication (`InquiryProposals`, through `expectLatest`) and decline
+  lock the same canonical association row before reading each other's facts in READ COMMITTED,
+  so a waiter observes the committed winner: decline first makes issuance `409
+  illegal_transition`; Quote first makes the waiting decline's reviewed version stale (`409
+  conflict`). Two declines: the second is `illegal_transition`. The primary key is only the
+  final guard. No JVM lock, retry or nested transaction.
+- **Progression guard.** `financial/DeclinedInquiryPolicy.rejectProgression(transaction,
+  inquiryId, locked)` runs after the caller's own lineage lock and before any ledger write,
+  locks the canonical association row unless `locked` is it, and rejects a declined inquiry
+  with `409 illegal_transition`. Callers: `InquiryProposals` (issuance and both revisions),
+  `CreateInquiryFinancialDocument` (new RELATED lineages and the estimate route),
+  `CreateChangeOrder`, `IssueQuote`, `IssueInvoice` and `SetDepositRequirement`, canonical or
+  RELATED. `PreviewInquiryQuote` checks the decline in its unlocked snapshot. Payments,
+  allocations, refunds, deposit withdrawal and every read stay allowed: settlement of what
+  already exists is history, not progression. RELATED operations lock their lineage then the
+  canonical row; nothing locks in the reverse order.
+- **Dashboard.** `InquiryOperationalState.active` is false for DECLINED; `needsQuote`, counts and
+  `needsResolution` already exclude it by stage, and `DashboardAttentionPolicy.needsReply(state,
+  communication)` returns nothing for an inactive state. Communication history is never
+  acknowledged or erased on a decline's behalf. No Declined queue or count exists.
+- **HTTP.** `POST /inquiries/{inquiryId}/decline` (`declineInquiry`, tag Inquiries,
+  `staffSessionSecurity`) takes `{expectedDocumentVersion, reason}`; unknown properties such as
+  a client-supplied actor or time are ignored. It requires `fionas.inquiries.manage`, a staff
+  USER (`requireStaffDecision`) and the unsafe-cookie Origin policy, and answers `200` no-store
+  with `InquiryLifecycleResponse`: stage DECLINED and `declined` (`occurredAt`, `principalKind`
+  USER, `principalId`, `reason`, declined `documentVersion`). Malformed id or body `400`,
+  invalid version or reason `422`, unknown inquiry `404`, stale or illegal `409`. A lost
+  response is resolved by reloading the inquiry, never by retrying with another reason. The
+  same `declined` object appears on `GET /inquiries/{inquiryId}` and `GET /staff/requests/{id}`,
+  whose financial view still shows the canonical Estimate and its actual reconciliation.
+- **Contract rollout.** `InquiryStageResponse` gains DECLINED everywhere it appears (including
+  the dashboard item enum, which never carries it). `fionas-web` interprets the stage strictly:
+  deploy a frontend that understands DECLINED before recording any production decline; this
+  backend can deploy first because nothing declines until the route is called. Grant
+  `fionas.events.inquiry.declined.v1` to the outbox publisher before the first decline, or its
+  event waits (retrying) behind the denied subject.
 
 ## Atomic canonical proposal publication
 
@@ -1314,8 +1400,8 @@ writes, and publish it through the existing proposal operations.
   READ; contradictions or corrupt JSON fail internally. A deposit-only revision keeps the Quote,
   so its plan remains; Quotes published without lines have none (never invented). Booking keeps
   the accepted Quote's plan.
-- Decline, notes beyond line notes, expiry, messages, delivery, payment links and post-close
-  correction remain separate slices.
+- Quote withdrawal, notes beyond line notes, expiry, messages, delivery, payment links and
+  post-close correction remain separate slices.
 
 ## Deposit requirements and bulk financial lineages
 
@@ -1425,7 +1511,7 @@ historical communication rows never reach the dashboard. Returned communication 
 O(inquiries), even as append-only history grows. Requested service restoration remains strict;
 corrupt data fails the whole read rather than defaulting the minimum flag. Complete
 population integrity is mandatory, including records outside queues. Nonempty populations
-use exactly ten SQL statements for one or many inquiries. Concurrent commits cannot mix
+use exactly eleven SQL statements for one or many inquiries. Concurrent commits cannot mix
 financial, fulfillment, enrichment and communication snapshots. One injected Clock `asOf`
 truncated to microseconds evaluates policy, not a database commit watermark. Read permissions
 remain BOTH `fionas.inquiries.read` and `commerce.financial-document.read`; GET statuses stay
@@ -1537,8 +1623,8 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root), `PersistedJson.kt` (strict persisted-JSON configuration shared by the owning repositories) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
-| `...events` | Separate outgoing/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream intake worker/handler and the exact-sequence recovery CLI |
-| `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
+| `...events` | Separate outgoing (`InquiryPersisted` v3, `InquiryDeclined` v1)/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream intake worker/handler and the exact-sequence recovery CLI |
+| `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; `InquiryDecline`, its repository and `DeclineInquiry`; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, the line DTOs and principal-kind guards (`FinancialLines.kt`), and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `FinancialDocumentRoutes.kt`, `InquiryProposalRoutes.kt`, `QuoteBuilderRoutes.kt`, `StaffRequestRoutes.kt`, `AuthRoutes.kt`, …) |
@@ -1557,9 +1643,9 @@ real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
-webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3,
+webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1,
 persisted financial projections, CQRS, separate Booking aggregates,
-cancellation, decline, archive, reopen, unserve, zero-deposit booking, email provider integration and broader communication workflows,
+Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, email provider integration and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),
 on-behalf-of headers or delegated staff identity,
 a generic line-source identity, stored balances or payment statuses, tax,
@@ -1699,7 +1785,8 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   removed routes `404` and permissions absent), `DepositRequirementRoutesSpec` (reads for USER or
   SERVICE; standalone deposit mutations only for a staff USER holding both
   `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage`, refusals writing nothing), `MigrationLifecycleSpec`, `DatabaseSchemaSpec`
-  (single baselines, eight published runtime FKs, no catalog or ledger-fact columns),
+  (one baseline per stream plus Fiona's additive V2, ten published runtime FKs, no catalog or
+  ledger-fact columns),
   `OpenApiDocumentSpec` (paths, operationIds, statuses, decimal-string schemas, no catalog or
   pricing schemas, per-route security including SERVICE-only `createInquiry` and staff-only
   terms routes, the runtime metadata gap pinned), `OpenApiRoutesSpec`, `GenerateOpenApiSpec`,
@@ -1712,6 +1799,13 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   non-user approver refused) and `QuoteBuilderRoutesSpec` (shapes, codes, no-store, staff-USER
   authority, Origin, fail-closed corrupt plans), plus `InquiryProposalsSpec` and
   `InquiryProposalRoutesSpec`.
+- Keep `InquiryDeclineSpec` (real PostgreSQL: projection consistency checks, persisted
+  provenance and trimmed reason, untouched inquiry/customer/Estimate history, stale/repeated/
+  illegal declines writing nothing, rollback of decline and event together, both winning orders
+  against initial Quote issuance, concurrent declines and RELATED creation waiting on the
+  canonical row, every progression path rejected while reads and settlement remain, dashboard
+  exclusion with outstanding email) and `InquiryDeclineRoutesSpec` (staff-USER authority,
+  Origin, codes, ignored client provenance, consistent staff detail).
 - Keep `InquiryCommunicationRepositorySpec` SQL/pure projection parity, real same-inquiry lock
   contention in both append directions, unrelated-writer independence and large-history
   database reduction. Keep `DashboardEventCalendarSpec` application composition with a UTC
