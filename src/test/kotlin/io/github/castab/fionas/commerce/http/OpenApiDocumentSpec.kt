@@ -1484,7 +1484,11 @@ class OpenApiDocumentSpec :
             listOf("subtotal", "taxAmount", "total").forEach { properties.getValue(it).text("type") shouldBe "string" }
             properties.getValue("reconciliation").text("\$ref") shouldBe "#/components/schemas/DocumentReconciliation"
             properties.getValue("linesAuthoredBy").text("\$ref") shouldBe "#/components/schemas/LineAuthorshipResponse"
-            schema("LineAuthorshipResponse").strings("required") shouldContainExactly listOf("principalKind", "principalId", "recordedAt")
+            schema("LineAuthorshipResponse").strings("required") shouldContainExactly
+                listOf("recordedAt", "originKind")
+            schema("LineAuthorshipResponse").text("properties", "principalId", "format") shouldBe "uuid"
+            schema("LineAuthorshipResponse").text("properties", "originKind", "type") shouldBe "string"
+            schema("LineAuthorshipResponse").text("properties", "component", "type") shouldBe "string"
             schema("DocumentReconciliation").strings("required") shouldContainExactly
                 listOf("grossAllocated", "netApplied", "balance", "currency")
             schema("FinancialDocumentLine").text("properties", "id", "format") shouldBe "uuid"

@@ -11,6 +11,7 @@ import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -412,10 +413,15 @@ class QuoteBuilderSpec :
                     .shouldBeInstanceOf<FinancialDocument.Quote>()
             quote shouldBe reviewed.quote
             quote.lineItems.map { it.description } shouldContainExactly listOf("Churro catering service", "Courtesy discount")
-            issued.financial.latest.authorship shouldBe LineAuthorship(app.adminId, STORED_INSTANT)
+            issued.financial.latest.authorship shouldBe LineAuthorship(OperationOrigin.Principal(app.adminId), STORED_INSTANT)
             app.transactor.inTransaction {
                 JdbiFinancialDocumentAuthorshipRepository().findAll(it, document).mapValues { (_, authored) -> authored.author }
-            } shouldBe mapOf(Version.of(1) to app.web.id, Version.of(2) to app.adminId, Version.of(3) to app.adminId)
+            } shouldBe
+                mapOf(
+                    Version.of(1) to OperationOrigin.Principal(app.web.id),
+                    Version.of(2) to OperationOrigin.Principal(app.adminId),
+                    Version.of(3) to OperationOrigin.Principal(app.adminId),
+                )
             val active =
                 issued.deposit.depositRequirement!!
                     .requirement
@@ -546,7 +552,7 @@ class QuoteBuilderSpec :
             issued.financial.latest.document.lineItems shouldBe estimate(id).lineItems
             issued.servicePlan!!.reviewedVersion shouldBe Version.INITIAL
             issued.financial.latest.authorship
-                ?.author shouldBe app.web.id
+                ?.author shouldBe OperationOrigin.Principal(app.web.id)
         }
 
         test("approval re-composes from authoritative state: a tampered or stale review writes nothing") {

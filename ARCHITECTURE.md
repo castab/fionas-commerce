@@ -237,8 +237,8 @@ customer.
 Fiona therefore accepts money only as complete, already-priced financial lines, and only from
 an authorized pricing authority:
 
-- the web server, authenticated as a SERVICE principal, for the initial Estimate of a customer
-  submission;
+- the web server for the initial Estimate of a customer submission, through authenticated
+  SERVICE HTTP or the secured, validated incoming event boundary;
 - a verified staff USER, holding an explicit financial-terms capability, for every negotiated
   document after it, and for any deposit terms approved or withdrawn on such a document.
 
@@ -259,7 +259,7 @@ The backend still owns the authoritative financial facts:
 
 Never reintroduce a catalog, a pricing engine, or price validation in Fiona to "double-check"
 an authority. A frontend that displays a price is not an authority unless its server is the
-authenticated pricing principal.
+authenticated pricing principal or the approved secured event producer.
 
 ---
 
@@ -726,8 +726,13 @@ Business meaning should survive a frontend framework change.
 # 19. Schema and Migration Ownership
 
 Fiona also owns its incoming inquiry transport boundary. A managed asynchronous consumer
-may invoke the same application operation as HTTP under an explicitly configured, live
-authorized SERVICE authority; message metadata does not authenticate that authority.
+invokes the same application operation as HTTP as an application-chosen trusted internal
+component. External callers authenticate and authorize at their boundaries; internal components
+execute directly without self-authentication or principal registration. Operation origins are
+provenance, never permission grants or evidence that input is trustworthy. Message metadata
+cannot choose an origin. Broker security, input validation and all business invariants still apply.
+Financial authorship identifies who committed exact lines, distinct from their pricing source;
+unchanged-line transitions preserve that history and replay never rewrites it.
 Transport and business operations remain separate. Acknowledging input follows committed
 business facts; success publication belongs to the existing transactional outbox and does
 not gate input acknowledgment. The process shares runtime infrastructure while HTTP,
@@ -904,6 +909,6 @@ Fiona relates inquiries, customers, bookings, and other application concepts to 
 
 **Only trusted authorities author money; the backend establishes authoritative business facts.**
 
-Prices arrive as complete lines from the authenticated web pricing service or a verified staff user; validation, derived totals, financial documents, permissions, and transactional orchestration are server responsibilities.
+Prices arrive as complete lines from the web through authenticated HTTP or secured event intake, or from a verified staff user; validation, derived totals, financial documents, permissions, and transactional orchestration are server responsibilities.
 
 **When a Fiona feature exposes a missing shared concept, fix the boundary instead of hiding it locally.**

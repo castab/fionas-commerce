@@ -1,6 +1,6 @@
 package io.github.castab.fionas.commerce.testing
 
-import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.CustomerRepository
@@ -63,7 +63,7 @@ fun TestApplication.inquiryCommand(
     lines: List<TestLine> = acceptanceLines(),
     requested: RequestedService = requestedService(),
     key: String = UUID.randomUUID().toString(),
-    submittedBy: ServiceId = web.id,
+    origin: OperationOrigin = OperationOrigin.Principal(web.id),
 ) = CreateInquiry.Command(
     CustomerName.of(name),
     Email.of(email),
@@ -74,5 +74,5 @@ fun TestApplication.inquiryCommand(
     EventDate.of("2026-12-05"),
     EventType.BIRTHDAY,
     InquirySubmissionKey(key),
-    submittedBy,
+    origin,
 )

@@ -32,30 +32,28 @@ without a success outbox record remain historical; recovery never backfills even
 | `FIONAS_INTAKE_NATS_CREDS_FILE` | Readable mounted JWT/NKey credentials file |
 | `FIONAS_INTAKE_NATS_USER`, `FIONAS_INTAKE_NATS_PASSWORD` | Nonblank username/password pair |
 | `FIONAS_INTAKE_NATS_TOKEN` | Nonblank preshared broker token |
-| `FIONAS_INTAKE_AUTHOR_SERVICE_ID` | Existing commerce SERVICE UUID recorded as financial author |
 
 When enabled, exactly one NATS authentication method is required. Prefer a dedicated user
 or mounted credentials and trusted TLS. Intake and outbox use separate connections and
 credentials; shutting down one does not close the other. `FIONAS_NATS_*` continues to configure
 only the outbox publisher. Disabled intake opens no connection and starts no thread.
 
-Preserve the old worker's `COMMERCE_SERVICE_ID` as the author during cutover. The runtime
-directory must contain that ACTIVE SERVICE with live `fionas.inquiries.create`. Intake checks
-it on each valid command through supported authorization APIs. Missing/disabled identity or
-revoked permission halts intake. No former HTTP service secret is needed. Do not change
-principal IDs or invent a service at startup. These checks have the same authorization/read
-race as the HTTP boundary; they are not a new cross-transaction revocation guarantee.
+The application captures the stable `OperationOrigin.Internal(InternalComponentId("fionas.inquiry-intake"))`
+for intake and exact-sequence recovery. No commerce SERVICE, role, credential or permission lookup
+is required. This origin records the component that committed the financial lines; the web
+remains their pricing source. Historical SERVICE authorship stays unchanged. External HTTP
+submission still authenticates a SERVICE and checks its live `fionas.inquiries.create` grant.
 
-Three different facts establish trust: broker authentication and publish ACLs constrain
-the transport; deployment configuration selects the application authority; that SERVICE is
-recorded as the exact Estimate's author. Payload `source: fionas-web` is contract validation,
-**not authentication**. Payload `submittedBy` is ignored. A shared broker token cannot
+Internal attribution does not make an incoming event trustworthy. Broker authentication and
+publish ACLs constrain transport; strict input validation and business invariants still apply.
+Payload `source: fionas-web` is contract validation, **not authentication**. Payload origin,
+component and `submittedBy` fields cannot select attribution. A shared broker token cannot
 identify individual publishers or enforce per-user least privilege; every holder can submit
 financial terms. Use it only in an appropriately trusted development environment.
 
 ### Bounded database shutdown
 
-Released runtime 0.0.25 exposes blocking operations, not arbitrary-operation cancellation.
+Released runtime 0.0.26 exposes blocking operations, not arbitrary-operation cancellation.
 Intake therefore requires finite bounds through its existing runtime JDBC configuration:
 
 ```text
@@ -203,7 +201,8 @@ Use runtime `context.outbox.backlog("fionas-commerce")` independently to verify 
 publication and drainage; see [outbox operations](inquiry-outbox.md).
 
 For targeted recovery, stop normal intake processes and use **separate operator NATS
-credentials**, the same author UUID, and normal runtime database/permission-catalog settings:
+credentials** and normal runtime database/permission-catalog settings. Recovery uses the same
+stable internal origin without any commerce SERVICE configuration:
 
 ```sh
 # Load secrets privately from your deployment secret store; do not put them on the command line.
@@ -241,8 +240,8 @@ Expired source retention requires established archival/business recovery.
 2. Test the bounded JDBC URL/pool settings with migrations and normal HTTP workloads. Set
    termination grace to at least 100s. Prepare separate intake credentials and failure-v2
    publish permission; `FIONAS_EVENTS` already captures `fionas.events.>`.
-3. Preserve the old worker SERVICE UUID; verify ACTIVE status and live create permission.
-   No HTTP service credential is required by integrated intake.
+3. Apply Fiona V3 before enabling this version. No intake SERVICE registration, role grant
+   or HTTP credential is required. Remove the obsolete intake-author environment setting.
 4. As operator, verify every required durable field above and the input stream. Save durable
    creation time, delivered/ACK floor, pending/redelivery state. Do not run a mutating setup.
 
@@ -252,8 +251,8 @@ Expired source retention requires established archival/business recovery.
    or remains replayable. Do not deliberately run both implementations against the durable.
 2. Enable integrated intake and restart commerce normally. Messages arriving in the gap stay
    queued. Confirm connection/running observations, the original durable creation time and
-   continuing ACK floor; no stream/durable reset or data migration is needed.
-3. Submit one synthetic public-form inquiry. Verify one inquiry/Estimate and expected SERVICE
+   continuing ACK floor; no stream/durable reset is needed.
+3. Submit one synthetic public-form inquiry. Verify one inquiry/Estimate and expected INTERNAL / `fionas.inquiry-intake`
    authorship, one committed outbox record, then confirmed input ACK.
 4. Verify one matching `InquiryPersisted v3` through the outbox identity; input pending counts
    and outbox backlog drain independently. Verify failure-v2 permissions with a controlled
@@ -262,7 +261,8 @@ Expired source retention requires established archival/business recovery.
 ### C. Retire the old deployment
 
 1. Keep the old worker stopped while observing new submissions and reconnect behavior.
-2. Remove its deployment and HTTP credential secrets when operationally appropriate. Revoke
+2. Remove its deployment and HTTP credential secrets when operationally appropriate. Retire
+   old SERVICE roles or identities only after verifying no external consumers still use them. Revoke
    obsolete NATS grants, preserving any separate operators/downstream consumers. Keep v1
    historical events intact. Retain old tooling for explicit provisioning/inspection, or use
    NATS operator CLI and this repository's recovery command.
@@ -289,3 +289,19 @@ rollback, broker outages and shutdown during a transaction. Existing outbox test
 broker publication/confirmation/restart independently. Dockerfile packaging and OpenAPI
 generation remain on their existing release path. No shared dependency, migration, public
 endpoint, downstream consumer or new business event is introduced by this consolidation.
+
+### Authorship API and application rollback
+
+Fiona V3 additively extends `financial_document_authorship`: existing USER/SERVICE UUID rows
+remain intact; INTERNAL uses a constrained component name and a null UUID. No database reset
+or runtime-schema change is needed. Deploy the migration before any INTERNAL writes. Older
+application binaries cannot read INTERNAL rows; roll back durable ownership while retaining
+an origin-aware commerce binary. Do not relabel or delete history to run an older binary.
+
+`linesAuthoredBy` remains optional for snapshots without provenance. Its value now contains
+`originKind`, `principalKind`, `principalId`, `component`, and `recordedAt`. PRINCIPAL keeps
+USER/SERVICE and UUID, with absent component; INTERNAL has absent principal fields and the stable
+component name. `fionas-web` must branch on `originKind`, render the component for INTERNAL,
+and stop assuming every author has a UUID. Regenerate clients from the generated OpenAPI.
+No event schema changes: InquiryPersisted v3 and InquiryProcessingFailed v2 are unchanged.
+Replay across HTTP/intake preserves the first committed origin and never rewrites history.

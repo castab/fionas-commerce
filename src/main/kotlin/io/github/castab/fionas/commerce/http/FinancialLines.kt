@@ -4,6 +4,7 @@ import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.authenticatedPrincipal
 import io.github.castab.commerce.runtime.http.errorResponse
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.financial.EXACT_DECIMAL_PATTERN
@@ -195,14 +196,28 @@ data class ServicePlanResponse(
     @ApiProperty(description = "The verified staff user who approved the plan.", format = "uuid") val approvedBy: String,
 )
 
-/** Who committed a snapshot's lines: the authenticated principal whose authority the amounts rest on. */
+/** Who committed a snapshot's lines; attribution is distinct from the source of its prices. */
 @Serializable
 data class LineAuthorshipResponse(
-    @ApiProperty(description = "`SERVICE` for the public pricing authority (an inquiry's Estimate v1), `USER` for a staff user.")
-    val principalKind: String,
-    @ApiProperty(format = "uuid") val principalId: String,
+    @ApiProperty(description = "`SERVICE` or `USER` for PRINCIPAL origins; absent for INTERNAL.")
+    val principalKind: String?,
+    @ApiProperty(format = "uuid") val principalId: String?,
     @ApiProperty(description = "When Fiona recorded the lines.", format = "date-time") val recordedAt: String,
-)
+    @ApiProperty(description = "PRINCIPAL or INTERNAL; mutually exclusive principal identity and component.")
+    val originKind: String,
+    @ApiProperty(description = "Stable internal component name for INTERNAL; absent for PRINCIPAL.")
+    val component: String?,
+) {
+    init {
+        require(
+            when (originKind) {
+                "PRINCIPAL" -> principalKind in setOf("USER", "SERVICE") && principalId != null && component == null
+                "INTERNAL" -> principalKind == null && principalId == null && component != null
+                else -> false
+            },
+        ) { "Line authorship must identify exactly one principal or internal component" }
+    }
+}
 
 /** The precision rules a line can break, for the documented `422` causes of every line-taking route. */
 internal val LINE_PRECISION_REJECTED =
@@ -320,10 +335,14 @@ internal fun ServicePlanItem.toResponse() = ServicePlanItemDto(label, group, key
 
 internal fun ServicePlanLineNote.toResponse() = ServicePlanLineNoteResponse(lineItemId.toString(), note)
 
-internal fun LineAuthorship.toResponse() =
-    when (val principal = author) {
-        is UserId -> LineAuthorshipResponse("USER", principal.value.toString(), recordedAt.toString())
-        is ServiceId -> LineAuthorshipResponse("SERVICE", principal.value.toString(), recordedAt.toString())
+internal fun LineAuthorship.toResponse(): LineAuthorshipResponse =
+    when (val origin = author) {
+        is OperationOrigin.Principal ->
+            when (val principal = origin.principalId) {
+                is UserId -> LineAuthorshipResponse("USER", principal.value.toString(), recordedAt.toString(), "PRINCIPAL", null)
+                is ServiceId -> LineAuthorshipResponse("SERVICE", principal.value.toString(), recordedAt.toString(), "PRINCIPAL", null)
+            }
+        is OperationOrigin.Internal -> LineAuthorshipResponse(null, null, recordedAt.toString(), "INTERNAL", origin.component.value)
     }
 
 /**

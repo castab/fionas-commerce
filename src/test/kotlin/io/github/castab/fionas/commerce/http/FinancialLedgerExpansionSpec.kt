@@ -5,6 +5,7 @@ import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
@@ -130,7 +131,7 @@ class FinancialLedgerExpansionSpec :
                 document.reconciliation?.grossAllocated shouldBe "0.00"
                 application.transactor.inTransaction { transaction ->
                     val source = authorship.find(transaction, FinancialDocumentReference(UUID.fromString(document.id), Version.INITIAL))
-                    source?.author shouldBe application.adminId
+                    source?.author shouldBe OperationOrigin.Principal(application.adminId)
                     application.context.financialLedger
                         .history(transaction, UUID.fromString(document.id))
                         .size shouldBe 1

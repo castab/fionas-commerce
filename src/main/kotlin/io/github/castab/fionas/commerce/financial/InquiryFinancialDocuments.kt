@@ -12,6 +12,7 @@ import io.github.castab.commerce.runtime.financial.FinancialDocumentVersion
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.commerce.staff.UserId
@@ -196,7 +197,7 @@ internal class FionaFinancialDocuments(
         validateChangeOrder(current.document, changes)
         return ledger
             .changeOrder(transaction, current.document.id, changes, current.document.version)
-            .also { authorship.insert(transaction, it.reference, LineAuthorship(author, recordedAt)) }
+            .also { authorship.insert(transaction, it.reference, LineAuthorship(OperationOrigin.Principal(author), recordedAt)) }
     }
 
     /**

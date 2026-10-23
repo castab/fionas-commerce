@@ -2,8 +2,9 @@ package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Version
+import io.github.castab.commerce.runtime.operation.InternalComponentId
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
-import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import java.sql.ResultSet
@@ -12,16 +13,14 @@ import java.time.OffsetDateTime
 import java.util.UUID
 
 /**
- * Who committed the financial lines of one exact snapshot: the authenticated principal whose
- * authority the amounts rest on, and when Fiona recorded them. A public inquiry's Estimate v1
- * is authored by the web server's SERVICE principal (the public pricing authority); staff
- * creations and change orders by the verified staff USER. Stage transitions do not author lines:
- * they carry their predecessor's authorship forward, because the lines are the same.
+ * Who committed the financial lines of one exact snapshot: an authenticated principal or
+ * a trusted internal component, and when Fiona recorded them. The web supplies intake prices;
+ * the intake component commits them. Stage transitions preserve the source authorship.
  *
  * Provenance only: it never prices, validates or reconstructs a line.
  */
 data class LineAuthorship(
-    val author: PrincipalId,
+    val author: OperationOrigin,
     val recordedAt: Instant,
 )
 
@@ -64,21 +63,31 @@ class JdbiFinancialDocumentAuthorshipRepository : FinancialDocumentAuthorshipRep
         snapshot: FinancialDocumentReference,
         authorship: LineAuthorship,
     ) {
-        val (kind, id) =
-            when (val author = authorship.author) {
-                is UserId -> "USER" to author.value
-                is ServiceId -> "SERVICE" to author.value
+        val principal = (authorship.author as? OperationOrigin.Principal)?.principalId
+        val component = (authorship.author as? OperationOrigin.Internal)?.component?.value
+        val kind =
+            when (principal) {
+                is UserId -> "USER"
+                is ServiceId -> "SERVICE"
+                null -> "INTERNAL"
+            }
+        val id =
+            when (principal) {
+                is UserId -> principal.value
+                is ServiceId -> principal.value
+                null -> null
             }
         transaction.handle
             .createUpdate(
                 """
-                INSERT INTO fionas.financial_document_authorship (document_id, document_version, author_kind, author_id, recorded_at)
-                VALUES (:documentId, :version, :kind, :author, :recordedAt)
+                INSERT INTO fionas.financial_document_authorship (document_id, document_version, author_kind, author_id, author_component, recorded_at)
+                VALUES (:documentId, :version, :kind, CAST(:author AS uuid), :component, :recordedAt)
                 """.trimIndent(),
             ).bind("documentId", snapshot.id)
             .bind("version", snapshot.version.number)
             .bind("kind", kind)
-            .bind("author", id)
+            .bindByType("author", id, UUID::class.java)
+            .bind("component", component)
             .bind("recordedAt", authorship.recordedAt)
             .execute()
     }
@@ -90,7 +99,7 @@ class JdbiFinancialDocumentAuthorshipRepository : FinancialDocumentAuthorshipRep
         transaction.handle
             .createQuery(
                 """
-                SELECT author_kind, author_id, recorded_at FROM fionas.financial_document_authorship
+                SELECT author_kind, author_id, author_component, recorded_at FROM fionas.financial_document_authorship
                 WHERE document_id = :documentId AND document_version = :version
                 """.trimIndent(),
             ).bind("documentId", snapshot.id)
@@ -106,7 +115,7 @@ class JdbiFinancialDocumentAuthorshipRepository : FinancialDocumentAuthorshipRep
         transaction.handle
             .createQuery(
                 """
-                SELECT document_version, author_kind, author_id, recorded_at FROM fionas.financial_document_authorship
+                SELECT document_version, author_kind, author_id, author_component, recorded_at FROM fionas.financial_document_authorship
                 WHERE document_id = :documentId ORDER BY document_version
                 """.trimIndent(),
             ).bind("documentId", documentId)
@@ -128,13 +137,14 @@ class JdbiFinancialDocumentAuthorshipRepository : FinancialDocumentAuthorshipRep
 
     private fun authorship(
         kind: String,
-        id: UUID,
+        id: UUID?,
         row: ResultSet,
     ): LineAuthorship =
         LineAuthorship(
             when (kind) {
-                "USER" -> UserId(id)
-                "SERVICE" -> ServiceId(id)
+                "USER" -> OperationOrigin.Principal(UserId(checkNotNull(id)))
+                "SERVICE" -> OperationOrigin.Principal(ServiceId(checkNotNull(id)))
+                "INTERNAL" -> OperationOrigin.Internal(InternalComponentId(row.getString("author_component")))
                 else -> error("Invalid line author kind $kind")
             },
             row.getObject("recorded_at", OffsetDateTime::class.java).toInstant(),

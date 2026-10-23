@@ -4,12 +4,7 @@ import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.staff.PrincipalStatus
-import io.github.castab.commerce.staff.RoleDefinition
-import io.github.castab.commerce.staff.RoleKey
-import io.github.castab.commerce.staff.ServiceId
-import io.github.castab.commerce.staff.ServiceIdentity
 import io.github.castab.fionas.commerce.fionaApplication
-import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.TEST_SERVICE_TOKENS
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.TestDatabase
@@ -38,7 +33,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 internal fun intakeConfig(
     broker: TestNats,
-    author: String,
     user: String = "intake",
 ): NatsIntakeConfiguration =
     checkNotNull(
@@ -48,7 +42,6 @@ internal fun intakeConfig(
                 "FIONAS_INTAKE_NATS_URL" to broker.url,
                 "FIONAS_INTAKE_NATS_USER" to user,
                 "FIONAS_INTAKE_NATS_PASSWORD" to "test-$user",
-                "FIONAS_INTAKE_AUTHOR_SERVICE_ID" to author,
             ),
         ),
     )
@@ -113,11 +106,9 @@ class NatsIntakeIntegrationSpec :
                 val config =
                     intakeConfig(
                         broker,
-                        app.web.id.value
-                            .toString(),
                     )
                 val failed = CountDownLatch(1)
-                val real = inquiryIntakeHandler(app.context, config, testClock)
+                val real = inquiryIntakeHandler(app.context, testClock)
                 val handler: (ByteArray) -> Unit = { bytes ->
                     try {
                         real(bytes)
@@ -156,15 +147,13 @@ class NatsIntakeIntegrationSpec :
                 val config =
                     intakeConfig(
                         broker,
-                        app.web.id.value
-                            .toString(),
                     )
                 broker.admin().use { it.jetStream().publish(INQUIRY_INPUT_SUBJECT, submittedFixture().toByteArray()) }
                 broker.stop()
                 try {
                     ManagedJetStreamWorker(
                         NatsIntakeTransport(config),
-                        inquiryIntakeHandler(app.context, config, testClock),
+                        inquiryIntakeHandler(app.context, testClock),
                     ).use { worker ->
                         worker.start()
                         awaitIntake { worker.status.state == IntakeState.RETRYING }
@@ -191,8 +180,7 @@ class NatsIntakeIntegrationSpec :
 
         test("runtime composes enabled intake and outbox independently and shuts down during a real transaction") {
             TestDatabase.create().use { database ->
-                val author = ServiceId(UUID.randomUUID())
-                val config = intakeConfig(broker, author.value.toString())
+                val config = intakeConfig(broker)
                 val fiona = fionaApplication(bootstrap = null, outboxPublisher = broker.publisherConfiguration(), intake = config)
                 val runtime =
                     commerceRuntime(
@@ -209,15 +197,7 @@ class NatsIntakeIntegrationSpec :
                             migrations = fiona.migrations,
                             permissionDefinitions = fiona.permissionDefinitions,
                             backgroundServices = fiona.backgroundServices,
-                            routes = { active ->
-                                active.authorization.createService(ServiceIdentity(author, "intake", PrincipalStatus.ACTIVE, emptySet()))
-                                val role = RoleKey("intake.test")
-                                active.authorization.createRole(
-                                    RoleDefinition(role, "Intake", null, setOf(FionaPermissions.InquiriesCreate)),
-                                )
-                                active.authorization.assignRole(author, role)
-                                fiona.routes(active)
-                            },
+                            routes = fiona.routes,
                         ),
                     )
                 runtime.use {
@@ -248,27 +228,24 @@ class NatsIntakeIntegrationSpec :
             }
         }
 
-        test("revoked intake author halts without financial writes") {
+        test("disabled external SERVICE does not affect trusted internal intake") {
             TestApplication.create().use { app ->
                 app.authorization.setStatus(app.web.id, PrincipalStatus.DISABLED)
                 val config =
                     intakeConfig(
                         broker,
-                        app.web.id.value
-                            .toString(),
                     )
                 broker.admin().use { it.jetStream().publish(INQUIRY_INPUT_SUBJECT, submittedFixture().toByteArray()) }
                 ManagedJetStreamWorker(
                     NatsIntakeTransport(config),
-                    inquiryIntakeHandler(app.context, config, testClock),
+                    inquiryIntakeHandler(app.context, testClock),
                 ).use { worker ->
                     worker.start()
-                    awaitIntake { worker.status.state == IntakeState.HALTED }
-                    worker.status.code shouldBe "intake_author_not_authorized"
-                    app.database.count("fionas.inquiries") shouldBe 0
+                    awaitIntake { app.database.count("fionas.inquiries") == 1 }
+                    worker.status.state shouldBe IntakeState.RUNNING
                     app.context.outbox
                         .backlog(FIONA_EVENT_PRODUCER)
-                        .unpublished shouldBe 0
+                        .unpublished shouldBe 1
                 }
             }
         }
@@ -278,11 +255,9 @@ class NatsIntakeIntegrationSpec :
                 val config =
                     intakeConfig(
                         broker,
-                        app.web.id.value
-                            .toString(),
                     )
                 val input = submittedFixture()
-                val handler = inquiryIntakeHandler(app.context, config, testClock)
+                val handler = inquiryIntakeHandler(app.context, testClock)
                 val committed = CountDownLatch(1)
                 val releaseAck = CountDownLatch(1)
                 broker.admin().use { operator ->
@@ -303,11 +278,8 @@ class NatsIntakeIntegrationSpec :
                             .unpublished shouldBe 1
                         management.getConsumerInfo(INQUIRY_INPUT_STREAM, INQUIRY_CONSUMER).numAckPending shouldBe 1
                         management.getStreamInfo(FIONA_EVENTS_STREAM).streamState.msgCount shouldBe 0
-                        app.database.strings("SELECT author_id FROM fionas.financial_document_authorship") shouldBe
-                            listOf(
-                                app.web.id.value
-                                    .toString(),
-                            )
+                        app.database.strings("SELECT author_component FROM fionas.financial_document_authorship") shouldBe
+                            listOf("fionas.inquiry-intake")
                         releaseAck.countDown()
                         awaitIntake { management.getConsumerInfo(INQUIRY_INPUT_STREAM, INQUIRY_CONSUMER).numAckPending == 0L }
                         val after = management.getConsumerInfo(INQUIRY_INPUT_STREAM, INQUIRY_CONSUMER)
@@ -356,10 +328,8 @@ class NatsIntakeIntegrationSpec :
                 val config =
                     intakeConfig(
                         broker,
-                        app.web.id.value
-                            .toString(),
                     )
-                val handler = inquiryIntakeHandler(app.context, config, testClock)
+                val handler = inquiryIntakeHandler(app.context, testClock)
                 val input = submittedFixture()
                 val lost = AtomicBoolean(false)
                 val transport = NatsIntakeTransport(config)
@@ -424,6 +394,8 @@ class NatsIntakeIntegrationSpec :
                     after.ackFloor.streamSequence shouldBe before.ackFloor.streamSequence
                     after.delivered.streamSequence shouldBe before.delivered.streamSequence
                     app.database.count("fionas.inquiries") shouldBe 1
+                    app.database.strings("SELECT author_kind || ':' || author_component FROM fionas.financial_document_authorship") shouldBe
+                        listOf("INTERNAL:fionas.inquiry-intake")
                 }
             }
         }
@@ -433,15 +405,13 @@ class NatsIntakeIntegrationSpec :
                 val config =
                     intakeConfig(
                         broker,
-                        app.web.id.value
-                            .toString(),
                     )
                 broker.admin().use { operator ->
                     operator.jetStream().publish(INQUIRY_INPUT_SUBJECT, byteArrayOf(0xc3.toByte(), 0x28))
                     operator.jetStream().publish(INQUIRY_INPUT_SUBJECT, submittedFixture().toByteArray())
                     ManagedJetStreamWorker(
                         NatsIntakeTransport(config),
-                        inquiryIntakeHandler(app.context, config, testClock),
+                        inquiryIntakeHandler(app.context, testClock),
                     ).use { worker ->
                         worker.start()
                         awaitIntake { app.database.count("fionas.inquiries") == 1 }
@@ -461,15 +431,13 @@ class NatsIntakeIntegrationSpec :
                 val config =
                     intakeConfig(
                         broker,
-                        app.web.id.value
-                            .toString(),
                         "intake-no-diagnostic",
                     )
                 broker.admin().use { operator ->
                     operator.jetStream().publish(INQUIRY_INPUT_SUBJECT, "{".toByteArray())
                     ManagedJetStreamWorker(
                         NatsIntakeTransport(config),
-                        inquiryIntakeHandler(app.context, config, testClock),
+                        inquiryIntakeHandler(app.context, testClock),
                     ).use { worker ->
                         worker.start()
                         awaitIntake { worker.status.state == IntakeState.HALTED }
@@ -481,11 +449,6 @@ class NatsIntakeIntegrationSpec :
                         app.http(Request(Method.GET, "/health")).status shouldBe Status.OK
                         inquiryIntakeHandler(
                             app.context,
-                            intakeConfig(
-                                broker,
-                                app.web.id.value
-                                    .toString(),
-                            ),
                             testClock,
                         )(submittedFixture().toByteArray())
                         InquiryOutboxPublisher(app.context, broker.publisherConfiguration()).use { publisher ->
@@ -511,8 +474,6 @@ class NatsIntakeIntegrationSpec :
                         NatsIntakeTransport(
                             intakeConfig(
                                 broker,
-                                app.web.id.value
-                                    .toString(),
                             ),
                         ),
                         {},
@@ -526,8 +487,6 @@ class NatsIntakeIntegrationSpec :
                         NatsIntakeTransport(
                             intakeConfig(
                                 broker,
-                                app.web.id.value
-                                    .toString(),
                                 "denied",
                             ),
                         ),

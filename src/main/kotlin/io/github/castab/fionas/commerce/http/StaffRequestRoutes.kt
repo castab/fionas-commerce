@@ -60,7 +60,14 @@ internal fun readStaffRequestRoute(
     val financial =
         exampleEstimate.copy(
             id = exampleInquiry.lifecycle.documentId,
-            linesAuthoredBy = LineAuthorshipResponse("SERVICE", "d2a7c9e4-61f0-4b8e-9c3a-5f1e2d4b6a80", "2026-09-26T21:19:39.321012Z"),
+            linesAuthoredBy =
+                LineAuthorshipResponse(
+                    "SERVICE",
+                    "d2a7c9e4-61f0-4b8e-9c3a-5f1e2d4b6a80",
+                    "2026-09-26T21:19:39.321012Z",
+                    "PRINCIPAL",
+                    null,
+                ),
         )
     return "/staff/requests" / inquiryDetailIdPath meta {
         operationId = "readStaffRequest"

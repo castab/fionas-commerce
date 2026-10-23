@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.inquiry.InquiryDeclineRepository
@@ -49,7 +50,15 @@ class CreateInquiryFinancialDocument(
             inquiries.findById(transaction, command.inquiryId)
                 ?: throw CommerceFailure.NotFound("Inquiry ${command.inquiryId.value} was not found")
             declined.rejectProgression(transaction, command.inquiryId, null)
-            val created = materialize.create(transaction, command.inquiryId, command.stage, command.lines, command.author, now)
+            val created =
+                materialize.create(
+                    transaction,
+                    command.inquiryId,
+                    command.stage,
+                    command.lines,
+                    OperationOrigin.Principal(command.author),
+                    now,
+                )
             documents.describeLocked(transaction, command.inquiryId, created.id)
         }
     }
