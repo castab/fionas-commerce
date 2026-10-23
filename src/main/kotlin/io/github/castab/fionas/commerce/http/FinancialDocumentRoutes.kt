@@ -627,7 +627,7 @@ private fun exampleDocument(
         previousVersion = (version - 1).takeIf { it >= 1 },
         stage = stage,
         inquiryId = EXAMPLE_INQUIRY,
-        linesAuthoredBy = LineAuthorshipResponse("USER", "580a28a1-7417-480a-9089-8f5f3c25c1cd", "2026-09-28T17:05:00Z"),
+        linesAuthoredBy = LineAuthorshipResponse("USER", "580a28a1-7417-480a-9089-8f5f3c25c1cd", "2026-09-28T17:05:00Z", "PRINCIPAL", null),
         lines = lines,
         subtotal = total,
         taxAmount = "0.00",

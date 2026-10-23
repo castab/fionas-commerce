@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.inquiry
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
@@ -131,7 +132,7 @@ class InquiryOperationsSpec :
             estimate.first.lineItems.map { it.description to it.price.amount } shouldBe
                 listOf("Churro catering service" to BigDecimal("450.00"), "Courtesy discount" to BigDecimal("-50.00"))
             estimate.first.total.amount shouldBe BigDecimal("400.00")
-            estimate.second?.author shouldBe application.web.id
+            estimate.second?.author shouldBe OperationOrigin.Principal(application.web.id)
         }
 
         test("a returning customer's new request records its own requested service and leaves earlier ones unchanged") {

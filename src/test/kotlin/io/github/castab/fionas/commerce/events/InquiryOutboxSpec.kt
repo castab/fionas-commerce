@@ -131,7 +131,7 @@ class InquiryOutboxSpec :
             app.transactor.inTransaction {
                 JdbiInquiryRepository().findRequested(it, inquiry.id)?.requestedService shouldBe requested
                 JdbiInquiryRepository().findById(it, inquiry.id) shouldBe inquiry
-                JdbiFinancialDocumentAuthorshipRepository().find(it, estimate.reference)?.author shouldBe command.submittedBy
+                JdbiFinancialDocumentAuthorshipRepository().find(it, estimate.reference)?.author shouldBe command.origin
             }
             snapshot.id shouldBe estimate.id.toString()
             snapshot.version shouldBe estimate.version.number

@@ -1,9 +1,9 @@
 package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.outbox.Outbox
 import io.github.castab.commerce.runtime.persistence.Transactor
-import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
@@ -26,7 +26,7 @@ import java.util.UUID
  * already-priced lines its public pricing authority submitted as the inquiry's canonical
  * initial Estimate.
  *
- * The pricing authority is the web server's SERVICE principal ([Command.submittedBy]): it owns
+ * The trusted entry boundary supplies [Command.origin]. The web server owns
  * the public catalog, selection rules, availability and prices, evaluates the customer's
  * untrusted choices, and submits exact lines. Fiona never reprices, checks a catalog revision or
  * option eligibility, or infers a price from the guest count or the requested items; it records
@@ -69,8 +69,8 @@ class CreateInquiry(
         val eventDate: EventDate,
         val eventType: EventType,
         val submissionKey: InquirySubmissionKey,
-        /** The trusted SERVICE principal established by the entry point, never by an event/request payload. */
-        val submittedBy: ServiceId,
+        /** The trusted operation origin established by the entry point, never by an event/request payload. */
+        val origin: OperationOrigin,
     ) {
         init {
             requireDocumentLines(lines)
@@ -107,7 +107,7 @@ class CreateInquiry(
                     inquiry.id,
                     FirstSnapshotStage.ESTIMATE,
                     command.lines,
-                    command.submittedBy,
+                    command.origin,
                     now,
                     InquiryDocumentPurpose.INITIAL_ESTIMATE,
                 )

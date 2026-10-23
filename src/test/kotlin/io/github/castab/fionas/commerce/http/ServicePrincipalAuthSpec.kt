@@ -177,6 +177,49 @@ class ServicePrincipalAuthSpec :
             }
         }
 
+        test("forged origin fields headers and query parameters cannot select internal execution") {
+            TestApplication.create().use { app ->
+                val body =
+                    inquiryBody().trimEnd().dropLast(1) +
+                        """, "originKind":"INTERNAL", "component":"fionas.inquiry-intake", "submittedBy":"forged"}"""
+                val request =
+                    Request(Method.POST, "/inquiries")
+                        .withSubmissionKey()
+                        .query("originKind", "INTERNAL")
+                        .query("component", "fionas.inquiry-intake")
+                        .header("X-Operation-Origin", "INTERNAL")
+                        .header("X-Internal-Component", "fionas.inquiry-intake")
+                        .header("Content-Type", "application/json")
+                        .body(body)
+                app.http(request).status shouldBe Status.UNAUTHORIZED
+                app.http(request.withBearer("invalid")).status shouldBe Status.UNAUTHORIZED
+                val denied = app.serviceToken(app.provisionService("no-create", emptySet()))
+                app.http(request.withBearer(denied)).status shouldBe Status.FORBIDDEN
+                val staff = staffCookie(app, setOf(FionaPermissions.InquiriesCreate))
+                app.http(request.header("Cookie", staff).header("Origin", TEST_ORIGIN)).status shouldBe Status.FORBIDDEN
+                val accepted = app.http(request.asFionasWeb(app))
+                accepted.status shouldBe Status.CREATED
+                val inquiryId =
+                    accepted
+                        .json()
+                        .getValue("id")
+                        .jsonPrimitive.content
+                val documentId = app.initialEstimateOf(inquiryId)
+                val document =
+                    CommerceJson.asA(
+                        app.adminGet("/financial-documents/$documentId").bodyString(),
+                        FinancialDocumentResponse.serializer(),
+                    )
+                document.linesAuthoredBy?.originKind shouldBe "PRINCIPAL"
+                document.linesAuthoredBy?.principalKind shouldBe "SERVICE"
+                document.linesAuthoredBy?.principalId shouldBe
+                    app.web.id.value
+                        .toString()
+                document.linesAuthoredBy?.component shouldBe null
+                app.database.count("fionas.inquiries") shouldBe 1
+            }
+        }
+
         test("permissions are live: the same token changes with role grants, never with a new token") {
             TestApplication.create().use { app ->
                 val service = app.provisionService("submitter", emptySet())

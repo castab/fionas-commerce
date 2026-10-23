@@ -10,6 +10,7 @@ import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.financial.RefundAllocationPortion
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.testing.STORED_INSTANT
@@ -272,7 +273,7 @@ class ChangeOrderFoundationSpec :
             v2.lineItems.map { it.id } shouldBe listOf(b.id, a.id)
             v2.lineItems shouldBe listOf(b, a)
             v2.total shouldBe original.total
-            reordered.latest.authorship?.author shouldBe app.adminId
+            reordered.latest.authorship?.author shouldBe OperationOrigin.Principal(app.adminId)
             ledger.get(original.reference).lineItems shouldBe listOf(a, b)
 
             // Omitting A and adding an identical new line is a remove-and-add under a new id.
@@ -356,7 +357,7 @@ class ChangeOrderFoundationSpec :
                 .signum() shouldBe 0
             zero.latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
             zero.latest.document.version shouldBe document.version.next()
-            zero.latest.authorship?.author shouldBe app.adminId
+            zero.latest.authorship?.author shouldBe OperationOrigin.Principal(app.adminId)
             zero.reconciliation.balance.amount
                 .compareTo(BigDecimal("-600")) shouldBe 0
             val history = app.context.financialLedger.paymentHistory(payment.id)

@@ -2,12 +2,14 @@ package io.github.castab.fionas.commerce.events
 
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.ManagedBackgroundService
-import io.github.castab.commerce.staff.PrincipalStatus
+import io.github.castab.commerce.runtime.operation.InternalComponentId
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.fionas.commerce.createInquiryOperation
-import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.time.Clock
 import java.time.Duration
+
+private val INQUIRY_INTAKE_ORIGIN = OperationOrigin.Internal(InternalComponentId("fionas.inquiry-intake"))
 
 private val workerLogger = KotlinLogging.logger {}
 
@@ -102,18 +104,11 @@ class ManagedJetStreamWorker(
 
 internal fun inquiryIntakeHandler(
     context: CommerceRuntimeContext,
-    configuration: NatsIntakeConfiguration,
     clock: Clock,
 ): (ByteArray) -> Unit {
     val createInquiry = createInquiryOperation(context, clock)
     return { bytes ->
-        val command = submittedCommand(bytes, configuration.author)
-        val service = context.authorization.getService(configuration.author)
-        if (service?.status != PrincipalStatus.ACTIVE ||
-            FionaPermissions.InquiriesCreate !in context.authorization.permissionResolver.permissionsFor(configuration.author)
-        ) {
-            throw IntakeFailure("intake_author_not_authorized", FailureKind.SYSTEMIC)
-        }
+        val command = submittedCommand(bytes, INQUIRY_INTAKE_ORIGIN)
         createInquiry(command)
         Unit
     }
@@ -125,5 +120,5 @@ internal fun inquiryIntake(
     clock: Clock,
 ): ManagedJetStreamWorker {
     requireIntakeDatabaseBounds(context.configuration.database)
-    return ManagedJetStreamWorker(NatsIntakeTransport(configuration), inquiryIntakeHandler(context, configuration, clock))
+    return ManagedJetStreamWorker(NatsIntakeTransport(configuration), inquiryIntakeHandler(context, clock))
 }

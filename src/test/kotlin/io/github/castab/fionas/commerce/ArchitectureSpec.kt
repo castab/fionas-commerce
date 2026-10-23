@@ -316,13 +316,13 @@ class ArchitectureSpec :
                 .shouldBeEmpty()
         }
 
-        test("commerce runtime and transitive domain resolve at the adopted 0.0.25 release") {
+        test("commerce runtime and transitive domain resolve at the adopted 0.0.26 release") {
             listOf(
                 io.github.castab.commerce.runtime.financial.FinancialLedger::class.java to "commerce-runtime",
                 io.github.castab.commerce.financial.Money::class.java to "commerce-domain",
             ).forEach { (type, artifact) ->
                 type.protectionDomain.codeSource.location.path
-                    .substringAfterLast('/') shouldBe "$artifact-0.0.25.jar"
+                    .substringAfterLast('/') shouldBe "$artifact-0.0.26.jar"
             }
             File("gradle/libs.versions.toml").readText().contains("http4k = \"6.58.0.0\"") shouldBe true
         }
@@ -397,6 +397,7 @@ class ArchitectureSpec :
             fun File.compactCode() = codeWithoutComments().replace(Regex("""\s+"""), "")
             val inquiries = File(mainSources, "http/InquiryRoutes.kt").compactCode()
             inquiries.contains("access.requirePermission(FionaPermissions.InquiriesCreate).then(requireService)") shouldBe true
+            inquiries.contains("origin=OperationOrigin.Principal(servicePrincipal(request))") shouldBe true
             val financial = File(mainSources, "http/FinancialDocumentRoutes.kt").compactCode()
             financial.contains(".then(requirePermission(FionaPermissions.FinancialTermsManage)).then(requireStaffUser)") shouldBe true
             Regex("""access\.staffTerms\(""").findAll(financial).count() shouldBe 3

@@ -5,6 +5,7 @@ import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
@@ -109,7 +110,7 @@ class StaffRequestSpec :
             estimate.lineItems.map { it.description } shouldBe listOf("Base service", "Ice cream service")
             estimate.total.amount.compareTo(BigDecimal("550.00")) shouldBe 0
             request.financial.latest.authorship
-                ?.author shouldBe app.web.id
+                ?.author shouldBe OperationOrigin.Principal(app.web.id)
             request.financial.latest.createdAt shouldBe
                 app.context.financialLedger
                     .latestVersion(document)

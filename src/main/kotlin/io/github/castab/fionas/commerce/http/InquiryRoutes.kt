@@ -5,6 +5,7 @@ import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
@@ -102,7 +103,10 @@ data class CreateInquiryRequest(
         pattern = ZipCode.PATTERN,
     )
     val zipCode: String,
-    @ApiProperty(description = "Required event calendar date in YYYY-MM-DD, without a time or time zone. Years 0001–9999.", format = "date")
+    @ApiProperty(
+        description = "Required event calendar date in YYYY-MM-DD, without a time or time zone. Years 0001–9999.",
+        format = "date",
+    )
     val eventDate: String,
     @ApiProperty(description = "Required event type. Submit one of the form's option values.")
     val eventType: InquiryEventType,
@@ -447,7 +451,7 @@ fun createInquiryRoute(
                         eventDate = EventDate.of(body.eventDate),
                         eventType = body.eventType.toDomain(),
                         submissionKey = submissionKey,
-                        submittedBy = servicePrincipal(request),
+                        origin = OperationOrigin.Principal(servicePrincipal(request)),
                     )
                 }
             try {

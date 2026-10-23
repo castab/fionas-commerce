@@ -1,7 +1,7 @@
 package io.github.castab.fionas.commerce.events
 
 import io.github.castab.commerce.financial.Money
-import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
 import io.github.castab.fionas.commerce.financial.PricedLine
@@ -47,9 +47,10 @@ internal fun submittedObject(bytes: ByteArray): JsonObject =
         throw IntakeFailure("invalid_event_json", FailureKind.PERMANENT)
     }
 
+/** Translate business content using attribution supplied only by the trusted entry boundary. */
 internal fun submittedCommand(
     bytes: ByteArray,
-    author: ServiceId,
+    origin: OperationOrigin,
 ): CreateInquiry.Command {
     val event = submittedObject(bytes)
     if (event["schemaVersion"].integerOrNull() != 1 || event["type"] != JsonPrimitive("fionas.inquiry.submitted")) {
@@ -98,7 +99,7 @@ internal fun submittedCommand(
             EventDate.of(data.text("eventDate")),
             EventType.valueOf(data.text("eventType")),
             InquirySubmissionKey(id),
-            author,
+            origin,
         )
     } catch (_: DateTimeException) {
         throw IntakeFailure("invalid_inquiry_submitted", FailureKind.PERMANENT)

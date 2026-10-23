@@ -7,6 +7,8 @@ import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.InternalComponentId
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
@@ -52,8 +54,13 @@ class FinancialDocumentRepositoriesSpec :
 
         fun newLineage() = FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line()))
 
-        val service = LineAuthorship(ServiceId(UUID.fromString("00000000-0000-0000-0000-00000000000a")), STORED_INSTANT)
-        val staff = LineAuthorship(UserId(UUID.fromString("00000000-0000-0000-0000-00000000000b")), STORED_INSTANT.plusSeconds(60))
+        val service =
+            LineAuthorship(OperationOrigin.Principal(ServiceId(UUID.fromString("00000000-0000-0000-0000-00000000000a"))), STORED_INSTANT)
+        val staff =
+            LineAuthorship(
+                OperationOrigin.Principal(UserId(UUID.fromString("00000000-0000-0000-0000-00000000000b"))),
+                STORED_INSTANT.plusSeconds(60),
+            )
 
         /** A persisted inquiry and the first snapshot of a new commerce-runtime lineage, in [transaction]. */
         fun inquiryAndEstimate(transaction: Transaction): Pair<InquiryId, FinancialDocument> {
@@ -135,18 +142,21 @@ class FinancialDocumentRepositoriesSpec :
         }
 
         test("a transition's successor carries its source's authorship forward; a snapshot without one carries none") {
-            application.transactor.inTransaction { transaction ->
-                val (inquiryId, estimate) = inquiryAndEstimate(transaction)
-                associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
-                authorship.insert(transaction, estimate.reference, staff)
-                val quote = application.context.financialLedger.quoteLatest(transaction, estimate.id)
-                authorship.copy(transaction, estimate.reference, quote.reference)
-                val invoice = application.context.financialLedger.invoiceLatest(transaction, estimate.id)
-                authorship.copy(transaction, quote.reference, invoice.reference)
+            val internal = LineAuthorship(OperationOrigin.Internal(InternalComponentId("fionas.inquiry-intake")), STORED_INSTANT)
+            listOf(staff, internal).forEach { source ->
+                application.transactor.inTransaction { transaction ->
+                    val (inquiryId, estimate) = inquiryAndEstimate(transaction)
+                    associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
+                    authorship.insert(transaction, estimate.reference, source)
+                    val quote = application.context.financialLedger.quoteLatest(transaction, estimate.id)
+                    authorship.copy(transaction, estimate.reference, quote.reference)
+                    val invoice = application.context.financialLedger.invoiceLatest(transaction, estimate.id)
+                    authorship.copy(transaction, quote.reference, invoice.reference)
 
-                authorship.findAll(transaction, estimate.id) shouldBe
-                    mapOf(Version.INITIAL to staff, Version.of(2) to staff, Version.of(3) to staff)
-                authorship.findAll(transaction, UUID.randomUUID()) shouldBe emptyMap()
+                    authorship.findAll(transaction, estimate.id) shouldBe
+                        mapOf(Version.INITIAL to source, Version.of(2) to source, Version.of(3) to source)
+                    authorship.findAll(transaction, UUID.randomUUID()) shouldBe emptyMap()
+                }
             }
             application.transactor.inTransaction { transaction ->
                 val (inquiryId, estimate) = inquiryAndEstimate(transaction)
@@ -154,6 +164,43 @@ class FinancialDocumentRepositoriesSpec :
                 val quote = application.context.financialLedger.quoteLatest(transaction, estimate.id)
                 authorship.copy(transaction, estimate.reference, quote.reference)
                 authorship.find(transaction, quote.reference).shouldBeNull()
+            }
+        }
+
+        test("database rejects ambiguous missing and invalid origin identities") {
+            val id = UUID.randomUUID()
+            val invalid =
+                listOf(
+                    Triple("USER", null, null),
+                    Triple("SERVICE", null, null),
+                    Triple("USER", id, "fionas.inquiry-intake"),
+                    Triple("SERVICE", id, "fionas.inquiry-intake"),
+                    Triple("INTERNAL", id, "fionas.inquiry-intake"),
+                    Triple("INTERNAL", null, null),
+                    Triple("INTERNAL", null, ""),
+                    Triple("INTERNAL", null, "Upper"),
+                    Triple("INTERNAL", null, "a..b"),
+                    Triple("INTERNAL", null, "a--b"),
+                    Triple("INTERNAL", null, "a\n"),
+                    Triple("INTERNAL", null, "a".repeat(129)),
+                )
+            invalid.forEach { (kind, principal, component) ->
+                shouldThrowAny {
+                    application.transactor.inTransaction { transaction ->
+                        val (inquiryId, estimate) = inquiryAndEstimate(transaction)
+                        associations.associate(transaction, InquiryDocumentAssociation(inquiryId, estimate.id, STORED_INSTANT))
+                        transaction.handle
+                            .createUpdate(
+                                "INSERT INTO fionas.financial_document_authorship " +
+                                    "(document_id, document_version, author_kind, author_id, author_component, recorded_at) " +
+                                    "VALUES (:id, 1, :kind, CAST(:principal AS uuid), :component, now())",
+                            ).bind("id", estimate.id)
+                            .bind("kind", kind)
+                            .bindByType("principal", principal, UUID::class.java)
+                            .bind("component", component)
+                            .execute()
+                    }
+                }.sqlState() shouldBe "23514"
             }
         }
 
@@ -184,7 +231,7 @@ class FinancialDocumentRepositoriesSpec :
             }.sqlState() shouldBe "23505"
         }
 
-        test("authorship rolls back with the caller's transaction, and the database accepts only USER or SERVICE authors") {
+        test("authorship rolls back with the caller's transaction, and the database rejects unknown author kinds") {
             val before = application.database.count("fionas.financial_document_authorship")
             shouldThrow<IllegalStateException> {
                 application.transactor.inTransaction { transaction ->
