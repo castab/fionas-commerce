@@ -1035,8 +1035,9 @@ Fiona's own private `@Serializable` representation (in `inquiry/RequestedService
   and values the domain types reject, fail with an `IllegalStateException` naming the owner.
   Nothing is defaulted, coerced, or repaired.
 - Only the repositories whose rows own the values encode or restore them (`ArchitectureSpec`).
-  Domain types stay unaware of JSON. A shape change is a durable-data decision with its own
-  migration. Neither value ever holds money.
+  Domain types stay unaware of JSON. A shape change is a durable-data decision requiring an
+  explicit migration or, for disposable pre-production data, a documented operator reset.
+  Neither value ever holds money.
 
 ## Financial documents and payments
 
@@ -1364,10 +1365,11 @@ writes, and publish it through the existing proposal operations.
   same-stage successor. It rejects a nonpositive Quote (`QUOTE_TOTAL_NOT_POSITIVE`) and
   negative totals, resolves the deposit with shared `DepositTerms.resolve` (plus Fiona's
   minor-unit check for fixed terms), resolves plan notes to line ids
-  (`SERVICE_PLAN_LINE_NOT_FOUND`), and computes a SHA-256 `QuoteReviewToken` (v2) over inquiry,
+  (`SERVICE_PLAN_LINE_NOT_FOUND`), and computes a SHA-256 `QuoteReviewToken` (v3) over inquiry,
   document, reviewed version and stage, every final line (id, origin, key, values) in order,
-  total, terms, required deposit and the plan. `ComposedQuote.financialChange` says whether an
-  intermediate Estimate is appended.
+  total, terms, required deposit and the plan, including every ordered item
+  label, group and key with explicit absence markers. `ComposedQuote.financialChange` says
+  whether an intermediate Estimate is appended.
 - **Preview** `POST /staff/requests/{inquiryId}/quote-preview` (`previewInquiryQuote`) runs
   `PreviewInquiryQuote` in one unlocked REPEATABLE READ: canonical lineage at exactly
   `expectedDocumentVersion`, Estimate stage, coherent empty proposal/deposit history, then
@@ -1390,11 +1392,21 @@ writes, and publish it through the existing proposal operations.
   deposit with the expected revision, and appends QUOTE_REVISED.
 - **Service plans** (`InquiryServicePlan`, `fionas.inquiry_service_plans`) are immutable, one per
   exact Quote snapshot, written only with staff-composed lines. They store the reviewed version,
-  a `ServiceCommitment` (description ≤2000, optional guest count and duration, ≤50 items of
-  ≤200), line notes by ledger id (≤500 each), approval Clock time and the approving USER
-  (`approvedBy: UserId`, FK to `commerce.users`). No amounts, prices, catalog references,
-  totals, stages or current flags. Only `JdbiInquiryServicePlanRepository` encodes and restores
-  the strict JSON (`ArchitectureSpec`).
+  a `ServiceCommitment` (description ≤2000, optional guest count and duration, ≤50 ordered
+  `ServicePlanItem` selections), line notes by ledger id (≤500 each), approval Clock time and
+  the approving USER (`approvedBy: UserId`, FK to `commerce.users`). Each selection has a
+  required nonblank `label` (≤200), optional descriptive `group` (≤120), and optional opaque
+  source `key` (≤120). Submitted text is trimmed; blank optional text becomes null. Categories
+  are not enums or catalog relationships; keys are never resolved, validated against a menu,
+  or used for prices. Duplicates and presentation order are preserved. These approved facts
+  are independent of the original requested service, which approval never rewrites.
+  No amounts, prices, totals, stages or current flags. Only `JdbiInquiryServicePlanRepository`
+  encodes and restores the strict JSON (`ArchitectureSpec`), requiring every item property
+  (including explicit nulls) and rejecting legacy strings. HTTP uses `ServicePlanItemDto`
+  consistently in requests, previews and approved responses; group/key are optional.
+  This pre-production representation change needs no schema migration: the existing JSONB
+  column and Flyway history remain valid. Operators must discard old development plan data
+  or reset the identified disposable database; there is no decoder, backfill or automatic reset.
 - **Read model.** `ReadStaffRequest` adds optional `servicePlan`: the plan of the latest
   proposal's exact Quote, checked against that ledger snapshot's line ids in the same REPEATABLE
   READ; contradictions or corrupt JSON fail internally. A deposit-only revision keeps the Quote,

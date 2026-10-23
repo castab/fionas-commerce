@@ -721,7 +721,9 @@ POST /staff/requests/{inquiryId}/quote-preview
    {"key": "courtesy", "description": "Courtesy discount",
     "unitPrice": "-50.00", "taxAmount": "0.00", "currency": "USD"}],
  "servicePlan": {"description": "Churro catering for an evening reception", "guestCount": 100,
-   "durationMinutes": 120, "items": ["Churros with chocolate sauce", "Cinnamon sugar"],
+   "durationMinutes": 120, "items": [
+     {"label": "Churros with chocolate sauce", "group": "Desserts"},
+     {"label": "Cinnamon sugar", "group": "Toppings", "key": "cinnamon-sugar"}],
    "lineNotes": [{"key": "courtesy", "note": "Returning customer courtesy"}]},
  "terms": {"type": "PERCENTAGE", "percentage": "20"}}
 ```
@@ -762,9 +764,34 @@ Quote as before.
 - **Service plan** (`servicePlan` on issuance, Quote revision and `GET /staff/requests/{inquiryId}`):
   the money-free commitment the staff user approved with this exact Quote: `documentId`,
   `documentVersion`, `reviewedDocumentVersion`, a free-text `description`, optional
-  `guestCount` and `durationMinutes`, ordered `items`, `lineNotes` by `lineItemId`,
-  `approvedAt` and `approvedBy` (the staff USER id). It names no price, offering or catalog;
-  join `lineNotes` with the financial lines by id. Quotes published without a plan have none.
+  `guestCount` and `durationMinutes`, ordered structured `items`, `lineNotes` by `lineItemId`,
+  `approvedAt` and `approvedBy` (the staff USER id). Each item has a required nonblank `label`
+  (at most 200 characters), optional descriptive `group` and optional opaque source `key`
+  (at most 120 each). Text is trimmed and blank optional fields become null. At most 50 items;
+  duplicates and presentation order are preserved. No catalog lookup, category sorting or
+  pricing follows from these fields. The original inquiry is never overwritten. Join
+  `lineNotes` with the financial lines by id. Quotes published without a plan have none.
+  Review-token encoding v3 binds label, group, key, their absence and item order; changing
+  any of them requires a new review before initial issuance.
+
+This is a breaking service-plan contract change. `ServicePlanRequest`, `ServicePlanPreviewResponse`
+and `ServicePlanResponse` now use objects instead of strings in `items`; preview, initial
+issuance, Quote revision and staff request reads share the shape. For `fionas-web`:
+
+```typescript
+type ServicePlanItem = { label: string; group?: string | null; key?: string | null };
+```
+
+Initialize the proposed plan from customer intent in the frontend, then submit the complete
+ordered selections staff reviewed. Approved selections may differ from that intent. Group
+for display using first occurrence, retaining uncategorized selections. No new backend
+service-plan-only Quote revision workflow is introduced.
+
+Persistence stores every item property, using explicit nulls, and rejects old string arrays.
+No table/column change or Flyway migration is needed. Before upgrading an existing disposable
+development database, discard old plan data or reset that identified database manually.
+Fresh databases bootstrap with the unchanged migrations; the application performs no reset
+or legacy conversion. The incoming inquiry/NATS contracts are unchanged.
 
 ## Financial documents and payments
 

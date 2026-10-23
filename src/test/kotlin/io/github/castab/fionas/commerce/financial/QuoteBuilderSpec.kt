@@ -81,7 +81,13 @@ class QuoteBuilderSpec :
                     "Churro catering for an evening reception",
                     100,
                     120,
-                    listOf("Churros with chocolate sauce", "Cinnamon sugar"),
+                    listOf(
+                        ServicePlanItem("Churros with chocolate sauce", "Desserts", null),
+                        ServicePlanItem("Cinnamon sugar", "Toppings", "cinnamon-sugar"),
+                        ServicePlanItem("Chocolate sauce", "Toppings", null),
+                        ServicePlanItem("Custom birthday flavor", null, null),
+                        ServicePlanItem("Serving station", null, "station"),
+                    ),
                 ),
                 listOf(ProposedLineNote(ProposedLineIdentity.New(LineKey("courtesy")), "Returning customer courtesy")),
             )
@@ -311,6 +317,55 @@ class QuoteBuilderSpec :
                     percent,
                 ),
             ).forEach { it.reviewToken shouldNotBe base.reviewToken }
+        }
+
+        test("review tokens bind each ordered selection field without changing financial facts") {
+            val kept = LineProposal(pureEstimate.lineItems.map { existing(it) })
+            val basePlan = plan.copy(lineNotes = emptyList())
+            val base = QuoteComposer.compose(inquiry, pureEstimate, kept, basePlan, percent)
+            val items = basePlan.service.items
+            val first = items.first()
+            val changedItems =
+                listOf(
+                    listOf(first.copy(label = "Another dessert")) + items.drop(1),
+                    listOf(first.copy(group = "Equipment")) + items.drop(1),
+                    listOf(first.copy(group = null)) + items.drop(1),
+                    listOf(first.copy(key = "new-source")) + items.drop(1),
+                    items.reversed(),
+                    items + first,
+                    items.dropLast(1),
+                )
+            changedItems.forEach { selections ->
+                val changed =
+                    QuoteComposer.compose(
+                        inquiry,
+                        pureEstimate,
+                        kept,
+                        basePlan.copy(service = basePlan.service.copy(items = selections)),
+                        percent,
+                    )
+                changed.reviewToken shouldNotBe base.reviewToken
+                changed.quote shouldBe base.quote
+                changed.requiredDeposit shouldBe base.requiredDeposit
+                changed.financialChange shouldBe false
+            }
+            val normalized =
+                items.map {
+                    ServicePlanItem.of(
+                        " ${it.label} ",
+                        it.group?.let { group -> " $group " } ?: " ",
+                        it.key?.let { key -> " $key " } ?: " ",
+                    )
+                }
+            QuoteComposer
+                .compose(
+                    inquiry,
+                    pureEstimate,
+                    kept,
+                    basePlan.copy(service = basePlan.service.copy(items = normalized)),
+                    percent,
+                ).reviewToken shouldBe
+                base.reviewToken
         }
 
         test("negative, zero, unknown-line, foreign-currency and unknown-note proposals reject with stable codes") {

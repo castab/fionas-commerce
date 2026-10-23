@@ -12,7 +12,7 @@ import java.util.UUID
 /**
  * What staff approved Fiona to serve, in their own words: a service commitment that may differ
  * from the customer's original request and from the financial line descriptions (soft serve
- * replaced by churros, for example). It names no product, catalog, or price: a business may
+ * replaced by churros, for example). It defines no product, catalog, or price: a business may
  * serve something no catalog ever offered.
  *
  * @property description The promised service, for people. Required.
@@ -24,7 +24,7 @@ data class ServiceCommitment(
     val description: String,
     val guestCount: Int?,
     val durationMinutes: Int?,
-    val items: List<String>,
+    val items: List<ServicePlanItem>,
 ) {
     init {
         requireCanonicalText(description, DESCRIPTION_MAX_LENGTH, "A service description")
@@ -35,15 +35,39 @@ data class ServiceCommitment(
             ) { "A committed duration is between 1 and $MAX_DURATION_MINUTES minutes" }
         }
         require(items.size <= MAX_ITEMS) { "A service commitment lists at most $MAX_ITEMS items" }
-        items.forEach { requireCanonicalText(it, ITEM_MAX_LENGTH, "A service item") }
     }
 
     companion object {
         const val DESCRIPTION_MAX_LENGTH = 2000
-        const val ITEM_MAX_LENGTH = 200
         const val MAX_ITEMS = 50
         const val MAX_GUESTS = 100_000
         const val MAX_DURATION_MINUTES = 1440
+    }
+}
+
+/** An approved selection, with a descriptive category and an opaque optional source key; neither determines prices. */
+data class ServicePlanItem(
+    val label: String,
+    val group: String?,
+    val key: String?,
+) {
+    init {
+        requireCanonicalText(label, LABEL_MAX_LENGTH, "A service item label")
+        group?.let { requireCanonicalText(it, GROUP_MAX_LENGTH, "A service item group") }
+        key?.let { requireCanonicalText(it, KEY_MAX_LENGTH, "A service item key") }
+    }
+
+    companion object {
+        const val LABEL_MAX_LENGTH = 200
+        const val GROUP_MAX_LENGTH = 120
+        const val KEY_MAX_LENGTH = 120
+
+        /** Canonical submitted text: trim all fields, and treat blank optional fields as absent. */
+        fun of(
+            label: String,
+            group: String? = null,
+            key: String? = null,
+        ) = ServicePlanItem(label.trim(), group?.trim()?.takeIf { it.isNotEmpty() }, key?.trim()?.takeIf { it.isNotEmpty() })
     }
 }
 

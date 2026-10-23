@@ -121,7 +121,7 @@ internal object QuoteComposer {
     ): QuoteReviewToken {
         val bytes = ByteArrayOutputStream()
         DataOutputStream(bytes).use { output ->
-            output.writeInt(2)
+            output.writeInt(3)
             output.text(inquiryId.value.toString())
             output.text(reviewed.id.toString())
             output.writeInt(reviewed.version.number)
@@ -155,7 +155,11 @@ internal object QuoteComposer {
                 output.optional(it.service.guestCount?.toString())
                 output.optional(it.service.durationMinutes?.toString())
                 output.writeInt(it.service.items.size)
-                it.service.items.forEach(output::text)
+                it.service.items.forEach { item ->
+                    output.text(item.label)
+                    output.optional(item.group)
+                    output.optional(item.key)
+                }
                 output.writeInt(it.lineNotes.size)
                 it.lineNotes.forEach { note ->
                     output.text(note.lineItemId.toString())

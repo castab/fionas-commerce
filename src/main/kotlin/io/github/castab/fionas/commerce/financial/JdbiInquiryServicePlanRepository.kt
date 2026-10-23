@@ -22,12 +22,12 @@ import java.util.UUID
  * ```
  * {"description": "Churro catering for an evening reception",
  *  "guestCount": 100, "durationMinutes": 120,
- *  "items": ["Churros with chocolate sauce", "Cinnamon sugar"],
+ *  "items": [{"label": "Churros", "group": "Desserts", "key": null}],
  *  "lineNotes": [{"lineItemId": "…", "note": "Negotiated with the venue"}]}
  * ```
  *
  * It holds no money: each note names its commerce-runtime ledger line by id. Decoded strictly:
- * every property is required, `null` only for `guestCount` and `durationMinutes`, unknown
+ * every property is required, `null` only for `guestCount`, `durationMinutes`, item `group` and `key`, unknown
  * properties and wrong JSON types fail, and the domain types' invariants are checked again.
  */
 
@@ -36,11 +36,15 @@ private class ServicePlanJson(
     @Serializable(with = StrictStringSerializer::class) val description: String,
     @Serializable(with = StrictIntSerializer::class) val guestCount: Int?,
     @Serializable(with = StrictIntSerializer::class) val durationMinutes: Int?,
-    val items: List<
-        @Serializable(with = StrictStringSerializer::class)
-        String,
-    >,
+    val items: List<ServicePlanItemJson>,
     val lineNotes: List<LineNoteJson>,
+)
+
+@Serializable
+private class ServicePlanItemJson(
+    @Serializable(with = StrictStringSerializer::class) val label: String,
+    @Serializable(with = StrictStringSerializer::class) val group: String?,
+    @Serializable(with = StrictStringSerializer::class) val key: String?,
 )
 
 @Serializable
@@ -109,7 +113,7 @@ class JdbiInquiryServicePlanRepository : InquiryServicePlanRepository {
                 plan.service.description,
                 plan.service.guestCount,
                 plan.service.durationMinutes,
-                plan.service.items,
+                plan.service.items.map { ServicePlanItemJson(it.label, it.group, it.key) },
                 plan.lineNotes.map { LineNoteJson(it.lineItemId.toString(), it.note) },
             )
         // Write only what reading would accept, so no invalid value is ever stored.
@@ -139,7 +143,7 @@ class JdbiInquiryServicePlanRepository : InquiryServicePlanRepository {
 }
 
 private fun ServicePlanJson.restore(): Pair<ServiceCommitment, List<ServicePlanLineNote>> =
-    ServiceCommitment(description, guestCount, durationMinutes, items) to
+    ServiceCommitment(description, guestCount, durationMinutes, items.map { ServicePlanItem(it.label, it.group, it.key) }) to
         lineNotes.map { note ->
             val id = UUID.fromString(note.lineItemId)
             require(id.toString() == note.lineItemId) { "A noted line id must be a canonical UUID" }

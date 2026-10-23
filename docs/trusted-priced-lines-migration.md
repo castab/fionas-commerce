@@ -1,5 +1,9 @@
 # Migrating to trusted priced lines (commerce 0.0.23)
 
+> The service-plan string-item examples below record the 0.0.23 migration. That item shape
+> is superseded by structured selections; see the current [quote builder contract](../README.md#quote-builder)
+> for the object shape and coordinated frontend/development-database update.
+
 This release removes Fiona's catalog and pricing engine. Fiona now accepts money only as
 complete, already-priced lines from two authorities, and records who authored them:
 

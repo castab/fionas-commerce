@@ -17,6 +17,7 @@ import io.github.castab.fionas.commerce.financial.ProposedLineIdentity
 import io.github.castab.fionas.commerce.financial.ProposedLineNote
 import io.github.castab.fionas.commerce.financial.ProposedServicePlan
 import io.github.castab.fionas.commerce.financial.ServiceCommitment
+import io.github.castab.fionas.commerce.financial.ServicePlanItem
 import io.github.castab.fionas.commerce.financial.ServicePlanLineNote
 import io.github.castab.fionas.commerce.financial.parseExactDecimal
 import kotlinx.serialization.Serializable
@@ -132,7 +133,27 @@ data class LineNoteRequest(
     val note: String,
 )
 
-/** What staff approve Fiona to serve with the Quote: never a price, product reference or catalog identity. */
+/** One ordered, money-free approved selection, also used when proposing it. */
+@Serializable
+data class ServicePlanItemDto(
+    @ApiProperty(
+        description = "Human-readable selection. Trimmed; nonblank; at most 200 characters.",
+        maxLength = ServicePlanItem.LABEL_MAX_LENGTH,
+    )
+    val label: String,
+    @ApiProperty(
+        description = "Descriptive category; no catalog validation. Trimmed; blank means none.",
+        maxLength = ServicePlanItem.GROUP_MAX_LENGTH,
+    )
+    val group: String? = null,
+    @ApiProperty(
+        description = "Opaque optional source reference; never resolved or priced. Trimmed; blank means none.",
+        maxLength = ServicePlanItem.KEY_MAX_LENGTH,
+    )
+    val key: String? = null,
+)
+
+/** What staff approve Fiona to serve with the Quote: descriptive facts, never pricing inputs. */
 @Serializable
 data class ServicePlanRequest(
     @ApiProperty(
@@ -144,8 +165,8 @@ data class ServicePlanRequest(
     val guestCount: Int? = null,
     @ApiProperty(description = "The service duration in minutes, when stated: 1 to 1440.")
     val durationMinutes: Int? = null,
-    @ApiProperty(description = "Human-facing service items in presentation order; at most 50, each at most 200 characters.")
-    val items: List<String> = emptyList(),
+    @ApiProperty(description = "Structured service selections in presentation order; at most 50.")
+    val items: List<ServicePlanItemDto> = emptyList(),
     @ApiProperty(description = "Optional staff notes on final Quote lines, for example the reason for an override; one per line.")
     val lineNotes: List<LineNoteRequest> = emptyList(),
 )
@@ -167,7 +188,7 @@ data class ServicePlanResponse(
     val description: String,
     val guestCount: Int? = null,
     val durationMinutes: Int? = null,
-    val items: List<String>,
+    val items: List<ServicePlanItemDto>,
     @ApiProperty(description = "Notes on lines of the approved Quote; join on lineItemId for amounts.")
     val lineNotes: List<ServicePlanLineNoteResponse>,
     @ApiProperty(format = "date-time") val approvedAt: String,
@@ -276,7 +297,7 @@ internal fun ServicePlanRequest.domain(noteIdentities: List<Pair<UUID?, String?>
             description.trim(),
             guestCount,
             durationMinutes,
-            items.map(String::trim),
+            items.map { ServicePlanItem.of(it.label, it.group, it.key) },
         ),
         lineNotes.zip(noteIdentities) { note, identity -> ProposedLineNote(identity.identity(), note.note.trim()) },
     )
@@ -289,11 +310,13 @@ internal fun InquiryServicePlan.toResponse() =
         description = service.description,
         guestCount = service.guestCount,
         durationMinutes = service.durationMinutes,
-        items = service.items,
+        items = service.items.map { it.toResponse() },
         lineNotes = lineNotes.map { it.toResponse() },
         approvedAt = approvedAt.toString(),
         approvedBy = approvedBy.value.toString(),
     )
+
+internal fun ServicePlanItem.toResponse() = ServicePlanItemDto(label, group, key)
 
 internal fun ServicePlanLineNote.toResponse() = ServicePlanLineNoteResponse(lineItemId.toString(), note)
 
