@@ -415,6 +415,7 @@ class OpenApiDocumentSpec :
                 "ServicePlanPreviewResponse",
                 "ServicePlanRequest",
                 "ServicePlanResponse",
+                "ServicePlanItemDto",
                 "ServicePlanLineNoteResponse",
                 "LineNoteRequest",
                 "PricedLineRequest",
@@ -1138,7 +1139,15 @@ class OpenApiDocumentSpec :
             }
             schema("ServicePlanRequest").strings("required") shouldContainExactly listOf("description")
             schema("LineNoteRequest").strings("required") shouldContainExactly listOf("note")
-            // Issuance stays backward compatible: lines, service plan and reviewToken are additive and optional.
+            listOf("ServicePlanRequest", "ServicePlanResponse", "ServicePlanPreviewResponse").forEach {
+                schema(it).text("properties", "items", "items", "\$ref") shouldBe "#/components/schemas/ServicePlanItemDto"
+            }
+            schema("ServicePlanItemDto").strings("required") shouldContainExactly listOf("label")
+            listOf("label" to "200", "group" to "120", "key" to "120").forEach { (field, limit) ->
+                schema("ServicePlanItemDto").text("properties", field, "type") shouldBe "string"
+                schema("ServicePlanItemDto").text("properties", field, "maxLength") shouldBe limit
+            }
+            // Composed issuance remains optional; structured selections intentionally replace string items.
             schema("IssueInquiryProposalRequest").at("properties").jsonObject.keys shouldContainExactlyInAnyOrder
                 listOf("expectedDocumentVersion", "terms", "lines", "servicePlan", "reviewToken")
             operation("/staff/requests/{inquiryId}/proposals", "post").text("responses", "409", "description") shouldContain

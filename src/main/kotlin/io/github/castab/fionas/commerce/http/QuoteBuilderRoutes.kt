@@ -82,7 +82,7 @@ data class ServicePlanPreviewResponse(
     val description: String,
     val guestCount: Int? = null,
     val durationMinutes: Int? = null,
-    val items: List<String>,
+    val items: List<ServicePlanItemDto>,
     val lineNotes: List<ServicePlanLineNoteResponse>,
 )
 
@@ -156,7 +156,7 @@ internal fun ComposedQuote.toResponse() =
                     plan.service.description,
                     plan.service.guestCount,
                     plan.service.durationMinutes,
-                    plan.service.items,
+                    plan.service.items.map { it.toResponse() },
                     plan.lineNotes.map { it.toResponse() },
                 )
             },
@@ -220,7 +220,11 @@ internal val exampleServicePlanRequest =
         description = "Churro catering for an evening reception",
         guestCount = 100,
         durationMinutes = 120,
-        items = listOf("Churros with chocolate sauce", "Cinnamon sugar"),
+        items =
+            listOf(
+                ServicePlanItemDto("Churros with chocolate sauce", "Desserts"),
+                ServicePlanItemDto("Cinnamon sugar", "Toppings", "cinnamon-sugar"),
+            ),
         lineNotes = listOf(LineNoteRequest(null, "courtesy", "Returning customer courtesy")),
     )
 
@@ -271,7 +275,10 @@ private val examplePreview: InquiryQuotePreviewResponse =
                 "Churro catering for an evening reception",
                 100,
                 120,
-                listOf("Churros with chocolate sauce", "Cinnamon sugar"),
+                listOf(
+                    ServicePlanItemDto("Churros with chocolate sauce", "Desserts"),
+                    ServicePlanItemDto("Cinnamon sugar", "Toppings", "cinnamon-sugar"),
+                ),
                 listOf(ServicePlanLineNoteResponse("2a3b4c5d-6e7f-3081-92a3-b4c5d6e7f809", "Returning customer courtesy")),
             ),
         reviewToken = "9f2c4a1b8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b",
@@ -285,7 +292,11 @@ internal val exampleServicePlan =
         description = "Churro catering for an evening reception",
         guestCount = 100,
         durationMinutes = 120,
-        items = listOf("Churros with chocolate sauce", "Cinnamon sugar"),
+        items =
+            listOf(
+                ServicePlanItemDto("Churros with chocolate sauce", "Desserts"),
+                ServicePlanItemDto("Cinnamon sugar", "Toppings", "cinnamon-sugar"),
+            ),
         lineNotes = listOf(ServicePlanLineNoteResponse("2a3b4c5d-6e7f-3081-92a3-b4c5d6e7f809", "Returning customer courtesy")),
         approvedAt = "2026-10-05T17:00:00Z",
         approvedBy = "580a28a1-7417-480a-9089-8f5f3c25c1cd",

@@ -20,6 +20,7 @@ import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldNotContain
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -35,9 +36,19 @@ class QuoteBuilderRoutesSpec :
         lateinit var app: TestApplication
         val percentTerms = """{"type":"PERCENTAGE","percentage":"20"}"""
         val churroLines = proposalJson(CHURROS.new("churros"), COURTESY_DISCOUNT.new("courtesy"))
+        val selections =
+            listOf(
+                ServicePlanItemDto("Churros with chocolate sauce", "Desserts"),
+                ServicePlanItemDto("Cinnamon sugar", "Toppings", "cinnamon-sugar"),
+                ServicePlanItemDto("Chocolate sauce", "Toppings"),
+                ServicePlanItemDto("Custom birthday flavor"),
+                ServicePlanItemDto("Serving station", key = "station"),
+            )
+        val selectionFormat = Json { encodeDefaults = true }
+        val selectionJson = selectionFormat.encodeToString(ListSerializer(ServicePlanItemDto.serializer()), selections)
         val servicePlan =
             """{"description":"Churro catering for an evening reception","guestCount":100,"durationMinutes":120,""" +
-                """"items":["Churros with chocolate sauce","Cinnamon sugar"],""" +
+                """"items":$selectionJson,""" +
                 """"lineNotes":[{"key":"courtesy","note":"Returning customer courtesy"}]}"""
 
         fun preview(id: String) = "/staff/requests/$id/quote-preview"
@@ -91,12 +102,15 @@ class QuoteBuilderRoutesSpec :
 
         test("a no-store preview writes nothing, and issuing exactly the reviewed lines publishes them with the service plan") {
             val id = app.createInquiry()
+            val originalRequest = request(id).inquiry.requestedService
+            originalRequest.items.isNotEmpty() shouldBe true
             val before = counts()
             val response = app.adminPost(preview(id), previewBody())
             response.status shouldBe Status.OK
             response.header("Cache-Control") shouldBe "no-store"
             counts() shouldBe before
             val reviewed = previewed(response)
+            reviewed.servicePlan!!.items shouldBe selections
             reviewed.reviewedDocumentVersion shouldBe 1
             reviewed.estimateTotal shouldBe "681.25"
             reviewed.financialChange shouldBe true
@@ -130,9 +144,16 @@ class QuoteBuilderRoutesSpec :
             plan.documentVersion shouldBe 3
             plan.reviewedDocumentVersion shouldBe 1
             plan.description shouldBe "Churro catering for an evening reception"
-            plan.items shouldContainExactly listOf("Churros with chocolate sauce", "Cinnamon sugar")
+            plan.items shouldContainExactly selections
             plan.approvedBy shouldBe app.adminId.value.toString()
             request(id).servicePlan shouldBe plan
+            request(id).inquiry.requestedService shouldBe originalRequest
+            val persisted =
+                Json
+                    .parseToJsonElement(
+                        app.database.strings("SELECT plan::text FROM fionas.inquiry_service_plans WHERE inquiry_id = '$id'").single(),
+                    ).jsonObject
+            persisted.getValue("items") shouldBe Json.parseToJsonElement(selectionJson)
             request(id).inquiry.lifecycle.stage shouldBe InquiryStageResponse.QUOTED
             // Estimate v1 is unchanged in the history.
             val history =
@@ -145,6 +166,76 @@ class QuoteBuilderRoutesSpec :
                 .first()
                 .linesAuthoredBy
                 ?.principalKind shouldBe "SERVICE"
+        }
+
+        test("Quote revisions independently approve selections and deposit revisions and booking retain that plan") {
+            val id = app.createInquiry()
+            val original = request(id).inquiry.requestedService
+            val token = previewed(app.adminPost(preview(id), previewBody())).reviewToken
+            val initial = issued(app.adminPost(proposals(id), issueBody(token)))
+            val revisedPlan = servicePlan.replace("Churros with chocolate sauce", "Cookies & Cream").replace("Desserts", "Hand-scooped")
+            val changedLines = proposalJson(CHURROS.copy(unitPrice = "500.00").new("churros"), COURTESY_DISCOUNT.new("courtesy"))
+            val revisedResponse =
+                app.adminPost(
+                    proposals(id) + "/quote-revisions",
+                    """{"expectedDocumentVersion":3,"expectedDepositRequirementRevision":1,"lines":$changedLines,"servicePlan":$revisedPlan,"terms":$percentTerms}""",
+                )
+            revisedResponse.status shouldBe Status.OK
+            val revised = issued(revisedResponse)
+            val approved = revised.servicePlan.shouldNotBeNull()
+            approved.items shouldBe listOf(ServicePlanItemDto("Cookies & Cream", "Hand-scooped")) + selections.drop(1)
+            approved.documentVersion shouldBe 4
+            request(id).servicePlan shouldBe approved
+            val persisted =
+                app.database.strings(
+                    "SELECT plan::text FROM fionas.inquiry_service_plans WHERE inquiry_id = '$id' ORDER BY document_version",
+                )
+            persisted.map { Json.parseToJsonElement(it).jsonObject.getValue("items") } shouldBe
+                listOf(
+                    Json.parseToJsonElement(selectionJson),
+                    Json.parseToJsonElement(
+                        selectionJson.replace("Churros with chocolate sauce", "Cookies & Cream").replace("Desserts", "Hand-scooped"),
+                    ),
+                )
+            val depositResponse =
+                app.adminPost(
+                    proposals(id) + "/deposit-revisions",
+                    """{"expectedDocumentVersion":4,"expectedDepositRequirementRevision":2,"terms":{"type":"FIXED","amount":"100.00","currency":"USD"}}""",
+                )
+            depositResponse.status shouldBe Status.OK
+            val deposit = issued(depositResponse)
+            request(id).servicePlan shouldBe approved
+            app
+                .adminPost(
+                    "/financial-documents/${initial.financial.id}/payments",
+                    """{"documentVersion":4,"amount":"100.00","method":"CASH","expectedProposalId":"${deposit.proposal.id}"}""",
+                ).status shouldBe Status.CREATED
+            request(id).inquiry.lifecycle.stage shouldBe InquiryStageResponse.BOOKED
+            request(id).servicePlan shouldBe approved
+            app.adminPost("/inquiries/$id/served", "").status shouldBe Status.OK
+            request(id).servicePlan shouldBe approved
+            app
+                .adminPost(
+                    "/financial-documents/${initial.financial.id}/payments",
+                    """{"documentVersion":5,"amount":"350.00","method":"CASH"}""",
+                ).status shouldBe Status.CREATED
+            app.adminPost("/inquiries/$id/close", "").status shouldBe Status.OK
+            request(id).inquiry.lifecycle.stage shouldBe InquiryStageResponse.CLOSED
+            request(id).servicePlan shouldBe approved
+            request(id).inquiry.requestedService shouldBe original
+        }
+
+        test("optional blank selection metadata normalizes before preview and review comparison") {
+            val id = app.createInquiry()
+            val canonical = """{"description":"Custom service","items":[{"label":"Custom flavor"}]}"""
+            val padded = """{"description":"Custom service","items":[{"label":" Custom flavor ","group":" ","key":" "}]}"""
+            val a = previewed(app.adminPost(preview(id), previewBody(plan = canonical)))
+            val b = previewed(app.adminPost(preview(id), previewBody(plan = padded)))
+            a.reviewToken shouldBe b.reviewToken
+            b.servicePlan!!.items shouldBe listOf(ServicePlanItemDto("Custom flavor"))
+            val response = app.adminPost(proposals(id), issueBody(a.reviewToken, plan = padded))
+            response.status shouldBe Status.OK
+            issued(response).servicePlan!!.items shouldBe a.servicePlan!!.items
         }
 
         test("issuance without lines keeps the Estimate and records no plan") {
@@ -171,6 +262,9 @@ class QuoteBuilderRoutesSpec :
                 preview(id) to previewBody(lines = """[{"lineItemId":"not-a-uuid",${CHURROS.json().drop(1)}]"""),
                 preview(id) to
                     previewBody(lines = """[{"key":"a","description":"Churros","unitPrice":450,"taxAmount":"0","currency":"USD"}]"""),
+                preview(id) to previewBody(plan = """{"description":"x","items":["legacy"]}"""),
+                preview(id) to previewBody(plan = """{"description":"x","items":[{}]}"""),
+                preview(id) to previewBody(plan = """{"description":"x","items":[{"label":null}]}"""),
                 preview(id) to previewBody(plan = """{"description":"x","lineNotes":[{"note":"no identity"}]}"""),
                 preview(id) to previewBody(terms = """{"type":"FIXED","amount":"1.00","currency":"USD","percentage":"20"}"""),
                 proposals(id) to """{"expectedDocumentVersion":1,"terms":$percentTerms,"lines":$churroLines}""",
@@ -198,6 +292,10 @@ class QuoteBuilderRoutesSpec :
                 previewBody(lines = proposalJson(CHURROS.copy(unitPrice = "450.001").new("a"))) to emptyList(),
                 previewBody(lines = "[]") to emptyList(),
                 previewBody(plan = """{"description":"   "}""") to emptyList(),
+                previewBody(plan = """{"description":"x","items":[{"label":"   "}]}""") to emptyList(),
+                previewBody(plan = """{"description":"x","items":[{"label":"${"a".repeat(201)}"}]}""") to emptyList(),
+                previewBody(plan = """{"description":"x","items":[{"label":"x","group":"${"a".repeat(121)}"}]}""") to emptyList(),
+                previewBody(plan = """{"description":"x","items":[{"label":"x","key":"${"a".repeat(121)}"}]}""") to emptyList(),
                 previewBody(terms = """{"type":"PERCENTAGE","percentage":"101"}""") to emptyList(),
                 previewBody(terms = """{"type":"FIXED","amount":"1000.00","currency":"USD"}""") to emptyList(),
             ).forEach { (body, expected) ->
@@ -216,6 +314,8 @@ class QuoteBuilderRoutesSpec :
             listOf(
                 issueBody(token, lines = changed),
                 issueBody(token, plan = null),
+                issueBody(token, plan = servicePlan.replace("Desserts", "Equipment")),
+                issueBody(token, plan = servicePlan.replace("cinnamon-sugar", "different-key")),
                 issueBody(token, terms = """{"type":"PERCENTAGE","percentage":"25"}"""),
             ).forEach { body ->
                 val response = app.adminPost(proposals(id), body)
@@ -244,6 +344,18 @@ class QuoteBuilderRoutesSpec :
                 "jsonb_set(plan, '{lineNotes,0,lineItemId}', to_jsonb(gen_random_uuid()::text))",
                 "plan || '{\"extra\": true}'::jsonb",
                 "plan - 'items'",
+                "jsonb_set(plan, '{items}', '[\"legacy\"]'::jsonb)",
+                "jsonb_set(plan, '{items,0}', '{\"label\":\"x\",\"group\":null,\"key\":null,\"extra\":true}'::jsonb)",
+                "jsonb_set(plan, '{items,0}', '{\"label\":\"x\",\"group\":null}'::jsonb)",
+                "jsonb_set(plan, '{items,0,label}', '42'::jsonb)",
+                "jsonb_set(plan, '{items,0,group}', 'false'::jsonb)",
+                "jsonb_set(plan, '{items,0,key}', '[]'::jsonb)",
+                "jsonb_set(plan, '{items,0,label}', 'null'::jsonb)",
+                "jsonb_set(plan, '{items,0,label}', '\"\"'::jsonb)",
+                "jsonb_set(plan, '{items,0,group}', '\" padded \"'::jsonb)",
+                "jsonb_set(plan, '{items,0,key}', to_jsonb(repeat('x', 121)))",
+                "jsonb_set(plan, '{items,0,group}', to_jsonb(repeat('x', 121)))",
+                "jsonb_set(plan, '{items,0,label}', to_jsonb(repeat('x', 201)))",
             ).forEach { corruption ->
                 val id = app.createInquiry()
                 val token = previewed(app.adminPost(preview(id), previewBody())).reviewToken
