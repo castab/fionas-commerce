@@ -56,12 +56,16 @@ data class ReviseInquiryQuoteProposalRequest(
     @ApiProperty(
         description =
             "The complete revised final Quote lines: existing lines by `lineItemId` (carried or overridden), new lines by " +
-                "`key`; lines left out are removed. Lines equal to the current Quote's are no change.",
+                "`key`; lines left out are removed. Unchanged lines are valid when service or deposit terms change.",
     )
     val lines: List<ProposedLineRequest>,
     @Serializable(with = StrictDepositTerms::class) val terms: DepositTermsRequest,
-    @ApiProperty(description = "Optional service plan approved with the revised Quote.")
+    @ApiProperty(
+        description = "Replacement plan: required only with servicePlanAction REPLACE; RETAIN is the default and CLEAR removes it.",
+    )
     val servicePlan: ServicePlanRequest? = null,
+    val reviewToken: String,
+    val servicePlanAction: ServicePlanActionRequest = ServicePlanActionRequest.RETAIN,
 )
 
 @Serializable
@@ -81,6 +85,7 @@ data class InquiryProposalResponse(
     @ApiProperty(format = "date-time") val issuedAt: String,
     @ApiProperty(description = "The verified staff user who published the proposal.", format = "uuid") val issuedBy: String,
     @ApiProperty(description = "INITIAL, QUOTE_REVISED, or DEPOSIT_REVISED; never communication delivery.") val issuanceKind: String,
+    val servicePlanRevision: Int? = null,
 )
 
 @Serializable
@@ -102,6 +107,7 @@ internal fun InquiryProposal.toResponse(): InquiryProposalResponse =
         issuedAt.toString(),
         issuedBy.value.toString(),
         kind.name,
+        servicePlanRevision,
     )
 
 private fun IssuedInquiryProposal.toResponse() =
@@ -336,20 +342,29 @@ internal fun reviseInquiryQuoteProposalRoute(
         operationId = "reviseInquiryQuoteProposal"
         summary = "Revise the lines of an unpaid inquiry proposal and reissue it"
         description =
-            "Exact current Quote/deposit tokens are required. Commits the staff user's complete revised final lines " +
-            "(existing lines carried or overridden by `lineItemId`, new lines by `key`, omitted lines removed) as a " +
-            "same-stage Quote of exactly the reviewed version, with an optional service plan, a replacement deposit " +
-            "approved against that new version even when terms are unchanged, and QUOTE_REVISED issuance, atomically. " +
-            "No catalog or pricing policy is consulted. Rejects lines equal to the current Quote's (NO_FINANCIAL_CHANGE; " +
-            "use deposit-revisions) and negative or zero totals. Supersedes every prior payment-link target. Any " +
-            "historical gross allocation blocks revision, including fully refunded payments. Cache-Control: no-store."
+            "Requires the reviewToken from quote-revision-preview and the identical approved " +
+            "inputs. Under the canonical association lock, " +
+            "checks current Quote/deposit versions and latest publication, recomposes, and rejects stale review with QUOTE_REVIEW_STALE. " +
+            "Real financial changes append a Quote and replace its deposit approval atomically. Service-only revisions append a Fiona " +
+            "approval and publication without changing the financial/deposit pair. RETAIN keeps the plan, REPLACE requires servicePlan, " +
+            "CLEAR forbids servicePlan and records an explicit clearing approval. No material change is NO_MATERIAL_CHANGE. " +
+            "Rejects negative or zero totals. No catalog or pricing policy is consulted. " +
+            "Historical allocations block revisions even after refunds; only the latest publication is payable. Cache-Control: no-store."
         receiving(
             quoteRevisionBody to
-                ReviseInquiryQuoteProposalRequest(2, 1, exampleProposedLines, defaultTerms, exampleServicePlanRequest),
+                ReviseInquiryQuoteProposalRequest(
+                    2,
+                    1,
+                    exampleProposedLines,
+                    defaultTerms,
+                    exampleServicePlanRequest,
+                    "0".repeat(64),
+                    ServicePlanActionRequest.REPLACE,
+                ),
         )
         proposalErrors(quoteRevisionExample, validationExtra = " " + COMPOSITION_REJECTED)
     } bindContract Method.POST to { id: String, _: String, _: String ->
-        access.staffComposition().then { request: Request ->
+        access.staffComposition().then(quoteReviewStaleResponses).then { request: Request ->
             val inquiry = inquiryId(id)
             val body = quoteRevisionBody(request)
             val lineIdentities = body.lines.identities(quoteRevisionBody)
@@ -368,6 +383,8 @@ internal fun reviseInquiryQuoteProposalRoute(
                         body.terms.domain(),
                         staffUser(request),
                         body.servicePlan?.domain(noteIdentities),
+                        QuoteReviewToken(body.reviewToken),
+                        body.servicePlanAction.domain(),
                     )
                 }
             Response(Status.OK).header("Cache-Control", "no-store").with(proposalBody of revise(command).toResponse())

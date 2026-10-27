@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
@@ -45,11 +46,33 @@ data class StaffRequestResponse(
     val payments: List<PaymentHistoryResponse>,
     @ApiProperty(
         description =
-            "The immutable approved service plan of the published Quote (proposal.documentVersion): the service staff " +
-                "approved and their line notes. Absent before issuance, for a Quote published without one (including a " +
-                "deposit-only revision); never invented.",
+            "Service approval bound to the latest published proposal, historical after booking. Its " +
+                "original snapshot may precede that Quote when retained. Use effectiveServicePlan for " +
+                "fulfillment.",
     )
     val servicePlan: ServicePlanResponse? = null,
+    @ApiProperty(
+        description = "Latest staff approval governing fulfillment; cleared=true explicitly removes the plan. Absent if never approved.",
+    )
+    val effectiveServicePlan: ServicePlanResponse? = null,
+    @ApiProperty(
+        description =
+            "Exact service approval of the accepted proposal; present only after booking when an " +
+                "approval exists, immutable across amendments.",
+    )
+    val acceptedServicePlan: ServicePlanResponse? = null,
+    @ApiProperty(
+        description =
+            "All independent service approvals in revision order, including clearings, with exact " +
+                "snapshot references and staff provenance.",
+    )
+    val servicePlanHistory: List<ServicePlanResponse> = emptyList(),
+    @ApiProperty(
+        description =
+            "All publications in durable order, each bound to its financial version, deposit " +
+                "revision and optional servicePlanRevision.",
+    )
+    val proposalHistory: List<InquiryProposalResponse> = emptyList(),
 )
 
 internal fun readStaffRequestRoute(
@@ -130,6 +153,13 @@ internal fun readStaffRequestRoute(
                                 request.deposit.currentDepositResponse(),
                                 request.payments.map { it.toResponse() },
                                 request.servicePlan?.toResponse(),
+                                request.effectiveServicePlan?.toResponse(),
+                                request.servicePlan
+                                    ?.takeIf {
+                                        request.financial.latest.document is FinancialDocument.Invoice
+                                    }?.toResponse(),
+                                request.servicePlanHistory.map { it.toResponse() },
+                                request.proposalHistory.map { it.toResponse() },
                             ),
                     )
             }

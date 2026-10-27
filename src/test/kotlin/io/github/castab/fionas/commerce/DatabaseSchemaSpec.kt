@@ -79,9 +79,12 @@ class DatabaseSchemaSpec :
                 """.trimIndent(),
             )
 
-        test("proposal publication stores only exact identities and provenance with unique pairs and Fiona association integrity") {
+        test(
+            "proposal publication stores only exact identities and provenance with distinct publication identities and Fiona association integrity",
+        ) {
             application.database.foreignKeys("inquiry_proposals") shouldContainExactlyInAnyOrder
                 listOf(
+                    "inquiry_id, service_plan_revision → fionas.inquiry_service_plans(inquiry_id, revision)",
                     "inquiry_id, document_id → fionas.inquiry_financial_documents(inquiry_id, document_id)",
                     "document_id, document_version → commerce.financial_document_snapshots(document_id, version)",
                     "issued_by → commerce.users(principal_id)",
@@ -99,15 +102,16 @@ class DatabaseSchemaSpec :
                     "kind",
                     "issued_at",
                     "issued_by",
+                    "service_plan_revision",
                 )
             application.database
                 .strings(
                     "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' AND table_name = 'inquiry_proposals' AND is_nullable = 'YES'",
-                ).shouldBeEmpty()
+                ).shouldContainExactly("service_plan_revision")
             application.database.strings(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_proposals'::regclass AND contype = 'u'",
             ) shouldContainExactlyInAnyOrder
-                listOf("UNIQUE (recorded_order)", "UNIQUE (document_id, document_version, deposit_requirement_revision)")
+                listOf("UNIQUE (recorded_order)")
         }
 
         test("a decline is one immutable row per inquiry naming its exact canonical Estimate and staff user, holding no status") {
@@ -135,7 +139,7 @@ class DatabaseSchemaSpec :
             ) shouldContainExactly listOf("PRIMARY KEY (inquiry_id)")
         }
 
-        test("an approved service plan is one immutable row per exact canonical Quote, holding no money") {
+        test("an approved service plan is independently versioned immutable approvals, holding no money") {
             application.database.foreignKeys("inquiry_service_plans") shouldContainExactlyInAnyOrder
                 listOf(
                     "inquiry_id, document_id → fionas.inquiry_financial_documents(inquiry_id, document_id)",
@@ -152,20 +156,22 @@ class DatabaseSchemaSpec :
                     "document_version NO integer",
                     "inquiry_id NO uuid",
                     "reviewed_document_version NO integer",
-                    "plan NO jsonb",
+                    "plan YES jsonb",
                     "approved_at NO timestamp with time zone",
                     "approved_by NO uuid",
+                    "revision NO integer",
                 )
             application.database.strings(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_service_plans'::regclass AND contype = 'p'",
-            ) shouldContainExactly listOf("PRIMARY KEY (document_id, document_version)")
+            ) shouldContainExactly listOf("PRIMARY KEY (inquiry_id, revision)")
             application.database.strings(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_service_plans'::regclass " +
                     "AND contype = 'c'",
             ) shouldContainExactlyInAnyOrder
                 listOf(
                     "CHECK ((document_version >= 2))",
-                    "CHECK (((reviewed_document_version >= 1) AND (reviewed_document_version < document_version)))",
+                    "CHECK ((revision > 0))",
+                    "CHECK (((reviewed_document_version >= 1) AND (reviewed_document_version <= document_version)))",
                     "CHECK ((jsonb_typeof(plan) = 'object'::text))",
                 )
             application.database.strings(

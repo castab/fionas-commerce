@@ -29,6 +29,7 @@ data class InquiryProposal(
     /** The verified staff user who published it. */
     val issuedBy: UserId,
     val kind: ProposalIssuanceKind,
+    val servicePlanRevision: Int? = null,
 ) {
     init {
         require(documentReference.version.number >= 2) { "A canonical proposal requires an issued Quote" }

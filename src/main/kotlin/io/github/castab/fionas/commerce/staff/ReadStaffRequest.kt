@@ -35,11 +35,24 @@ class ReadStaffRequest(
             val proposal = proposals.latest(transaction, id)
             requireCoherentProposal(id, proposal, view)
             val histories = payments.read(transaction, document.latest.document.id)
-            // The approved plan of the published Quote; absent for Quotes issued without composition.
-            val plan = proposal?.let { servicePlans.find(transaction, it.documentReference) }
-            plan?.let {
-                check(it.describes(ledger.get(transaction, it.quote))) { "Staff request service plan disagrees with its Quote snapshot" }
+            val history = servicePlans.history(transaction, id)
+            history.forEach { plan ->
+                check(plan.describes(ledger.get(transaction, plan.document))) { "Service approval disagrees with its financial snapshot" }
             }
-            StaffRequest(inquiry, document, proposal, view, histories, plan)
+            val publishedPlan =
+                proposal?.servicePlanRevision?.let { revision ->
+                    checkNotNull(history.singleOrNull { it.revision == revision }) { "Missing published service approval" }
+                }
+            StaffRequest(
+                inquiry,
+                document,
+                proposal,
+                view,
+                histories,
+                publishedPlan,
+                history.lastOrNull(),
+                history,
+                proposals.history(transaction, id),
+            )
         }
 }

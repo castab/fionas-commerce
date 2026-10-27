@@ -77,26 +77,38 @@ class InquiryProposals(
         return publish(transaction, command.inquiryId, quote, command.issuedBy, ProposalIssuanceKind.INITIAL).copy(servicePlan = plan)
     }
 
-    /**
-     * Revises an unpaid published Quote from staff-committed final lines: a same-stage Quote of
-     * exactly the reviewed version, its optional service plan, a replacement deposit approved
-     * against that new version (even when the terms are unchanged), and the QUOTE_REVISED
-     * publication, atomically. Lines equal to the current Quote are no change.
-     */
+    /** Revalidates the preview under the association lock and atomically publishes meaningful changes. */
     internal fun reviseQuote(
         transaction: Transaction,
         command: ReviseInquiryQuoteProposal.Command,
     ): IssuedInquiryProposal {
         val current = canonical(transaction, command.inquiryId, command.expectedDocumentVersion)
-        reviewed(transaction, current, command.expectedDepositRequirementRevision)
-        val composed = QuoteComposer.compose(command.inquiryId, current.document, command.lines, command.servicePlan, command.terms)
+        val preview =
+            composeQuoteRevision(transaction, ledger, proposals, servicePlans, current.document, command.intent, rejectNoChange = false)
+        val composed = preview.composition
+        if (composed.reviewToken != command.reviewToken) {
+            throw CommerceFailure.Conflict(QUOTE_REVIEW_STALE_MESSAGE, QuoteReviewStale())
+        }
         val now = now()
-        val quote = documents.commitLines(transaction, current, composed.lines, command.issuedBy, now) as FinancialDocument.Quote
+        val quote =
+            if (composed.financialChange) {
+                documents.commitLines(transaction, current, composed.lines, command.issuedBy, now) as FinancialDocument.Quote
+            } else {
+                current.document as FinancialDocument.Quote
+            }
         check(quote == composed.quote) { "The persisted Quote differs from the composed Quote" }
-        val plan = composed.approve(transaction, quote, current.document.version, now, command.issuedBy)
-        documents.approveDeposit(transaction, quote, command.terms, command.expectedDepositRequirementRevision)
+        servicePlans.approveChange(
+            transaction,
+            command.inquiryId,
+            preview.currentServicePlan,
+            composed.servicePlan,
+            quote,
+            current.document.version,
+            now,
+            command.issuedBy,
+        )
+        if (preview.depositChange) documents.approveDeposit(transaction, quote, command.terms, command.expectedDepositRequirementRevision)
         return publish(transaction, command.inquiryId, quote, command.issuedBy, ProposalIssuanceKind.QUOTE_REVISED)
-            .copy(servicePlan = plan)
     }
 
     internal fun reviseDeposit(
@@ -164,16 +176,17 @@ class InquiryProposals(
     ): IssuedInquiryProposal {
         val view: FinancialLineageView = ledger.financialLineages(transaction, listOf(quote.id)).single()
         val requirement = view.depositRequirement!!.requirement as DepositRequirement.Active
-        val proposal = InquiryProposal(newId(), inquiryId, quote.reference, requirement.revision, now(), issuedBy, kind)
+        val plan = servicePlans.latest(transaction, inquiryId)
+        val proposal = InquiryProposal(newId(), inquiryId, quote.reference, requirement.revision, now(), issuedBy, kind, plan?.revision)
         proposals.append(transaction, proposal)
         requireCoherentProposal(inquiryId, proposal, view)
-        return IssuedInquiryProposal(proposal, documents.describeLocked(transaction, inquiryId, view), view)
+        return IssuedInquiryProposal(proposal, documents.describeLocked(transaction, inquiryId, view), view, plan)
     }
 
     private fun now(): Instant = clock.instant().truncatedTo(ChronoUnit.MICROS)
 }
 
-private fun sameTerms(
+internal fun sameTerms(
     first: DepositTerms,
     second: DepositTerms,
 ): Boolean =

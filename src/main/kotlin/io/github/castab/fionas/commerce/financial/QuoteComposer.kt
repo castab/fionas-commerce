@@ -68,8 +68,8 @@ const val QUOTE_TOTAL_NOT_POSITIVE = "QUOTE_TOTAL_NOT_POSITIVE"
  * policy, and generates nothing random (new line ids derive from their keys).
  *
  * From an Estimate it composes the Estimate's Quote successor (after a same-stage revision when
- * the lines change). From a Quote it composes the same-stage revised Quote, which must change
- * the lines.
+ * the lines change). From a Quote it composes a same-stage successor only for changed lines;
+ * publication policy independently checks whether service or deposit terms change.
  */
 internal object QuoteComposer {
     fun compose(
@@ -87,13 +87,7 @@ internal object QuoteComposer {
                     (successor as FinancialDocument.Estimate).toQuote()
                 }
                 is FinancialDocument.Quote -> {
-                    val changes =
-                        resolved.changes
-                            ?: throw lineProposalFailure(
-                                listOf(LineProposalViolations.NO_FINANCIAL_CHANGE),
-                                "The proposed lines are exactly the current Quote's; revise only the deposit instead",
-                            )
-                    validateChangeOrder(reviewed, changes) as FinancialDocument.Quote
+                    resolved.changes?.let { validateChangeOrder(reviewed, it) as FinancialDocument.Quote } ?: reviewed
                 }
                 is FinancialDocument.Invoice -> error("A canonical Quote is never composed from an Invoice")
             }
@@ -110,18 +104,19 @@ internal object QuoteComposer {
         return ComposedQuote(inquiryId, reviewed, resolved, quote, terms, required, plan, token)
     }
 
-    private fun reviewToken(
+    internal fun reviewToken(
         inquiryId: InquiryId,
         reviewed: FinancialDocument,
         resolved: ResolvedLineProposal,
-        quote: FinancialDocument.Quote,
-        terms: DepositTerms,
-        required: Money,
+        quote: FinancialDocument,
+        terms: DepositTerms?,
+        required: Money?,
         plan: ComposedServicePlan?,
+        context: List<String> = emptyList(),
     ): QuoteReviewToken {
         val bytes = ByteArrayOutputStream()
         DataOutputStream(bytes).use { output ->
-            output.writeInt(3)
+            output.writeInt(4)
             output.text(inquiryId.value.toString())
             output.text(reviewed.id.toString())
             output.writeInt(reviewed.version.number)
@@ -137,6 +132,7 @@ internal object QuoteComposer {
             output.text(quote.total.amount.decimalText())
             output.text(quote.currency.currencyCode)
             when (terms) {
+                null -> output.text("NONE")
                 is DepositTerms.Fixed -> {
                     output.text("FIXED")
                     output.text(terms.amount.amount.decimalText())
@@ -147,8 +143,10 @@ internal object QuoteComposer {
                     output.text(terms.percentage.decimalText())
                 }
             }
-            output.text(required.amount.decimalText())
-            output.text(required.currency.currencyCode)
+            output.optional(required?.amount?.decimalText())
+            output.optional(required?.currency?.currencyCode)
+            output.writeInt(context.size)
+            context.forEach { output.text(it) }
             output.writeBoolean(plan != null)
             plan?.let {
                 output.text(it.service.description)

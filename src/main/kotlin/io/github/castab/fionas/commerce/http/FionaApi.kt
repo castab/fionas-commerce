@@ -23,10 +23,15 @@ import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentHistory
 import io.github.castab.fionas.commerce.financial.InquiryFinancialLineage
+import io.github.castab.fionas.commerce.financial.InquiryInvoiceRevisions
+import io.github.castab.fionas.commerce.financial.InvoiceRevisionIntent
+import io.github.castab.fionas.commerce.financial.InvoiceRevisionPreview
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.IssuedInquiryProposal
 import io.github.castab.fionas.commerce.financial.PreviewInquiryQuote
 import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
+import io.github.castab.fionas.commerce.financial.QuoteRevisionIntent
+import io.github.castab.fionas.commerce.financial.QuoteRevisionPreview
 import io.github.castab.fionas.commerce.financial.ReconciledRefund
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
@@ -34,6 +39,7 @@ import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.financial.RecordedPayment
 import io.github.castab.fionas.commerce.financial.ReviseInquiryProposalDeposit
 import io.github.castab.fionas.commerce.financial.ReviseInquiryQuoteProposal
+import io.github.castab.fionas.commerce.financial.RevisedInquiryInvoice
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
@@ -80,6 +86,9 @@ class FionaOperations(
     val listStaffRequests: (ListStaffRequests.Command) -> StaffRequestPage,
     val readStaffRequest: (InquiryId) -> StaffRequest,
     val issueInquiryProposal: (IssueInquiryProposal.Command) -> IssuedInquiryProposal,
+    val previewInquiryQuoteRevision: (QuoteRevisionIntent) -> QuoteRevisionPreview,
+    val previewInquiryInvoiceRevision: (InvoiceRevisionIntent) -> InvoiceRevisionPreview,
+    val reviseInquiryInvoice: (InquiryInvoiceRevisions.Command) -> RevisedInquiryInvoice,
     val previewInquiryQuote: (PreviewInquiryQuote.Command) -> ComposedQuote,
     val reviseInquiryQuoteProposal: (ReviseInquiryQuoteProposal.Command) -> IssuedInquiryProposal,
     val reviseInquiryProposalDeposit: (ReviseInquiryProposalDeposit.Command) -> IssuedInquiryProposal,
@@ -135,6 +144,9 @@ fun fionaApiRoutes(
         acknowledgeInquiryCommunicationRoute(operations.acknowledgeInquiryCommunication, auth.access),
         listStaffRequestsRoute(operations.listStaffRequests, auth.access),
         readStaffRequestRoute(operations.readStaffRequest, auth.access),
+        previewInquiryQuoteRevisionRoute(operations.previewInquiryQuoteRevision, auth.access),
+        previewInquiryInvoiceRevisionRoute(operations.previewInquiryInvoiceRevision, auth.access),
+        reviseInquiryInvoiceRoute(operations.reviseInquiryInvoice, auth.access),
         previewInquiryQuoteRoute(operations.previewInquiryQuote, auth.access),
         issueInquiryProposalRoute(operations.issueInquiryProposal, auth.access),
         reviseInquiryQuoteProposalRoute(operations.reviseInquiryQuoteProposal, auth.access),

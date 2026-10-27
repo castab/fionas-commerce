@@ -324,8 +324,9 @@ a suggestion does not constitute approval. Quote, deposit approval and publicati
 atomically, as do subsequent republications. Publication is an independent Fiona business
 fact, beyond the financial stage derived from shared commerce history.
 
-Changing either the Quote or deposit terms requires republication and supersedes the
-earlier customer proposal. Only the latest proposal matching the authoritative Quote and
+Changing the Quote, deposit terms, or approved service commitment requires republication and
+supersedes the earlier customer proposal. A publication has its own identity even when its
+financial snapshot and deposit approval are unchanged. Only the latest proposal matching the authoritative Quote and
 deposit pair can be payable. Ordinary revision is a pre-payment workflow: payment
 allocation ends it, and refunds do not reopen it. Customer payment acceptance must
 validate proposal currentness and record money as one atomic unit so republication cannot
@@ -363,9 +364,20 @@ intermediate Estimate is recorded only for an actual financial change, and the s
 nonnegative-total policy runs before any ledger write.
 
 What Fiona promises to serve is an independent Fiona business fact: a money-free description
-of the commitment and notes on the lines, bound immutably to the exact Quote snapshot it
-approves and to the staff user who approved it. Amounts remain on the shared ledger lines it
-names. Quotes published without composed lines simply have no plan.
+of the commitment and notes on the lines, approved against an exact canonical financial
+snapshot by a staff user. Service approval history evolves independently of financial
+versions. A meaningful service-only amendment creates an approval without manufacturing
+financial changes or deposit revisions. Retention, replacement and intentional clearing are
+explicit business choices. Amounts remain on the shared ledger lines it names.
+
+The proposal accepted at booking binds its exact service approval as well as its Quote and
+deposit. That acceptance remains immutable. Subsequent Invoice amendments may establish a
+different effective fulfillment commitment, atomically with real financial changes when
+needed. Financial-only amendments retain the existing commitment. Acceptance and current
+fulfillment must remain distinguishable in reads; neither requires a separate Booking
+aggregate. Shared reconciliation continues to apply historical payments against the latest
+Invoice, including overpayment. Amendments never imply refunds, additional deposits,
+fulfillment or closure.
 
 Composition and publication are one atomic unit with the Quote, deposit approval and
 proposal; publication is still not delivery. See

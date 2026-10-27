@@ -20,6 +20,7 @@ import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.linesJson
 import io.github.castab.fionas.commerce.testing.replacementLines
+import io.github.castab.fionas.commerce.testing.reviseQuoteReviewed
 import io.github.castab.fionas.commerce.testing.withBearer
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -73,8 +74,8 @@ class InquiryProposalRoutesSpec :
                     .toString()
             read().proposal shouldBe a.proposal
             val revised =
-                app.adminPost(
-                    path(id) + "/quote-revisions",
+                app.reviseQuoteReviewed(
+                    id,
                     """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,""" +
                         """"lines":${replacementLines(acceptanceLines(guests = 100))},"terms":{"type":"PERCENTAGE","percentage":"20"}}""",
                 )

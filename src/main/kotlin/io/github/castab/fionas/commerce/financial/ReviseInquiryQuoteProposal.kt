@@ -20,7 +20,19 @@ class ReviseInquiryQuoteProposal(
         val terms: DepositTerms,
         val issuedBy: UserId,
         val servicePlan: ProposedServicePlan? = null,
-    )
+        val reviewToken: QuoteReviewToken? = null,
+        val servicePlanAction: ServicePlanAction = if (servicePlan == null) ServicePlanAction.RETAIN else ServicePlanAction.REPLACE,
+    ) {
+        val intent get() =
+            QuoteRevisionIntent(
+                inquiryId,
+                expectedDocumentVersion,
+                expectedDepositRequirementRevision,
+                lines,
+                ServicePlanChange(servicePlanAction, servicePlan),
+                terms,
+            )
+    }
 
     operator fun invoke(command: Command): IssuedInquiryProposal = transactor.inTransaction { proposals.reviseQuote(it, command) }
 }

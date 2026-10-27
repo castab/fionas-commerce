@@ -20,6 +20,7 @@ import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.acceptanceLines
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.newLinesProposal
+import io.github.castab.fionas.commerce.testing.reviewed
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -86,14 +87,15 @@ class InquiryProposalsSpec :
             rev: Int = 1,
             guests: Int = 100,
         ) = ReviseInquiryQuoteProposal(app.transactor, core())(
-            ReviseInquiryQuoteProposal.Command(
-                id,
-                Version.of(version),
-                DepositRequirementRevision.of(rev),
-                newLinesProposal(acceptanceLines(guests = guests)),
-                percent,
-                actor,
-            ),
+            ReviseInquiryQuoteProposal
+                .Command(
+                    id,
+                    Version.of(version),
+                    DepositRequirementRevision.of(rev),
+                    newLinesProposal(acceptanceLines(guests = guests)),
+                    percent,
+                    actor,
+                ).reviewed(app),
         )
 
         fun persisted(id: InquiryId) = app.transactor.inTransaction { history.history(it, id) }
@@ -121,7 +123,7 @@ class InquiryProposalsSpec :
             id: InquiryId,
             lines: LineProposal,
         ) = ReviseInquiryQuoteProposal(app.transactor, core())(
-            ReviseInquiryQuoteProposal.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, lines, percent, actor),
+            ReviseInquiryQuoteProposal.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, lines, percent, actor).reviewed(app),
         )
 
         fun current(id: InquiryProposalId) =
@@ -311,7 +313,7 @@ class InquiryProposalsSpec :
             unchanged(id) {
                 shouldThrow<CommerceFailure.ValidationFailed> { reviseLines(id, keepAllRescaled(id)) }
                     .violations
-                    .map { it.code } shouldBe listOf(LineProposalViolations.NO_FINANCIAL_CHANGE)
+                    .map { it.code } shouldBe listOf("NO_MATERIAL_CHANGE")
             }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { deposit(id, 1, 1, fixed("200")) } }
             unchanged(id) { shouldThrow<CommerceFailure.Conflict> { deposit(id, 2, 2, fixed("200")) } }
@@ -353,14 +355,15 @@ class InquiryProposalsSpec :
             unchanged(id) {
                 shouldThrow<IllegalStateException> {
                     ReviseInquiryQuoteProposal(app.transactor, core(failing))(
-                        ReviseInquiryQuoteProposal.Command(
-                            id,
-                            Version.of(2),
-                            DepositRequirementRevision.INITIAL,
-                            newLinesProposal(acceptanceLines(guests = 100)),
-                            percent,
-                            actor,
-                        ),
+                        ReviseInquiryQuoteProposal
+                            .Command(
+                                id,
+                                Version.of(2),
+                                DepositRequirementRevision.INITIAL,
+                                newLinesProposal(acceptanceLines(guests = 100)),
+                                percent,
+                                actor,
+                            ).reviewed(app),
                     )
                 }
             }
@@ -793,7 +796,7 @@ class InquiryProposalsSpec :
                     app.transactor.inTransaction {
                         history.append(
                             it,
-                            a.proposal.copy(id = InquiryProposalId(UUID.randomUUID()), kind = ProposalIssuanceKind.DEPOSIT_REVISED),
+                            a.proposal.copy(kind = ProposalIssuanceKind.DEPOSIT_REVISED),
                         )
                     }
                 }
@@ -826,14 +829,15 @@ class InquiryProposalsSpec :
                     CompletableFuture.supplyAsync {
                         if (change == "QUOTE") {
                             ReviseInquiryQuoteProposal(app.transactor, core(pausing))(
-                                ReviseInquiryQuoteProposal.Command(
-                                    id,
-                                    Version.of(2),
-                                    DepositRequirementRevision.INITIAL,
-                                    inputs,
-                                    percent,
-                                    actor,
-                                ),
+                                ReviseInquiryQuoteProposal
+                                    .Command(
+                                        id,
+                                        Version.of(2),
+                                        DepositRequirementRevision.INITIAL,
+                                        inputs,
+                                        percent,
+                                        actor,
+                                    ).reviewed(app),
                             )
                         } else {
                             ReviseInquiryProposalDeposit(app.transactor, core(pausing))(
