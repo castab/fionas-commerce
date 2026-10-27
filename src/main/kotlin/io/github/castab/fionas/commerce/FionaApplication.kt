@@ -69,6 +69,7 @@ import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.BootstrapFirstAdmin
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
+import io.github.castab.fionas.commerce.staff.ListStaffRequests
 import io.github.castab.fionas.commerce.staff.Login
 import io.github.castab.fionas.commerce.staff.PasswordHasher
 import io.github.castab.fionas.commerce.staff.ReadStaffDashboard
@@ -199,6 +200,12 @@ fun fionaApplication(
             val proposals = InquiryProposals(ledger, documentOwners, authorship, proposalHistory, servicePlans, clock, declines)
             val operations =
                 FionaOperations(
+                    listStaffRequests = ListStaffRequests(
+                        context.transactor,
+                        ReadInquiryOperationalStates(context.transactor, inquiries, documentOwners, ledger, fulfillment, declines),
+                        inquiries,
+                        customers,
+                    )::invoke,
                     readStaffRequest = ReadStaffRequest(
                         context.transactor,
                         getInquiry,

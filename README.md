@@ -98,6 +98,7 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md) and
 | `POST /inquiries/{inquiryId}/communications/acknowledge` | `fionas.communications.acknowledge` | Record explicit customer-email acknowledgement; repeated calls return `204`. |
 | `POST /inquiries/{inquiryId}/decline` | `fionas.inquiries.manage`, **staff USER only** | Terminally decline a REQUESTED inquiry with a required internal `reason` and the reviewed `expectedDocumentVersion`. See [Declining an inquiry](#declining-an-inquiry). |
 | `GET /staff/dashboard` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | One coherent snapshot of operational counts and enriched staff work queues. USER sessions and SERVICE tokens are supported. |
+| `GET /staff/requests` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Filtered, searchable request summaries with opaque cursors and totalCount. Includes closed/declined history; see [Staff request discovery](#staff-request-discovery). |
 | `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review, with the published Quote's optional `servicePlan`. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
 | `POST /staff/requests/{inquiryId}/quote-preview` | `commerce.financial-document.create`, `commerce.deposit-requirement.manage`, `fionas.financial-terms.manage`, **staff USER only** | Write-free preview of the initial Quote from staff-committed final lines: resolved lines, domain totals, deposit, service plan and `reviewToken`. See [Quote builder](#quote-builder). |
 | `POST /staff/requests/{inquiryId}/proposals` | Same as preview | Atomic initial Quote publication with approved deposit terms; optionally the reviewed `lines`, `servicePlan` and `reviewToken`. See [Atomic canonical proposal publication](#atomic-canonical-proposal-publication). |
@@ -1896,3 +1897,57 @@ Full verification, as CI runs it (`build` also generates the OpenAPI document):
 ```
 
 `./gradlew ktlintFormat` fixes formatting.
+
+### Staff request discovery
+
+`GET /staff/requests` (`listStaffRequests`) is the dedicated staff collection; the primitive
+`GET /inquiries` and request detail endpoint retain their contracts. Both
+`fionas.inquiries.read` and `commerce.financial-document.read` are required for USER sessions
+or SERVICE tokens. Success uses `Cache-Control: no-store`.
+
+Query parameters are single-valued: `filter` defaults to `all`, `q` is optional, `limit`
+defaults to 25 (1–100), and `cursor` is an opaque continuation. Invalid or repeated parameters
+return `400 malformed_request`, after authorization. Filters:
+
+| Filter | Membership |
+|---|---|
+| `all` | Every inquiry, including CLOSED and DECLINED |
+| `new` | REQUESTED |
+| `quoted` | QUOTED |
+| `booked` | BOOKED or SERVED |
+| `needs-closing` | SERVED with numerically zero canonical Invoice balance |
+| `closed` | CLOSED |
+| `declined` | DECLINED |
+
+Booked overlaps Needs closing. With no search, the four dashboard-backed totals agree with
+the dashboard summary for equivalent underlying state. Positive balances and negative
+overpayments never qualify for Needs closing. RELATED lineages never classify a request.
+
+Search trims surrounding whitespace, ignores blank text, and performs case-insensitive
+literal substrings on durable customer names and emails, or exact inquiry UUID matching.
+It accepts at most 200 UTF-16 code units (before trimming and after normalization), rejects
+control characters remaining after trimming and malformed Unicode, and combines with the filter using AND. SQL
+pattern characters and regex punctuation are literal. Returning customers' requests remain
+separate results. Case normalization uses Locale.ROOT; it does not remove accents.
+
+The response contains `items`, `nextCursor` and `totalCount` (all matches before pagination).
+Each compact item exposes inquiry/customer identities, customer name/email, event date/type,
+actual lifecycle stage, backend `needsClosing`, canonical document identity/version/stage,
+exact decimal string total/balance, currency, EXACT/FROM qualifier and inquiry/latest-version
+timestamps. FROM applies only to minimum-guest Estimates. Detail remains at
+`GET /staff/requests/{inquiryId}`.
+
+Results sort by inquiry creation time descending, then lexical UUID descending. Cursors
+bind the normalized filter and search through a SHA-256 digest, contain no customer text,
+and permit changing page size. A mismatched or malformed cursor is 400; the last page has
+an omitted `nextCursor` (application null), following CommerceJson's existing null-omission convention.
+Cursors are continuation positions, not authorization or integrity tokens.
+Each request calculates results in one unlocked REPEATABLE READ snapshot; independent pages
+do not freeze membership across concurrent business changes.
+
+At current scale the operation reads the complete canonical operational population and bulk
+customer/event enrichment, then filters, sorts and pages in memory. This avoids N+1 reads
+and keeps all classification server-owned, at O(population) memory and O(population log
+population) sorting cost. Only the requested page reaches clients. Future optimization must
+preserve canonical runtime reads and complete integrity checks; no local financial replica
+or direct runtime-table SQL is implied.

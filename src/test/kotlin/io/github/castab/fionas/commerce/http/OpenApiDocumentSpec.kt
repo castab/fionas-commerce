@@ -94,6 +94,51 @@ class OpenApiDocumentSpec :
             method: String,
         ) = document.at("paths", path, method).jsonObject
 
+        test("staff request collection documents query semantics compact fields and exact decimals") {
+            val route = operation("/staff/requests", "get")
+            route.text("operationId") shouldBe "listStaffRequests"
+            route
+                .at("parameters")
+                .jsonArray
+                .map { it.text("name") }
+                .toSet() shouldBe setOf("filter", "q", "limit", "cursor")
+            listOf(
+                "REPEATABLE READ",
+                "fionas.inquiries.read",
+                "commerce.financial-document.read",
+                "no-store",
+                "overlap",
+                "DECLINED",
+            ).forEach {
+                route.text("description") shouldContain it
+            }
+            schema("StaffRequestListResponse").strings("required") shouldContainExactly listOf("items", "totalCount")
+            val item = schema("StaffRequestListItemResponse")
+            listOf("total", "balance").forEach {
+                item.text("properties", it, "type") shouldBe "string"
+                item.text("properties", it, "pattern") shouldBe SIGNED_DECIMAL
+            }
+            item.at("properties").jsonObject.keys shouldBe
+                setOf(
+                    "inquiryId",
+                    "customerId",
+                    "customerName",
+                    "customerEmail",
+                    "eventDate",
+                    "eventType",
+                    "stage",
+                    "needsClosing",
+                    "documentId",
+                    "version",
+                    "financialStage",
+                    "total",
+                    "totalQualifier",
+                    "balance",
+                    "currency",
+                    "inquiryCreatedAt",
+                    "latestDocumentVersionAt",
+                )
+        }
         test("staff request composes existing detail schemas and documents both permissions") {
             val route = operation("/staff/requests/{inquiryId}", "get")
             route.text("operationId") shouldBe "readStaffRequest"
@@ -253,6 +298,7 @@ class OpenApiDocumentSpec :
             mapOf(
                 Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "acknowledgeInquiryCommunication") to
                     listOf("204", "400", "401", "403", "404", "500"),
+                Triple("/staff/requests", "get", "listStaffRequests") to listOf("200", "400", "401", "403", "500"),
                 Triple("/staff/dashboard", "get", "readStaffDashboard") to listOf("200", "401", "403", "500"),
                 Triple("/staff/requests/{inquiryId}", "get", "readStaffRequest") to listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/staff/requests/{inquiryId}/proposals", "post", "issueInquiryProposal") to
@@ -323,6 +369,7 @@ class OpenApiDocumentSpec :
         val tags =
             mapOf(
                 "readStaffDashboard" to "Staff dashboard",
+                "listStaffRequests" to "Staff requests",
                 "readStaffRequest" to "Staff requests",
                 "issueInquiryProposal" to "Staff proposals",
                 "previewInquiryQuote" to "Staff proposals",
@@ -403,6 +450,8 @@ class OpenApiDocumentSpec :
             listOf(
                 "StaffDashboardResponse",
                 "StaffRequestResponse",
+                "StaffRequestListResponse",
+                "StaffRequestListItemResponse",
                 "InquiryProposalResponse",
                 "IssuedInquiryProposalResponse",
                 "IssueInquiryProposalRequest",

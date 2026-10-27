@@ -54,6 +54,7 @@ import java.time.Duration
 private val notInvoked =
     FionaOperations(
         acknowledgeInquiryCommunication = { error("not called while rendering") },
+        listStaffRequests = { error("not called while rendering") },
         readStaffRequest = { error("not called while rendering") },
         issueInquiryProposal = { error("not called while rendering") },
         previewInquiryQuote = { error("not called while rendering") },

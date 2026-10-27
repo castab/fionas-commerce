@@ -21,6 +21,7 @@ import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordRefund
 import io.github.castab.fionas.commerce.http.StaffDashboardResponse
 import io.github.castab.fionas.commerce.http.StaffDashboardSummaryResponse
+import io.github.castab.fionas.commerce.http.StaffRequestListResponse
 import io.github.castab.fionas.commerce.staff.DashboardAttentionPolicy
 import io.github.castab.fionas.commerce.staff.ReadStaffDashboard
 import io.github.castab.fionas.commerce.staff.StaffAttentionReason
@@ -185,6 +186,28 @@ class InquiryOperationalStatesSpec :
             dto.workQueue.needsResolution.items
                 .single { it.reasons.any { reason -> reason.name == "READY_TO_CLOSE" } }
                 .balance shouldBe "0.00"
+            val expectedFilters =
+                mapOf(
+                    "all" to listOf(requested, quoted, booked, positive, zero, negative, closed),
+                    "new" to listOf(requested),
+                    "quoted" to listOf(quoted),
+                    "booked" to listOf(booked, positive, zero, negative),
+                    "needs-closing" to listOf(zero),
+                    "closed" to listOf(closed),
+                    "declined" to emptyList(),
+                )
+            expectedFilters.forEach { (filter, expected) ->
+                val page =
+                    CommerceJson.asA(
+                        app.adminGet("/staff/requests?filter=$filter").bodyString(),
+                        StaffRequestListResponse.serializer(),
+                    )
+                page.items.map { it.inquiryId }.toSet() shouldBe expected.map { it.first.value.toString() }.toSet()
+                page.totalCount shouldBe expected.size
+                page.nextCursor shouldBe null
+                page.items.filter { it.needsClosing }.map { it.inquiryId } shouldBe
+                    expected.filter { it == zero }.map { it.first.value.toString() }
+            }
             val states = snapshot.states.associateBy { it.inquiryId }
             listOf(
                 requested to InquiryOperationalCounts(1, 0, 0, 0),
@@ -253,6 +276,11 @@ class InquiryOperationalStatesSpec :
                     .single()
                     .financial.reconciliation.balance
             app.transactor.inTransaction { owners.initialEstimates(it) } shouldBe mapOf(inquiry to canonical)
+            val page = CommerceJson.asA(app.adminGet("/staff/requests?filter=new").bodyString(), StaffRequestListResponse.serializer())
+            page.totalCount shouldBe 1
+            page.items.single().documentId shouldBe canonical.toString()
+            page.items.single().financialStage shouldBe "ESTIMATE"
+            page.items.single().needsClosing shouldBe false
         }
 
         test("pure counts treat zero balances at different decimal scales equally and snapshots retain their own state collection") {

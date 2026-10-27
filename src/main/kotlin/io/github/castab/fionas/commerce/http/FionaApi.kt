@@ -46,9 +46,11 @@ import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
+import io.github.castab.fionas.commerce.staff.ListStaffRequests
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import io.github.castab.fionas.commerce.staff.StaffDashboard
 import io.github.castab.fionas.commerce.staff.StaffRequest
+import io.github.castab.fionas.commerce.staff.StaffRequestPage
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
 import org.http4k.contract.Root
@@ -75,6 +77,7 @@ const val API_DOCS_PATH = "/docs"
  */
 class FionaOperations(
     val acknowledgeInquiryCommunication: (RecordInquiryCommunication.Acknowledge) -> Unit,
+    val listStaffRequests: (ListStaffRequests.Command) -> StaffRequestPage,
     val readStaffRequest: (InquiryId) -> StaffRequest,
     val issueInquiryProposal: (IssueInquiryProposal.Command) -> IssuedInquiryProposal,
     val previewInquiryQuote: (PreviewInquiryQuote.Command) -> ComposedQuote,
@@ -130,6 +133,7 @@ fun fionaApiRoutes(
 ): List<ContractRoute> =
     listOf(
         acknowledgeInquiryCommunicationRoute(operations.acknowledgeInquiryCommunication, auth.access),
+        listStaffRequestsRoute(operations.listStaffRequests, auth.access),
         readStaffRequestRoute(operations.readStaffRequest, auth.access),
         previewInquiryQuoteRoute(operations.previewInquiryQuote, auth.access),
         issueInquiryProposalRoute(operations.issueInquiryProposal, auth.access),

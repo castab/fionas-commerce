@@ -1662,7 +1662,7 @@ any product catalog, offerings binding, pricing engine, price preview or price v
 on-behalf-of headers or delegated staff identity,
 a generic line-source identity, stored balances or payment statuses, tax,
 travel fees, minimum orders, inventory, availability schedules/windows, deposit
-schedules, customer merge or deduplication, inquiry search, filters, or
+schedules, customer merge or deduplication, generic inquiry query frameworks, or
 arbitrary status mutation, and further event details (street address, time, contacts). Do not add placeholders for
 them.
 
@@ -1842,3 +1842,29 @@ Changes to endpoints, the API contract, configuration, migrations, packages, the
 customer-matching policy, the trusted priced-line boundary, the financial-document or payment policy,
 the bootstrap grants, the version convention, or the upstream version must update
 `README.md` and this file in the same change.
+
+## Staff request discovery
+
+`ListStaffRequests` / `GET /staff/requests` is the dedicated discovery slice; do not expand
+`ListInquiries`. It owns one unlocked REPEATABLE_READ transaction covering the complete
+`ReadInquiryOperationalStates` core and bulk requested-inquiry/customer enrichment. Missing
+or contradictory population data fails the entire request, even outside search/filter
+matches. No per-item reads, financial SQL, persisted projection, or writes are introduced.
+
+The explicit filters are all, new, quoted, booked, needs-closing, closed and declined.
+Membership reuses operational predicates (including the shared booked predicate used by
+counts); booked includes BOOKED/SERVED and overlaps exact-zero SERVED needsClosing. All and
+declined expose terminal history. Canonical INITIAL_ESTIMATE alone determines lifecycle.
+Literal normalized customer-name/email substring search or exact UUID combines with the
+filter before pagination. Search is bounded to 200 UTF-16 units before trimming and after
+Locale.ROOT lowercasing; controls and malformed Unicode are rejected. No deduplication.
+
+HTTP parses single-valued queries after both existing read permissions, owns base64url
+cursor encoding, and binds positions to a versioned SHA-256 filter/search identity without
+customer text. The typed operation accepts criteria and a timestamp/InquiryId position.
+Sort is creation time descending then UUID string descending, never JVM signed UUID order.
+`nextCursor` is omitted at the end under the shared CommerceJson null convention.
+`totalCount` covers all matches in the same snapshot; no cross-page frozen snapshot is
+promised. Successful compact summaries are no-store and preserve exact financial strings
+and the dashboard EXACT/FROM rule. Invalid query/cursor values are 400 runtime errors.
+See README's Staff request discovery section for client semantics and scale tradeoffs.
