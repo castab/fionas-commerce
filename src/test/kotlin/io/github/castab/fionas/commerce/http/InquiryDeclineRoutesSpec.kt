@@ -94,6 +94,21 @@ class InquiryDeclineRoutesSpec :
             staff.financial.reconciliation!!.balance shouldBe "681.25"
             staff.proposal shouldBe null
             app.adminGet("/inquiries?limit=100").bodyString().contains(id) shouldBe true
+            listOf("all", "declined").forEach { filter ->
+                val page =
+                    CommerceJson.asA(
+                        app.adminGet("/staff/requests?filter=$filter").bodyString(),
+                        StaffRequestListResponse.serializer(),
+                    )
+                page.items.single().inquiryId shouldBe id
+                page.items.single().stage shouldBe InquiryStageResponse.DECLINED
+                page.totalCount shouldBe 1
+            }
+            listOf("new", "quoted", "booked", "needs-closing", "closed").forEach { filter ->
+                CommerceJson
+                    .asA(app.adminGet("/staff/requests?filter=$filter").bodyString(), StaffRequestListResponse.serializer())
+                    .totalCount shouldBe 0
+            }
         }
 
         test("a repeated decline is an illegal transition and a stale version a conflict, writing nothing") {

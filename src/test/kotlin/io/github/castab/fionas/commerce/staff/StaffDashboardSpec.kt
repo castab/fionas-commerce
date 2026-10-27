@@ -129,6 +129,28 @@ class StaffDashboardSpec :
                 }
             }
             app.database.execute("UPDATE fionas.inquiries SET event_type = 'WEDDING' WHERE id = '${oldest.id.value}'")
+            val listing =
+                ListStaffRequests(
+                    app.transactor,
+                    ReadInquiryOperationalStates(app.transactor, inquiries, owners, app.context.financialLedger, facts),
+                    inquiries,
+                    customers,
+                )
+            val first = listing(ListStaffRequests.Command(limit = 1))
+            first.items
+                .single()
+                .inquiry.id.value
+                .toString() shouldBe tied[0]
+            val second = listing(ListStaffRequests.Command(after = first.next, limit = 1))
+            second.items
+                .single()
+                .inquiry.id.value
+                .toString() shouldBe tied[1]
+            val third = listing(ListStaffRequests.Command(after = second.next, limit = 1))
+            third.items
+                .single()
+                .inquiry.id shouldBe oldest.id
+            third.next shouldBe null
             val result = operation()()
             result.workQueue.needsQuote.items
                 .map { it.inquiryId.value.toString() } shouldBe

@@ -15,6 +15,8 @@ class InquiryOperationalState(
     /** DECLINED is terminal history: no queue, count or attention applies to it. */
     val active: Boolean get() = lifecycle.stage != InquiryStage.DECLINED
 
+    val booked: Boolean get() = lifecycle.stage == InquiryStage.BOOKED || lifecycle.stage == InquiryStage.SERVED
+
     val needsQuote: Boolean get() = lifecycle.stage == InquiryStage.REQUESTED
     val awaitingQuoteReply: Boolean get() = lifecycle.stage == InquiryStage.QUOTED
     val needsClosing: Boolean get() =
@@ -35,7 +37,7 @@ data class InquiryOperationalCounts(
             InquiryOperationalCounts(
                 new = states.count { it.needsQuote },
                 quoted = states.count { it.awaitingQuoteReply },
-                booked = states.count { it.lifecycle.stage == InquiryStage.BOOKED || it.lifecycle.stage == InquiryStage.SERVED },
+                booked = states.count { it.booked },
                 needsClosing = states.count { it.needsClosing },
             )
     }
