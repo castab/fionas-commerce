@@ -2,8 +2,8 @@ package io.github.castab.fionas.commerce.financial
 
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.runtime.financial.FinancialLedger
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
-import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.time.Instant
 import java.util.UUID
@@ -27,7 +27,7 @@ class MaterializeInquiryFinancialDocument(
         inquiryId: InquiryId,
         stage: FirstSnapshotStage,
         lines: List<PricedLine>,
-        author: PrincipalId,
+        author: OperationOrigin,
         recordedAt: Instant,
         purpose: InquiryDocumentPurpose = InquiryDocumentPurpose.RELATED,
     ): FinancialDocument {

@@ -101,7 +101,7 @@ object InquiryRecovery {
                                 migrations = ApplicationMigrations(FIONA_MIGRATION_SCHEMA, listOf(FIONA_MIGRATION_LOCATION)),
                                 permissionDefinitions = FionaPermissions.definitions,
                                 routes = { context ->
-                                    handle = inquiryIntakeHandler(context, configuration, Clock.systemUTC())
+                                    handle = inquiryIntakeHandler(context, Clock.systemUTC())
                                     emptyList()
                                 },
                             ),

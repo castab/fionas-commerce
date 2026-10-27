@@ -2,15 +2,15 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.25/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.25/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.26/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.26/domain)
 artifacts.
 
 > **Status: early slices.** Fiona records inquiries and their customers, owns which inquiry
 > each financial document belongs to, publishes canonical proposals (Quote + approved deposit),
 > projects the booking lifecycle, and records served/closed facts. **Fiona has no catalog and
 > no pricing engine.** Every financial line arrives already priced from a trusted authority:
-> the `fionas-web` server (a SERVICE principal) for a customer's initial Estimate, and a
+> the `fionas-web` server (authenticated HTTP or secured NATS) for a customer's initial Estimate, and a
 > verified staff USER for every negotiated document after it. Fiona validates and stores
 > those exact lines through commerce-runtime's financial ledger, which derives every total.
 > Documents, payments, refunds and settlement are commerce-runtime's; there is no separate
@@ -25,13 +25,14 @@ Intake defaults to disabled; enable it only after the documented ownership cutov
 standalone worker. No deployment or broker change happens automatically.
 
 Enablement uses `FIONAS_INTAKE_ENABLED=true`, independent `FIONAS_INTAKE_NATS_*` credentials
-and `FIONAS_INTAKE_AUTHOR_SERVICE_ID` (prefer the existing worker's SERVICE UUID). It requires
+with application-owned INTERNAL attribution (`fionas.inquiry-intake`). It requires
 the bounded JDBC URL/pool settings and at least 100s termination grace described in the
 guide. Database validation reports the specific rejected setting; equivalent timeout option
 order and millisecond/second units are accepted. Both JDBC query parameters belong in the
 commerce service's `DATABASE_JDBC_URL`, not separate environment variables.
-Per-delivery live authorization still requires an ACTIVE SERVICE with
-`fionas.inquiries.create`; no HTTP credential secret is needed for local operation calls.
+Intake and recovery require no commerce SERVICE registration or role. External HTTP still
+requires an authenticated SERVICE with live `fionas.inquiries.create`; NATS authentication,
+publish ACLs and strict message validation remain required.
 Permanent failures publish minimal `InquiryProcessingFailed v2` before TERM. Operator
 monitoring must observe intake logs/broker state separately from HTTP health and outbox
 backlog. The packaged `events.InquiryRecovery` CLI retries an exact retained sequence without
@@ -58,8 +59,8 @@ fionas-web (separate) the customer catalog, its pricing, and the staff UI; calls
                        a SERVICE for submissions and on behalf of a verified staff session
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.25`, which brings
-`commerce-domain:0.0.25` with it. It contributes its migration schema and location,
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.26`, which brings
+`commerce-domain:0.0.26` with it. It contributes its migration schema and location,
 permissions, and routes to the runtime through `ApplicationContributions`, and every write
 goes through the runtime's shared `Transactor`:
 
@@ -1078,10 +1079,15 @@ or pricing input is ever consulted to read, evolve, transition or settle it. Lat
 evolve from the previous snapshot plus explicit line changes.
 
 `fionas.financial_document_authorship` records, for each exact version whose lines were
-committed, who committed them (`USER` or `SERVICE` principal) and when. Transitions copy the
+committed, who committed them (a `USER`/`SERVICE` principal or INTERNAL component) and when. Transitions copy the
 predecessor's authorship to the successor (the lines did not change); a version without a row
 was written outside Fiona's authored paths. It holds no money. Document responses expose it as
-`linesAuthoredBy` (`principalKind`, `principalId`, `recordedAt`).
+`linesAuthoredBy` (`originKind`, nullable `principalKind`/`principalId`, nullable `component`,
+`recordedAt`). PRINCIPAL retains USER/SERVICE and UUID; INTERNAL records `fionas.inquiry-intake`
+with absent principal fields. The origin identifies who committed the lines, distinct from the
+web pricing source. Fiona V3 preserves historical principal rows and constrains valid origin
+combinations. `fionas-web` must handle INTERNAL and regenerate its client from OpenAPI; see
+[deployment and response compatibility](docs/inquiry-intake.md#authorship-api-and-application-rollback).
 
 ```text
 D/v1 Estimate  $681.25   lines by SERVICE fionas-web (customer submission)
@@ -1507,10 +1513,13 @@ Commerce 0.0.24 adds runtime-owned `V2__transactional_outbox.sql` after its unch
 Commerce 0.0.25 adds `V3__outbox_jsonb_payload.sql`, converting valid historical JSON objects
 from text to JSONB without changing their business meaning or destination; invalid/non-object
 history fails migration and needs an explicit operator decision.
-These additive migrations upgrade current V1/V2 databases normally. Fiona's additive
-`V2__inquiry_declines.sql` likewise only creates `fionas.inquiry_declines` and upgrades a deployed
-`V1` database in place, preserving every inquiry; the historical 0.0.23 rebaseline instructions below apply only to databases
-that predate that rebaseline. No reset is required for a valid 0.0.23/0.0.24 → 0.0.25 upgrade.
+Commerce 0.0.26 adds no runtime migration. These additive migrations upgrade current V1/V2
+databases normally. Fiona's additive `V2__inquiry_declines.sql` likewise only creates
+`fionas.inquiry_declines`, and `V3__internal_line_authorship.sql` only extends
+`fionas.financial_document_authorship` for INTERNAL origins; both upgrade a deployed database
+in place, preserving every inquiry and existing USER/SERVICE authorship row. The historical
+0.0.23 rebaseline instructions below apply only to databases that predate that rebaseline. No
+reset is required for a valid 0.0.23/0.0.24/0.0.25 → 0.0.26 upgrade.
 
 > **Rebaseline for the trusted priced-line release (commerce 0.0.23).** commerce-runtime
 > 0.0.23 replaces its migration history with a single `V1__commerce_baseline`, and Fiona
@@ -1879,7 +1888,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after issuance, RELATED exclusion, integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, nested response parity, permission intersection and no-store |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: staff Estimate, line edits, Quote, deposit, Invoice and final payment; several lineages per inquiry; caller totals never authoritative; carry, override, remove, add and reorder keeping identities; change orders in every stage; stable rejection codes; stale versions; illegal transitions; payment policy and validation; duplicate references; non-Fiona documents `404`; staff-only routes with live permissions; declared methods |
 | `FinancialLedgerExpansionSpec`, `FinancialDocumentAtomicitySpec` | Direct first-snapshot stages from staff lines; invalid line sets append nothing; standalone receipts, partial and split allocations, runtime limits and Fiona stage/version policy; every cross-boundary write (creation, change orders, combined payments, allocations) rolls back the ledger with Fiona's rows |
-| `FinancialDocumentRepositoriesSpec` | Associations (several lineages per inquiry, one inquiry per lineage, first-snapshot FK) and line authorship (USER/SERVICE round trips, copies to successors, exact-snapshot FK, once per version, transactional rollback, kind check) |
+| `FinancialDocumentRepositoriesSpec` | Associations (several lineages per inquiry, one inquiry per lineage, first-snapshot FK) and line authorship (USER/SERVICE/INTERNAL round trips, copies to successors, exact-snapshot FK, once per version, transactional rollback, kind check) |
 | `FinancialDocumentReadConsistencySpec` | Current-document, history, and inquiry-list reads keep their snapshot while a payment or quote commits; ownership lookups never take the mutation lock |
 | `FinancialDocumentPaymentsSpec`, `UnappliedPaymentsSpec` | Canonical deposit acceptance and rejection; document payment histories rediscovered after their responses are gone; split payments whole; runtime ordering; unapplied receipts; permission boundaries |
 | `DepositRequirementRoutesSpec`, `DepositRequirementOperationsSpec` | Reads for USER or SERVICE; standalone PUT/DELETE only for a staff USER with both `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage` (a SERVICE with both, or a USER with either alone, is `403` and writes nothing); deposit unions, history, frozen amounts, payment/refund satisfaction, ownership, permissions, bulk facts and activity, set-based reads, REPEATABLE READ coherence and NOWAIT rollback |

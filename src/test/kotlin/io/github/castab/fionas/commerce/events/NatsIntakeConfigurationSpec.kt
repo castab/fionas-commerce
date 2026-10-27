@@ -11,7 +11,6 @@ import io.kotest.matchers.string.shouldNotContain
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.sql.DriverManager
-import java.util.UUID
 
 internal fun boundedIntakeDatabase(database: CommerceRuntimeConfiguration.Database): CommerceRuntimeConfiguration.Database =
     database.copy(
@@ -121,7 +120,6 @@ class NatsIntakeConfigurationSpec :
                 "FIONAS_INTAKE_ENABLED" to "true",
                 "FIONAS_INTAKE_NATS_URL" to "nats://127.0.0.1:1",
                 "FIONAS_INTAKE_NATS_TOKEN" to "test-private-token",
-                "FIONAS_INTAKE_AUTHOR_SERVICE_ID" to UUID.randomUUID().toString(),
             )
         test("disabled ignores unrelated intake settings; enabled config and service factory never connect") {
             NatsIntakeConfiguration.fromEnvironment(emptyMap()) shouldBe null
@@ -132,12 +130,14 @@ class NatsIntakeConfigurationSpec :
             NatsIntakeTransport(enabled).use { }
             enabled.toString() shouldNotContain "test-private-token"
         }
-        test("invalid enabled authentication URL and author settings fail without exposing secrets") {
+        test("obsolete author configuration is ignored") {
+            val enabled = checkNotNull(NatsIntakeConfiguration.fromEnvironment(environment + ("FIONAS_INTAKE_AUTHOR_SERVICE_ID" to "bad")))
+            fionaApplication(bootstrap = null, outboxPublisher = null, intake = enabled).backgroundServices.size shouldBe 1
+        }
+        test("invalid enabled authentication URL settings fail without exposing secrets") {
             val invalid =
                 listOf(
                     environment + ("FIONAS_INTAKE_ENABLED" to "yes"),
-                    environment + ("FIONAS_INTAKE_AUTHOR_SERVICE_ID" to "bad"),
-                    environment - "FIONAS_INTAKE_AUTHOR_SERVICE_ID",
                     environment - "FIONAS_INTAKE_NATS_TOKEN",
                     environment + ("FIONAS_INTAKE_NATS_URL" to "nats://test-private-token@example.com"),
                     environment + ("FIONAS_INTAKE_NATS_TOKEN" to ""),

@@ -1,15 +1,12 @@
 package io.github.castab.fionas.commerce.events
 
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
-import io.github.castab.commerce.staff.ServiceId
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
-import java.util.UUID
 
 /** Disabled by default. Construction validates configuration without any broker or database I/O. */
 class NatsIntakeConfiguration private constructor(
     internal val connection: NatsConnectionConfiguration,
-    val author: ServiceId,
 ) {
     companion object {
         fun fromEnvironment(environment: Map<String, String> = System.getenv()): NatsIntakeConfiguration? {
@@ -21,11 +18,8 @@ class NatsIntakeConfiguration private constructor(
             require(listOf("CREDS_FILE", "USER", "TOKEN").count { environment.containsKey("FIONAS_INTAKE_NATS_$it") } == 1) {
                 "Intake requires exactly one NATS authentication method: mounted credentials, user/password, or token"
             }
-            val id = environment["FIONAS_INTAKE_AUTHOR_SERVICE_ID"]
-            require(id != null && submittedUuid.matches(id)) { "FIONAS_INTAKE_AUTHOR_SERVICE_ID must be a SERVICE UUID" }
             return NatsIntakeConfiguration(
                 NatsConnectionConfiguration.fromEnvironment(environment, "FIONAS_INTAKE_NATS"),
-                ServiceId(UUID.fromString(id)),
             )
         }
     }

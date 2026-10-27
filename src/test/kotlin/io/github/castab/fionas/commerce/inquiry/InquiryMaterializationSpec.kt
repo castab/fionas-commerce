@@ -8,6 +8,7 @@ import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
@@ -111,7 +112,8 @@ class InquiryMaterializationSpec :
                 inquiries.findRequested(transaction, inquiry.id)?.requestedService shouldBe requestedService()
                 associations.initialEstimateOf(transaction, inquiry.id) shouldBe id
                 associations.documentsOf(transaction, inquiry.id) shouldBe listOf(id)
-                authorship.findAll(transaction, id) shouldBe mapOf(Version.INITIAL to LineAuthorship(application.web.id, STORED_INSTANT))
+                authorship.findAll(transaction, id) shouldBe
+                    mapOf(Version.INITIAL to LineAuthorship(OperationOrigin.Principal(application.web.id), STORED_INSTANT))
             }
             val after = counts()
             tables.forEach { after.getValue(it) shouldBe before.getValue(it) + 1 }
@@ -199,7 +201,14 @@ class InquiryMaterializationSpec :
             val lines = listOf(CHURROS.priced())
             application.transactor.inTransaction { transaction ->
                 MaterializeInquiryFinancialDocument(application.context.financialLedger, associations, authorship, { relatedId })
-                    .create(transaction, inquiry.id, FirstSnapshotStage.ESTIMATE, lines, application.adminId, STORED_INSTANT)
+                    .create(
+                        transaction,
+                        inquiry.id,
+                        FirstSnapshotStage.ESTIMATE,
+                        lines,
+                        OperationOrigin.Principal(application.adminId),
+                        STORED_INSTANT,
+                    )
             }
             val before = counts()
             val secondId = UUID.randomUUID()
@@ -211,7 +220,7 @@ class InquiryMaterializationSpec :
                             inquiry.id,
                             FirstSnapshotStage.ESTIMATE,
                             lines,
-                            application.web.id,
+                            OperationOrigin.Principal(application.web.id),
                             STORED_INSTANT,
                             InquiryDocumentPurpose.INITIAL_ESTIMATE,
                         )
@@ -236,7 +245,7 @@ class InquiryMaterializationSpec :
                 .shouldBe(emptyList())
             val read = GetFinancialDocument(application.transactor, application.context.financialLedger, associations, authorship)(id)
             read.latest.document.lineItems shouldBe initial.lineItems
-            read.latest.authorship?.author shouldBe application.web.id
+            read.latest.authorship?.author shouldBe OperationOrigin.Principal(application.web.id)
             val custom =
                 LineItem(
                     id = UUID.randomUUID(),
@@ -293,7 +302,8 @@ class InquiryMaterializationSpec :
                     it.map { snapshot -> snapshot.document.version.number } shouldBe listOf(1, 2, 3, 4)
                     it.first().document.lineItems shouldBe initial.lineItems
                     // v2 was appended through the raw ledger (no Fiona author); the Quote and Invoice carry v2's absence forward.
-                    it.map { snapshot -> snapshot.authorship?.author } shouldBe listOf(application.web.id, null, null, null)
+                    it.map { snapshot -> snapshot.authorship?.author } shouldBe
+                        listOf(OperationOrigin.Principal(application.web.id), null, null, null)
                 }
             application.transactor.inTransaction {
                 authorship.find(it, FinancialDocumentReference(id, Version.INITIAL)).shouldNotBeNull()

@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce.inquiry
 
 import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.Email
@@ -40,7 +41,7 @@ class InquiryRequestFingerprintSpec :
                 EventDate.of("2026-12-05"),
                 EventType.BIRTHDAY,
                 InquirySubmissionKey("A"),
-                ServiceId(UUID.fromString("00000000-0000-0000-0000-000000000001")),
+                OperationOrigin.Principal(ServiceId(UUID.fromString("00000000-0000-0000-0000-000000000001"))),
             )
 
         fun requested(value: RequestedService) = original.copy(requestedService = value)
@@ -97,7 +98,11 @@ class InquiryRequestFingerprintSpec :
                     message = InquiryMessage.ofOptional(" Birthday "),
                     zipCode = ZipCode.of(" 02108 "),
                     submissionKey = InquirySubmissionKey("different"),
-                    submittedBy = ServiceId(UUID.randomUUID()),
+                    origin =
+                        OperationOrigin.Internal(
+                            io.github.castab.commerce.runtime.operation
+                                .InternalComponentId("fionas.inquiry-intake"),
+                        ),
                     lines =
                         listOf(
                             service.copy(quantity = BigDecimal("100.000"), unitPrice = money("4.5"), taxAmount = money("0")),

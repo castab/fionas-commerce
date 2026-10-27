@@ -1,7 +1,7 @@
 package io.github.castab.fionas.commerce.events
 
 import io.github.castab.commerce.runtime.operation.CommerceFailure
-import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.fionas.commerce.inquiry.IdempotencyKeyReused
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -57,7 +57,11 @@ internal class TestDelivery(
 
 class InquiryIntakeSpec :
     FunSpec({
-        val author = ServiceId(UUID.randomUUID())
+        val author =
+            OperationOrigin.Internal(
+                io.github.castab.commerce.runtime.operation
+                    .InternalComponentId("fionas.inquiry-intake"),
+            )
 
         test("targeted recovery shares processing without issuing source disposition") {
             val persisted = TestDelivery()
@@ -123,11 +127,11 @@ class InquiryIntakeSpec :
             worker.close()
         }
 
-        test("producer projection preserves exact decimals, order, UUID spelling and configured authority") {
+        test("producer projection preserves exact decimals, order, UUID spelling and boundary-supplied origin") {
             val id = UUID.randomUUID().toString().uppercase()
             val command = submittedCommand(submittedFixture(id).toByteArray(), author)
             command.submissionKey.value shouldBe id
-            command.submittedBy shouldBe author
+            command.origin shouldBe author
             command.lines.map { it.description } shouldBe listOf("Service", "Travel")
             command.lines
                 .first()

@@ -389,11 +389,14 @@ class DatabaseSchemaSpec :
                     "document_id NO uuid",
                     "document_version NO integer",
                     "author_kind NO text",
-                    "author_id NO uuid",
+                    "author_id YES uuid",
                     "recorded_at NO timestamp with time zone",
+                    "author_component YES text",
                 )
-            application.database.checks("financial_document_authorship", "author_kind") shouldContainExactly
-                listOf("CHECK ((author_kind = ANY (ARRAY['USER'::text, 'SERVICE'::text])))")
+            application.database
+                .checks("financial_document_authorship", "author_kind")
+                .single()
+                .contains("INTERNAL") shouldBe true
         }
 
         test("Fiona duplicates no ledger fact: documents, payments, refunds, and reconciliation stay in commerce") {

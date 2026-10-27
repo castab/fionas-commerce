@@ -182,7 +182,7 @@ verifying ownership of the address. Decide these explicitly before changing the 
 - **Submission is the web pricing authority's, as a SERVICE.** The route applies
   `access.requirePermission(FionaPermissions.InquiriesCreate).then(requireService)`: a USER
   session is `403` even when it holds the permission, so staff cannot inject customer-priced
-  lines. The SERVICE becomes the lines' author (`CreateInquiry.Command.submittedBy`).
+  lines. The authenticated SERVICE wrapped in `OperationOrigin.Principal` becomes the lines' author (`CreateInquiry.Command.origin`).
   `GET /inquiries` and `GET /inquiries/{inquiryId}` require `fionas.inquiries.read` from any
   principal. There is no public confirmation lookup.
 - **The inbox is a primitive, not a query API.** `ListInquiries` returns the newest
@@ -400,11 +400,11 @@ for HTTP, intake and the packaged exact-sequence recovery CLI.
 
 `FIONAS_INTAKE_ENABLED` defaults false. Enabled settings are independent
 `FIONAS_INTAKE_NATS_URL`, exactly one of `..._CREDS_FILE`, `..._USER`/`..._PASSWORD`, or
-`..._TOKEN`, plus `FIONAS_INTAKE_AUTHOR_SERVICE_ID`. The shared scoped NATS parser retains
-the outbox's existing validation/secret-handling behavior. Each accepted command checks the
-configured SERVICE is ACTIVE and holds live `fionas.inquiries.create` through runtime APIs.
-The payload cannot choose authorship; its `source` is validation, not authentication.
-Prefer preserving the standalone worker SERVICE UUID, without its HTTP secret. Shared
+`..._TOKEN`. The shared scoped NATS parser retains the outbox's existing validation/secret-handling
+behavior. `inquiryIntakeHandler` captures `OperationOrigin.Internal(InternalComponentId("fionas.inquiry-intake"))`
+for intake and recovery. No commerce SERVICE, role, credentials or permission lookup is required.
+The payload cannot choose authorship; its `source` is validation, not authentication. Internal
+attribution identifies who committed the web's prices, not proof of trusted input. Shared
 broker tokens support development but cannot isolate publishers or enforce per-user ACLs.
 
 Enabled intake requires the existing runtime pool's connection timeout <=5000ms and JDBC
@@ -447,7 +447,7 @@ extractable UUID correlation. PubAck must name FIONAS_EVENTS with positive seque
 Historical worker v1 diagnostics remain unchanged; AsyncAPI describes both.
 
 Database availability/serialization/lock conflicts, unconfirmed ACK and transient broker
-failures NAK 10s/30s/2m/5m/15m with max 10 deliveries. Observed exhaustion, missing authority,
+failures NAK 10s/30s/2m/5m/15m with max 10 deliveries. Observed exhaustion,
 consumer mismatch, auth/permission failure and unknown application/persistence defects halt
 intake without stopping HTTP/outbox. Never classify unknown exceptions as customer mistakes.
 Failed diagnostic publication never permits TERM. Logs and in-process `IntakeStatus` expose
@@ -804,7 +804,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V3__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V4__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -845,6 +845,13 @@ after runtime-owned migrations.
   USER `declined_by`, and a `reason` checked trimmed and 1–500 characters. No status column.
   `DatabaseSchemaSpec`'s ledger-fact name check exempts only the word `decline`, which contains
   `line` but names a disposition.
+- **`V3__internal_line_authorship`** adds nullable `author_component`, permits null `author_id`
+  only for INTERNAL, and constrains mutually exclusive principal/component fields. Component
+  syntax matches runtime `InternalComponentId` (1–128 lowercase ASCII segmented characters).
+  USER/SERVICE rows and exact snapshot references remain unchanged; no runtime DDL changes.
+  `LineAuthorship.author` is `OperationOrigin`. HTTP `linesAuthoredBy` retains principal field
+  names, adds `originKind` and `component`, and omits inapplicable nullable fields through CommerceJson.
+  Older binaries cannot read INTERNAL rows; retain origin-aware binaries on ownership rollback.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
@@ -988,9 +995,11 @@ fionas-commerce        line validation, proposal resolution, authorship, ownersh
    property is ignored, and commerce-domain derives every subtotal, tax and total from the
    lines. HTTP amounts are exact decimal strings matching `SIGNED_DECIMAL`; never JSON numbers,
    `Double` or `Float`. Tax is the committed line amount, never a rate.
-4. **Who may author.** `fionas.inquiries.create` + SERVICE for the canonical Estimate v1;
+4. **Who may author.** HTTP requires `fionas.inquiries.create` + SERVICE for the canonical Estimate v1;
+   embedded intake uses the fixed INTERNAL origin above;
    commerce permission + `fionas.financial-terms.manage` + USER for every staff-authored
-   snapshot. The author comes from authentication, never the body, and is recorded in
+   snapshot. Principal origins come from authentication, internal origins from application composition,
+   never the body. The origin is recorded in
    `fionas.financial_document_authorship` for the exact snapshot. Transitions copy it.
 5. **Staff edits are complete line sets** (`financial/LineProposal.kt`). A `LineProposal` lists
    every final line in order; each `ProposedLine` is either `Existing(lineItemId)` of the
@@ -1688,14 +1697,16 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (last audited at commerce 0.0.25)
+### Known upstream gaps (last audited at commerce 0.0.26)
 
-The application consumes commerce-runtime 0.0.25, with matching commerce-domain transitively.
+The application consumes commerce-runtime 0.0.26, with matching commerce-domain transitively.
 Version 0.0.24 adds runtime-owned transactional outbox persistence, sequencing, leases,
 retry coordination, backlog diagnostics and managed background-service lifecycle. Fiona
 consumes those capabilities for InquiryPersisted v3; it owns no delivery persistence or scheduler.
 Version 0.0.25 adds native JSONB object payloads, the synchronous sequence-aware append factory
 and the authoritative `RecordedOutboxEvent.payloadJson` publication representation.
+Version 0.0.26 adds `OperationOrigin` and `InternalComponentId` (no runtime migration); Fiona
+uses them for line authorship and the INTERNAL `fionas.inquiry-intake` origin.
 Commerce 0.0.23 removes the Offerings catalog capability (Fiona no longer needs it), replaces
 the runtime migration history with a single `V1__commerce_baseline`, and makes every ledger
 lifecycle mutation take the caller's expected document version (`changeOrder`, `issueQuote`,
@@ -1703,7 +1714,7 @@ lifecycle mutation take the caller's expected document version (`changeOrder`, `
 the application history schema gap (0.0.15), the payment read gap (0.0.16), unapplied
 discovery, persisted version timestamps and structured validation errors (0.0.17), and added
 service credentials and tokens (0.0.20) and versioned deposits with bulk lineage facts (0.0.22).
-Audit source: the tagged `v0.0.25` sources of castab/commerce-domain (domain financial types,
+Audit source: the tagged `v0.0.26` sources of castab/commerce-domain (domain financial types,
 runtime ledger, capabilities, configuration, migrations, error and health routes). The gaps
 below were rechecked and remain open; they do not justify Fiona workarounds.
 
@@ -1733,7 +1744,7 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
 - **Capability routes need a composed runtime.** The administration and service-token
   capabilities take a `CommerceRuntimeContext`, whose constructor is `internal`, and only
   `commerceRuntime(...)`, which needs a database, creates one. The generator (`src/openapi`,
-  never the deployable jar) builds a rendering-only context reflectively against the 0.0.25
+  never the deployable jar) builds a rendering-only context reflectively against the 0.0.26
   constructor, including its outbox, with a transactor that opens no connection and a reflectively assembled
   `FinancialLedger` and authorization directory that refuse every call. This is provisional:
   commerce-runtime may eventually need a first-class contract composition seam.

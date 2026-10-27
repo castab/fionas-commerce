@@ -27,7 +27,7 @@ flowchart TD
   Ack --> Confirm[Runtime confirms publication in a short DB transaction]
 ```
 
-Fiona consumes released `commerce-runtime:0.0.25` and its matching transitive domain.
+Fiona consumes released `commerce-runtime:0.0.26` and its matching transitive domain.
 Runtime owns additive `commerce/V2__transactional_outbox.sql` and
 `commerce/V3__outbox_jsonb_payload.sql`. V3 converts the existing payload column from text
 to JSONB, requiring top-level objects. Valid historical v2 objects retain their business
@@ -302,7 +302,7 @@ Companion: [fionas-event-workers PR #3](https://github.com/castab/fionas-event-w
 Its worker ACKs input after a valid commerce HTTP 201 and no longer publishes success.
 It deliberately does not verify NATS success delivery: the committed commerce outbox owns it.
 
-1. Confirm the deployable artifact resolves released runtime/domain v0.0.25; run the build,
+1. Confirm the deployable artifact resolves released runtime/domain v0.0.26; run the build,
    OpenAPI generation, event contract and packaging checks.
 2. Preflight historical payloads for the runtime V3 JSONB migration. Ensure every payload is
    a valid JSON object compatible with PostgreSQL JSONB; take the normal deployment backup.

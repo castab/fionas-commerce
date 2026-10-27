@@ -11,6 +11,7 @@ import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
@@ -300,7 +301,7 @@ class InquiryLifecycleSpec :
             result.document.latest.document
                 .shouldBeInstanceOf<FinancialDocument.Invoice>()
             result.document.latest.authorship
-                ?.author shouldBe app.web.id
+                ?.author shouldBe OperationOrigin.Principal(app.web.id)
             read(inquiry).stage shouldBe InquiryStage.BOOKED
             allocate(AllocatePayment.Command(payment.id, id, Version.of(3), BigDecimal("20")))
             allocate(AllocatePayment.Command(payment.id, id, Version.of(3), BigDecimal("60")))
