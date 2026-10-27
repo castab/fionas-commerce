@@ -19,6 +19,7 @@ import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.inquiryProposals
 import io.github.castab.fionas.commerce.testing.issueProposal
+import io.github.castab.fionas.commerce.testing.reviewed
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -411,14 +412,15 @@ class ChangeOrderFoundationSpec :
             cases.forEach { (total, code) ->
                 shouldThrow<CommerceFailure.ValidationFailed> {
                     ReviseInquiryQuoteProposal(app.transactor, app.inquiryProposals())(
-                        ReviseInquiryQuoteProposal.Command(
-                            id,
-                            published.proposal.documentReference.version,
-                            published.proposal.depositRequirementRevision,
-                            flat(total),
-                            DepositTerms.Percentage(BigDecimal("20")),
-                            app.adminId,
-                        ),
+                        ReviseInquiryQuoteProposal
+                            .Command(
+                                id,
+                                published.proposal.documentReference.version,
+                                published.proposal.depositRequirementRevision,
+                                flat(total),
+                                DepositTerms.Percentage(BigDecimal("20")),
+                                app.adminId,
+                            ).reviewed(app),
                     )
                 }.violations.map { it.code } shouldBe listOf(code)
                 ledger.versionHistory(document).map { it.document to it.createdAt } shouldBe history

@@ -106,33 +106,36 @@ data class ProposedServicePlan(
 }
 
 /**
- * The immutable approved service plan of one exact canonical Quote snapshot: Fiona business
+ * An independently versioned immutable service approval against a canonical financial snapshot: Fiona business
  * facts the ledger cannot reproduce. It holds no money and copies no payment state; amounts stay
  * on the commerce-runtime snapshot, and each [lineNotes] entry names its ledger line by id.
  *
- * [reviewedVersion] is the snapshot staff reviewed (the Estimate, or the Quote being revised);
+ * [reviewedVersion] is the snapshot staff reviewed; service-only approvals reference that same snapshot.
  * [approvedBy] is the verified staff user who approved it at [approvedAt].
  */
 data class InquiryServicePlan(
     val inquiryId: InquiryId,
-    val quote: FinancialDocumentReference,
+    val document: FinancialDocumentReference,
     val reviewedVersion: Version,
-    val service: ServiceCommitment,
+    val service: ServiceCommitment?,
     val lineNotes: List<ServicePlanLineNote>,
     val approvedAt: Instant,
     val approvedBy: UserId,
+    val revision: Int = 1,
 ) {
     init {
-        require(reviewedVersion < quote.version) { "A service plan's Quote must follow the version staff reviewed" }
-        require(quote.version.number >= 2) { "A service plan belongs to an issued Quote" }
+        require(revision > 0) { "A service approval revision must be positive" }
+        require(reviewedVersion <= document.version) { "A service approval cannot precede the reviewed version" }
+        require(document.version.number >= 2) { "A service approval belongs to an issued document" }
+        require(service != null || lineNotes.isEmpty()) { "A cleared plan has no line notes" }
         require(lineNotes.map { it.lineItemId }.toSet().size == lineNotes.size) { "A service plan notes each line at most once" }
     }
 
-    /** Whether this plan belongs to exactly [quote] and notes only its lines. */
-    fun describes(quote: FinancialDocument): Boolean =
-        quote is FinancialDocument.Quote &&
-            quote.reference == this.quote &&
-            quote.lineItems.map { it.id }.containsAll(lineNotes.map { it.lineItemId })
+    /** Whether this approval belongs to exactly [snapshot] and notes only its lines. */
+    fun describes(snapshot: FinancialDocument): Boolean =
+        snapshot !is FinancialDocument.Estimate &&
+            snapshot.reference == document &&
+            snapshot.lineItems.map { it.id }.containsAll(lineNotes.map { it.lineItemId })
 }
 
 /** [plan]'s notes resolved to the final ledger ids of [lines]; an unknown proposed line rejects with a stable code. */
@@ -149,16 +152,26 @@ const val SERVICE_PLAN_LINE_NOT_FOUND = "SERVICE_PLAN_LINE_NOT_FOUND"
 
 /**
  * Immutable approved service plans in the caller's transaction. Never begins, commits or rolls
- * back. A plan is written once, with the Quote it describes, and never changed.
+ * back. Each approval or explicit clearing is written once and never changed.
  */
 interface InquiryServicePlanRepository {
-    /** Records [plan]; its Quote must exist and belong to the inquiry's canonical lineage. */
+    fun history(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): List<InquiryServicePlan>
+
+    fun latest(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): InquiryServicePlan?
+
+    /** Records [plan]; its financial snapshot must exist and belong to the inquiry's canonical lineage. */
     fun insert(
         transaction: Transaction,
         plan: InquiryServicePlan,
     )
 
-    /** The plan of exactly [quote], or `null` when that snapshot has none. */
+    /** The latest approval referencing exactly [quote], or null; each publication names its own approval revision. */
     fun find(
         transaction: Transaction,
         quote: FinancialDocumentReference,

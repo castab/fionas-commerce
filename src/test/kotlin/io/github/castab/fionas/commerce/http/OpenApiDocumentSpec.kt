@@ -12,6 +12,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeUnique
+import io.kotest.matchers.collections.shouldContainAll
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.collections.shouldNotContain
@@ -174,13 +175,29 @@ class OpenApiDocumentSpec :
         test("proposal operations expose explicit tokens, shared terms/pricing schemas and exact publication identities") {
             schema("IssueInquiryProposalRequest").strings("required") shouldContainExactly listOf("expectedDocumentVersion", "terms")
             schema("ReviseInquiryQuoteProposalRequest").strings("required") shouldContainExactly
-                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "lines", "terms")
+                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "lines", "terms", "reviewToken")
             schema("ReviseInquiryProposalDepositRequest").strings("required") shouldContainExactly
                 listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "terms")
             schema("ReviseInquiryQuoteProposalRequest").text("properties", "lines", "items", "\$ref") shouldBe
                 "#/components/schemas/ProposedLineRequest"
             schema("ReviseInquiryQuoteProposalRequest").text("properties", "servicePlan", "\$ref") shouldBe
                 "#/components/schemas/ServicePlanRequest"
+            // Revisions name their service-plan intent explicitly through one closed enum.
+            listOf(
+                "ReviseInquiryQuoteProposalRequest",
+                "QuoteRevisionPreviewRequest",
+                "InvoiceRevisionPreviewRequest",
+                "InvoiceRevisionRequest",
+            ).forEach { name ->
+                schema(name).strings("properties", "servicePlanAction", "enum") shouldContainExactly listOf("RETAIN", "REPLACE", "CLEAR")
+                schema(name).strings("required").contains("servicePlanAction") shouldBe false
+            }
+            schema("InvoiceRevisionRequest").strings("required") shouldContainExactly
+                listOf("expectedDocumentVersion", "lines", "reviewToken")
+            schema("InvoiceRevisionPreviewResponse").strings("properties", "settlement", "enum") shouldContainExactly
+                listOf("UNDERPAID", "SETTLED", "OVERPAID")
+            schema("StaffRequestResponse").at("properties").jsonObject.keys shouldContainAll
+                listOf("servicePlan", "effectiveServicePlan", "acceptedServicePlan", "servicePlanHistory", "proposalHistory")
             val requests =
                 listOf("IssueInquiryProposalRequest", "ReviseInquiryQuoteProposalRequest", "ReviseInquiryProposalDepositRequest")
             requests.forEach { name ->
@@ -303,6 +320,12 @@ class OpenApiDocumentSpec :
                 Triple("/staff/requests/{inquiryId}", "get", "readStaffRequest") to listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/staff/requests/{inquiryId}/proposals", "post", "issueInquiryProposal") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/quote-revision-preview", "post", "previewInquiryQuoteRevision") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/invoice-revision-preview", "post", "previewInquiryInvoiceRevision") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/invoice-revisions", "post", "reviseInquiryInvoice") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/staff/requests/{inquiryId}/quote-preview", "post", "previewInquiryQuote") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/staff/requests/{inquiryId}/proposals/quote-revisions", "post", "reviseInquiryQuoteProposal") to
@@ -373,6 +396,9 @@ class OpenApiDocumentSpec :
                 "readStaffRequest" to "Staff requests",
                 "issueInquiryProposal" to "Staff proposals",
                 "previewInquiryQuote" to "Staff proposals",
+                "previewInquiryQuoteRevision" to "Staff proposals",
+                "previewInquiryInvoiceRevision" to "Staff proposals",
+                "reviseInquiryInvoice" to "Staff proposals",
                 "reviseInquiryQuoteProposal" to "Staff proposals",
                 "reviseInquiryProposalDeposit" to "Staff proposals",
                 "acknowledgeInquiryCommunication" to "Inquiries",
@@ -457,6 +483,12 @@ class OpenApiDocumentSpec :
                 "IssueInquiryProposalRequest",
                 "ReviseInquiryQuoteProposalRequest",
                 "ReviseInquiryProposalDepositRequest",
+                "QuoteRevisionPreviewRequest",
+                "QuoteRevisionPreviewResponse",
+                "InvoiceRevisionPreviewRequest",
+                "InvoiceRevisionRequest",
+                "InvoiceRevisionPreviewResponse",
+                "RevisedInquiryInvoiceResponse",
                 "PreviewInquiryQuoteRequest",
                 "InquiryQuotePreviewResponse",
                 "QuotePreviewLineResponse",
@@ -610,6 +642,9 @@ class OpenApiDocumentSpec :
                 "createInquiryFinancialDocument",
                 "createChangeOrder",
                 "previewInquiryQuote",
+                "previewInquiryQuoteRevision",
+                "previewInquiryInvoiceRevision",
+                "reviseInquiryInvoice",
                 "issueInquiryProposal",
                 "reviseInquiryQuoteProposal",
                 "reviseInquiryProposalDeposit",

@@ -12,6 +12,7 @@ import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.proposalJson
+import io.github.castab.fionas.commerce.testing.reviseQuoteReviewed
 import io.github.castab.fionas.commerce.testing.withBearer
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -176,9 +177,9 @@ class QuoteBuilderRoutesSpec :
             val revisedPlan = servicePlan.replace("Churros with chocolate sauce", "Cookies & Cream").replace("Desserts", "Hand-scooped")
             val changedLines = proposalJson(CHURROS.copy(unitPrice = "500.00").new("churros"), COURTESY_DISCOUNT.new("courtesy"))
             val revisedResponse =
-                app.adminPost(
-                    proposals(id) + "/quote-revisions",
-                    """{"expectedDocumentVersion":3,"expectedDepositRequirementRevision":1,"lines":$changedLines,"servicePlan":$revisedPlan,"terms":$percentTerms}""",
+                app.reviseQuoteReviewed(
+                    id,
+                    """{"expectedDocumentVersion":3,"expectedDepositRequirementRevision":1,"lines":$changedLines,"servicePlan":$revisedPlan,"servicePlanAction":"REPLACE","terms":$percentTerms}""",
                 )
             revisedResponse.status shouldBe Status.OK
             val revised = issued(revisedResponse)

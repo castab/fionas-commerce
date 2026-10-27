@@ -34,6 +34,7 @@ import io.github.castab.fionas.commerce.testing.initialEstimateOf
 import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.replacementLines
+import io.github.castab.fionas.commerce.testing.reviseQuoteReviewed
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -331,8 +332,8 @@ class InquiryOperationalStatesSpec :
         test("quote and Invoice revisions preserve lifecycle; refunds do not demote durable booking") {
             val pair = quote()
             app
-                .adminPost(
-                    "/staff/requests/${pair.first.value}/proposals/quote-revisions",
+                .reviseQuoteReviewed(
+                    pair.first.value.toString(),
                     """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,
                     "lines":${replacementLines(acceptanceLines(guests = 100))},
                     "terms":{"type":"FIXED","amount":"50","currency":"USD"}}""",

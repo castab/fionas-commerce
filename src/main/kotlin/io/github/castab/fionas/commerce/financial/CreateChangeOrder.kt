@@ -33,6 +33,7 @@ class CreateChangeOrder(
     private val fulfillment: InquiryFulfillmentRepository,
     private val clock: Clock,
     declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
+    private val servicePlans: InquiryServicePlanRepository = JdbiInquiryServicePlanRepository(),
 ) {
     data class Command(
         val documentId: UUID,
@@ -54,7 +55,11 @@ class CreateChangeOrder(
             if (documents.isCanonical(transaction, current) && fulfillment.find(transaction, current.inquiryId)?.closed != null) {
                 throw CommerceFailure.IllegalTransition("A closed inquiry requires a separate post-close adjustment workflow")
             }
-            documents.commitLines(transaction, current, command.lines.resolveAgainst(current.document), command.author, now)
+            val resolved = command.lines.resolveAgainst(current.document)
+            if (documents.isCanonical(transaction, current)) {
+                requireRetainedNotes(servicePlans.latest(transaction, current.inquiryId)?.content(), resolved)
+            }
+            documents.commitLines(transaction, current, resolved, command.author, now)
             documents.describeLocked(transaction, current.inquiryId, command.documentId)
         }
     }

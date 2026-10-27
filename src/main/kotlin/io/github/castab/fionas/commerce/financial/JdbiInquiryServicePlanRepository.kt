@@ -54,8 +54,8 @@ private class LineNoteJson(
 )
 
 /**
- * [InquiryServicePlanRepository] on `fionas.inquiry_service_plans`: one immutable row per exact
- * Quote snapshot. The approving user references the runtime's published `commerce.users`.
+ * [InquiryServicePlanRepository] on `fionas.inquiry_service_plans`: independent immutable service approvals
+ * against canonical Quote or Invoice snapshots. The approving user references the runtime's published `commerce.users`.
  */
 class JdbiInquiryServicePlanRepository : InquiryServicePlanRepository {
     override fun insert(
@@ -68,7 +68,7 @@ class JdbiInquiryServicePlanRepository : InquiryServicePlanRepository {
                 "SELECT document_id FROM fionas.inquiry_financial_documents " +
                     "WHERE inquiry_id = :inquiry AND document_id = :document AND purpose = 'INITIAL_ESTIMATE' FOR UPDATE",
             ).bind("inquiry", plan.inquiryId.value)
-            .bind("document", plan.quote.id)
+            .bind("document", plan.document.id)
             .mapTo(UUID::class.java)
             .findOne()
             .orElseThrow { CommerceFailure.NotFound("Canonical inquiry financial lineage was not found") }
@@ -77,19 +77,20 @@ class JdbiInquiryServicePlanRepository : InquiryServicePlanRepository {
                 .createUpdate(
                     """
                     INSERT INTO fionas.inquiry_service_plans
-                        (document_id, document_version, inquiry_id, reviewed_document_version, plan, approved_at, approved_by)
-                    VALUES (:document, :version, :inquiry, :reviewed, CAST(:plan AS jsonb), :at, :approvedBy)
+                        (document_id, document_version, inquiry_id, reviewed_document_version, plan, approved_at, approved_by, revision)
+                    VALUES (:document, :version, :inquiry, :reviewed, CAST(:plan AS jsonb), :at, :approvedBy, :revision)
                     """.trimIndent(),
-                ).bind("document", plan.quote.id)
-                .bind("version", plan.quote.version.number)
+                ).bind("document", plan.document.id)
+                .bind("version", plan.document.version.number)
                 .bind("inquiry", plan.inquiryId.value)
                 .bind("reviewed", plan.reviewedVersion.number)
                 .bind("plan", encode(plan))
                 .bind("at", plan.approvedAt)
                 .bind("approvedBy", plan.approvedBy.value)
+                .bind("revision", plan.revision)
                 .execute()
         } catch (failure: Exception) {
-            if (failure.isUniqueViolation()) throw CommerceFailure.Conflict("The Quote already has an approved service plan", failure)
+            if (failure.isUniqueViolation()) throw CommerceFailure.Conflict("The service approval revision already exists", failure)
             throw failure
         }
     }
@@ -100,20 +101,43 @@ class JdbiInquiryServicePlanRepository : InquiryServicePlanRepository {
     ): InquiryServicePlan? =
         transaction.handle
             .createQuery(
-                "SELECT * FROM fionas.inquiry_service_plans WHERE document_id = :document AND document_version = :version",
+                "SELECT * FROM fionas.inquiry_service_plans WHERE document_id = :document AND document_version = :version ORDER BY revision DESC LIMIT 1",
             ).bind("document", quote.id)
             .bind("version", quote.version.number)
             .map { row, _ -> restore(row) }
             .findOne()
             .orElse(null)
 
-    private fun encode(plan: InquiryServicePlan): String {
+    override fun latest(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): InquiryServicePlan? =
+        transaction.handle
+            .createQuery(
+                "SELECT * FROM fionas.inquiry_service_plans WHERE inquiry_id = :inquiry ORDER BY revision DESC LIMIT 1",
+            ).bind("inquiry", inquiryId.value)
+            .map { row, _ -> restore(row) }
+            .findOne()
+            .orElse(null)
+
+    override fun history(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): List<InquiryServicePlan> =
+        transaction.handle
+            .createQuery("SELECT * FROM fionas.inquiry_service_plans WHERE inquiry_id = :inquiry ORDER BY revision")
+            .bind("inquiry", inquiryId.value)
+            .map { row, _ -> restore(row) }
+            .list()
+
+    private fun encode(plan: InquiryServicePlan): String? {
+        val service = plan.service ?: return null
         val persisted =
             ServicePlanJson(
-                plan.service.description,
-                plan.service.guestCount,
-                plan.service.durationMinutes,
-                plan.service.items.map { ServicePlanItemJson(it.label, it.group, it.key) },
+                service.description,
+                service.guestCount,
+                service.durationMinutes,
+                service.items.map { ServicePlanItemJson(it.label, it.group, it.key) },
                 plan.lineNotes.map { LineNoteJson(it.lineItemId.toString(), it.note) },
             )
         // Write only what reading would accept, so no invalid value is ever stored.
@@ -126,15 +150,18 @@ class JdbiInquiryServicePlanRepository : InquiryServicePlanRepository {
         val quote = FinancialDocumentReference(documentId, Version.of(row.getInt("document_version")))
         val owner = "the service plan of $documentId at ${quote.version}"
         return try {
-            val (service, notes) = persistedJson.decodeFromString(ServicePlanJson.serializer(), row.getString("plan")).restore()
+            val (service, notes) =
+                row.getString("plan")?.let { persistedJson.decodeFromString(ServicePlanJson.serializer(), it).restore() }
+                    ?: (null to emptyList())
             InquiryServicePlan(
                 inquiryId = InquiryId(row.getObject("inquiry_id", UUID::class.java)),
-                quote = quote,
+                document = quote,
                 reviewedVersion = Version.of(row.getInt("reviewed_document_version")),
                 service = service,
                 lineNotes = notes,
                 approvedAt = row.getObject("approved_at", OffsetDateTime::class.java).toInstant(),
                 approvedBy = UserId(row.getObject("approved_by", UUID::class.java)),
+                revision = row.getInt("revision"),
             )
         } catch (e: Exception) {
             throw IllegalStateException("Malformed $owner: ${e.message}", e)

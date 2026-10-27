@@ -183,17 +183,21 @@ data class ServicePlanLineNoteResponse(
 @Serializable
 data class ServicePlanResponse(
     @ApiProperty(format = "uuid") val documentId: String,
-    @ApiProperty(description = "The exact Quote version the plan approves.") val documentVersion: Int,
+    @ApiProperty(
+        description = "The exact financial snapshot reviewed or amended by this approval; may be Quote or Invoice.",
+    ) val documentVersion: Int,
     @ApiProperty(description = "The version staff reviewed when approving it (the Estimate, or the Quote revised).")
     val reviewedDocumentVersion: Int,
-    val description: String,
+    val description: String? = null,
     val guestCount: Int? = null,
     val durationMinutes: Int? = null,
     val items: List<ServicePlanItemDto>,
-    @ApiProperty(description = "Notes on lines of the approved Quote; join on lineItemId for amounts.")
+    @ApiProperty(description = "Notes on lines of the approval snapshot; join on lineItemId for amounts.")
     val lineNotes: List<ServicePlanLineNoteResponse>,
     @ApiProperty(format = "date-time") val approvedAt: String,
     @ApiProperty(description = "The verified staff user who approved the plan.", format = "uuid") val approvedBy: String,
+    val revision: Int = 1,
+    val cleared: Boolean = false,
 )
 
 /** Who committed a snapshot's lines; attribution is distinct from the source of its prices. */
@@ -319,16 +323,18 @@ internal fun ServicePlanRequest.domain(noteIdentities: List<Pair<UUID?, String?>
 
 internal fun InquiryServicePlan.toResponse() =
     ServicePlanResponse(
-        documentId = quote.id.toString(),
-        documentVersion = quote.version.number,
+        documentId = document.id.toString(),
+        documentVersion = document.version.number,
         reviewedDocumentVersion = reviewedVersion.number,
-        description = service.description,
-        guestCount = service.guestCount,
-        durationMinutes = service.durationMinutes,
-        items = service.items.map { it.toResponse() },
+        description = service?.description,
+        guestCount = service?.guestCount,
+        durationMinutes = service?.durationMinutes,
+        items = service?.items.orEmpty().map { it.toResponse() },
         lineNotes = lineNotes.map { it.toResponse() },
         approvedAt = approvedAt.toString(),
         approvedBy = approvedBy.value.toString(),
+        revision = revision,
+        cleared = service == null,
     )
 
 internal fun ServicePlanItem.toResponse() = ServicePlanItemDto(label, group, key)

@@ -32,8 +32,8 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
                 .createUpdate(
                     """
                     INSERT INTO fionas.inquiry_proposals
-                        (id, inquiry_id, document_id, document_version, deposit_requirement_revision, kind, issued_at, issued_by)
-                    VALUES (:id, :inquiry, :document, :version, :revision, :kind, :at, :issuedBy)
+                        (id, inquiry_id, document_id, document_version, deposit_requirement_revision, kind, issued_at, issued_by, service_plan_revision)
+                    VALUES (:id, :inquiry, :document, :version, :revision, :kind, :at, :issuedBy, :planRevision)
                     """.trimIndent(),
                 ).bind("id", proposal.id.value)
                 .bind("inquiry", proposal.inquiryId.value)
@@ -43,6 +43,7 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
                 .bind("kind", proposal.kind.name)
                 .bind("at", proposal.issuedAt)
                 .bind("issuedBy", proposal.issuedBy.value)
+                .bind("planRevision", proposal.servicePlanRevision)
                 .execute()
         } catch (failure: Exception) {
             if (failure.isUniqueViolation()) throw CommerceFailure.Conflict("Proposal has already been issued", failure)
@@ -93,5 +94,6 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
             row.getObject("issued_at", OffsetDateTime::class.java).toInstant(),
             UserId(row.getObject("issued_by", UUID::class.java)),
             ProposalIssuanceKind.valueOf(row.getString("kind")),
+            row.getObject("service_plan_revision", Int::class.javaObjectType),
         )
 }

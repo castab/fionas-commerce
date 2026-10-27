@@ -19,12 +19,19 @@ data class StaffRequest(
     val payments: List<PaymentHistory>,
     /** The approved service plan of the published Quote; absent before issuance or for a Quote issued without one. */
     val servicePlan: InquiryServicePlan? = null,
+    val effectiveServicePlan: InquiryServicePlan? = servicePlan,
+    val servicePlanHistory: List<InquiryServicePlan> = emptyList(),
+    val proposalHistory: List<InquiryProposal> = emptyList(),
 ) {
     val suggestedDepositTerms get() = FIONAS_DEFAULT_DEPOSIT_TERMS
 
     init {
         servicePlan?.let { plan ->
-            check(plan.inquiryId == inquiry.inquiry.id && plan.quote == proposal?.documentReference) {
+            check(
+                plan.inquiryId == inquiry.inquiry.id &&
+                    plan.revision == proposal?.servicePlanRevision &&
+                    plan.document.id == proposal.documentReference.id,
+            ) {
                 "Staff request service plan disagrees with its published proposal"
             }
         }

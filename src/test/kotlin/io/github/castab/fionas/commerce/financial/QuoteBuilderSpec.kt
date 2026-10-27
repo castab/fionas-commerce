@@ -30,6 +30,7 @@ import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.github.castab.fionas.commerce.testing.inquiryProposals
 import io.github.castab.fionas.commerce.testing.issueProposal
+import io.github.castab.fionas.commerce.testing.reviewed
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -623,7 +624,7 @@ class QuoteBuilderSpec :
                         app.context.financialLedger.activateDepositRequirement(
                             transaction,
                             document,
-                            plan.quote.version,
+                            plan.document.version,
                             DepositTerms.Fixed(money("10.00")),
                             null,
                         )
@@ -728,15 +729,16 @@ class QuoteBuilderSpec :
             val (churros, courtesy) = quote.lineItems
             val revision =
                 ReviseInquiryQuoteProposal(app.transactor, app.inquiryProposals())(
-                    ReviseInquiryQuoteProposal.Command(
-                        id,
-                        quote.version,
-                        DepositRequirementRevision.INITIAL,
-                        LineProposal(listOf(existing(churros, CHURROS.copy(unitPrice = "500.00")), existing(courtesy))),
-                        percent,
-                        app.adminId,
-                        ProposedServicePlan(plan.service.copy(guestCount = 120)),
-                    ),
+                    ReviseInquiryQuoteProposal
+                        .Command(
+                            id,
+                            quote.version,
+                            DepositRequirementRevision.INITIAL,
+                            LineProposal(listOf(existing(churros, CHURROS.copy(unitPrice = "500.00")), existing(courtesy))),
+                            percent,
+                            app.adminId,
+                            ProposedServicePlan(plan.service.copy(guestCount = 120)),
+                        ).reviewed(app),
                 )
             val revised = revision.financial.latest.document
             revised.version shouldBe Version.of(4)
@@ -744,7 +746,7 @@ class QuoteBuilderSpec :
             revised.total shouldBe money("450.00")
             revision.proposal.kind shouldBe ProposalIssuanceKind.QUOTE_REVISED
             revision.servicePlan!!.reviewedVersion shouldBe Version.of(3)
-            revision.servicePlan.service.guestCount shouldBe 120
+            revision.servicePlan.service!!.guestCount shouldBe 120
             // The earlier plan stays as history of its own Quote.
             app.transactor.inTransaction { plans.find(it, quote.reference) } shouldBe first.servicePlan
             val depositOnly =
@@ -757,21 +759,22 @@ class QuoteBuilderSpec :
                         app.adminId,
                     ),
                 )
-            depositOnly.servicePlan.shouldBeNull()
+            depositOnly.servicePlan shouldBe revision.servicePlan
             app.transactor.inTransaction { plans.find(it, FinancialDocumentReference(revised.id, Version.of(4))) }.shouldNotBeNull()
             // Revising to the same lines is no change.
             shouldThrow<CommerceFailure.ValidationFailed> {
                 ReviseInquiryQuoteProposal(app.transactor, app.inquiryProposals())(
-                    ReviseInquiryQuoteProposal.Command(
-                        id,
-                        Version.of(4),
-                        DepositRequirementRevision.of(3),
-                        LineProposal(revised.lineItems.map { existing(it) }),
-                        percent,
-                        app.adminId,
-                    ),
+                    ReviseInquiryQuoteProposal
+                        .Command(
+                            id,
+                            Version.of(4),
+                            DepositRequirementRevision.of(3),
+                            LineProposal(revised.lineItems.map { existing(it) }),
+                            DepositTerms.Fixed(money("100.00")),
+                            app.adminId,
+                        ).reviewed(app),
                 )
-            }.violations.map { it.code } shouldBe listOf(LineProposalViolations.NO_FINANCIAL_CHANGE)
+            }.violations.map { it.code } shouldBe listOf("NO_MATERIAL_CHANGE")
         }
 
         test("a staff approver that is not a real user cannot be recorded") {

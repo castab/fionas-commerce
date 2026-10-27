@@ -110,7 +110,7 @@ Fiona owns, and persists in its own tables:
 - which inquiry owns each commerce-runtime `FinancialDocument` lineage and its semantic purpose,
   change-order resolution, and payment acceptance policy (see
   [Financial documents and payments](#financial-documents-and-payments));
-- the immutable, money-free service plan a staff user approved with a canonical Quote (see
+- immutable, money-free service approvals before and after booking (see
   [Quote builder: staff-committed lines](#quote-builder-staff-committed-lines));
 - inquiry served/closed operational facts with authenticated principal provenance;
 - the terminal staff decision to decline a REQUESTED inquiry, with its staff USER provenance
@@ -804,7 +804,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V4__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V5__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -835,7 +835,7 @@ after runtime-owned migrations.
   (unique key and inquiry id, bounded key/SHA-256 checks, deferred inquiry FK);
   `inquiry_fulfillment` (served mandatory, closed all-or-nothing); append-only
   `inquiry_communications` with database-generated `recorded_order` and its covering index;
-  append-only `inquiry_proposals` (exact pair uniqueness, one INITIAL per inquiry, USER
+  append-only `inquiry_proposals` (pair uniqueness until V4, one INITIAL per inquiry, USER
   `issued_by`); and immutable `inquiry_service_plans` (money-free `plan` jsonb, USER
   `approved_by`). No table holds an amount, total, stage, balance, catalog, offering or
   pricing input.
@@ -852,6 +852,12 @@ after runtime-owned migrations.
   `LineAuthorship.author` is `OperationOrigin`. HTTP `linesAuthoredBy` retains principal field
   names, adds `originKind` and `component`, and omits inapplicable nullable fields through CommerceJson.
   Older binaries cannot read INTERNAL rows; retain origin-aware binaries on ownership rollback.
+- **`V4__service_approval_revisions`** (in place, existing rows backfilled): `inquiry_service_plans`
+  gains a positive per-inquiry `revision` primary key (backfilled in Quote-version order), a
+  nullable `plan` for explicit clearings and `reviewed_document_version <= document_version`;
+  `inquiry_proposals` drops its pair uniqueness and gains nullable `service_plan_revision` with a
+  composite FK to `(inquiry_id, revision)`, backfilled from the plan of its exact Quote. No new
+  runtime references; no runtime DDL changes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
@@ -1261,12 +1267,14 @@ Estimate -> immutable Quote + active deposit approved against that exact Quote +
 lineages retain their standalone shared financial behavior.
 
 `fionas.inquiry_proposals` stores only publication UUID, inquiry/lineage identities,
-Quote version, deposit revision, issuance kind, microsecond Clock time and the approving staff
-USER (`issued_by` references `commerce.users`; `InquiryProposal.issuedBy` is a `UserId`). Its
-composite FKs reference Fiona's association and the exact published runtime snapshot.
-An exact pair is unique; one INITIAL publication per inquiry is unique. Durable identity
-ordering follows the association lock, independent of Clock timestamps. Re-sending a pair
-is a future communication action, not another proposal. No amounts, terms, totals, stages,
+Quote version, deposit revision, the nullable bound `service_plan_revision`, issuance kind,
+microsecond Clock time and the approving staff USER (`issued_by` references `commerce.users`;
+`InquiryProposal.issuedBy` is a `UserId`). Its composite FKs reference Fiona's association, the
+exact published runtime snapshot and the exact service approval. One INITIAL publication per
+inquiry is unique; since V4 a financial/deposit pair is not, because a service-only revision
+republishes it under a new UUID. Durable identity ordering follows the association lock,
+independent of Clock timestamps. Re-sending a publication is a future communication action,
+not another proposal. No amounts, terms, totals, stages,
 mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
 
 `recorded_order` orders proposal history within an inquiry. Sequence allocation does not
@@ -1277,10 +1285,11 @@ delivery/claim semantics or another appropriate durable dispatch design.
 `IssueInquiryProposal`, `ReviseInquiryQuoteProposal`, and `ReviseInquiryProposalDeposit`
 own one READ COMMITTED transaction each. `InquiryProposals` composes transaction-taking
 financial helpers and runtime ledger calls under the existing association row lock, acquired
-before reviewed-token checks. Quote revision resolves staff-committed final lines against
-the current Quote (`QuoteComposer`), applies the no-financial-change rule, appends a same-stage
-Quote through `commitLines`, records an optional new service plan, then replaces the deposit
-against the new Quote even if terms remain 20%. Deposit-only revision keeps the Quote
+before reviewed-token checks. Quote revision requires the revision preview's review token
+and publishes a financial, deposit or service-only change (see
+[Quote revision review](#quote-revision-review-and-service-only-publication)): a real line
+change appends a same-stage Quote through `commitLines` and replaces the deposit against the
+new Quote even if terms remain 20%. Deposit-only revision keeps the Quote
 version and rejects numerically equivalent same-form terms; changing percentage to fixed
 is meaningful even if the resolved amount is equal. Both require exact reviewed Quote and
 deposit revision tokens. Any historical `grossAllocated > 0` blocks both revisions, even
@@ -1288,10 +1297,10 @@ when refunds unwind all applied value. Deposit satisfaction by the exact payment
 operation atomically promotes Quote -> Invoice/BOOKED only after one exact canonical
 deposit receipt; refunds never demote it.
 
-Every publication is the exact `(documentId, documentVersion, depositRequirementRevision)`.
-`IsCurrentPayableInquiryProposal` reads one REPEATABLE READ snapshot: only the latest
-publication whose exact Quote and active approval/revision still match is payable. Every
-reissue supersedes all earlier ids; Invoice makes all publication targets non-payable.
+Every publication binds the exact `(documentId, documentVersion, depositRequirementRevision)`
+and its optional `servicePlanRevision`. `IsCurrentPayableInquiryProposal` reads one REPEATABLE
+READ snapshot: only the latest publication whose exact Quote and active approval/revision
+still match is payable. Every reissue, service-only included, supersedes all earlier ids; Invoice makes all publication targets non-payable.
 Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
 contact collection, cancellation, or post-payment adjustment workflow is introduced.
 
@@ -1300,7 +1309,8 @@ acceptance uses `CanonicalInquiryDepositPaymentPolicy` inside `RecordDocumentPay
 existing READ COMMITTED transaction after `expectLatest` locks the association. It reads
 runtime `FinancialLineageView` and the latest publication, applies `requireCoherentProposal`,
 and requires `Command.expectedProposalId` to name that exact current payable proposal.
-Deposit-only republication invalidates old ids even at the same Quote version/amount.
+Deposit-only and service-only republication invalidate old ids even at the same Quote
+version/amount.
 Missing identity is `422 validation_failed`; stale identity/version is `409 conflict`.
 Missing or incoherent canonical publication fails internally, with no compatibility repair.
 
@@ -1340,7 +1350,8 @@ child (`reviseInquiryQuoteProposal`) and `/deposit-revisions` child
 `commerce.deposit-requirement.manage`, `fionas.financial-terms.manage`, and a staff USER
 (`requireStaffUser`; a SERVICE is `403`), plus the unsafe-cookie Origin policy. The command's
 `issuedBy` is the authenticated `UserId`. Responses are 200 with
-`{proposal, financial, depositRequirement, servicePlan?}` and no-store.
+`{proposal, financial, depositRequirement, servicePlan?}` and no-store; `servicePlan` is the
+approval the new publication binds.
 
 Standalone canonical Quote issuance and Quote change orders reject with illegal_transition.
 Standalone deposit set/replace/reactivate/withdraw also reject whenever the lineage is
@@ -1349,12 +1360,65 @@ canonical and proposal history exists, regardless of current financial stage. Bo
 Unpaid Quote deposit changes use atomic proposal reissuance. After Invoice/BOOKED, the
 accepted deposit requirement/history is immutable. Canonical Estimate and booked Invoice
 change orders and RELATED deposit behavior remain supported; manual canonical Invoice
-issuance remains forbidden.
+issuance remains forbidden. A canonical `CreateChangeOrder` retains the effective service
+approval (`requireRetainedNotes`), so removing a noted line there is `SERVICE_PLAN_LINE_NOT_FOUND`.
 `GET /staff/requests/{inquiryId}` keeps one unlocked REPEATABLE READ and its existing read
-permissions, adding `suggestedDepositTerms`, optional latest `proposal`, and authoritative
-`depositRequirement`. Missing/mismatched published Quote pairs fail internally. After booking,
+permissions, adding `suggestedDepositTerms`, optional latest `proposal`, authoritative
+`depositRequirement` and the service approval fields described under
+[Service approvals](#service-approvals-and-invoice-amendments). Missing/mismatched published Quote pairs fail internally. After booking,
 the latest proposal is historical Quote/deposit context and its approval/revision must still
 match the immutable accepted deposit.
+
+### Quote revision review and service-only publication
+
+`PreviewInquiryQuoteRevision` reads one unlocked REPEATABLE READ snapshot. The latest
+canonical document must be a Quote, its expected document and deposit revisions must match,
+and its latest proposal/deposit pair must be coherent. Any historical gross allocation
+blocks ordinary revision, including fully refunded and unwound allocations.
+`composeQuoteRevision` is shared with publication under the lock. It resolves the complete
+ordered staff lines, the requested service-plan action and deposit terms; the same validation
+runs in preview and approval. Financial changes append a same-stage Quote through
+`FionaFinancialDocuments.commitLines` and replace the deposit approval against that Quote,
+even when the terms are unchanged. Deposit changes without financial changes replace only
+the deposit approval. Service-only changes append only a service approval and publication.
+All three forms publish QUOTE_REVISED. No-op inputs reject with `NO_MATERIAL_CHANGE` and no
+writes; ordered selections, descriptions, notes and line identities are material.
+
+`ReviseInquiryQuoteProposal` requires the `reviewToken` from the revision preview. The token
+binds inquiry/lineage, reviewed version, latest publication UUID, deposit revision, current
+service approval revision, explicit RETAIN/REPLACE/CLEAR action, complete resolved ordered
+lines and identities, proposed commitment/notes, terms and resolved deposit. Decimal scale
+is canonicalized; text uses existing value-object normalization. Approval recomposes and
+compares under the association lock. Stale expected versions are `409 conflict`; changed
+review is `409 QUOTE_REVIEW_STALE` with no-store. Tokens are deterministic review identities,
+not credentials, delivery receipts or idempotency keys.
+
+`ReviseInquiryProposalDeposit` retains its separate endpoint and expected document/deposit
+revision contract. It rejects numerically equivalent same-form terms; percentage-to-fixed
+is meaningful even for an equal resolved amount. It retains the current service approval
+and returns it. It never requires a financial change.
+
+V4 removes the old proposal pair uniqueness and gives `inquiry_service_plans` its own
+positive integer revision per inquiry. Proposals keep their UUID and durable `recorded_order`,
+exact Quote/deposit references, authenticated USER provenance and issuance kind. Their
+nullable `service_plan_revision` FK binds the exact published approval. No mutable current
+flags, amounts or payment truth are persisted. INITIAL remains unique per inquiry. Service
+approval revisions are allocated under the same association lock and roll back with the
+operation; recorded_order is not a global commit watermark. V4 preserves existing plans and
+publication bindings without resets or runtime DDL changes.
+
+Only the latest publication UUID matching the current Quote and deposit pair is payable.
+`CanonicalInquiryDepositPaymentPolicy` checks that identity while holding the association
+lock inside `RecordDocumentPayment`. It requires one complete exact deposit receipt allocated
+to the approved Quote and atomically promotes to Invoice. Partial/excess deposits and any
+historical gross allocation reject. Standalone allocations to canonical Quotes reject.
+Refunds never restore proposal payability or demote booking. Service-only publication
+invalidates older payment targets even at unchanged financial/deposit identities.
+
+After booking, the last published proposal and its accepted service approval, Quote and
+deposit are historical evidence. Canonical standalone deposit set/replace/withdraw remains
+forbidden. Invoice amendments never recalculate the accepted percentage, collect a second
+deposit, alter payments, refund automatically or modify served/closed provenance.
 
 ## Quote builder: staff-committed lines
 
@@ -1363,21 +1427,25 @@ writes, and publish it through the existing proposal operations.
 
 - **Final lines, never pricing instructions.** Preview, initial issuance and Quote revision
   take a `LineProposal` (see [Trusted priced lines](#trusted-priced-lines)) against the exact
-  reviewed version, an optional `ProposedServicePlan`, and `DepositTerms`. There are no modes,
+  reviewed version, a service plan (an optional `ProposedServicePlan` on initial issuance, an
+explicit `ServicePlanChange` RETAIN/REPLACE/CLEAR on revisions), and `DepositTerms`. There are no modes,
   overrides-by-source, catalog revisions or selections. A verified staff USER holding
   `fionas.financial-terms.manage` is the pricing authority; Fiona checks structure and
   arithmetic only.
 - **One pure core.** `QuoteComposer.compose(inquiryId, reviewed, proposal, servicePlan, terms)`
   (internal, pure; only derived ids vary by document/version/key): from an Estimate it yields
   the domain Quote successor (`changeOrder(...).toQuote()` when the lines change, else the
-  Estimate's own `toQuote()`); from a Quote (revision) it requires a change and yields the
-  same-stage successor. It rejects a nonpositive Quote (`QUOTE_TOTAL_NOT_POSITIVE`) and
+  Estimate's own `toQuote()`); from a Quote (revision) it yields the same-stage successor for
+  changed lines and the Quote itself otherwise (material-change policy belongs to
+  `composeQuoteRevision`). It rejects a nonpositive Quote (`QUOTE_TOTAL_NOT_POSITIVE`) and
   negative totals, resolves the deposit with shared `DepositTerms.resolve` (plus Fiona's
   minor-unit check for fixed terms), resolves plan notes to line ids
-  (`SERVICE_PLAN_LINE_NOT_FOUND`), and computes a SHA-256 `QuoteReviewToken` (v3) over inquiry,
-  document, reviewed version and stage, every final line (id, origin, key, values) in order,
-  total, terms, required deposit and the plan, including every ordered item
-  label, group and key with explicit absence markers. `ComposedQuote.financialChange` says
+  (`SERVICE_PLAN_LINE_NOT_FOUND`), and computes a SHA-256 `QuoteReviewToken` (encoding v4) over
+  inquiry, document, reviewed version and stage, every final line (id, origin, key, values) in
+  order, total, terms and required deposit when present, an ordered context of revision
+  identities (proposal, deposit and service revisions, plan action and, for Invoices, payment
+  fact ids), and the plan, including every ordered item label, group and key with explicit
+  absence markers. `ComposedQuote.financialChange` says
   whether an intermediate Estimate is appended.
 - **Preview** `POST /staff/requests/{inquiryId}/quote-preview` (`previewInquiryQuote`) runs
   `PreviewInquiryQuote` in one unlocked REPEATABLE READ: canonical lineage at exactly
@@ -1396,11 +1464,13 @@ writes, and publish it through the existing proposal operations.
   the deposit is approved against that final Quote, and the INITIAL proposal is appended: one
   READ COMMITTED transaction; any failure rolls back every fact. Chains: `E1 → Q2` (no financial
   change) or `E1 → E2 → Q3`. Issued is not sent: no communication, payment or booking follows.
-- **Quote revision** (`ReviseInquiryQuoteProposal`) composes against the current Quote with the
-  same core, commits the lines, records an optional new plan for the new Quote, replaces the
-  deposit with the expected revision, and appends QUOTE_REVISED.
-- **Service plans** (`InquiryServicePlan`, `fionas.inquiry_service_plans`) are immutable, one per
-  exact Quote snapshot, written only with staff-composed lines. They store the reviewed version,
+- **Quote revision** (`ReviseInquiryQuoteProposal`) recomposes the reviewed revision through
+  `composeQuoteRevision` under the association lock, requires its token, commits lines only for a
+  real change, appends a service approval only for a meaningful service change, replaces the
+  deposit only for a financial or terms change, and appends QUOTE_REVISED.
+- **Service plans** (`InquiryServicePlan`, `fionas.inquiry_service_plans`) are immutable approvals
+  with their own per-inquiry `revision`, each against an exact canonical Quote or Invoice snapshot
+  (see [Service approvals](#service-approvals-and-invoice-amendments)). They store the reviewed version,
   a `ServiceCommitment` (description ≤2000, optional guest count and duration, ≤50 ordered
   `ServicePlanItem` selections), line notes by ledger id (≤500 each), approval Clock time and
   the approving USER (`approvedBy: UserId`, FK to `commerce.users`). Each selection has a
@@ -1413,16 +1483,76 @@ writes, and publish it through the existing proposal operations.
   encodes and restores the strict JSON (`ArchitectureSpec`), requiring every item property
   (including explicit nulls) and rejecting legacy strings. HTTP uses `ServicePlanItemDto`
   consistently in requests, previews and approved responses; group/key are optional.
-  This pre-production representation change needs no schema migration: the existing JSONB
-  column and Flyway history remain valid. Operators must discard old development plan data
-  or reset the identified disposable database; there is no decoder, backfill or automatic reset.
-- **Read model.** `ReadStaffRequest` adds optional `servicePlan`: the plan of the latest
-  proposal's exact Quote, checked against that ledger snapshot's line ids in the same REPEATABLE
-  READ; contradictions or corrupt JSON fail internally. A deposit-only revision keeps the Quote,
-  so its plan remains; Quotes published without lines have none (never invented). Booking keeps
-  the accepted Quote's plan.
+  An explicit clearing stores a null `plan`. V4 adds the revision key and nullable plan in
+  place; there is no legacy item decoder or automatic reset.
+- **Read model.** `ReadStaffRequest` adds optional `servicePlan`: the approval bound to the
+  latest proposal's `servicePlanRevision`, every approval checked against its own ledger
+  snapshot's line ids in the same REPEATABLE READ; contradictions or corrupt JSON fail
+  internally. A deposit-only revision keeps the bound approval; Quotes published without lines
+  have none (never invented). Booking keeps the accepted proposal's approval.
 - Quote withdrawal, notes beyond line notes, expiry, messages, delivery, payment links and
   post-close correction remain separate slices.
+
+### Service approvals and Invoice amendments
+
+`InquiryServicePlan` now represents one immutable service approval, not necessarily a Quote
+approval. `document` is the exact snapshot reviewed or amended, `reviewedVersion <=
+document.version`, and `revision` identifies the independent approval. `service == null`
+with empty notes is an explicit clearing approval, with normal timestamp and staff USER
+provenance. Initial absence means no approval has ever occurred. The repository alone owns
+strict JSON encoding/decoding. `ServiceCommitment` and ordered label/group/key items retain
+all validation limits and normalization; keys are descriptive and never priced or resolved.
+
+Revision requests use `servicePlanAction`: RETAIN (default, forbids replacement data),
+REPLACE (requires a complete `servicePlan`), or CLEAR (forbids replacement data). RETAIN
+keeps the exact approval and notes; removing a noted financial line requires REPLACE or
+CLEAR and otherwise fails `SERVICE_PLAN_LINE_NOT_FOUND`. Replacing with identical normalized
+content is not a service change. Clearing an already absent/cleared plan is not a service
+change. Only meaningful changes append approvals. Historical notes are checked against their
+own immutable financial snapshots, never rewritten onto current lines.
+
+`InquiryInvoiceRevisions.preview` reads one unlocked REPEATABLE READ snapshot. Only canonical
+Invoices in BOOKED/SERVED are eligible; CLOSED rejects. It resolves staff lines through
+`validateChangeOrder`, combines proposed service intent and reconciles the candidate using
+shared `FinancialDocumentReconciliation` over runtime `paymentHistoriesForLineage`. Its token
+also binds current service revision, accepted proposal and immutable payment/allocation/
+refund identities. No local balance calculator or financial persistence is introduced.
+
+`InquiryInvoiceRevisions.revise` locks the canonical association then existing payment rows
+in UUID order through the runtime, so refunds cannot race its reviewed balance. It recomposes,
+checks the exact token, appends a ledger change order only for changed lines, and appends a
+service approval only for changed service intent, atomically. Existing payments apply to the
+latest total; overpayment is preserved. Closure remains a separate served/exact-zero action.
+The existing generic change-order route retains the effective plan and rejects removal of
+noted lines; use the atomic amendment workflow to replace or clear their commitment.
+
+HTTP (all 200/no-store, runtime error envelope and existing cookie Origin policy):
+
+- POST `/staff/requests/{inquiryId}/quote-preview`: initial Estimate preview.
+- POST `/staff/requests/{inquiryId}/quote-revision-preview`: reviewed Quote amendment.
+- POST `/staff/requests/{inquiryId}/proposals`: initial publication.
+- POST `/staff/requests/{inquiryId}/proposals/quote-revisions`: requires revision reviewToken.
+- POST `/staff/requests/{inquiryId}/proposals/deposit-revisions`: dedicated deposit-only revision.
+- POST `/staff/requests/{inquiryId}/invoice-revision-preview`: Invoice amendment preview.
+- POST `/staff/requests/{inquiryId}/invoice-revisions`: reviewed atomic Invoice amendment.
+
+Quote routes require financial-document.create, deposit-requirement.manage and
+fionas.financial-terms.manage plus a staff USER. Invoice routes require only document-create
+and financial-terms authority plus USER. Client-supplied authority never becomes provenance.
+Both revision families use `QUOTE_REVIEW_STALE` for stale reviewed intent. Invalid plans,
+lines or no-ops are 422; wrong lifecycle and stale versions are 409; missing lineage is 404.
+
+`ReadStaffRequest` retains its single unlocked REPEATABLE READ and read permissions. Existing
+`servicePlan` still means the approval bound to the latest proposal (historical after booking).
+`effectiveServicePlan` is the latest fulfillment approval, including an explicit cleared row.
+`acceptedServicePlan` is exposed only for Invoice, binding the accepted proposal's approval.
+`servicePlanHistory` lists all approvals by revision; `proposalHistory` lists all publications
+by durable order with servicePlanRevision. History validates notes against each approval's
+own financial snapshot. Use existing financial-document/history and deposit-requirement/history
+for the runtime-owned histories. No second financial history or audit framework is stored.
+
+The concrete client contract and examples live in
+[the frontend handoff](docs/quote-invoice-revisions-frontend-handoff.md).
 
 ## Deposit requirements and bulk financial lineages
 
@@ -1822,6 +1952,13 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   non-user approver refused) and `QuoteBuilderRoutesSpec` (shapes, codes, no-store, staff-USER
   authority, Origin, fail-closed corrupt plans), plus `InquiryProposalsSpec` and
   `InquiryProposalRoutesSpec`.
+- Keep `CanonicalRevisionsSpec` (real PostgreSQL through the complete handler: service-only Quote
+  publication identity and payability, sequential financial/deposit Quote revisions, Invoice
+  increases/decreases/partial payments/overpayment against the frozen accepted deposit,
+  atomic line + service amendments, service-only clear/replace history, stale payment and
+  service reviews, SERVED/CLOSED eligibility, stage/decline/unknown rejections, retained-note
+  removal on both amendment paths, late approval failure rollback, association contention,
+  and staff-USER authority without deposit permission for Invoice amendments).
 - Keep `InquiryDeclineSpec` (real PostgreSQL: projection consistency checks, persisted
   provenance and trimmed reason, untouched inquiry/customer/Estimate history, stale/repeated/
   illegal declines writing nothing, rollback of decline and event together, both winning orders

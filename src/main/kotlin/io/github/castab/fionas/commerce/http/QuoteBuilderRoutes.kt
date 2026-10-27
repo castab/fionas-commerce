@@ -115,7 +115,7 @@ data class InquiryQuotePreviewResponse(
     val reviewToken: String,
 )
 
-private fun ResolvedLine.toResponse() =
+internal fun ResolvedLine.toResponse() =
     QuotePreviewLineResponse(
         id = line.id.toString(),
         origin = origin.name,

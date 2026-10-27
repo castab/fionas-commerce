@@ -38,7 +38,18 @@ class StaffRequestRoutesSpec :
             response.status shouldBe Status.OK
             response.header("Cache-Control") shouldBe "no-store"
             val json = Json.parseToJsonElement(response.bodyString()).jsonObject
-            json.keys shouldBe setOf("inquiry", "financial", "suggestedDepositTerms", "depositRequirement", "payments")
+            json.keys shouldBe
+                setOf(
+                    "inquiry",
+                    "financial",
+                    "suggestedDepositTerms",
+                    "depositRequirement",
+                    "payments",
+                    "servicePlanHistory",
+                    "proposalHistory",
+                )
+            json.getValue("servicePlanHistory") shouldBe Json.parseToJsonElement("[]")
+            json.getValue("proposalHistory") shouldBe Json.parseToJsonElement("[]")
             json.getValue("payments") shouldBe Json.parseToJsonElement("[]")
             json.getValue("inquiry") shouldBe Json.parseToJsonElement(app.adminGet("/inquiries/$id").bodyString())
             json.getValue("financial") shouldBe Json.parseToJsonElement(app.adminGet("/financial-documents/$document").bodyString())

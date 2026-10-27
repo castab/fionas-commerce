@@ -22,6 +22,7 @@ import io.github.castab.fionas.commerce.financial.GetDepositRequirement
 import io.github.castab.fionas.commerce.financial.GetDepositRequirementHistory
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
 import io.github.castab.fionas.commerce.financial.GetFinancialDocumentHistory
+import io.github.castab.fionas.commerce.financial.InquiryInvoiceRevisions
 import io.github.castab.fionas.commerce.financial.InquiryProposals
 import io.github.castab.fionas.commerce.financial.IssueInquiryProposal
 import io.github.castab.fionas.commerce.financial.IssueInvoice
@@ -34,6 +35,7 @@ import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHi
 import io.github.castab.fionas.commerce.financial.ListInquiryFinancialDocuments
 import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.PreviewInquiryQuote
+import io.github.castab.fionas.commerce.financial.PreviewInquiryQuoteRevision
 import io.github.castab.fionas.commerce.financial.QueryFinancialLineages
 import io.github.castab.fionas.commerce.financial.RecordDocumentPayment
 import io.github.castab.fionas.commerce.financial.RecordPayment
@@ -198,6 +200,17 @@ fun fionaApplication(
             val proposalHistory = JdbiInquiryProposalRepository()
             val servicePlans = JdbiInquiryServicePlanRepository()
             val proposals = InquiryProposals(ledger, documentOwners, authorship, proposalHistory, servicePlans, clock, declines)
+            val invoiceRevisions =
+                InquiryInvoiceRevisions(
+                    context.transactor,
+                    ledger,
+                    documentOwners,
+                    authorship,
+                    proposalHistory,
+                    servicePlans,
+                    fulfillment,
+                    clock,
+                )
             val operations =
                 FionaOperations(
                     listStaffRequests = ListStaffRequests(
@@ -216,6 +229,15 @@ fun fionaApplication(
                         servicePlans,
                     )::invoke,
                     issueInquiryProposal = IssueInquiryProposal(context.transactor, proposals)::invoke,
+                    previewInquiryQuoteRevision = PreviewInquiryQuoteRevision(
+                        context.transactor,
+                        ledger,
+                        documentOwners,
+                        proposalHistory,
+                        servicePlans,
+                    )::invoke,
+                    previewInquiryInvoiceRevision = invoiceRevisions::preview,
+                    reviseInquiryInvoice = invoiceRevisions::revise,
                     previewInquiryQuote = PreviewInquiryQuote(
                         context.transactor,
                         ledger,
