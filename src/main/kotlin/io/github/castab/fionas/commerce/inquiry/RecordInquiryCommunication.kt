@@ -59,6 +59,7 @@ class RecordInquiryCommunication(
                     InquiryCommunicationKind.STAFF_ACKNOWLEDGED,
                     clock.instant().truncatedTo(ChronoUnit.MICROS),
                     command.principalId,
+                    command.throughRecordedOrder,
                 ),
             )
         }

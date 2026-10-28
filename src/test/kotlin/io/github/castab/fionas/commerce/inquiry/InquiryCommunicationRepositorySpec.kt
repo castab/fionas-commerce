@@ -125,6 +125,36 @@ class InquiryCommunicationRepositorySpec :
             app.transactor.inTransaction { repository.attentionFor(it, emptySet()) } shouldBe emptyMap()
         }
 
+        test("SQL aggregate and history agree with pure semantics for explicit observed clearing boundaries") {
+            val id = InquiryId(UUID.fromString(app.createInquiry()))
+            val recorded =
+                app.transactor.inTransaction { tx ->
+                    val first = repository.append(tx, fact(id, InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, 0))
+                    val second = repository.append(tx, fact(id, InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, 100))
+                    val reply =
+                        repository.append(
+                            tx,
+                            fact(id, InquiryCommunicationKind.STAFF_EMAIL_SENT, 200).copy(clearsThrough = first.recordedOrder),
+                        )
+                    listOf(first, second, reply)
+                }
+            val attention = app.transactor.inTransaction { repository.attentionFor(it, listOf(id)) }.getValue(id)
+            attention shouldBe InquiryCommunicationAttention.project(recorded)
+            attention.unacknowledgedSince shouldBe recorded[1].activity.occurredAt
+            app.transactor.inTransaction { repository.history(it, id) } shouldBe recorded
+            // The database refuses a boundary that is not strictly before its own fact or sits on inbound.
+            shouldThrow<Exception> {
+                app.database.execute(
+                    "UPDATE fionas.inquiry_communications SET clears_through = recorded_order WHERE id = '${recorded[2].activity.id.value}'",
+                )
+            }
+            shouldThrow<Exception> {
+                app.database.execute(
+                    "UPDATE fionas.inquiry_communications SET clears_through = 0 WHERE id = '${recorded[0].activity.id.value}'",
+                )
+            }
+        }
+
         listOf(true, false).forEach { inboundFirst ->
             test("same-inquiry appends wait for commit: inbound first = $inboundFirst; unrelated inquiry remains independent") {
                 val id = InquiryId(UUID.fromString(app.createInquiry()))

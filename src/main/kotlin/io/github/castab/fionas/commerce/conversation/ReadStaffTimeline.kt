@@ -1,9 +1,11 @@
 package io.github.castab.fionas.commerce.conversation
 
 import io.github.castab.commerce.financial.FinancialDocument
-import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.financial.FinancialDocumentReference
+import io.github.castab.commerce.payment.RefundRecord
 import io.github.castab.commerce.runtime.financial.DepositRequirementVersion
 import io.github.castab.commerce.runtime.financial.FinancialLedger
+import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.PrincipalId
@@ -11,7 +13,6 @@ import io.github.castab.fionas.commerce.financial.DocumentSnapshot
 import io.github.castab.fionas.commerce.financial.InquiryProposal
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
 import io.github.castab.fionas.commerce.inquiry.InquiryId
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryConversationRepository
 import io.github.castab.fionas.commerce.staff.ReadStaffRequest
 import io.github.castab.fionas.commerce.staff.StaffRequest
 import java.time.Instant
@@ -43,13 +44,29 @@ sealed interface TimelineItem {
         override val occurredAt = snapshot.createdAt
     }
 
+    /**
+     * A receipt with its whole authoritative runtime history. [canonicalDocuments] are the canonical lineage's
+     * immutable snapshots, giving each allocation its exact stage; allocations to other lineages carry none.
+     */
     data class Payment(
-        override val id: String,
-        override val occurredAt: Instant,
-        val amount: Money,
-        val paymentId: String,
-        val refunded: Boolean,
-    ) : TimelineItem
+        val history: PaymentHistory,
+        val classification: PaymentClassification,
+        val acceptedProposal: InquiryProposal?,
+        val canonicalDocuments: Map<FinancialDocumentReference, FinancialDocument>,
+    ) : TimelineItem {
+        override val id = "payment:${history.payment.id}"
+        override val occurredAt: Instant = history.payment.receivedAt
+    }
+
+    /** A refund of [payment], with the allocations it explicitly unwound from that payment's history. */
+    data class Refund(
+        val refund: RefundRecord,
+        val payment: Payment,
+    ) : TimelineItem {
+        override val id = "refund:${refund.id}"
+        override val occurredAt: Instant = refund.refundedAt
+        val unwound get() = payment.history.refundAllocations.filter { it.refundReference == refund.id }
+    }
 
     data class Milestone(
         override val id: String,
@@ -59,6 +76,12 @@ sealed interface TimelineItem {
         val reason: String? = null,
     ) : TimelineItem
 }
+
+/**
+ * DEPOSIT is the receipt allocated to a published canonical Quote snapshot, which only deposit acceptance can do;
+ * every other receipt in the canonical lineage's history is ADDITIONAL. Refunds never reclassify a receipt.
+ */
+enum class PaymentClassification { DEPOSIT, ADDITIONAL }
 
 enum class MilestoneKind { COMMUNICATION_ACKNOWLEDGED, SERVED, CLOSED, DECLINED }
 
@@ -73,7 +96,7 @@ class ReadStaffTimeline(
     private val transactor: Transactor,
     private val requests: ReadStaffRequest,
     private val ledger: FinancialLedger,
-    private val sources: JdbiInquiryConversationRepository,
+    private val establishment: ConversationEstablishment,
     private val reader: ConversationReader,
 ) {
     operator fun invoke(
@@ -97,28 +120,21 @@ class ReadStaffTimeline(
                             .drop(
                                 1,
                             ).forEach { add(TimelineItem.Invoice(DocumentSnapshot(it, null))) }
+                        val canonicalDocuments = versions.associate { it.document.reference to it.document }
                         request.payments.forEach { history ->
-                            val payment = history.payment
-                            add(
+                            val accepted =
+                                request.proposalHistory.singleOrNull { proposal ->
+                                    history.allocations.any { it.financialDocumentReference == proposal.documentReference }
+                                }
+                            val payment =
                                 TimelineItem.Payment(
-                                    "payment:${payment.id}",
-                                    payment.receivedAt,
-                                    payment.amount,
-                                    payment.id.toString(),
-                                    false,
-                                ),
-                            )
-                            history.refunds.forEach { refund ->
-                                add(
-                                    TimelineItem.Payment(
-                                        "refund:${refund.id}",
-                                        refund.refundedAt,
-                                        refund.amount,
-                                        payment.id.toString(),
-                                        true,
-                                    ),
+                                    history,
+                                    if (accepted == null) PaymentClassification.ADDITIONAL else PaymentClassification.DEPOSIT,
+                                    accepted,
+                                    canonicalDocuments,
                                 )
-                            }
+                            add(payment)
+                            history.refunds.forEach { add(TimelineItem.Refund(it, payment)) }
                         }
                         request.communicationHistory.filter { it.activity.kind == InquiryCommunicationKind.STAFF_ACKNOWLEDGED }.forEach {
                             val activity = it.activity
@@ -158,7 +174,7 @@ class ReadStaffTimeline(
                             )
                         }
                     }
-                Triple(request, items, sources.established(transaction, inquiry))
+                Triple(request, items, establishment.established(transaction, inquiry))
             }
         var conversation = if (canReadMessages) reader.read(inquiry) else ConversationRead(ConversationAvailability.FORBIDDEN)
         if (conversation.availability == ConversationAvailability.EMPTY &&

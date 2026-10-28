@@ -267,6 +267,7 @@ class DatabaseSchemaSpec :
             database.foreignKeys("inquiry_communications") shouldContainExactly listOf("inquiry_id → fionas.inquiries(id)")
             database.columns(
                 "inquiry_communications",
+                "clears_through",
                 "id",
                 "inquiry_id",
                 "kind",
@@ -276,6 +277,7 @@ class DatabaseSchemaSpec :
                 "recorded_order",
             ) shouldContainExactly
                 listOf(
+                    "clears_through YES bigint",
                     "id NO uuid",
                     "inquiry_id NO uuid",
                     "kind NO text",
@@ -297,7 +299,7 @@ class DatabaseSchemaSpec :
                     "AND indexname = 'inquiry_communications_inquiry_order_idx'",
             ) shouldContainExactly
                 listOf(
-                    "CREATE INDEX inquiry_communications_inquiry_order_idx ON fionas.inquiry_communications USING btree (inquiry_id, recorded_order) INCLUDE (kind, occurred_at)",
+                    "CREATE INDEX inquiry_communications_inquiry_order_idx ON fionas.inquiry_communications USING btree (inquiry_id, recorded_order) INCLUDE (kind, occurred_at, clears_through)",
                 )
             val inquiry = application.createInquiry()
             val principal =

@@ -43,6 +43,13 @@ private val eventPairs =
         "conversation.deleted" to setOf("operator/manual_delete"),
     )
 
+private fun fionaTopic(externalId: String): InquiryId? =
+    externalId
+        .takeIf { conversationUuid.matches(it) }
+        ?.let(UUID::fromString)
+        ?.takeIf { it.toString() == externalId }
+        ?.let(::InquiryId)
+
 private val baseFields = setOf("schemaVersion", "id", "type", "occurredAt", "conversationId", "sequence", "topic", "actor", "cause")
 private val eventFields =
     mapOf(
@@ -102,12 +109,9 @@ internal fun conversationEvent(bytes: ByteArray): ConversationEvent =
                 val topicType = string("type", obj)
                 val externalId = string("externalId", obj)
                 require(topicType.length in 1..64 && externalId.length in 1..255)
-                if (topicType == "booking") {
-                    require(conversationUuid.matches(externalId))
-                    InquiryId(UUID.fromString(externalId))
-                } else {
-                    null
-                }
+                // Topic ids are generic provider text: only a booking topic whose id is exactly an inquiry's canonical
+                // UUID text (as Fiona names its topics) relates to an inquiry; any other valid topic is unrelated.
+                if (topicType == "booking") fionaTopic(externalId) else null
             }
         val message = if (type.startsWith("conversation.message.")) uuid("messageId") else null
         if (type == "conversation.state.changed") {

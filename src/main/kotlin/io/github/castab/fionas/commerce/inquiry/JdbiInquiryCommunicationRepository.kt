@@ -42,6 +42,7 @@ class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
                             null -> null
                             else -> error("Invalid communication principal")
                         },
+                        row.getObject("clears_through", Long::class.javaObjectType),
                     ),
                     row.getLong("recorded_order"),
                 )
@@ -70,9 +71,12 @@ class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
             val order =
                 transaction.handle
                     .createQuery(
-                        "INSERT INTO fionas.inquiry_communications (id, inquiry_id, kind, occurred_at, principal_kind, principal_id) " +
-                            "VALUES (:id, :inquiry, :kind, :at, :principalKind, CAST(:principalId AS uuid)) RETURNING recorded_order",
+                        "INSERT INTO fionas.inquiry_communications " +
+                            "(id, inquiry_id, kind, occurred_at, principal_kind, principal_id, clears_through) " +
+                            "VALUES (:id, :inquiry, :kind, :at, :principalKind, CAST(:principalId AS uuid), :clearsThrough) " +
+                            "RETURNING recorded_order",
                     ).bind("id", activity.id.value)
+                    .bindByType("clearsThrough", activity.clearsThrough, Long::class.javaObjectType)
                     .bind("inquiry", activity.inquiryId.value)
                     .bind("kind", activity.kind.name)
                     .bind("at", activity.occurredAt)
@@ -97,7 +101,8 @@ class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
                 """
                 WITH scoped AS (
                     SELECT inquiry_id, kind, occurred_at, recorded_order,
-                           max(recorded_order) FILTER (WHERE kind IN ('STAFF_EMAIL_SENT', 'STAFF_ACKNOWLEDGED'))
+                           max(coalesce(clears_through, recorded_order))
+                               FILTER (WHERE kind IN ('STAFF_EMAIL_SENT', 'STAFF_ACKNOWLEDGED'))
                                OVER (PARTITION BY inquiry_id) AS clearing_order
                     FROM fionas.inquiry_communications WHERE inquiry_id = ANY(:ids)
                 )

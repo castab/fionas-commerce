@@ -122,6 +122,23 @@ class ConversationIngestionSpec :
             shouldThrow<IntakeFailure> { ingest(String(payload(id)).replace("\"participant\"", "\"service\"").toByteArray()) }
             detail(id).communication.throughRecordedOrder shouldBe 0L
         }
+        test("valid booking topics whose provider ids are not Fiona inquiry ids are unrelated, never malformed") {
+            val id = app.createInquiry()
+
+            fun topic(externalId: String) = String(payload(id)).replace("\"externalId\":\"$id\"", "\"externalId\":\"$externalId\"")
+            // Generic provider topic ids: opaque text up to 255 characters, including near-miss UUID spellings.
+            listOf("order-1234", "BK_42", "booking:$id", "{$id}", id.uppercase(), id.replace("-", ""), "x".repeat(255)).forEach {
+                ingest(topic(it).toByteArray())
+            }
+            detail(id).communication.throughRecordedOrder shouldBe 0L
+            app.transactor.inTransaction { sources.established(it, InquiryId(UUID.fromString(id))) } shouldBe false
+            // Only invalid provider contracts halt.
+            shouldThrow<IntakeFailure> { ingest(topic("").toByteArray()) }
+            shouldThrow<IntakeFailure> { ingest(topic("x".repeat(256)).toByteArray()) }
+            shouldThrow<IntakeFailure> { ingest(String(payload(id)).replace("\"type\":\"booking\"", "\"type\":\"\"").toByteArray()) }
+            ingest(payload(id))
+            detail(id).communication.needsReply shouldBe true
+        }
         test("delivery updates cannot fabricate staff activity or regress attention") {
             val id = app.createInquiry()
             val inbound = payload(id)

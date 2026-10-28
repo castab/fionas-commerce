@@ -8,6 +8,7 @@ import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.StaffReplyOutcomeResponse
 import io.github.castab.fionas.commerce.http.StaffReplyResponse
+import io.github.castab.fionas.commerce.http.StaffRequestListResponse
 import io.github.castab.fionas.commerce.http.StaffRequestResponse
 import io.github.castab.fionas.commerce.http.StaffTimelineResponse
 import io.github.castab.fionas.commerce.http.TimelineItemResponse
@@ -43,6 +44,8 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 
 class StaffConversationSpec :
     FunSpec({
@@ -167,6 +170,117 @@ class StaffConversationSpec :
             items.last().sendState shouldBe "accepted"
         }
 
+        fun appendInbound(
+            id: String,
+            at: Instant,
+        ) = app.transactor.inTransaction {
+            JdbiInquiryCommunicationRepository().append(
+                it,
+                InquiryCommunication(
+                    InquiryCommunicationId(UUID.randomUUID()),
+                    InquiryId(UUID.fromString(id)),
+                    InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED,
+                    at,
+                    null,
+                ),
+            )
+        }
+
+        fun listed(id: String) =
+            CommerceJson
+                .asA(app.adminGet("/staff/requests").bodyString(), StaffRequestListResponse.serializer())
+                .items
+                .single { it.inquiryId == id }
+
+        test("inbound recorded while the provider accepts a reply stays outstanding in both attention projections") {
+            val id = app.createInquiry()
+            provider.inbound(id)
+            val observed = appendInbound(id, Instant.parse("2026-10-01T12:00:00Z"))
+            val later = Instant.parse("2026-10-01T12:05:00Z")
+            val appended = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            var writer: CompletableFuture<*>? = null
+            // A customer email is ingested after the staff member's lookup, while the provider is accepting: its
+            // append holds the inquiry lock, so the reply's acceptance waits for it and still must not clear it.
+            provider.onSend = {
+                provider.onSend = null
+                writer =
+                    CompletableFuture.runAsync {
+                        app.transactor.inTransaction { transaction ->
+                            JdbiInquiryCommunicationRepository().append(
+                                transaction,
+                                InquiryCommunication(
+                                    InquiryCommunicationId(UUID.randomUUID()),
+                                    InquiryId(UUID.fromString(id)),
+                                    InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED,
+                                    later,
+                                    null,
+                                ),
+                            )
+                            appended.countDown()
+                            release.await()
+                        }
+                    }
+                appended.await()
+            }
+            val expectation = latest(id)
+            val sending = CompletableFuture.supplyAsync { reply(id, "Yes, the 12th works.", expectation) }
+            appended.await()
+            Thread.sleep(300)
+            sending.isDone shouldBe false
+            release.countDown()
+            sending.join().status shouldBe Status.CREATED
+            checkNotNull(writer).join()
+            sent(id).single().activity.clearsThrough shouldBe observed.recordedOrder
+            detail(id).communication.needsReply shouldBe true
+            detail(id).communication.unacknowledgedSince shouldBe later.toString()
+            listed(id).needsReply shouldBe true
+            listed(id).awaitingReplySince shouldBe later.toString()
+            // Acknowledging what is now visible clears it, through the explicit watermark.
+            val through = detail(id).communication.throughRecordedOrder
+            app.adminPost("/inquiries/$id/communications/acknowledge", """{"throughRecordedOrder":$through}""").status shouldBe
+                Status.NO_CONTENT
+            detail(id).communication.needsReply shouldBe false
+            listed(id).needsReply shouldBe false
+        }
+
+        test("a delayed same-key reconciliation never clears inbound recorded after the original observation") {
+            val id = app.createInquiry()
+            val earlier = appendInbound(id, Instant.parse("2026-10-01T12:00:00Z"))
+            val key = UUID.randomUUID().toString()
+            provider.script += Behavior.TIMEOUT_AFTER_PERSIST
+            provider.replayDelayMillis = 1500
+            reply(id, "Slow", key = key).result().outcome shouldBe StaffReplyOutcomeResponse.UNKNOWN
+            provider.replayDelayMillis = 0
+            val later = Instant.parse("2026-10-01T13:00:00Z")
+            appendInbound(id, later)
+            reply(id, "Slow", key = key).let {
+                it.status shouldBe Status.OK
+                it.result().outcome shouldBe StaffReplyOutcomeResponse.ACCEPTED
+            }
+            provider.created.get() shouldBe 1
+            sent(id).single().activity.clearsThrough shouldBe earlier.recordedOrder
+            detail(id).communication.unacknowledgedSince shouldBe later.toString()
+            listed(id).awaitingReplySince shouldBe later.toString()
+        }
+
+        test("an accepted reply establishes the topic for sending and the timeline without the conversation consumer") {
+            val id = app.createInquiry()
+            reply(id, "Hello").status shouldBe Status.CREATED
+            timeline(id).conversation.state.name shouldBe "READY"
+            // The provider later answers 404 for the topic; no events were ever ingested (intake disabled).
+            provider.conversations.remove(id)
+            timeline(id).conversation.state.name shouldBe "MISSING"
+            reply(id, "Hello again").let {
+                it.status shouldBe Status.CONFLICT
+                it.code() shouldBe "conversation_missing"
+            }
+            provider.created.get() shouldBe 1
+            sent(id).size shouldBe 1
+            // Without any evidence a 404 is still an empty thread.
+            timeline(app.createInquiry()).conversation.state.name shouldBe "EMPTY"
+        }
+
         test("provider unavailability and missing established threads never open a replacement conversation") {
             val id = app.createInquiry()
             provider.lookupStatus = 500
@@ -261,7 +375,7 @@ class StaffConversationSpec :
                     ),
                     failing,
                     JdbiStaffReplyRepository(),
-                    JdbiInquiryConversationRepository(),
+                    ConversationEstablishment(JdbiInquiryConversationRepository(), JdbiStaffReplyRepository()),
                     app.authorization::getUser,
                     ResendConversationSender(provider.sendConfiguration()),
                     testClock,

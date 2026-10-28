@@ -60,8 +60,9 @@ data class StaffReplyResponse(
     @ApiProperty(
         description =
             "ACCEPTED: the provider durably holds the outbound intent (`sendState` pending or accepted); never " +
-                "delivery. UNKNOWN: the outcome could not be confirmed; retry with the SAME Idempotency-Key and body to " +
-                "reconcile, never a new key.",
+                "delivery. UNKNOWN: the outcome could not be confirmed; retry with the SAME Idempotency-Key, body and " +
+                "original expectation (expectedLatestMessageId or expectEmptyConversation as first sent) to reconcile, " +
+                "never a new key.",
     )
     val outcome: StaffReplyOutcomeResponse,
     @ApiProperty(description = "True when this key's earlier command was replayed rather than newly sent.")
@@ -161,7 +162,7 @@ internal fun sendStaffReplyRoute(
             Status.ACCEPTED,
             replyResponse to StaffReplyResponse(StaffReplyOutcomeResponse.UNKNOWN, false),
             "UNKNOWN: the provider outcome could not be confirmed and may have been sent. Never a failure: retry with the " +
-                "same key and body to reconcile, or review the timeline.",
+                "same key, body and original expectation to reconcile, or review the timeline.",
         )
         returningError(
             ErrorCategory.MALFORMED_REQUEST,

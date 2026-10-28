@@ -1085,8 +1085,11 @@ inquiry existence check; a missing inquiry fails before insertion. Same-inquiry 
 preceding commit/rollback; unrelated inquiries remain independent. Sequence gaps are allowed.
 Clearing follows record order; quote inactivity follows actual email `occurredAt`, excluding
 acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when
-its actual email time leaves the Quote stale. The `(inquiry_id, recorded_order)` index
-includes `kind` and `occurred_at` for the aggregate read.
+its actual email time leaves the Quote stale. A staff reply or acknowledgement clears only
+through the observed boundary it acted on (`clears_through`), so inbound recorded after the
+staff member looked stays outstanding even when the clearing fact is recorded later. The
+`(inquiry_id, recorded_order)` index includes `kind`, `occurred_at` and `clears_through` for the
+aggregate read.
 `RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
 No provider/public webhook, email bodies, attachments, delivery tracking, notifications,
 mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
@@ -1537,7 +1540,12 @@ inbound provider message, deduplicated by event and message identity, so staff a
 (`FIONAS_CONVERSATION_READ_ENABLED`) and reply through Fiona (`FIONAS_CONVERSATION_SEND_ENABLED`,
 with an explicit `FIONAS_CONVERSATION_RECIPIENT_ALLOWLIST`); each reply is an idempotent command
 recorded before the provider call and reconciled by exact same-key replay, so a timeout never
-causes a second email. Everything is disabled by default and independent. The verified provider
+causes a second email; an `UNKNOWN` outcome is retried with the same key, body and original
+expectation. A reply clears only the inbound recorded before its staff member's lookup, however
+late the provider accepts it. Provider topic ids are generic: a `booking` topic that is not an
+inquiry's UUID is unrelated and ignored. Timeline payments carry the runtime history (method,
+allocations with exact versions, `DEPOSIT`/`ADDITIONAL`). Everything is disabled by default and
+independent. The verified provider
 contract (0.7.2-rc.2), consumer grants, configuration, failure modes, cutover and deferred work
 (no timeline change signal yet, no backfill, no automatic emails) are in
 [docs/email-conversations.md](docs/email-conversations.md).
@@ -1623,7 +1631,11 @@ in place, preserving every inquiry and existing USER/SERVICE authorship row.
 `V4__service_approval_revisions.sql` gives `fionas.inquiry_service_plans` a per-inquiry
 `revision` primary key (backfilled in Quote-version order), permits a null `plan` for explicit
 clearings, drops the proposal pair uniqueness and binds each proposal to its service approval
-revision (backfilled from the plan of its exact Quote); it also upgrades in place. The historical
+revision (backfilled from the plan of its exact Quote); it also upgrades in place.
+`V5__conversation_sources.sql` adds the provider event, inbound message source and staff reply
+command tables, and `V6__communication_clearing_boundary.sql` adds nullable observed clearing
+boundaries to communication facts and reply commands (NULL keeps the previous meaning); both are
+additive. The historical
 0.0.23 rebaseline instructions below apply only to databases that predate that rebaseline. No
 reset is required for a valid 0.0.23/0.0.24/0.0.25 → 0.0.26 upgrade.
 
@@ -1992,7 +2004,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `InquiryDeclineSpec`, `InquiryDeclineRoutesSpec` | DECLINED projection and fail-loud contradictions; persisted staff provenance and trimmed reason with history untouched; stale/repeated/illegal declines writing nothing; decline and InquiryDeclined v1 rolling back together; real PostgreSQL contention in both orders against initial Quote issuance, between declines and against RELATED creation; every progression path rejected while reads and settlement remain; dashboard exclusion with outstanding email; staff-USER authority, Origin, codes and ignored client provenance |
 | `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; the three attention queues and onset ordering; durable-order clearing with PostgreSQL contention; SQL/pure projection parity; EXACT/FROM qualifiers from the requested service; event-zone and DST boundaries; eleven set-based SQL reads; declined inquiries in no queue or count; snapshot coherence; strict corrupt-data failures; live USER/SERVICE permissions |
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after issuance, RELATED exclusion, integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, nested response parity, permission intersection and no-store |
-| `ConversationIngestionSpec`, `ConversationNatsSpec`, `ResendConversationReaderSpec`, `StaffConversationSpec` | Provider events: one inbound fact per message across duplicate/replayed deliveries, reused identities halt, unknown inquiries and foreign topics ignored, unsupported/extra-field contracts rejected, delivery updates fabricate nothing, the dedicated least-privilege durable ACKs only after commit; stale acknowledgement conflicts; timeline READY/EMPTY/MISSING/UNAVAILABLE/FORBIDDEN with commerce history kept and plain text only; staff replies opening and continuing the topic as the USER with a trusted signature, stale expectations, lookup failure never opening a replacement, exact same-key reconciliation after errors, timeouts and local failure with one email, recorded rejections, allow-list, disabled sending and SERVICE refusal |
+| `ConversationIngestionSpec`, `ConversationNatsSpec`, `ResendConversationReaderSpec`, `StaffConversationSpec` | Provider events: one inbound fact per message across duplicate/replayed deliveries, reused identities halt, unknown inquiries, foreign topics and generic non-inquiry booking topic ids ignored, unsupported/extra-field contracts rejected, delivery updates fabricate nothing, the dedicated least-privilege durable ACKs only after commit; stale acknowledgement conflicts; timeline READY/EMPTY/MISSING/UNAVAILABLE/FORBIDDEN with commerce history kept and plain text only; staff replies opening and continuing the topic as the USER with a trusted signature, stale expectations, lookup failure never opening a replacement, exact same-key reconciliation after errors, timeouts and local failure with one email, inbound recorded during provider acceptance or before a delayed reconciliation kept outstanding in both attention projections, accepted replies establishing the topic for send and timeline without intake, recorded rejections, allow-list, disabled sending and SERVICE refusal |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: staff Estimate, line edits, Quote, deposit, Invoice and final payment; several lineages per inquiry; caller totals never authoritative; carry, override, remove, add and reorder keeping identities; change orders in every stage; stable rejection codes; stale versions; illegal transitions; payment policy and validation; duplicate references; non-Fiona documents `404`; staff-only routes with live permissions; declared methods |
 | `FinancialLedgerExpansionSpec`, `FinancialDocumentAtomicitySpec` | Direct first-snapshot stages from staff lines; invalid line sets append nothing; standalone receipts, partial and split allocations, runtime limits and Fiona stage/version policy; every cross-boundary write (creation, change orders, combined payments, allocations) rolls back the ledger with Fiona's rows |
 | `FinancialDocumentRepositoriesSpec` | Associations (several lineages per inquiry, one inquiry per lineage, first-snapshot FK) and line authorship (USER/SERVICE/INTERNAL round trips, copies to successors, exact-snapshot FK, once per version, transactional rollback, kind check) |

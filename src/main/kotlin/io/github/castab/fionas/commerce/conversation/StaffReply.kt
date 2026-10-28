@@ -54,7 +54,12 @@ enum class StaffReplyMode { OPEN, REPLY }
 
 enum class StaffReplyOutcome { ACCEPTED, REJECTED }
 
-/** The durable command record. No message body; [providerRequest] is the digest of the exact provider request. */
+/**
+ * The durable command record. No message body; [providerRequest] is the digest of the exact provider request.
+ * [observedThrough] is the inquiry's greatest communication `recordedOrder` read before the provider lookup confirmed
+ * the staff member's expectation: the reply's STAFF_EMAIL_SENT clears inbound through it and no further, however late
+ * the provider accepts. Null only for commands recorded before the boundary existed.
+ */
 data class StaffReplyRecord(
     val key: StaffReplyKey,
     val inquiryId: InquiryId,
@@ -65,6 +70,7 @@ data class StaffReplyRecord(
     val signatureName: String,
     val requestedAt: Instant,
     val conversationId: UUID?,
+    val observedThrough: Long?,
     val outcome: StaffReplyOutcome? = null,
     val providerMessageId: UUID? = null,
     val providerState: String? = null,

@@ -11,6 +11,7 @@ import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthentic
 import io.github.castab.commerce.runtime.session.SessionAuthenticator
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.fionas.commerce.conversation.ConversationAvailability
+import io.github.castab.fionas.commerce.conversation.ConversationEstablishment
 import io.github.castab.fionas.commerce.conversation.ConversationRead
 import io.github.castab.fionas.commerce.conversation.ConversationReadConfiguration
 import io.github.castab.fionas.commerce.conversation.ConversationReader
@@ -239,13 +240,14 @@ fun fionaApplication(
                     servicePlans,
                     communications,
                 )
-            val conversationSources = JdbiInquiryConversationRepository()
+            val staffReplies = JdbiStaffReplyRepository()
+            val conversationEstablishment = ConversationEstablishment(JdbiInquiryConversationRepository(), staffReplies)
             val timeline =
                 ReadStaffTimeline(
                     context.transactor,
                     staffRequest,
                     ledger,
-                    conversationSources,
+                    conversationEstablishment,
                     conversationReads?.let(::ResendConversationReader)
                         ?: ConversationReader { ConversationRead(ConversationAvailability.UNAVAILABLE) },
                 )
@@ -255,8 +257,8 @@ fun fionaApplication(
                         context.transactor,
                         getInquiry,
                         communications,
-                        JdbiStaffReplyRepository(),
-                        conversationSources,
+                        staffReplies,
+                        conversationEstablishment,
                         context.authorization::getUser,
                         conversationSends?.let(::ResendConversationSender),
                         clock,

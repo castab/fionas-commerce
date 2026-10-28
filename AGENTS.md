@@ -811,7 +811,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V6__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V7__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -874,6 +874,12 @@ after runtime-owned migrations.
   time, and an all-or-nothing ACCEPTED outcome with conversation, provider message, state and
   unique communication, or REJECTED). No subject, address, body, HTML, routing token or
   delivery state is stored.
+- **`V6__communication_clearing_boundary`** (additive, expand-safe): nullable
+  `inquiry_communications.clears_through` (only on STAFF_EMAIL_SENT/STAFF_ACKNOWLEDGED,
+  `0 <= clears_through < recorded_order`; NULL keeps clearing through the fact's own order, so
+  older binaries and existing rows keep their meaning), the communication index recreated to
+  include it, and nullable `inquiry_staff_replies.observed_through` (NULL only for commands
+  recorded before V6). No runtime references or runtime DDL changes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
@@ -1652,7 +1658,11 @@ preceding commit/rollback; unrelated inquiries remain independent. Sequence gaps
 Clearing follows record order; quote inactivity follows actual email `occurredAt`, excluding
 acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when
 its actual email time leaves the Quote stale. The `(inquiry_id, recorded_order)` index
-includes `kind` and `occurred_at` for the aggregate read.
+includes `kind`, `occurred_at` and `clears_through` for the aggregate read. A clearing fact's
+optional `clearsThrough` is the observed boundary it acted on; it clears inbound with
+`recordedOrder <= clearsThrough` only, and the pure projection and SQL aggregate both clear
+through the maximum `coalesce(clears_through, recorded_order)` (see
+[Email conversations](#email-conversations)).
 Communication-kind clearing, quote-activity and principal-provenance semantics use exhaustive Kotlin `when`
 expressions without `else`; every new kind requires explicit decisions for all three, with SQL
 kind lists kept explicit and verified against the pure projection.
@@ -1796,7 +1806,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root), `PersistedJson.kt` (strict persisted-JSON configuration shared by the owning repositories) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...events` | Separate outgoing (`InquiryPersisted` v3, `InquiryDeclined` v1)/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream worker shape used by inquiry intake and the provider conversation consumer (`ConversationEvent`, `ConversationIntake`, `RecordConversationEvent`), and the exact-sequence recovery CLI |
-| `...conversation` | The typed Resend Conversation Service adapter (`ResendConversationReader`, `ResendConversationSender`, their configuration), staff reply values, record, repository and `SendStaffReply`, and the read-only `ReadStaffTimeline` |
+| `...conversation` | The typed Resend Conversation Service adapter (`ResendConversationReader`, `ResendConversationSender`, their configuration), `ConversationEstablishment`, staff reply values, record, repository and `SendStaffReply`, and the read-only `ReadStaffTimeline` |
 | `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; `InquiryDecline`, its repository and `DeclineInquiry`; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
@@ -1996,10 +2006,13 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   integrity failures and permission intersection.
 - Keep `ConversationIngestionSpec`, `ConversationNatsSpec`, `ResendConversationReaderSpec` and
   `StaffConversationSpec` (real PostgreSQL and a deterministic stub provider: event/message
-  deduplication and reuse halts, ignored topics and unknown inquiries, closed-schema rejection,
+  deduplication and reuse halts, ignored topics, generic non-inquiry booking topic ids and
+  unknown inquiries, closed-schema rejection,
   ACK after commit through an isolated least-privilege durable, stale acknowledgement, timeline
   states with commerce history, first-reply opening, stale expectations, no replacement on
   lookup failure, same-key reconciliation after errors/timeouts/local failure with one email,
+  inbound recorded during acceptance or before delayed reconciliation staying outstanding in the
+  pure and SQL projections, accepted-reply establishment without intake,
   recorded rejections, allow-list, disabled sending, SERVICE refusal). Never require a live
   provider account.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
@@ -2028,9 +2041,11 @@ configuration and cutover are in [docs/email-conversations.md](docs/email-conver
 Verified provider contract: resend-conversation-service **0.7.2-rc.2**; re-verify before
 relying on any other provider behavior, and never guess an endpoint.
 
-- **Identity.** An inquiry's conversation is the provider topic (`booking`, inquiry UUID),
-  resolved on every read and send; no provider conversation id is authority. Never correlate by
-  customer email. Processed booking events and accepted replies are *establishment evidence*:
+- **Identity.** An inquiry's conversation is the provider topic (`booking`, the inquiry's
+  canonical lowercase UUID text), resolved on every read and send; no provider conversation id is
+  authority. Never correlate by customer email. Processed booking events and accepted replies are
+  *establishment evidence*, decided by the one `ConversationEstablishment` shared by
+  `SendStaffReply` and `ReadStaffTimeline` (accepted replies count with the consumer disabled):
   a topic `404` with evidence is MISSING and never opens a replacement; only `404` without
   evidence is EMPTY. Timeouts, credential errors and malformed answers are never absence.
 - **Consumer.** `conversationIntake` composes `ManagedJetStreamWorker` and `NatsIntakeTransport`
@@ -2041,8 +2056,11 @@ relying on any other provider behavior, and never guess an endpoint.
   `processConversationDelivery` ACKs after commit or explicit ignore, NAKs transient failures and
   halts on contract violations or exhaustion; no failure event is published.
 - **Validation.** `conversationEvent` parses the closed v1 schema strictly (exact property set
-  per type, actor/cause pairs, UUIDs, positive sequence, 64 KiB UTF-8). Null or non-`booking`
-  topics and unknown inquiries are ignored and ACKed; nothing is created implicitly.
+  per type, actor/cause pairs, UUIDs, positive sequence, topic type 1–64 and external id 1–255
+  characters, 64 KiB UTF-8); only those contract violations halt. Topic ids are generic provider
+  text: null or non-`booking` topics, `booking` topics whose id is not exactly an inquiry's
+  canonical UUID text, and unknown inquiries are unrelated, ignored and ACKed; nothing is created
+  implicitly.
 - **Facts.** `RecordConversationEvent` locks the inquiry row (the communication append lock),
   claims the event id with its payload fingerprint (reuse with different content fails), and only
   for `conversation.message.received` appends one CUSTOMER_EMAIL_RECEIVED per provider message id
@@ -2053,15 +2071,24 @@ relying on any other provider behavior, and never guess an endpoint.
   stored); `ListStaffRequests` uses the one set-based `attentionFor` query. `ReadStaffTimeline`
   reads the request, version history and deposit history in one REPEATABLE READ, then the
   provider (not atomic with it). Milestones come only from existing facts and immutable
-  snapshots; sort is `occurredAt` then lexical item id. Message content requires
+  snapshots; sort is `occurredAt` then lexical item id. Payment and refund items carry the
+  runtime `PaymentHistory` unmodified (exact amounts, method, external reference, every
+  allocation's lineage, exact version and canonical stage, each refund's unwound allocations) and
+  a `DEPOSIT`/`ADDITIONAL` classification: DEPOSIT is the receipt allocated to a published
+  canonical Quote snapshot, naming its proposal and deposit revision. Message content requires
   `fionas.communications.read`; HTML, routing tokens and provider diagnostics never cross.
 - **Replies.** `SendStaffReply`: an existing key resumes; otherwise enabled/allow-list checks,
   the topic lookup against the required expectation (`409 conversation_changed`), a committed
-  `inquiry_staff_replies` claim under the inquiry lock, then the provider call outside any
+  `inquiry_staff_replies` claim under the inquiry lock carrying `observedThrough` (the greatest
+  communication `recordedOrder`, read before the lookup), then the provider call outside any
   transaction with key `fionas-commerce:inquiry:{id}:staff-reply:{key}:v1`. Only `pending` or
-  `accepted` appends STAFF_EMAIL_SENT (authenticated USER, Clock time) and the ACCEPTED outcome,
-  once. Ambiguity gets exactly one identical replay, then `202 UNKNOWN`; a same-key retry rebuilds
-  the request, must match the stored digest, and replays it. Never a new provider key, never an
+  `accepted` appends STAFF_EMAIL_SENT (authenticated USER, Clock time, `clearsThrough` = the
+  command's `observedThrough`, never the acceptance-time order) and the ACCEPTED outcome, once, so
+  inbound recorded after the observation stays outstanding however late acceptance is. Ambiguity
+  gets exactly one identical replay, then `202 UNKNOWN`; a same-key retry must repeat the same key,
+  body and original expectation (all fingerprinted; the expectation is not re-checked), rebuilds
+  the request, must match the stored digest, and replays it. Abandoned UNKNOWN commands are never
+  swept or hand-edited; recovery is in the runbook. Never a new provider key, never an
   automatic resend, never a confirmed failure for an ambiguous result. Recipient, From,
   Reply-To and signature never come from the request.
 - **Errors.** Fiona-local codes reuse the runtime `ErrorResponse`: `conversation_changed`,

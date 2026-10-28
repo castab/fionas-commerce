@@ -6,6 +6,7 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.fionas.commerce.conversation.PaymentClassification
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.InquiryInvoiceRevisions
 import io.github.castab.fionas.commerce.financial.InquiryServicePlan
@@ -228,15 +229,62 @@ class CanonicalRevisionsSpec :
             pay(id, "400.00").status shouldBe Status.CREATED
             reviseInvoice(id, invoiceInput(id, "1800.00"))
             reviseInvoice(id, invoiceInput(id, "1900.00"))
+            val invoice = read(id).financial
+            val additional =
+                CommerceJson.asA(
+                    app
+                        .adminPost(
+                            "/financial-documents/${invoice.id}/payments",
+                            """{"documentVersion":${invoice.version},"amount":"500.10","method":"CASH"}""",
+                        ).also { it.status shouldBe Status.CREATED }
+                        .bodyString(),
+                    RecordedPaymentResponse.serializer(),
+                )
+            app
+                .adminPost(
+                    "/payments/${additional.paymentId}/refunds",
+                    """{"amount":"20.05","currency":"USD","method":"CASH","allocations":""" +
+                        """[{"paymentAllocationId":"${additional.allocationId}","amount":"20.05"}]}""",
+                ).status shouldBe Status.CREATED
             val response = app.adminGet(path(id) + "/timeline")
             response.status shouldBe Status.OK
             val timeline = CommerceJson.asA(response.bodyString(), StaffTimelineResponse.serializer())
-            timeline.items.filterIsInstance<TimelineItemResponse.Quote>().map { it.financial.total } shouldBe listOf("1200.00", "1600.00")
+            // The fixed test clock gives both publications one issuedAt, so their order is the documented id tie-break.
+            val quotes = timeline.items.filterIsInstance<TimelineItemResponse.Quote>().sortedBy { it.financial.version }
+            quotes.map { it.financial.total } shouldBe listOf("1200.00", "1600.00")
             timeline.items.filterIsInstance<TimelineItemResponse.Invoice>().map { it.financial.total } shouldBe listOf("1800.00", "1900.00")
-            timeline.items
-                .filterIsInstance<TimelineItemResponse.Payment>()
-                .single()
-                .amount shouldBe "400.00"
+            val payments = timeline.items.filterIsInstance<TimelineItemResponse.Payment>()
+            payments.size shouldBe 2
+            val deposit = payments.single { it.classification == PaymentClassification.DEPOSIT }
+            val extra = payments.single { it.paymentId == additional.paymentId }
+            deposit.amount shouldBe "400.00"
+            deposit.method shouldBe "CHECK"
+            deposit.classification shouldBe PaymentClassification.DEPOSIT
+            deposit.proposalId shouldBe quotes.last().proposal.id
+            deposit.depositRequirementRevision shouldBe quotes.last().proposal.depositRequirementRevision
+            deposit.allocations.single().let {
+                it.documentVersion shouldBe quotes.last().financial.version
+                it.documentStage shouldBe "QUOTE"
+                it.canonical shouldBe true
+                it.amount shouldBe "400.00"
+            }
+            extra.amount shouldBe "500.10"
+            extra.method shouldBe "CASH"
+            extra.classification shouldBe PaymentClassification.ADDITIONAL
+            extra.proposalId shouldBe null
+            extra.allocations.single().let {
+                it.allocationId shouldBe additional.allocationId
+                it.documentVersion shouldBe invoice.version
+                it.documentStage shouldBe "INVOICE"
+            }
+            timeline.items.filterIsInstance<TimelineItemResponse.Refund>().single().let {
+                it.paymentId shouldBe additional.paymentId
+                it.amount shouldBe "20.05"
+                it.paymentClassification shouldBe PaymentClassification.ADDITIONAL
+                it.unwound.single().paymentAllocationId shouldBe additional.allocationId
+                it.unwound.single().documentVersion shouldBe invoice.version
+                it.unwound.single().amount shouldBe "20.05"
+            }
             timeline.items
                 .map { it.id }
                 .toSet()

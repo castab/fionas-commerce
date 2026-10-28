@@ -27,8 +27,8 @@ conversation `concluded` or `terminated`, and never sends HTML or attachments.
 
 ## Conversation identity
 
-Every inquiry conversation is the provider topic (`booking`, *inquiry UUID*). The inquiry UUID
-is the only correlation: never the customer's email, since several inquiries may share one
+Every inquiry conversation is the provider topic (`booking`, *inquiry UUID*), named with the
+inquiry's canonical lowercase hyphenated UUID text. The inquiry UUID is the only correlation: never the customer's email, since several inquiries may share one
 address. Fiona persists no provider conversation ID as authority; it resolves the topic on each
 read and send. It records only:
 
@@ -39,6 +39,11 @@ read and send. It records only:
   `CUSTOMER_EMAIL_RECEIVED` communication fact it produced.
 - `fionas.inquiry_staff_replies`: one staff reply command per `Idempotency-Key`; accepted rows
   are establishment evidence too.
+
+Sending and the timeline apply one rule (`ConversationEstablishment`): an ingested event **or**
+an accepted reply is evidence. Accepted replies count even when the event consumer is disabled,
+so a deployment without intake still reports a vanished topic as `MISSING`, never `EMPTY`, and
+never opens a replacement.
 
 No table holds a subject, address, body, HTML, header, routing token or delivery state.
 
@@ -131,8 +136,9 @@ Every payload is strict UTF-8 JSON of at most 64 KiB, validated against the clos
 
 | Event | Disposition |
 |---|---|
-| Unsupported version, unknown type, extra/missing property, malformed | **Halt**, unacknowledged, for operator repair; never interpreted |
+| Unsupported version, unknown type, extra/missing property, malformed (including a topic `type` outside 1–64 or `externalId` outside 1–255 characters) | **Halt**, unacknowledged, for operator repair; never interpreted |
 | Topic `null` or a type other than `booking` | Ignored and acknowledged |
+| `booking` topic whose `externalId` is not exactly an inquiry's canonical UUID text (`order-1234`, `BK_42`, uppercase, braced or unhyphenated UUIDs) | Unrelated: ignored and acknowledged. Provider topic ids are generic text; only Fiona's own naming relates a topic to an inquiry |
 | `booking` topic naming no Fiona inquiry | Ignored and acknowledged (`event=conversation_ignored code=unknown_inquiry`); no inquiry or customer is created |
 | Already processed event ID, identical payload | Acknowledged; no new fact |
 | Reused event ID with a different payload, or a reused `(conversationId, sequence)` | Halt (contract violation) |
@@ -177,6 +183,26 @@ inquiry append lock, any inbound fact recorded after `n` is `409 conversation_ch
 watermark that is not one of the inquiry's facts is `422`. Acknowledgement only records a
 commerce fact; it never changes the provider conversation state.
 
+### Observed clearing boundary
+
+Each clearing fact (`STAFF_EMAIL_SENT`, `STAFF_ACKNOWLEDGED`) may carry `clears_through`: the
+greatest `recorded_order` its staff member had observed. It clears inbound recorded at or before
+that boundary and nothing later, regardless of when the clearing fact itself is recorded.
+Boundaries combine by maximum; a fact without one (older rows, generic adapters) clears through
+its own `recorded_order`, as before. The pure projection and the dashboard/list SQL aggregate
+both use `coalesce(clears_through, recorded_order)`, and `InquiryCommunicationRepositorySpec`
+keeps them in parity.
+
+- An acknowledgement's boundary is its `throughRecordedOrder`.
+- A staff reply's boundary is read **before** the provider lookup and stored on the command
+  (`inquiry_staff_replies.observed_through`). Inbound Fiona had recorded by then was already in
+  the provider thread, so the lookup confirming the staff member's expectation proves they saw
+  it. Inbound recorded after that read, whether during the provider call or before a late
+  same-key reconciliation, stays outstanding when the reply is accepted.
+- The conservative edge: if Fiona ingests the very message staff replied to only after the
+  boundary read (ingestion lag), it stays outstanding until acknowledged. Fiona never infers
+  more than it observed.
+
 ## Staff timeline
 
 `GET /staff/requests/{id}/timeline` returns provider messages and commerce milestones in one
@@ -190,6 +216,16 @@ Quote snapshot and deposit revision, `INVOICE_AMENDED` for each later Invoice sn
 `PAYMENT_RECORDED` and `REFUND_RECORDED` from the canonical lineage's payment histories,
 `COMMUNICATION_ACKNOWLEDGED`, `SERVED`, `CLOSED` and `DECLINED` from their facts. Historical
 snapshots never show today's amounts. A financial milestone never implies an email was sent.
+
+Payment items come from the runtime `PaymentHistory`, unmodified: the exact decimal amount and
+currency, `method`, optional `externalReference`, and every allocation with its lineage, exact
+`documentVersion`, whether it is the canonical lineage, and that snapshot's `documentStage`
+(canonical only). `classification` is `DEPOSIT` for the receipt allocated to a published
+canonical Quote snapshot (only deposit acceptance can do that), with its `proposalId` and
+`depositRequirementRevision`, and `ADDITIONAL` for every other receipt. Refund items carry their
+own method, external reference and amount, the refunded receipt's classification, and `unwound`:
+each allocation the refund explicitly unwound, with its exact document version. Refunds never
+reclassify a receipt, and nothing is recomputed or rounded.
 
 `conversation.state` is `READY`, `EMPTY`, `MISSING`, `UNAVAILABLE` (also when reads are
 disabled) or `FORBIDDEN` (the caller lacks `fionas.communications.read`, or the provider refused
@@ -229,17 +265,58 @@ signature come from configuration and the authenticated user's runtime display n
 | Provider success, local database failure | The record has no outcome; the same-key retry replays the request, the provider returns the stored message, and the fact is recorded once |
 | Timeout, `5xx`, conflict | One exact replay; then `UNKNOWN`, never failure |
 | Restart during a send | The committed record survives; the same-key retry reconciles |
-| Staff retry after `UNKNOWN` | Retry with the same key and body. A new key with the old expectation is refused with `conversation_changed` if the first reply landed |
+| Staff retry after `UNKNOWN` | Retry with the same key, same body and the same original expectation (see below). A new key with the old expectation is refused with `conversation_changed` if the first reply landed |
 | Configuration changed before a replay | The rebuilt request no longer matches the stored digest: internal failure, nothing sent; reconcile manually |
 | Duplicate outbound-intent events | Ignored for facts; no second `STAFF_EMAIL_SENT` |
 
-No PostgreSQL transaction spans the provider call. Remaining race: a customer email can arrive
-between the lookup and provider acceptance; the reply is then sent without staff having seen it,
-and the new inbound (recorded after the reply) correctly stays outstanding. Acceptance is never
-delivery: delivery appears later on the timeline from the provider's own message state.
+No PostgreSQL transaction spans the provider call. A customer email can arrive between the
+lookup and provider acceptance; the reply is then sent without staff having seen it. That email
+stays outstanding, because the reply clears only through its observed boundary (see
+[Observed clearing boundary](#observed-clearing-boundary)), even though `STAFF_EMAIL_SENT` is
+recorded after it. Acceptance is never delivery: delivery appears later on the timeline from
+the provider's own message state.
 
-An abandoned `UNKNOWN` record (never retried) leaves no `STAFF_EMAIL_SENT` even if the provider
-sent the email; the timeline shows the provider truth. Retry the key to repair commerce.
+### Retrying an `UNKNOWN` outcome
+
+`202 UNKNOWN` means the email may or may not have been sent. A reconciling retry must repeat
+the original command exactly:
+
+- the **same `Idempotency-Key`**;
+- the **same body** (Fiona stores only its fingerprint, so the client must keep the text; edge
+  whitespace is trimmed before fingerprinting);
+- the **same original conversation expectation**: the `expectedLatestMessageId` or
+  `expectEmptyConversation` sent the first time, even though the thread now shows newer
+  messages, possibly the reply itself. The expectation is part of the fingerprint and is not
+  re-checked on resume.
+
+Anything else under that key is `409 IDEMPOTENCY_KEY_REUSED`. The retry replays the stored
+provider request under the same provider key, so the provider returns its original result and
+at most one email exists. Sending must still be enabled and the provider configuration
+unchanged (otherwise the request digest no longer matches and nothing is sent). A retry may be
+`UNKNOWN` again; keep retrying with the same command. Never switch to a new key to "try again":
+a new key is a new email, refused with `conversation_changed` only when the original has
+already become visible.
+
+### Recovering an abandoned `UNKNOWN` command
+
+A command whose client gave up (lost body, closed tab, crashed caller) keeps its row with no
+outcome. Nothing retries it automatically and no `STAFF_EMAIL_SENT` exists, even if the
+provider sent the email. To recover:
+
+1. Read the timeline. The provider is the truth: an outbound message with the reply's text and
+   `sendState` `pending`/`accepted` means it was sent.
+2. If the original body and expectation are still available, retry the same key (above); this
+   records `STAFF_EMAIL_SENT` once with the original observed boundary.
+3. If they are not, and the reply is visible, do not resend. If the customer's email still shows
+   as needing a reply, acknowledge it with the observed `throughRecordedOrder`. Commerce then
+   lacks that one `STAFF_EMAIL_SENT` fact, so quote-inactivity timing does not count that email.
+   This is accepted; never edit `fionas.inquiry_staff_replies` or communication facts by hand.
+4. If the reply is not visible after the provider's own processing has settled, send a new
+   reply under a new key with the current expectation. The expectation check refuses it if the
+   original surfaces first.
+
+The orphaned row is harmless: it reserves its key and is never treated as establishment
+evidence (only `ACCEPTED` rows are).
 
 ### Configuration
 

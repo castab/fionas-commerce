@@ -490,6 +490,8 @@ class OpenApiDocumentSpec :
                 "StaffTimelineResponse",
                 "TimelineConversationResponse",
                 "TimelineActorResponse",
+                "TimelinePaymentAllocationResponse",
+                "TimelineRefundUnwindResponse",
                 "TimelineItemResponse",
                 "TimelineItemResponse_MESSAGE",
                 "TimelineItemResponse_QUOTE_PUBLISHED",

@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.http
 
+import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.authenticatedPrincipal
@@ -10,6 +11,7 @@ import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.conversation.ConversationAvailability
 import io.github.castab.fionas.commerce.conversation.MilestoneKind
+import io.github.castab.fionas.commerce.conversation.PaymentClassification
 import io.github.castab.fionas.commerce.conversation.StaffTimeline
 import io.github.castab.fionas.commerce.conversation.TimelineItem
 import io.github.castab.fionas.commerce.inquiry.InquiryId
@@ -41,6 +43,30 @@ data class TimelineConversationResponse(
         format = "uuid",
     )
     val latestMessageId: String? = null,
+)
+
+@Serializable
+data class TimelinePaymentAllocationResponse(
+    @ApiProperty(format = "uuid") val allocationId: String,
+    @ApiProperty(description = "The destination lineage.", format = "uuid") val documentId: String,
+    @ApiProperty(description = "The exact snapshot version the allocation stays attached to.") val documentVersion: Int,
+    @ApiProperty(description = "Whether the destination is this inquiry's canonical lineage.") val canonical: Boolean,
+    @ApiProperty(description = "ESTIMATE, QUOTE or INVOICE of that exact snapshot; canonical lineage only.")
+    val documentStage: String? = null,
+    @ApiProperty(description = "The amount applied, an exact decimal string.", pattern = SIGNED_DECIMAL) val amount: String,
+    val currency: String,
+    @ApiProperty(format = "date-time") val allocatedAt: String,
+)
+
+@Serializable
+data class TimelineRefundUnwindResponse(
+    @ApiProperty(format = "uuid") val refundAllocationId: String,
+    @ApiProperty(format = "uuid") val paymentAllocationId: String,
+    @ApiProperty(description = "The unwound allocation's lineage.", format = "uuid") val documentId: String,
+    @ApiProperty(description = "The unwound allocation's exact snapshot version.") val documentVersion: Int,
+    @ApiProperty(description = "The amount unwound, an exact decimal string.", pattern = SIGNED_DECIMAL) val amount: String,
+    val currency: String,
+    @ApiProperty(format = "date-time") val allocatedAt: String,
 )
 
 @Serializable
@@ -102,9 +128,24 @@ sealed class TimelineItemResponse {
     data class Payment(
         override val id: String,
         override val occurredAt: String,
-        val paymentId: String,
-        @ApiProperty(pattern = SIGNED_DECIMAL) val amount: String,
+        @ApiProperty(format = "uuid") val paymentId: String,
+        @ApiProperty(description = "The received amount, an exact decimal string.", pattern = SIGNED_DECIMAL) val amount: String,
         val currency: String,
+        @ApiProperty(description = "How the money was received, from the runtime payment record.") val method: String,
+        @ApiProperty(description = "The payment's identity in an external system, when recorded.")
+        val externalReference: PaymentExternalReference? = null,
+        @ApiProperty(
+            description =
+                "DEPOSIT: the receipt accepted against a published canonical Quote (its proposal is named). " +
+                    "ADDITIONAL: any other receipt in the canonical lineage's history. Refunds never reclassify a receipt.",
+        )
+        val classification: PaymentClassification,
+        @ApiProperty(description = "The published proposal this deposit accepted; DEPOSIT only.", format = "uuid")
+        val proposalId: String? = null,
+        @ApiProperty(description = "The deposit requirement revision this deposit satisfied; DEPOSIT only.")
+        val depositRequirementRevision: Int? = null,
+        @ApiProperty(description = "Every allocation of the payment, in runtime order, including ones later unwound.")
+        val allocations: List<TimelinePaymentAllocationResponse>,
     ) : TimelineItemResponse()
 
     @Serializable
@@ -112,9 +153,17 @@ sealed class TimelineItemResponse {
     data class Refund(
         override val id: String,
         override val occurredAt: String,
-        val paymentId: String,
-        @ApiProperty(pattern = SIGNED_DECIMAL) val amount: String,
+        @ApiProperty(format = "uuid") val refundId: String,
+        @ApiProperty(format = "uuid") val paymentId: String,
+        @ApiProperty(description = "The refunded amount, an exact decimal string.", pattern = SIGNED_DECIMAL) val amount: String,
         val currency: String,
+        @ApiProperty(description = "How the money was returned, from the runtime refund record.") val method: String,
+        @ApiProperty(description = "The refund's identity at an external provider, when recorded.")
+        val externalReference: RefundExternalReference? = null,
+        @ApiProperty(description = "The refunded receipt's classification.")
+        val paymentClassification: PaymentClassification,
+        @ApiProperty(description = "The allocations this refund explicitly unwound; empty when it returned unapplied value.")
+        val unwound: List<TimelineRefundUnwindResponse>,
     ) : TimelineItemResponse()
 
     @Serializable
@@ -156,6 +205,69 @@ private fun PrincipalId.timelineActor(): TimelineActorResponse =
         is UserId -> TimelineActorResponse("USER", value.toString())
         is ServiceId -> TimelineActorResponse("SERVICE", value.toString())
     }
+
+private fun stageName(document: FinancialDocument) =
+    when (document) {
+        is FinancialDocument.Estimate -> "ESTIMATE"
+        is FinancialDocument.Quote -> "QUOTE"
+        is FinancialDocument.Invoice -> "INVOICE"
+    }
+
+private fun TimelineItem.Payment.toResponse(): TimelineItemResponse.Payment {
+    val payment = history.payment
+    return TimelineItemResponse.Payment(
+        id,
+        occurredAt.toString(),
+        payment.id.toString(),
+        payment.amount.decimal(),
+        payment.currency.currencyCode,
+        payment.method.name,
+        payment.externalReference?.let { PaymentExternalReference(it.provider, it.reference) },
+        classification,
+        acceptedProposal?.id?.value?.toString(),
+        acceptedProposal?.depositRequirementRevision?.number,
+        history.allocations.map {
+            val reference = it.financialDocumentReference
+            TimelinePaymentAllocationResponse(
+                it.id.toString(),
+                reference.id.toString(),
+                reference.version.number,
+                canonicalDocuments.keys.any { known -> known.id == reference.id },
+                canonicalDocuments[reference]?.let(::stageName),
+                it.amount.decimal(),
+                it.currency.currencyCode,
+                it.allocatedAt.toString(),
+            )
+        },
+    )
+}
+
+private fun TimelineItem.Refund.toResponse(): TimelineItemResponse.Refund {
+    val allocations = payment.history.allocations.associateBy { it.id }
+    return TimelineItemResponse.Refund(
+        id,
+        occurredAt.toString(),
+        refund.id.toString(),
+        refund.paymentReference.toString(),
+        refund.amount.decimal(),
+        refund.currency.currencyCode,
+        refund.method.name,
+        refund.externalReference?.let { RefundExternalReference(it.provider, it.reference) },
+        payment.classification,
+        unwound.map {
+            val allocation = checkNotNull(allocations[it.paymentAllocationReference]) { "Refund unwinds an unknown allocation" }
+            TimelineRefundUnwindResponse(
+                it.id.toString(),
+                it.paymentAllocationReference.toString(),
+                allocation.financialDocumentReference.id.toString(),
+                allocation.financialDocumentReference.version.number,
+                it.amount.decimal(),
+                it.currency.currencyCode,
+                it.allocatedAt.toString(),
+            )
+        },
+    )
+}
 
 internal fun StaffTimeline.toResponse(): StaffTimelineResponse =
     StaffTimelineResponse(
@@ -203,12 +315,8 @@ internal fun StaffTimeline.toResponse(): StaffTimelineResponse =
                         at,
                         item.snapshot.toResponse(request.inquiry.inquiry.id, null),
                     )
-                is TimelineItem.Payment ->
-                    if (item.refunded) {
-                        TimelineItemResponse.Refund(item.id, at, item.paymentId, item.amount.decimal(), item.amount.currency.currencyCode)
-                    } else {
-                        TimelineItemResponse.Payment(item.id, at, item.paymentId, item.amount.decimal(), item.amount.currency.currencyCode)
-                    }
+                is TimelineItem.Payment -> item.toResponse()
+                is TimelineItem.Refund -> item.toResponse()
                 is TimelineItem.Milestone ->
                     when (item.kind) {
                         MilestoneKind.COMMUNICATION_ACKNOWLEDGED ->

@@ -14,7 +14,6 @@ import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationId
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
-import io.github.castab.fionas.commerce.inquiry.JdbiInquiryConversationRepository
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.time.Clock
 import java.time.temporal.ChronoUnit
@@ -38,7 +37,7 @@ class SendStaffReply(
     private val inquiries: GetInquiry,
     private val communications: InquiryCommunicationRepository,
     private val replies: JdbiStaffReplyRepository,
-    private val sources: JdbiInquiryConversationRepository,
+    private val establishment: ConversationEstablishment,
     private val users: (UserId) -> User?,
     private val sender: ConversationSender?,
     private val clock: Clock,
@@ -66,10 +65,16 @@ class SendStaffReply(
         val fingerprint = staffReplyFingerprint(command.inquiryId, command.sentBy, command.body, command.expectation)
         transactor.inTransaction { replies.find(it, command.key) }?.let { return resume(it, command, fingerprint) }
         val provider = sender ?: throw ConversationSendRefused(SENDING_DISABLED, "Email sending is not enabled")
-        val (details, established) =
+        // The observed boundary is read before the provider lookup: any inbound Fiona had recorded by then was already
+        // in the provider thread, so a lookup confirming the staff member's expectation proves they saw it. Inbound
+        // recorded later is never cleared by this reply, however late the provider accepts it.
+        val (details, established, observedThrough) =
             transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
-                inquiries.read(transaction, command.inquiryId) to
-                    (sources.established(transaction, command.inquiryId) || replies.established(transaction, command.inquiryId))
+                Triple(
+                    inquiries.read(transaction, command.inquiryId),
+                    establishment.established(transaction, command.inquiryId),
+                    communications.history(transaction, command.inquiryId).maxOfOrNull { it.recordedOrder } ?: 0L,
+                )
             }
         if (!provider.configuration.permits(details.customer.email)) {
             throw ConversationSendRefused(RECIPIENT_NOT_ALLOWED, "This customer's address is not on the outgoing email allow-list")
@@ -105,6 +110,7 @@ class SendStaffReply(
                 signature,
                 clock.instant().truncatedTo(ChronoUnit.MICROS),
                 conversation,
+                observedThrough,
             )
         val claimed =
             transactor.inTransaction { transaction ->
@@ -157,6 +163,7 @@ class SendStaffReply(
                                 InquiryCommunicationKind.STAFF_EMAIL_SENT,
                                 clock.instant().truncatedTo(ChronoUnit.MICROS),
                                 record.sentBy,
+                                current.observedThrough,
                             )
                         communications.append(transaction, activity)
                         replies.accept(transaction, record.key, outcome.conversationId, outcome.messageId, outcome.state, activity.id)

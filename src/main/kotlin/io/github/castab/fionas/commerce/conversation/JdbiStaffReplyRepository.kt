@@ -27,6 +27,7 @@ class JdbiStaffReplyRepository {
                     row.getString("signature_name"),
                     row.getObject("requested_at", OffsetDateTime::class.java).toInstant(),
                     row.getObject("conversation_id", UUID::class.java),
+                    row.getObject("observed_through", Long::class.javaObjectType),
                     row.getString("outcome")?.let(StaffReplyOutcome::valueOf),
                     row.getObject("provider_message_id", UUID::class.java),
                     row.getString("provider_state"),
@@ -44,10 +45,11 @@ class JdbiStaffReplyRepository {
             .createUpdate(
                 "INSERT INTO fionas.inquiry_staff_replies " +
                     "(idempotency_key, inquiry_id, fingerprint, sent_by, mode, provider_request, signature_name, requested_at, " +
-                    "conversation_id) VALUES (:key, :inquiry, :fingerprint, :sentBy, :mode, :request, :signature, :at, " +
-                    "CAST(:conversation AS uuid)) " +
+                    "conversation_id, observed_through) VALUES (:key, :inquiry, :fingerprint, :sentBy, :mode, :request, " +
+                    ":signature, :at, CAST(:conversation AS uuid), :observed) " +
                     "ON CONFLICT DO NOTHING",
             ).bind("key", record.key.value)
+            .bindByType("observed", record.observedThrough, Long::class.javaObjectType)
             .bind("inquiry", record.inquiryId.value)
             .bind("fingerprint", record.fingerprint)
             .bind("sentBy", record.sentBy.value)

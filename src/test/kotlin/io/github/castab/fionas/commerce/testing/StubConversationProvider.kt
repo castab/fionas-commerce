@@ -57,6 +57,9 @@ class StubConversationProvider : AutoCloseable {
     /** Delays same-key replays, so a scripted timeout can also defeat the client's single reconciliation attempt. */
     @Volatile var replayDelayMillis = 0L
 
+    /** Runs inside the first (non-replayed) send, before the provider persists it: a hook for concurrent Fiona writes. */
+    @Volatile var onSend: (() -> Unit)? = null
+
     private val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
 
     init {
@@ -133,6 +136,7 @@ class StubConversationProvider : AutoCloseable {
         }
         val body = Json.parseToJsonElement(text).jsonObject
         requests += body
+        onSend?.invoke()
         val behavior = script.pollFirst() ?: Behavior.NORMAL
         if (behavior == Behavior.REJECT) return exchange.respond(400, """{"error":"The requested email identity is not allowed."}""")
         val opening = path == "/api/conversations/v2"

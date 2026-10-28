@@ -506,8 +506,12 @@ and nothing replaces a conversation Fiona has evidence of.
 Provider events enter through a managed consumer inside Fiona, like inquiry intake, and become
 Fiona's existing append-only communication facts. Attention keeps Fiona's own observation order
 rather than provider timestamps or sequences, so a late or backdated email is never silently
-cleared. Provider actors are not Fiona staff: staff provenance comes only from Fiona's own
-authenticated commands.
+cleared. A staff action clears only what its staff member observed: a clearing fact carries the
+observation boundary it acted on, so a reply the provider accepts after a new customer email
+arrived, or one reconciled much later, still leaves that email outstanding. Provider topic ids
+are generic text; only Fiona's own topic naming relates a topic to an inquiry, and any other
+valid topic is unrelated rather than an error. Provider actors are not Fiona staff: staff
+provenance comes only from Fiona's own authenticated commands.
 
 A staff reply crosses two systems with no shared transaction. Fiona therefore records its
 command durably before the provider call, never holds a database transaction across it, and
