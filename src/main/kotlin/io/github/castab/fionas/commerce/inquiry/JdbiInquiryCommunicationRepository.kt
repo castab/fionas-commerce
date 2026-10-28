@@ -9,17 +9,50 @@ import java.time.OffsetDateTime
 import java.util.UUID
 
 class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
+    override fun lock(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ) {
+        transaction.handle
+            .createQuery("SELECT id FROM fionas.inquiries WHERE id = :inquiry FOR UPDATE")
+            .bind("inquiry", inquiryId.value)
+            .mapTo(UUID::class.java)
+            .findOne()
+            .orElseThrow { CommerceFailure.NotFound("Inquiry was not found") }
+    }
+
+    override fun history(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): List<RecordedInquiryCommunication> =
+        transaction.handle
+            .createQuery("SELECT * FROM fionas.inquiry_communications WHERE inquiry_id = :inquiry ORDER BY recorded_order")
+            .bind("inquiry", inquiryId.value)
+            .map { row, _ ->
+                val principal = row.getObject("principal_id", UUID::class.java)
+                RecordedInquiryCommunication(
+                    InquiryCommunication(
+                        InquiryCommunicationId(row.getObject("id", UUID::class.java)),
+                        inquiryId,
+                        InquiryCommunicationKind.valueOf(row.getString("kind")),
+                        row.getObject("occurred_at", OffsetDateTime::class.java).toInstant(),
+                        when (row.getString("principal_kind")) {
+                            "USER" -> UserId(checkNotNull(principal))
+                            "SERVICE" -> ServiceId(checkNotNull(principal))
+                            null -> null
+                            else -> error("Invalid communication principal")
+                        },
+                    ),
+                    row.getLong("recorded_order"),
+                )
+            }.list()
+
     override fun append(
         transaction: Transaction,
         activity: InquiryCommunication,
     ): RecordedInquiryCommunication {
         // Lock before allocating the identity: same-inquiry append order must follow transaction visibility.
-        transaction.handle
-            .createQuery("SELECT id FROM fionas.inquiries WHERE id = :inquiry FOR UPDATE")
-            .bind("inquiry", activity.inquiryId.value)
-            .mapTo(UUID::class.java)
-            .findOne()
-            .orElseThrow { CommerceFailure.NotFound("Inquiry was not found") }
+        lock(transaction, activity.inquiryId)
         val principal = activity.principalId
         val kind =
             when (principal) {

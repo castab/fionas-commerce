@@ -138,6 +138,8 @@ class OpenApiDocumentSpec :
                     "currency",
                     "inquiryCreatedAt",
                     "latestDocumentVersionAt",
+                    "needsReply",
+                    "awaitingReplySince",
                 )
         }
         test("staff request composes existing detail schemas and documents both permissions") {
@@ -314,7 +316,11 @@ class OpenApiDocumentSpec :
         val operations =
             mapOf(
                 Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "acknowledgeInquiryCommunication") to
-                    listOf("204", "400", "401", "403", "404", "500"),
+                    listOf("204", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/timeline", "get", "readStaffTimeline") to
+                    listOf("200", "400", "401", "403", "404", "500"),
+                Triple("/staff/requests/{inquiryId}/conversation/replies", "post", "sendStaffConversationReply") to
+                    listOf("200", "201", "202", "400", "401", "403", "404", "409", "422", "500", "502", "503"),
                 Triple("/staff/requests", "get", "listStaffRequests") to listOf("200", "400", "401", "403", "500"),
                 Triple("/staff/dashboard", "get", "readStaffDashboard") to listOf("200", "401", "403", "500"),
                 Triple("/staff/requests/{inquiryId}", "get", "readStaffRequest") to listOf("200", "400", "401", "403", "404", "500"),
@@ -394,6 +400,7 @@ class OpenApiDocumentSpec :
                 "readStaffDashboard" to "Staff dashboard",
                 "listStaffRequests" to "Staff requests",
                 "readStaffRequest" to "Staff requests",
+                "readStaffTimeline" to "Staff requests",
                 "issueInquiryProposal" to "Staff proposals",
                 "previewInquiryQuote" to "Staff proposals",
                 "previewInquiryQuoteRevision" to "Staff proposals",
@@ -402,6 +409,7 @@ class OpenApiDocumentSpec :
                 "reviseInquiryQuoteProposal" to "Staff proposals",
                 "reviseInquiryProposalDeposit" to "Staff proposals",
                 "acknowledgeInquiryCommunication" to "Inquiries",
+                "sendStaffConversationReply" to "Inquiries",
                 "createInquiry" to "Inquiries",
                 "listInquiries" to "Inquiries",
                 "getInquiry" to "Inquiries",
@@ -476,6 +484,24 @@ class OpenApiDocumentSpec :
             listOf(
                 "StaffDashboardResponse",
                 "StaffRequestResponse",
+                "AcknowledgeCommunicationRequest",
+                "CommunicationSummaryResponse",
+                "CommunicationAcknowledgementResponse",
+                "StaffTimelineResponse",
+                "TimelineConversationResponse",
+                "TimelineActorResponse",
+                "TimelineItemResponse",
+                "TimelineItemResponse_MESSAGE",
+                "TimelineItemResponse_QUOTE_PUBLISHED",
+                "TimelineItemResponse_INVOICE_AMENDED",
+                "TimelineItemResponse_PAYMENT_RECORDED",
+                "TimelineItemResponse_REFUND_RECORDED",
+                "TimelineItemResponse_COMMUNICATION_ACKNOWLEDGED",
+                "TimelineItemResponse_SERVED",
+                "TimelineItemResponse_CLOSED",
+                "TimelineItemResponse_DECLINED",
+                "StaffReplyRequest",
+                "StaffReplyResponse",
                 "StaffRequestListResponse",
                 "StaffRequestListItemResponse",
                 "InquiryProposalResponse",
@@ -653,6 +679,8 @@ class OpenApiDocumentSpec :
                 "withdrawFinancialDocumentDepositRequirement",
                 // Declining is a staff USER decision, never a service's.
                 "declineInquiry",
+                // Customer email is signed by and attributed to the sending staff USER.
+                "sendStaffConversationReply",
             )
 
         test("line amounts document precise unit rates with settlement-exact subtotals and minor-unit tax") {
@@ -813,6 +841,15 @@ class OpenApiDocumentSpec :
             }
         }
 
+        val reply = "/staff/requests/{inquiryId}/conversation/replies"
+        val fionaLocalCodes =
+            mapOf(
+                "conversation_changed" to
+                    setOf(Triple(reply, "post", "409"), Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "409")),
+                "email_send_rejected" to setOf(Triple(reply, "post", "502")),
+                "email_provider_unavailable" to setOf(Triple(reply, "post", "503")),
+            )
+
         test("documents every error with commerce-runtime's one reusable error body and its code") {
             operations.keys.forEach { (path, method) ->
                 operation(path, method).at("responses").jsonObject.filterKeys { it.toInt() >= 400 }.forEach { (status, response) ->
@@ -826,6 +863,9 @@ class OpenApiDocumentSpec :
                     } else if (code == "IDEMPOTENCY_KEY_REUSED") {
                         (path to method) shouldBe ("/inquiries" to "post")
                         status shouldBe "409"
+                    } else if (code in fionaLocalCodes) {
+                        // Fiona-local codes in the runtime envelope, which has no category for them.
+                        fionaLocalCodes.getValue(code).contains(Triple(path, method, status)) shouldBe true
                     } else {
                         ErrorCategory.entries
                             .single { it.code == code }
@@ -983,13 +1023,20 @@ class OpenApiDocumentSpec :
             create.text("description") shouldContain "does not confirm NATS publication"
             create.text("description") shouldContain "Replay never backfills historical events"
             // Neither staff routes nor other public operations acquire this header.
-            operations.keys.filter { (path, method) -> path != "/inquiries" || method != "post" }.forEach { (path, method) ->
-                operation(path, method)
-                    .jsonObject["parameters"]
-                    ?.jsonArray
-                    .orEmpty()
-                    .none { it.text("name") == "Idempotency-Key" } shouldBe true
-            }
+            val replyKey = operation(reply, "post").at("parameters").jsonArray.single { it.text("name") == "Idempotency-Key" }
+            replyKey.at("required").jsonPrimitive.content shouldBe "true"
+            replyKey.text("schema", "pattern") shouldBe "^[A-Za-z0-9_-]{1,128}$"
+            replyKey.text("description") shouldContain "SAME key"
+            operations.keys
+                .filter { (path, method) ->
+                    (path to method) !in setOf("/inquiries" to "post", reply to "post")
+                }.forEach { (path, method) ->
+                    operation(path, method)
+                        .jsonObject["parameters"]
+                        ?.jsonArray
+                        .orEmpty()
+                        .none { it.text("name") == "Idempotency-Key" } shouldBe true
+                }
         }
 
         test("describes the public create response as a receipt of the new inquiry, naming no customer") {

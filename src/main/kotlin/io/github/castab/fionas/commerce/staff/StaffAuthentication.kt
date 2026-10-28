@@ -61,7 +61,11 @@ object FionaPermissions {
     val CredentialsManage = PermissionKey("fionas.credentials.manage")
     val InquiriesRead = PermissionKey("fionas.inquiries.read")
     val InquiriesCreate = PermissionKey("fionas.inquiries.create")
+    val CommunicationsRead = PermissionKey("fionas.communications.read")
     val CommunicationsAcknowledge = PermissionKey("fionas.communications.acknowledge")
+
+    /** Send a reply in an inquiry's email conversation. Its route also requires a USER, the recorded sender. */
+    val CommunicationsSend = PermissionKey("fionas.communications.send")
     val InquiriesManage = PermissionKey("fionas.inquiries.manage")
 
     /**
@@ -95,9 +99,21 @@ object FionaPermissions {
                 inquiries,
             ),
             PermissionDefinition(
+                CommunicationsRead,
+                "Read inquiry email",
+                "Read provider message content for an inquiry",
+                PermissionGroup("fionas.communications"),
+            ),
+            PermissionDefinition(
                 CommunicationsAcknowledge,
                 "Acknowledge inquiry communications",
                 "Explicitly acknowledge customer email attention without changing quote activity or lifecycle",
+                PermissionGroup("fionas.communications"),
+            ),
+            PermissionDefinition(
+                CommunicationsSend,
+                "Send inquiry email",
+                "As a verified staff user, reply to the customer in an inquiry's email conversation",
                 PermissionGroup("fionas.communications"),
             ),
             PermissionDefinition(
@@ -262,6 +278,8 @@ class BootstrapFirstAdmin(
                                 FionaPermissions.InquiriesRead,
                                 FionaPermissions.InquiriesManage,
                                 FionaPermissions.CommunicationsAcknowledge,
+                                FionaPermissions.CommunicationsRead,
+                                FionaPermissions.CommunicationsSend,
                                 FionaPermissions.FinancialTermsManage,
                             ),
                         ),

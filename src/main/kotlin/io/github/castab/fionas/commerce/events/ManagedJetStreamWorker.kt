@@ -25,6 +25,8 @@ class ManagedJetStreamWorker(
     private val transport: IntakeTransport,
     handle: (ByteArray) -> Unit,
     private val grace: Duration = Duration.ofSeconds(55),
+    private val name: String = "fionas-inquiry-intake",
+    private val processDelivery: ((IntakeDelivery, () -> Boolean) -> Unit)? = null,
 ) : ManagedBackgroundService {
     private val processor = IntakeProcessor(handle, transport::publishDiagnostic)
     private val monitor = Any()
@@ -45,7 +47,7 @@ class ManagedJetStreamWorker(
                 worker =
                     Thread
                         .ofVirtual()
-                        .name("fionas-inquiry-intake")
+                        .name(name)
                         .unstarted(::runLoop)
                         .also(Thread::start)
             }
@@ -58,13 +60,19 @@ class ManagedJetStreamWorker(
                     val delivery = transport.next()
                     if (stopping) break
                     status = IntakeStatus(IntakeState.RUNNING)
-                    if (delivery != null) processor.process(delivery) { abort }
+                    if (delivery != null) {
+                        if (processDelivery != null) {
+                            processDelivery.invoke(delivery) { abort }
+                        } else {
+                            processor.process(delivery) { abort }
+                        }
+                    }
                 } catch (error: Exception) {
                     if (stopping) break
                     val failure = classifyIntakeFailure(error)
                     if (failure.kind != FailureKind.TRANSIENT) throw failure
                     status = IntakeStatus(IntakeState.RETRYING, failure.code)
-                    workerLogger.warn { "event=intake_retrying code=${failure.code}" }
+                    workerLogger.warn { "worker=$name event=intake_retrying code=${failure.code}" }
                     // Bounded retry without spinning during broker/database interruption.
                     repeat(20) { if (!stopping) Thread.sleep(100) }
                 }
@@ -73,12 +81,12 @@ class ManagedJetStreamWorker(
             if (!stopping) {
                 val failure = classifyIntakeFailure(error)
                 status = IntakeStatus(IntakeState.HALTED, failure.code)
-                workerLogger.error { "event=intake_halted code=${failure.code} action=repair_and_restart" }
+                workerLogger.error { "worker=$name event=intake_halted code=${failure.code} action=repair_and_restart" }
             }
         } finally {
             transport.close()
             if (status.state != IntakeState.HALTED) status = IntakeStatus(IntakeState.STOPPED)
-            workerLogger.info { "event=intake_stopped state=${status.state}" }
+            workerLogger.info { "worker=$name event=intake_stopped state=${status.state}" }
         }
     }
 

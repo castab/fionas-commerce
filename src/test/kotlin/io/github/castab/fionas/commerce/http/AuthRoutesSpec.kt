@@ -102,6 +102,8 @@ class AuthRoutesSpec :
                         FionaPermissions.InquiriesRead,
                         FionaPermissions.InquiriesManage,
                         FionaPermissions.CommunicationsAcknowledge,
+                        FionaPermissions.CommunicationsRead,
+                        FionaPermissions.CommunicationsSend,
                         FionaPermissions.FinancialTermsManage,
                     )
                 // Priced inquiry submission is a SERVICE capability: no human administrator is granted it.

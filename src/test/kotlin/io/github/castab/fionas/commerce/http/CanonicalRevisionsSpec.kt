@@ -221,6 +221,28 @@ class CanonicalRevisionsSpec :
             ),
         )
 
+        test("timeline preserves exact historical quote and invoice amounts through later revisions") {
+            val id = initial()
+            val input = quoteInput(id, "1600.00")
+            approveQuote(id, input, quotePreview(id, input).quote.reviewToken).status shouldBe Status.OK
+            pay(id, "400.00").status shouldBe Status.CREATED
+            reviseInvoice(id, invoiceInput(id, "1800.00"))
+            reviseInvoice(id, invoiceInput(id, "1900.00"))
+            val response = app.adminGet(path(id) + "/timeline")
+            response.status shouldBe Status.OK
+            val timeline = CommerceJson.asA(response.bodyString(), StaffTimelineResponse.serializer())
+            timeline.items.filterIsInstance<TimelineItemResponse.Quote>().map { it.financial.total } shouldBe listOf("1200.00", "1600.00")
+            timeline.items.filterIsInstance<TimelineItemResponse.Invoice>().map { it.financial.total } shouldBe listOf("1800.00", "1900.00")
+            timeline.items
+                .filterIsInstance<TimelineItemResponse.Payment>()
+                .single()
+                .amount shouldBe "400.00"
+            timeline.items
+                .map { it.id }
+                .toSet()
+                .size shouldBe timeline.items.size
+        }
+
         fun counts() =
             listOf(
                 "commerce.financial_document_snapshots",

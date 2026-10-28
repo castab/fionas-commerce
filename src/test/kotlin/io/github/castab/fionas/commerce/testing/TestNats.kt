@@ -90,6 +90,11 @@ class TestNats(
                   "${'$'}JS.API.CONSUMER.MSG.NEXT.FIONAS_INQUIRIES.inquiry-to-commerce",
                   "${'$'}JS.ACK.FIONAS_INQUIRIES.inquiry-to-commerce.>"], subscribe: ["_INBOX.>"]
             } },
+            { user: "conversations", password: "test-conversations", permissions: {
+                publish: ["${'$'}JS.API.CONSUMER.INFO.RESEND_CONVERSATIONS.fionas-commerce-conversations",
+                  "${'$'}JS.API.CONSUMER.MSG.NEXT.RESEND_CONVERSATIONS.fionas-commerce-conversations",
+                  "${'$'}JS.ACK.RESEND_CONVERSATIONS.fionas-commerce-conversations.>"], subscribe: ["_INBOX.>"]
+            } },
             { user: "denied", password: "test-denied", permissions: {
                 publish: ["unrelated.subject"], subscribe: ["_INBOX.>"]
             } }

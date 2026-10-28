@@ -13,8 +13,11 @@ import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.staff.PermissionKey
+import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.conversation.SendStaffReply
+import io.github.castab.fionas.commerce.conversation.StaffTimeline
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.AllocatedPayment
 import io.github.castab.fionas.commerce.financial.ComposedQuote
@@ -82,6 +85,8 @@ const val API_DOCS_PATH = "/docs"
  * supplies the real operations; rendering the contract never calls any of them.
  */
 class FionaOperations(
+    val sendStaffReply: (SendStaffReply.Command) -> SendStaffReply.Result,
+    val readStaffTimeline: (InquiryId, PrincipalId) -> StaffTimeline,
     val acknowledgeInquiryCommunication: (RecordInquiryCommunication.Acknowledge) -> Unit,
     val listStaffRequests: (ListStaffRequests.Command) -> StaffRequestPage,
     val readStaffRequest: (InquiryId) -> StaffRequest,
@@ -144,6 +149,8 @@ fun fionaApiRoutes(
         acknowledgeInquiryCommunicationRoute(operations.acknowledgeInquiryCommunication, auth.access),
         listStaffRequestsRoute(operations.listStaffRequests, auth.access),
         readStaffRequestRoute(operations.readStaffRequest, auth.access),
+        staffTimelineRoute(operations.readStaffTimeline, auth.access),
+        sendStaffReplyRoute(operations.sendStaffReply, auth.access),
         previewInquiryQuoteRevisionRoute(operations.previewInquiryQuoteRevision, auth.access),
         previewInquiryInvoiceRevisionRoute(operations.previewInquiryInvoiceRevision, auth.access),
         reviseInquiryInvoiceRoute(operations.reviseInquiryInvoice, auth.access),

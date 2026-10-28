@@ -486,7 +486,7 @@ private fun DepositRequirementVersion.withdrawnResponse(): CurrentDepositRequire
     )
 }
 
-private fun DepositRequirementVersion.historyResponse(): HistoricalDepositRequirementResponse =
+internal fun DepositRequirementVersion.historyResponse(): HistoricalDepositRequirementResponse =
     when (val entry = requirement) {
         is DepositRequirement.Active ->
             HistoricalDepositRequirementResponse.Active(

@@ -9,6 +9,7 @@ import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRe
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryStage
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
@@ -49,6 +50,7 @@ class ListStaffRequestsSpec :
             ),
             records,
             people,
+            JdbiInquiryCommunicationRepository(),
         )
         beforeTest { app = TestApplication.create() }
         afterTest { app.close() }
@@ -99,7 +101,7 @@ class ListStaffRequestsSpec :
                 page.totalCount shouldBe size
                 page.items.size shouldBe 1
                 enrichmentCalls shouldBe 2
-                sql.size shouldBe 10
+                sql.size shouldBe 11
                 sql.none { "FOR UPDATE" in it || "FOR NO KEY UPDATE" in it } shouldBe true
             }
         }

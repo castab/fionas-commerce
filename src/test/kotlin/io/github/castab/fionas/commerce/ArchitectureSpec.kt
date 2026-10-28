@@ -163,6 +163,9 @@ class ArchitectureSpec :
             sources()
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(
+                    "events/RecordConversationEvent.kt: inTransaction",
+                    "conversation/ReadStaffTimeline.kt: inTransaction",
+                    "conversation/SendStaffReply.kt: inTransaction",
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/RecordInquiryCommunication.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
@@ -214,14 +217,34 @@ class ArchitectureSpec :
             sources {
                 !it.path.contains("${File.separator}http${File.separator}") &&
                     it.name != "FionaApplication.kt" &&
-                    it.name !in setOf("InquiryPersisted.kt", "InquiryDeclined.kt", "InquirySubmitted.kt", "IntakeDelivery.kt") &&
+                    it.name !in
+                    setOf(
+                        "InquiryPersisted.kt",
+                        "InquiryDeclined.kt",
+                        "InquirySubmitted.kt",
+                        "IntakeDelivery.kt",
+                        "ConversationEvent.kt",
+                        "ResendConversationReader.kt",
+                        "ResendConversationSender.kt",
+                    ) &&
                     it.name !in persisted
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
                 .shouldBeEmpty()
             sources {
                 it.name in persisted ||
-                    it.name in setOf("InquiryPersisted.kt", "InquiryDeclined.kt", "InquirySubmitted.kt", "IntakeDelivery.kt")
+                    it.name in
+                    setOf(
+                        "InquiryPersisted.kt",
+                        "InquiryDeclined.kt",
+                        "InquirySubmitted.kt",
+                        "IntakeDelivery.kt",
+                        "ConversationEvent.kt",
+                    )
             }.containing(listOf("org.http4k", ".http.", "CommerceJson"))
+                .shouldBeEmpty()
+            // The provider adapters are HTTP clients (java.net.http) of another service, never Fiona's HTTP layer.
+            sources { it.name in setOf("ResendConversationReader.kt", "ResendConversationSender.kt") }
+                .containing(listOf("org.http4k", "CommerceJson", "Serializable"))
                 .shouldBeEmpty()
             sources { it.path.contains("${File.separator}http${File.separator}") }
                 .containing(listOf("toPersistedJson", "restoreRequestedService", "persistedJson", "ServicePlanJson"))
@@ -266,6 +289,8 @@ class ArchitectureSpec :
             val routes =
                 fionaApiRoutes(
                     FionaOperations(
+                        sendStaffReply = { error("not called while rendering") },
+                        readStaffTimeline = { _, _ -> error("not called while rendering") },
                         acknowledgeInquiryCommunication = { error("not called while rendering") },
                         listStaffRequests = { error("not called while rendering") },
                         readStaffRequest = { error("not called while rendering") },
@@ -420,6 +445,10 @@ class ArchitectureSpec :
             File(mainSources, "http/InquiryLifecycleRoutes.kt")
                 .compactCode()
                 .contains("access.requirePermission(FionaPermissions.InquiriesManage).then(requireStaffDecision)") shouldBe true
+            // Customer email is signed and attributed to the sender: a SERVICE never impersonates a staff sender.
+            File(mainSources, "http/StaffConversationRoutes.kt")
+                .compactCode()
+                .contains(".requirePermission(FionaPermissions.CommunicationsSend).then(requireStaffSender)") shouldBe true
             // The approver and author are always the authenticated principal, never a request value.
             sources { it.path.contains("${File.separator}http${File.separator}") }
                 .flatMap { file ->
@@ -528,7 +557,9 @@ class ArchitectureSpec :
                     FionaPermissions.CredentialsManage,
                     FionaPermissions.InquiriesRead,
                     FionaPermissions.InquiriesCreate,
+                    FionaPermissions.CommunicationsRead,
                     FionaPermissions.CommunicationsAcknowledge,
+                    FionaPermissions.CommunicationsSend,
                     FionaPermissions.InquiriesManage,
                     FionaPermissions.FinancialTermsManage,
                 )

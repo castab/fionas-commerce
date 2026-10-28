@@ -18,6 +18,8 @@ import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.ServiceIdentity
 import io.github.castab.fionas.commerce.FIONA_DEFAULT_EVENT_CALENDAR_ZONE
+import io.github.castab.fionas.commerce.conversation.ConversationReadConfiguration
+import io.github.castab.fionas.commerce.conversation.ConversationSendConfiguration
 import io.github.castab.fionas.commerce.fionaApplication
 import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.SERVICE_TOKEN_PATH
@@ -154,6 +156,8 @@ class TestApplication private constructor(
             loginRateLimit: LoginRateLimit = LoginRateLimit(),
             trustedOrigins: Set<String> = setOf(TEST_ORIGIN),
             eventCalendarZone: ZoneId = FIONA_DEFAULT_EVENT_CALENDAR_ZONE,
+            conversationReads: ConversationReadConfiguration? = null,
+            conversationSends: ConversationSendConfiguration? = null,
         ): TestApplication {
             val database = TestDatabase.create()
             try {
@@ -166,6 +170,9 @@ class TestApplication private constructor(
                         eventCalendarZone,
                         outboxPublisher = null,
                         intake = null,
+                        conversations = null,
+                        conversationReads = conversationReads,
+                        conversationSends = conversationSends,
                     )
                 var context: CommerceRuntimeContext? = null
                 val runtime =

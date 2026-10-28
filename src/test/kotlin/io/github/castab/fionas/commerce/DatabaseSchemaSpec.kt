@@ -51,6 +51,9 @@ class DatabaseSchemaSpec :
                     "inquiry_fulfillment",
                     "inquiry_declines",
                     "inquiry_communications",
+                    "inquiry_conversation_events",
+                    "inquiry_customer_email_sources",
+                    "inquiry_staff_replies",
                     "inquiry_proposals",
                     "inquiry_service_plans",
                     "inquiry_submissions",
@@ -112,6 +115,21 @@ class DatabaseSchemaSpec :
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_proposals'::regclass AND contype = 'u'",
             ) shouldContainExactlyInAnyOrder
                 listOf("UNIQUE (recorded_order)")
+        }
+
+        test("a staff reply command stores identities, provenance and digests but never the message body") {
+            application.database.foreignKeys("inquiry_staff_replies") shouldContainExactlyInAnyOrder
+                listOf(
+                    "inquiry_id → fionas.inquiries(id)",
+                    "sent_by → commerce.users(principal_id)",
+                    "communication_id → fionas.inquiry_communications(id)",
+                )
+            application.database
+                .strings(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                        "AND table_name IN ('inquiry_staff_replies', 'inquiry_conversation_events', 'inquiry_customer_email_sources')",
+                ).filter { it in setOf("body", "text", "html", "subject", "content") }
+                .shouldBeEmpty()
         }
 
         test("a decline is one immutable row per inquiry naming its exact canonical Estimate and staff user, holding no status") {

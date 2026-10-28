@@ -181,7 +181,16 @@ class DashboardAttentionSpec :
             val id = requested()
             quote(id)
             val issued = state(id).financial.latestVersion.createdAt
-            recorder(issued.plus(Duration.ofDays(10))).acknowledge(RecordInquiryCommunication.Acknowledge(id, actor()))
+            recorder(issued.plus(Duration.ofDays(10))).acknowledge(
+                RecordInquiryCommunication.Acknowledge(
+                    id,
+                    actor(),
+                    app.transactor.inTransaction {
+                        JdbiInquiryCommunicationRepository().history(it, id).lastOrNull()?.recordedOrder
+                            ?: 0
+                    },
+                ),
+            )
             val backdated = issued.plusSeconds(3600)
             recorder().customerEmailReceived(id, backdated)
             val at = backdated.plus(Duration.ofDays(3))
@@ -217,7 +226,16 @@ class DashboardAttentionSpec :
                 .workQueue.needsReply.items
                 .single()
                 .attentionSince shouldBe receivedAt
-            recorder(receivedAt.plusSeconds(3600)).acknowledge(RecordInquiryCommunication.Acknowledge(id, actor()))
+            recorder(receivedAt.plusSeconds(3600)).acknowledge(
+                RecordInquiryCommunication.Acknowledge(
+                    id,
+                    actor(),
+                    app.transactor.inTransaction {
+                        JdbiInquiryCommunicationRepository().history(it, id).lastOrNull()?.recordedOrder
+                            ?: 0
+                    },
+                ),
+            )
             val afterAcknowledgement = read(receivedAt.plus(Duration.ofDays(3)))
             afterAcknowledgement.workQueue.needsReply.items shouldBe emptyList()
             afterAcknowledgement.workQueue.needsResolution.items
@@ -286,7 +304,16 @@ class DashboardAttentionSpec :
                 result.workQueue.needsResolution.items
                     .single()
                     .inquiryId
-            recorder().acknowledge(RecordInquiryCommunication.Acknowledge(id, actor()))
+            recorder().acknowledge(
+                RecordInquiryCommunication.Acknowledge(
+                    id,
+                    actor(),
+                    app.transactor.inTransaction {
+                        JdbiInquiryCommunicationRepository().history(it, id).lastOrNull()?.recordedOrder
+                            ?: 0
+                    },
+                ),
+            )
             read(STORED_INSTANT).workQueue.needsReply.items shouldBe emptyList()
             state(id).financial.latestVersion.document shouldBe before.financial.latestVersion.document
             state(id).financial.reconciliation.balance shouldBe before.financial.reconciliation.balance

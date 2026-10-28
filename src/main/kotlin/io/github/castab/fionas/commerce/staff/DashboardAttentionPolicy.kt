@@ -35,9 +35,14 @@ data class DashboardAttentionPolicy(
     fun needsReply(
         state: InquiryOperationalState,
         communication: InquiryCommunicationAttention,
+    ): StaffAttention? = needsReply(state.lifecycle.stage, communication)
+
+    fun needsReply(
+        stage: InquiryStage,
+        communication: InquiryCommunicationAttention,
     ): StaffAttention? =
         communication.unacknowledgedSince
-            ?.takeIf { state.active }
+            ?.takeIf { stage != InquiryStage.DECLINED }
             ?.let { StaffAttention(mapOf(StaffAttentionReason.CUSTOMER_COMMUNICATION_UNACKNOWLEDGED to it)) }
 
     fun needsQuote(

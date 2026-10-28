@@ -35,10 +35,14 @@ interface IntakeTransport : AutoCloseable {
     override fun close()
 }
 
-internal fun verifyIntakeConsumer(config: ConsumerConfiguration) {
-    if (config.durable != INQUIRY_CONSUMER ||
-        config.name != INQUIRY_CONSUMER ||
-        config.filterSubjects != listOf(INQUIRY_INPUT_SUBJECT) ||
+internal fun verifyIntakeConsumer(
+    config: ConsumerConfiguration,
+    consumerName: String = INQUIRY_CONSUMER,
+    subject: String = INQUIRY_INPUT_SUBJECT,
+) {
+    if (config.durable != consumerName ||
+        config.name != consumerName ||
+        config.filterSubjects != listOf(subject) ||
         !config.deliverSubject.isNullOrEmpty() ||
         config.ackPolicy != AckPolicy.Explicit ||
         config.deliverPolicy != DeliverPolicy.All ||
@@ -59,6 +63,9 @@ internal fun verifyIntakeConsumer(config: ConsumerConfiguration) {
 /** Only INFO, NEXT and disposition against the existing durable. No consumer/stream mutation. */
 class NatsIntakeTransport(
     private val configuration: NatsIntakeConfiguration,
+    private val stream: String = INQUIRY_INPUT_STREAM,
+    private val subject: String = INQUIRY_INPUT_SUBJECT,
+    private val consumerName: String = INQUIRY_CONSUMER,
 ) : IntakeTransport {
     @Volatile private var connection: Connection? = null
 
@@ -153,16 +160,16 @@ class NatsIntakeTransport(
                     ?: active
                         .jetStream(
                             jsOptions,
-                        ).subscribe(INQUIRY_INPUT_SUBJECT, PullSubscribeOptions.bind(INQUIRY_INPUT_STREAM, INQUIRY_CONSUMER))
+                        ).subscribe(subject, PullSubscribeOptions.bind(stream, consumerName))
                         .also {
                             consumer =
                                 it
                         }
             val info = current.consumerInfo
-            verifyIntakeConsumer(info.consumerConfiguration)
+            verifyIntakeConsumer(info.consumerConfiguration, consumerName, subject)
             if (System.nanoTime() >= nextStatusLog) {
                 transportLogger.info {
-                    "event=intake_consumer_status stream=$INQUIRY_INPUT_STREAM consumer=$INQUIRY_CONSUMER " +
+                    "event=intake_consumer_status stream=$stream consumer=$consumerName " +
                         "pending=${info.numPending} ackPending=${info.numAckPending} redelivered=${info.redelivered}"
                 }
                 nextStatusLog = System.nanoTime() + Duration.ofSeconds(30).toNanos()
@@ -171,9 +178,9 @@ class NatsIntakeTransport(
             current.fetch(1, Duration.ofSeconds(2)).singleOrNull()?.let { message ->
                 checkFailure()
                 val metadata = message.metaData()
-                if (message.subject != INQUIRY_INPUT_SUBJECT ||
-                    metadata.stream != INQUIRY_INPUT_STREAM ||
-                    metadata.consumer != INQUIRY_CONSUMER
+                if (message.subject != subject ||
+                    metadata.stream != stream ||
+                    metadata.consumer != consumerName
                 ) {
                     throw IntakeFailure("unexpected_delivery", FailureKind.SYSTEMIC)
                 }

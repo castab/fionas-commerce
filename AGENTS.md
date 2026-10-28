@@ -116,6 +116,9 @@ Fiona owns, and persists in its own tables:
 - the terminal staff decision to decline a REQUESTED inquiry, with its staff USER provenance
   and internal reason (see [Inquiry decline](#inquiry-decline));
 - inquiry communication activity (inbound email, staff-sent email, acknowledgement) and dashboard attention policy;
+- the inquiry's email conversation relationship (provider topic `booking`/inquiry UUID), provider
+  event and message source identities, staff reply commands, and the staff timeline (see
+  [Email conversations](#email-conversations)); the Resend Conversation Service owns email itself;
 - contacts (future);
 - event and service details, and service locations (future);
 - further relationships between these records and generic commerce facts (future), for
@@ -204,12 +207,13 @@ verifying ownership of the address. Decide these explicitly before changing the 
   ledger snapshot/lines, `INITIAL_ESTIMATE` association and line authorship commit or roll back
   together through the transaction-taking `MaterializeInquiryFinancialDocument` core, shared
   with staff creation. All rejections commit nothing, including the key claim.
-- **Public submission identity is explicit and durable.** Only `POST /inquiries` requires
+- **Public submission identity is explicit and durable.** Of the inquiry routes, only `POST /inquiries` requires
   exactly one `Idempotency-Key`: 1–128 ASCII letters/digits/underscore/hyphen, case-sensitive,
   untrimmed, opaque and non-secret (UUIDs work). Invalid/missing/repeated keys are a
   `LensFailure` (`400 malformed_request`), after authorization and before the command.
   `CreateInquiry.Command` carries `InquirySubmissionKey`; the transport header never leaks
-  into repositories as an HTTP concept. Other routes require no key.
+  into repositories as an HTTP concept. Of the other routes only the staff email reply requires
+  a key (its own `StaffReplyKey`; see [Email conversations](#email-conversations)).
 - **Idempotency precedes business writes.** Canonical command fingerprint → claim/inspect
   key → replay or mismatch → only for new claims, customer/inquiry/Estimate materialization.
   A successful replay returns the stored Inquiry, hence the exact original 201
@@ -659,7 +663,7 @@ Also:
 - **Permissions describe capabilities, never callers**: no `fionas.ui`, `fionas.frontend`, or
   `fionas.trusted`, no route allow-lists for services, no union of a session's and a token's
   grants, no role-name checks. Most routes accept whichever principal holds the permission.
-- **Exactly three classes of routes also require a principal kind, explicitly and after the
+- **Exactly four classes of routes also require a principal kind, explicitly and after the
   permission:**
   - **Priced inquiry submission is SERVICE-only.** `POST /inquiries` applies
     `access.requirePermission(FionaPermissions.InquiriesCreate).then(requireService)`. The
@@ -681,7 +685,10 @@ Also:
     `access.requirePermission(FionaPermissions.InquiriesManage).then(requireStaffDecision)`:
     a SERVICE holding `fionas.inquiries.manage` (which may mark served/closed) is still `403`,
     and the decider is `staffUser(request)`.
-  `ArchitectureSpec` pins all three guards. `GET /auth/me` additionally requires a USER (`as? UserId`).
+  - **Customer email is USER-only.** `POST /staff/requests/{inquiryId}/conversation/replies`
+    applies `access.requirePermission(FionaPermissions.CommunicationsSend).then(requireStaffSender)`:
+    the reply is signed by and attributed to `staffUser(request)`; a SERVICE is `403`.
+  `ArchitectureSpec` pins all four guards. `GET /auth/me` additionally requires a USER (`as? UserId`).
 - **OpenAPI states the transports, separately from enforcement.** `http/OpenApi.kt` declares the
   `staffSession` scheme (API key in the `__Host-fionas_session` cookie) beside the runtime's
   `serviceAccessToken` bearer scheme, combined by Fiona's documentation-only `DocumentedSecurity`
@@ -804,7 +811,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V5__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V6__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -824,7 +831,8 @@ after runtime-owned migrations.
   line authorship, the proposal's Quote, and the service plan's Quote and reviewed snapshot
   reference `commerce.financial_document_snapshots(document_id, version)`. `V2__inquiry_declines`
   adds two: `inquiry_declines.declined_by` → `commerce.users(principal_id)` and its declined
-  Estimate → `commerce.financial_document_snapshots(document_id, version)`, ten in all.
+  Estimate → `commerce.financial_document_snapshots(document_id, version)`. `V5__conversation_sources`
+  adds one: `inquiry_staff_replies.sent_by` → `commerce.users(principal_id)`, eleven in all.
   `ArchitectureSpec` and `DatabaseSchemaSpec` confine runtime schema references to these.
 - **`V1__fionas_baseline` contents**: `customers` (unique email); `inquiries` (customer FK,
   message, `zip_code`, `event_date`, checked `event_type`, `NOT NULL` JSON-object
@@ -858,6 +866,14 @@ after runtime-owned migrations.
   `inquiry_proposals` drops its pair uniqueness and gains nullable `service_plan_revision` with a
   composite FK to `(inquiry_id, revision)`, backfilled from the plan of its exact Quote. No new
   runtime references; no runtime DDL changes.
+- **`V5__conversation_sources`** (additive): `inquiry_conversation_events` (processed provider
+  event id, inquiry, conversation id, positive provider sequence unique per conversation, payload
+  SHA-256); `inquiry_customer_email_sources` (provider inbound message id → its one unique
+  `CUSTOMER_EMAIL_RECEIVED` communication); `inquiry_staff_replies` (Idempotency-Key, inquiry,
+  fingerprint, USER `sent_by`, OPEN/REPLY mode, provider-request digest, signature name, request
+  time, and an all-or-nothing ACCEPTED outcome with conversation, provider message, state and
+  unique communication, or REJECTED). No subject, address, body, HTML, routing token or
+  delivery state is stored.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
@@ -909,7 +925,8 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   RoleRead, RoleManage, RoleAssign, the runtime's `RuntimePermissions.ServiceCredentialManage`
   (without it the first administrator could create a service but never issue its credential),
   and Fiona's `fionas.credentials.manage`, `fionas.inquiries.read`, `fionas.inquiries.manage`,
-  `fionas.communications.acknowledge`, and `fionas.financial-terms.manage`. It deliberately
+  `fionas.communications.acknowledge`, `fionas.communications.read`, `fionas.communications.send`,
+  and `fionas.financial-terms.manage`. It deliberately
   omits `fionas.inquiries.create` (a USER could not use it) and has no wildcard or automatic
   future grants. Grants are fixed when bootstrap creates the role; startup never mutates an
   existing Administrator role, whose grants are managed through `/admin/access` with the
@@ -921,7 +938,8 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
 - Fiona contributes through `ApplicationContributions.permissionDefinitions`:
   `fionas.credentials.manage` (group `fionas.credentials`); `fionas.inquiries.read`,
   `fionas.inquiries.create` and `fionas.inquiries.manage` (group `fionas.inquiries`);
-  `fionas.communications.acknowledge` (group `fionas.communications`); and
+  `fionas.communications.read`, `fionas.communications.acknowledge` and
+  `fionas.communications.send` (group `fionas.communications`); and
   `fionas.financial-terms.manage` (group `fionas.financial-terms`): a verified staff user may
   commit staff-authored lines, overrides, adjustments, proposal deposit terms and standalone
   deposit terms. The removed
@@ -1638,16 +1656,19 @@ includes `kind` and `occurred_at` for the aggregate read.
 Communication-kind clearing, quote-activity and principal-provenance semantics use exhaustive Kotlin `when`
 expressions without `else`; every new kind requires explicit decisions for all three, with SQL
 kind lists kept explicit and verified against the pure projection.
-`RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
-No provider/public webhook, email bodies, attachments, delivery tracking, notifications,
-mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
+`RecordInquiryCommunication` supports inbound/outbound recording for future adapters; the
+conversation consumer and `SendStaffReply` are the production writers (see
+[Email conversations](#email-conversations)). No provider/public webhook, email bodies,
+attachments, delivery tracking, notifications, mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
 attention membership and resolution reasons remain pure Fiona policy, never persisted.
 
 `POST /inquiries/{inquiryId}/communications/acknowledge` (`acknowledgeInquiryCommunication`)
 requires `fionas.communications.acknowledge` through the same live AccessControl for USER
 or SERVICE, with existing unsafe-cookie Origin policy. It appends server Clock time and
-authenticated provenance, clears inbound already durably recorded before the action, and
-returns 204/no-store. Later ingestion stays outstanding regardless of `occurredAt`.
+authenticated provenance and returns 204/no-store. The body's required `throughRecordedOrder`
+is the `communication.throughRecordedOrder` the caller observed (`0` for an empty history):
+under the inquiry append lock a watermark that is not one of the inquiry's facts is `422`, and
+any CUSTOMER_EMAIL_RECEIVED recorded after it is `409 conversation_changed`, writing nothing. Later ingestion stays outstanding regardless of `occurredAt`.
 Repeated calls succeed and append another fact, even without outstanding inbound. Unknown
 inquiries return 404, malformed UUIDs 400, missing auth/permission 401/403. It never changes
 financial state or lifecycle. New bootstrap Administrators receive the permission; existing
@@ -1774,7 +1795,8 @@ Organize by cohesive feature, not by layer. Current packages:
 |---|---|
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root), `PersistedJson.kt` (strict persisted-JSON configuration shared by the owning repositories) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
-| `...events` | Separate outgoing (`InquiryPersisted` v3, `InquiryDeclined` v1)/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream intake worker/handler and the exact-sequence recovery CLI |
+| `...events` | Separate outgoing (`InquiryPersisted` v3, `InquiryDeclined` v1)/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream worker shape used by inquiry intake and the provider conversation consumer (`ConversationEvent`, `ConversationIntake`, `RecordConversationEvent`), and the exact-sequence recovery CLI |
+| `...conversation` | The typed Resend Conversation Service adapter (`ResendConversationReader`, `ResendConversationSender`, their configuration), staff reply values, record, repository and `SendStaffReply`, and the read-only `ReadStaffTimeline` |
 | `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; `InquiryDecline`, its repository and `DeclineInquiry`; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
@@ -1796,7 +1818,7 @@ Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
 webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1,
 persisted financial projections, CQRS, separate Booking aggregates,
-Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, email provider integration and broader communication workflows,
+Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments or HTML, provider conversation state changes, a timeline change signal, provider event backfill and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),
 on-behalf-of headers or delegated staff identity,
 a generic line-source identity, stored balances or payment statuses, tax,
@@ -1938,7 +1960,7 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   removed routes `404` and permissions absent), `DepositRequirementRoutesSpec` (reads for USER or
   SERVICE; standalone deposit mutations only for a staff USER holding both
   `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage`, refusals writing nothing), `MigrationLifecycleSpec`, `DatabaseSchemaSpec`
-  (one baseline per stream plus Fiona's additive V2, ten published runtime FKs, no catalog or
+  (one baseline per stream plus Fiona's additive V2–V5, eleven published runtime FKs, no catalog or
   ledger-fact columns),
   `OpenApiDocumentSpec` (paths, operationIds, statuses, decimal-string schemas, no catalog or
   pricing schemas, per-route security including SERVICE-only `createInquiry` and staff-only
@@ -1972,6 +1994,14 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   Clock, default/alternate event zones, local midnight and DST boundaries, and invalid
   configuration. Keep `StaffRequestSpec`/`StaffRequestRoutesSpec` paused-snapshot coherence,
   integrity failures and permission intersection.
+- Keep `ConversationIngestionSpec`, `ConversationNatsSpec`, `ResendConversationReaderSpec` and
+  `StaffConversationSpec` (real PostgreSQL and a deterministic stub provider: event/message
+  deduplication and reuse halts, ignored topics and unknown inquiries, closed-schema rejection,
+  ACK after commit through an isolated least-privilege durable, stale acknowledgement, timeline
+  states with commerce history, first-reply opening, stale expectations, no replacement on
+  lookup failure, same-key reconciliation after errors/timeouts/local failure with one email,
+  recorded rejections, allow-list, disabled sending, SERVICE refusal). Never require a live
+  provider account.
 - Run `./gradlew ktlintCheck test build` before considering work complete.
 - Keep `InquiryOutboxSpec`, `InquiryEventContractSpec`, `NatsOutboxConfigurationSpec` and
   `NatsOutboxIntegrationSpec`: real transactional append rollback, canonical contact and
@@ -1990,6 +2020,55 @@ Changes to endpoints, the API contract, configuration, migrations, packages, the
 customer-matching policy, the trusted priced-line boundary, the financial-document or payment policy,
 the bootstrap grants, the version convention, or the upstream version must update
 `README.md` and this file in the same change.
+
+## Email conversations
+
+The principle is in [ARCHITECTURE.md](ARCHITECTURE.md#email-conversations); operations, grants,
+configuration and cutover are in [docs/email-conversations.md](docs/email-conversations.md).
+Verified provider contract: resend-conversation-service **0.7.2-rc.2**; re-verify before
+relying on any other provider behavior, and never guess an endpoint.
+
+- **Identity.** An inquiry's conversation is the provider topic (`booking`, inquiry UUID),
+  resolved on every read and send; no provider conversation id is authority. Never correlate by
+  customer email. Processed booking events and accepted replies are *establishment evidence*:
+  a topic `404` with evidence is MISSING and never opens a replacement; only `404` without
+  evidence is EMPTY. Timeouts, credential errors and malformed answers are never absence.
+- **Consumer.** `conversationIntake` composes `ManagedJetStreamWorker` and `NatsIntakeTransport`
+  bound to `RESEND_CONVERSATIONS` / `conversation.events.v1` / durable
+  `fionas-commerce-conversations` with the inquiry intake's exact consumer shape, through
+  `backgroundServices`, disabled unless `FIONAS_CONVERSATION_INTAKE_ENABLED`. It never creates or
+  mutates broker resources, publishes nothing, and its halt stops only itself.
+  `processConversationDelivery` ACKs after commit or explicit ignore, NAKs transient failures and
+  halts on contract violations or exhaustion; no failure event is published.
+- **Validation.** `conversationEvent` parses the closed v1 schema strictly (exact property set
+  per type, actor/cause pairs, UUIDs, positive sequence, 64 KiB UTF-8). Null or non-`booking`
+  topics and unknown inquiries are ignored and ACKed; nothing is created implicitly.
+- **Facts.** `RecordConversationEvent` locks the inquiry row (the communication append lock),
+  claims the event id with its payload fingerprint (reuse with different content fails), and only
+  for `conversation.message.received` appends one CUSTOMER_EMAIL_RECEIVED per provider message id
+  at its `occurredAt`. Provider actors are never staff: outbound and delivery events append no
+  facts. Attention keeps `recorded_order` clearing; provider sequence never replaces it. No
+  provider state projection exists, so no order-dependent projection can regress.
+- **Reads.** `ReadStaffRequest` carries the communication history (attention derived, never
+  stored); `ListStaffRequests` uses the one set-based `attentionFor` query. `ReadStaffTimeline`
+  reads the request, version history and deposit history in one REPEATABLE READ, then the
+  provider (not atomic with it). Milestones come only from existing facts and immutable
+  snapshots; sort is `occurredAt` then lexical item id. Message content requires
+  `fionas.communications.read`; HTML, routing tokens and provider diagnostics never cross.
+- **Replies.** `SendStaffReply`: an existing key resumes; otherwise enabled/allow-list checks,
+  the topic lookup against the required expectation (`409 conversation_changed`), a committed
+  `inquiry_staff_replies` claim under the inquiry lock, then the provider call outside any
+  transaction with key `fionas-commerce:inquiry:{id}:staff-reply:{key}:v1`. Only `pending` or
+  `accepted` appends STAFF_EMAIL_SENT (authenticated USER, Clock time) and the ACCEPTED outcome,
+  once. Ambiguity gets exactly one identical replay, then `202 UNKNOWN`; a same-key retry rebuilds
+  the request, must match the stored digest, and replays it. Never a new provider key, never an
+  automatic resend, never a confirmed failure for an ambiguous result. Recipient, From,
+  Reply-To and signature never come from the request.
+- **Errors.** Fiona-local codes reuse the runtime `ErrorResponse`: `conversation_changed`,
+  `conversation_missing`, `IDEMPOTENCY_KEY_REUSED` (409), `email_recipient_not_allowed` (422),
+  `email_send_rejected` (502), `email_sending_disabled`, `email_provider_unavailable` (503).
+- **Deferred.** No timeline head/ETag (delivery state is not recorded in commerce), no backfill,
+  no automatic emails, no provider state writes. No commerce-runtime gap was found.
 
 ## Staff request discovery
 

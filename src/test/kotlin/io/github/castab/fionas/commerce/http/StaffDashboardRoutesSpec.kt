@@ -244,7 +244,16 @@ class StaffDashboardRoutesSpec :
             val service = app.provisionService("communications", setOf(FionaPermissions.InquiriesRead))
             val token = app.serviceToken(service)
 
-            fun bearer(target: String = acknowledge) = app.http(Request(Method.POST, target).header("Authorization", "Bearer $token"))
+            val watermark = app.transactor.inTransaction { communicationHistory(it, id).last().recordedOrder }
+            val observed = """{"throughRecordedOrder":$watermark}"""
+
+            fun bearer(target: String = acknowledge) =
+                app.http(
+                    Request(
+                        Method.POST,
+                        target,
+                    ).header("Authorization", "Bearer $token").header("Content-Type", "application/json").body(observed),
+                )
             bearer().status shouldBe Status.FORBIDDEN
             app.authorization.replaceRolePermissions(service.role, setOf(FionaPermissions.CommunicationsAcknowledge))
             bearer("/inquiries/not-a-uuid/communications/acknowledge").status shouldBe Status.BAD_REQUEST
@@ -257,7 +266,7 @@ class StaffDashboardRoutesSpec :
             read()
                 .workQueue.needsResolution.items
                 .single() shouldBe balance
-            app.adminPost(acknowledge).status shouldBe Status.NO_CONTENT
+            app.adminPost(acknowledge, observed).status shouldBe Status.NO_CONTENT
             app.http(Request(Method.POST, acknowledge).header("Cookie", app.adminCookie)).status shouldBe Status.FORBIDDEN
             val facts = app.transactor.inTransaction { communicationHistory(it, id) }
             facts.filter { it.activity.kind.name == "STAFF_ACKNOWLEDGED" }.map { it.activity.principalId }.toSet() shouldBe

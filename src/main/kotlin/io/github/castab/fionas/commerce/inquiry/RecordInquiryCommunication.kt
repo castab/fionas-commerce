@@ -1,5 +1,6 @@
 package io.github.castab.fionas.commerce.inquiry
 
+import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.PrincipalId
 import java.time.Clock
@@ -17,7 +18,12 @@ class RecordInquiryCommunication(
     data class Acknowledge(
         val inquiryId: InquiryId,
         val principalId: PrincipalId,
-    )
+        val throughRecordedOrder: Long,
+    ) {
+        init {
+            require(throughRecordedOrder >= 0) { "Communication watermark must be nonnegative" }
+        }
+    }
 
     fun customerEmailReceived(
         inquiryId: InquiryId,
@@ -32,7 +38,30 @@ class RecordInquiryCommunication(
 
     /** Repeated acknowledgement succeeds and appends a fresh source fact, even with no outstanding inbound. */
     fun acknowledge(command: Acknowledge) {
-        record(command.inquiryId, InquiryCommunicationKind.STAFF_ACKNOWLEDGED, null, command.principalId)
+        transactor.inTransaction { transaction ->
+            communications.lock(transaction, command.inquiryId)
+            val history = communications.history(transaction, command.inquiryId)
+            require(command.throughRecordedOrder == 0L || history.any { it.recordedOrder == command.throughRecordedOrder }) {
+                "Communication watermark does not belong to this inquiry"
+            }
+            if (history.any {
+                    it.activity.kind == InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED &&
+                        it.recordedOrder > command.throughRecordedOrder
+                }
+            ) {
+                throw CommerceFailure.Conflict("Customer communication has changed; reload before acknowledging", ConversationChanged())
+            }
+            communications.append(
+                transaction,
+                InquiryCommunication(
+                    InquiryCommunicationId(newId()),
+                    command.inquiryId,
+                    InquiryCommunicationKind.STAFF_ACKNOWLEDGED,
+                    clock.instant().truncatedTo(ChronoUnit.MICROS),
+                    command.principalId,
+                ),
+            )
+        }
     }
 
     private fun record(

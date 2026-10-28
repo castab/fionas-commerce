@@ -8,7 +8,9 @@ import io.github.castab.fionas.commerce.financial.FIONAS_DEFAULT_DEPOSIT_TERMS
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
 import io.github.castab.fionas.commerce.financial.InquiryProposal
 import io.github.castab.fionas.commerce.financial.InquiryServicePlan
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
 import io.github.castab.fionas.commerce.inquiry.InquiryDetails
+import io.github.castab.fionas.commerce.inquiry.RecordedInquiryCommunication
 
 /** A derived inquiry detail and its current canonical INITIAL_ESTIMATE lineage, never persisted. */
 data class StaffRequest(
@@ -22,7 +24,10 @@ data class StaffRequest(
     val effectiveServicePlan: InquiryServicePlan? = servicePlan,
     val servicePlanHistory: List<InquiryServicePlan> = emptyList(),
     val proposalHistory: List<InquiryProposal> = emptyList(),
+    val communicationHistory: List<RecordedInquiryCommunication> = emptyList(),
 ) {
+    val communicationAttention get() = InquiryCommunicationAttention.project(communicationHistory)
+    val needsReply get() = DashboardAttentionPolicy().needsReply(inquiry.lifecycle.stage, communicationAttention) != null
     val suggestedDepositTerms get() = FIONAS_DEFAULT_DEPOSIT_TERMS
 
     init {
