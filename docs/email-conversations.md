@@ -324,7 +324,7 @@ evidence (only `ACCEPTED` rows are).
 |---|---|---|
 | `FIONAS_CONVERSATION_READ_ENABLED` | Enables timeline message reads | `false` |
 | `FIONAS_CONVERSATION_SEND_ENABLED` | Enables staff replies | `false` |
-| `FIONAS_CONVERSATION_BASE_URL` | Provider origin; HTTPS (HTTP only for loopback), no path or credentials | required when either is enabled |
+| `FIONAS_CONVERSATION_BASE_URL` | Provider origin; HTTPS, or HTTP for loopback / Railway private DNS; no path, credentials, query or fragment | required when either is enabled |
 | `FIONAS_CONVERSATION_API_KEY` | Provider `EMAIL_v2_API_KEY` | required when either is enabled |
 | `FIONAS_CONVERSATION_READ_TIMEOUT_MS` | Total timeline read budget (100–10000) | `5000` |
 | `FIONAS_CONVERSATION_SEND_TIMEOUT_MS` | Per provider request (1000–30000) | `10000` |
@@ -332,6 +332,35 @@ evidence (only `ACCEPTED` rows are).
 | `FIONAS_CONVERSATION_FROM_NAME` | Sender and Reply-To display name | `Fiona's Ice Cream` |
 | `FIONAS_CONVERSATION_REPLY_TO_ADDRESS` | Untagged Reply-To base; needs a `REPLY_TO` row; fixed per conversation by the provider | required for sending |
 | `FIONAS_CONVERSATION_RECIPIENT_ALLOWLIST` | Comma-separated exact customer addresses, or `*` for any (production only) | required for sending |
+
+Both reading and sending use the same provider origin validation:
+
+| Origin category | Allowed |
+|---|---|
+| Public HTTPS | Yes |
+| Loopback HTTP | Yes |
+| Railway private HTTP (`*.railway.internal`) | Yes, with a nonempty service hostname of valid DNS labels |
+| Arbitrary private/public HTTP | No |
+| Origin with credentials, API path, query or fragment | No |
+
+For adjacent services in Railway, for example:
+
+```dotenv
+FIONAS_CONVERSATION_READ_ENABLED=true
+FIONAS_CONVERSATION_SEND_ENABLED=true
+
+FIONAS_CONVERSATION_BASE_URL=http://resend-conversation-service.railway.internal:3000
+FIONAS_CONVERSATION_API_KEY=<provider EMAIL_v2_API_KEY>
+```
+
+Sending also requires the From, Reply-To and recipient allowlist settings above. Use the actual
+Railway service's private DNS name and its listening port (an explicit port is optional).
+Both services must be able to communicate within the appropriate Railway private environment.
+Syntactic acceptance does not guarantee DNS resolution or service connectivity. Hostname matching
+is case-insensitive and requires the complete `.railway.internal` suffix with valid DNS labels;
+the bare `railway.internal` and misleading suffixes are rejected. This exception is specific to
+Railway private service DNS, with no generic HTTP override. The base URL is an origin only;
+a trailing `/` is normalized, and application code appends the provider API paths automatically.
 
 Reads and sends are independent: with sending disabled, staff still read conversations. Never
 log the API key, bodies, HTML, payloads or routing addresses; Fiona's logs carry only event

@@ -1550,6 +1550,11 @@ contract (0.7.2-rc.2), consumer grants, configuration, failure modes, cutover an
 (no timeline change signal yet, no backfill, no automatic emails) are in
 [docs/email-conversations.md](docs/email-conversations.md).
 
+Reads and sends share `FIONAS_CONVERSATION_BASE_URL` origin validation: HTTPS, or HTTP for
+loopback and valid service hostnames ending in `.railway.internal` (case-insensitive, optional
+port). Public HTTP and origins with credentials, paths, queries or fragments are rejected.
+See the guide's Railway configuration example for private service DNS and listening-port setup.
+
 ## Configuration
 
 Commerce also owns `InquiryPersisted v3`: new submissions atomically commit the inquiry,
