@@ -7,11 +7,14 @@ import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.inquiry.Inquiry
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryListPosition
 import io.github.castab.fionas.commerce.inquiry.InquiryOperationalState
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryStage
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
+import java.time.Instant
 import java.util.Locale
 
 /** Fiona navigation categories deliberately overlap; financial truth remains in the operational projection. */
@@ -70,6 +73,7 @@ data class StaffRequestSummary(
     val customer: Customer,
     val operational: InquiryOperationalState,
     val totalQualifier: DashboardTotalQualifier,
+    val awaitingReplySince: Instant?,
 )
 
 data class StaffRequestPage(
@@ -84,6 +88,7 @@ class ListStaffRequests(
     private val operational: ReadInquiryOperationalStates,
     private val inquiries: InquiryRepository,
     private val customers: CustomerRepository,
+    private val communications: InquiryCommunicationRepository,
 ) {
     data class Command(
         val filter: StaffRequestFilter = StaffRequestFilter.ALL,
@@ -114,6 +119,7 @@ class ListStaffRequests(
             check(people.keys == customerIds && people.all { (id, value) -> id == value.id }) {
                 "Request customer enrichment is incomplete or corrupt"
             }
+            val attention = communications.attentionFor(transaction, ids)
             val matches =
                 snapshot.states
                     .map { state ->
@@ -129,6 +135,11 @@ class ListStaffRequests(
                             } else {
                                 DashboardTotalQualifier.EXACT
                             },
+                            DashboardAttentionPolicy()
+                                .needsReply(
+                                    state,
+                                    attention[state.inquiryId] ?: InquiryCommunicationAttention(null, null),
+                                )?.attentionSince,
                         )
                     }.filter { item ->
                         command.filter.includes(item.operational) &&

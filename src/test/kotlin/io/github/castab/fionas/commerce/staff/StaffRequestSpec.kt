@@ -25,6 +25,7 @@ import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHi
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryStage
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
@@ -72,6 +73,7 @@ class StaffRequestSpec :
             proposals,
             ListFinancialDocumentPaymentHistories(app.transactor, app.context.financialLedger, associations),
             JdbiInquiryServicePlanRepository(),
+            JdbiInquiryCommunicationRepository(),
         )
 
         fun submitted(): Pair<InquiryId, UUID> {

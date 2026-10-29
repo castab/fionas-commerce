@@ -16,6 +16,16 @@ interface InquiryCommunicationRepository {
         activity: InquiryCommunication,
     ): RecordedInquiryCommunication
 
+    fun lock(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    )
+
+    fun history(
+        transaction: Transaction,
+        inquiryId: InquiryId,
+    ): List<RecordedInquiryCommunication>
+
     /** One aggregate per inquiry with activity, reduced in PostgreSQL in the caller's snapshot. Absence means no activity. */
     fun attentionFor(
         transaction: Transaction,

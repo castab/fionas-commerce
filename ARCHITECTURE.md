@@ -488,6 +488,43 @@ strictly must understand DECLINED before any production decline is recorded. See
 [the decline contract in `AGENTS.md`](AGENTS.md#inquiry-decline) for the concrete table, guard
 placement, HTTP route, event and rollout mechanics.
 
+## Email conversations
+
+The Resend Conversation Service owns email: transport and delivery, mailboxes, threading,
+Reply-To routing, message content and its own conversation state. Fiona owns what that
+communication means to an inquiry: which conversation belongs to it, which communication facts
+matter to the booking, who on staff may read, acknowledge or reply, who did, and how messages
+sit beside commerce history. Fiona is not an email system and keeps no replica of one: no
+message bodies, HTML, addresses, routing tokens or delivery state in its tables, only the
+identities and facts its own policy needs.
+
+The inquiry UUID is the correlation: each inquiry's conversation is the provider topic
+(`booking`, inquiry UUID), never a match on the customer's email, which several inquiries may
+share. A failed or ambiguous provider lookup is never evidence that a conversation is absent,
+and nothing replaces a conversation Fiona has evidence of.
+
+Provider events enter through a managed consumer inside Fiona, like inquiry intake, and become
+Fiona's existing append-only communication facts. Attention keeps Fiona's own observation order
+rather than provider timestamps or sequences, so a late or backdated email is never silently
+cleared. A staff action clears only what its staff member observed: a clearing fact carries the
+observation boundary it acted on, so a reply the provider accepts after a new customer email
+arrived, or one reconciled much later, still leaves that email outstanding. Provider topic ids
+are generic text; only Fiona's own topic naming relates a topic to an inquiry, and any other
+valid topic is unrelated rather than an error. Provider actors are not Fiona staff: staff
+provenance comes only from Fiona's own authenticated commands.
+
+A staff reply crosses two systems with no shared transaction. Fiona therefore records its
+command durably before the provider call, never holds a database transaction across it, and
+reconciles uncertain outcomes only by replaying the identical provider request under the same
+provider idempotency key. An unknown outcome is reported as unknown, never as a failure that
+invites a second email. Acceptance is not delivery.
+
+The staff timeline is a derived read: commerce milestones from immutable history in one
+database snapshot, then a separate provider read that is explicitly not atomic with it.
+Provider unavailability degrades the conversation, never booking management or commerce
+history. The concrete contract is in [`AGENTS.md`](AGENTS.md#email-conversations) and the
+operational guide in [docs/email-conversations.md](docs/email-conversations.md).
+
 ---
 
 # 13. Authentication Is Fiona-Owned; Authorization Infrastructure Is Shared

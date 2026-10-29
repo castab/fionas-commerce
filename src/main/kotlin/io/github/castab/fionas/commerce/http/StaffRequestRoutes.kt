@@ -5,7 +5,10 @@ import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.financial.FIONAS_DEFAULT_DEPOSIT_TERMS
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.StaffRequest
@@ -21,6 +24,47 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import org.http4k.core.then
 import org.http4k.core.with
+
+@Serializable
+data class CommunicationAcknowledgementResponse(
+    val occurredAt: String,
+    val principalKind: String,
+    val principalId: String,
+)
+
+@Serializable
+data class CommunicationSummaryResponse(
+    val needsReply: Boolean,
+    val throughRecordedOrder: Long,
+    val unacknowledgedSince: String? = null,
+    val latestEmailAt: String? = null,
+    val lastAcknowledged: CommunicationAcknowledgementResponse? = null,
+)
+
+internal fun StaffRequest.communicationResponse(): CommunicationSummaryResponse {
+    val attention = communicationAttention
+    val acknowledged = communicationHistory.lastOrNull { it.activity.kind == InquiryCommunicationKind.STAFF_ACKNOWLEDGED }?.activity
+    return CommunicationSummaryResponse(
+        needsReply,
+        communicationHistory.maxOfOrNull { it.recordedOrder } ?: 0,
+        attention.unacknowledgedSince?.toString(),
+        attention.latestEmailAt?.toString(),
+        acknowledged?.let {
+            val principal = checkNotNull(it.principalId)
+            CommunicationAcknowledgementResponse(
+                it.occurredAt.toString(),
+                when (principal) {
+                    is UserId -> "USER"
+                    is ServiceId -> "SERVICE"
+                },
+                when (principal) {
+                    is UserId -> principal.value
+                    is ServiceId -> principal.value
+                }.toString(),
+            )
+        },
+    )
+}
 
 @Serializable
 data class StaffRequestResponse(
@@ -73,6 +117,7 @@ data class StaffRequestResponse(
                 "revision and optional servicePlanRevision.",
     )
     val proposalHistory: List<InquiryProposalResponse> = emptyList(),
+    val communication: CommunicationSummaryResponse = CommunicationSummaryResponse(false, 0),
 )
 
 internal fun readStaffRequestRoute(
@@ -160,6 +205,7 @@ internal fun readStaffRequestRoute(
                                     }?.toResponse(),
                                 request.servicePlanHistory.map { it.toResponse() },
                                 request.proposalHistory.map { it.toResponse() },
+                                request.communicationResponse(),
                             ),
                     )
             }

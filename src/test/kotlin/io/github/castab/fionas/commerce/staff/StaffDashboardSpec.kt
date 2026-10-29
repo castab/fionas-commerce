@@ -135,6 +135,7 @@ class StaffDashboardSpec :
                     ReadInquiryOperationalStates(app.transactor, inquiries, owners, app.context.financialLedger, facts),
                     inquiries,
                     customers,
+                    JdbiInquiryCommunicationRepository(),
                 )
             val first = listing(ListStaffRequests.Command(limit = 1))
             first.items

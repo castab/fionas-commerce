@@ -79,6 +79,26 @@ class InquiryCommunicationSpec :
                 ),
             ) shouldBe InquiryCommunicationAttention(null, tuesday)
         }
+        test("an explicit observed boundary clears only inbound recorded through it, however late the clearing fact") {
+            val sent = InquiryCommunicationKind.STAFF_EMAIL_SENT
+            val late = RecordedInquiryCommunication(fact(sent, wednesday).copy(clearsThrough = 1), 3)
+            InquiryCommunicationAttention.project(listOf(inbound(monday), inbound(tuesday, 2), late)) shouldBe
+                InquiryCommunicationAttention(tuesday, wednesday)
+            // Boundaries combine by maximum: an earlier boundary recorded later never reopens what was cleared.
+            val acknowledged =
+                RecordedInquiryCommunication(fact(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, wednesday).copy(clearsThrough = 2), 4)
+            InquiryCommunicationAttention
+                .project(
+                    listOf(inbound(monday), inbound(tuesday, 2), acknowledged, late),
+                ).unacknowledgedSince shouldBe
+                null
+            RecordedInquiryCommunication(fact(sent, wednesday), 3).clearingOrder shouldBe 3
+            late.clearingOrder shouldBe 1
+            inbound(monday).clearingOrder shouldBe null
+            shouldThrow<IllegalArgumentException> { fact(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, monday).copy(clearsThrough = 0) }
+            shouldThrow<IllegalArgumentException> { fact(sent, monday).copy(clearsThrough = -1) }
+            shouldThrow<IllegalArgumentException> { RecordedInquiryCommunication(fact(sent, monday).copy(clearsThrough = 3), 3) }
+        }
         test("strict activity provenance and microsecond precision") {
             shouldThrow<IllegalArgumentException> {
                 fact(InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED, monday).copy(principalId = staff)

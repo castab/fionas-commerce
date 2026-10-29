@@ -104,9 +104,10 @@ class MigrationLifecycleSpec :
 
                 // Independent histories: the runtime's additive outbox V2 and JSONB V3 needs no Fiona migration,
                 // and Fiona's additive V2 is the next integer of Fiona's own history.
-                database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2", "3", "4")
+                database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly
+                    listOf("1", "2", "3", "4", "5", "6")
                 database.history(FIONA_MIGRATION_SCHEMA).first() shouldContain "V1__fionas_baseline.sql"
-                database.history(FIONA_MIGRATION_SCHEMA).last() shouldContain "V4__service_approval_revisions.sql"
+                database.history(FIONA_MIGRATION_SCHEMA).last() shouldContain "V6__communication_clearing_boundary.sql"
                 database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2", "3")
                 database.history("commerce").first() shouldContain "V1__commerce_baseline.sql"
                 database.history("commerce").last() shouldContain "V3__outbox_jsonb_payload.sql"
@@ -129,13 +130,13 @@ class MigrationLifecycleSpec :
                         "SELECT (SELECT max(installed_on) FROM commerce.flyway_schema_history) <= " +
                             "(SELECT min(installed_on) FROM fionas.flyway_schema_history WHERE type = 'SQL')",
                     ).single() shouldBe "t"
-                // Fiona's baseline and V2 reference the runtime's users and financial snapshots, which are in place first.
+                // Fiona's baseline, V2 and V5 reference the runtime's users and financial snapshots, which are in place first.
                 database
                     .strings(
                         "SELECT count(*) FROM pg_constraint WHERE connamespace = 'fionas'::regnamespace AND contype = 'f' " +
                             "AND confrelid IN ('commerce.users'::regclass, 'commerce.financial_document_snapshots'::regclass)",
                     ).single()
-                    .toInt() shouldBe 10
+                    .toInt() shouldBe 11
             }
         }
 

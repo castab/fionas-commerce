@@ -62,6 +62,8 @@ data class StaffRequestListItemResponse(
     val currency: String,
     @ApiProperty(format = "date-time") val inquiryCreatedAt: String,
     @ApiProperty(format = "date-time") val latestDocumentVersionAt: String,
+    val needsReply: Boolean = false,
+    @ApiProperty(format = "date-time") val awaitingReplySince: String? = null,
 )
 
 private val requestFilter = Query.optional("filter", "all (default), new, quoted, booked, needs-closing, closed, declined.")
@@ -132,6 +134,8 @@ private fun StaffRequestSummary.toListResponse(): StaffRequestListItemResponse {
         document.currency.currencyCode,
         inquiry.createdAt.toString(),
         latest.createdAt.toString(),
+        awaitingReplySince != null,
+        awaitingReplySince?.toString(),
     )
 }
 

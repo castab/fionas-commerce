@@ -96,11 +96,13 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md) and
 | `POST /inquiries` | `fionas.inquiries.create`, **SERVICE only** | Requires `Idempotency-Key`. Records the customer, the inquiry, its descriptive `requestedService`, and the already-priced `lines` as canonical Estimate v1, atomically. `201` with the receipt (`id`, `createdAt`) and `Location`; identical retries return the same receipt. Never exposes the stored customer. A staff session is `403` even with the permission. |
 | `GET /inquiries` | `fionas.inquiries.read` | Staff inbox: inquiries newest first, `limit` (1–100, default 25) per page, continued with the opaque `cursor` a page returns as `nextCursor`. |
 | `GET /inquiries/{inquiryId}` | `fionas.inquiries.read` | The persisted inquiry, its customer, its requested service, and its lifecycle. `404` when unknown, `400` when the id is not a UUID. |
-| `POST /inquiries/{inquiryId}/communications/acknowledge` | `fionas.communications.acknowledge` | Record explicit customer-email acknowledgement; repeated calls return `204`. |
+| `POST /inquiries/{inquiryId}/communications/acknowledge` | `fionas.communications.acknowledge` | Record explicit customer-email acknowledgement of the communication the caller saw: body `{"throughRecordedOrder": n}` (`communication.throughRecordedOrder`, `0` for none). Inbound recorded after `n` is `409 conversation_changed`; repeated calls return `204`. Never changes provider state. See [Email conversations](#email-conversations). |
 | `POST /inquiries/{inquiryId}/decline` | `fionas.inquiries.manage`, **staff USER only** | Terminally decline a REQUESTED inquiry with a required internal `reason` and the reviewed `expectedDocumentVersion`. See [Declining an inquiry](#declining-an-inquiry). |
 | `GET /staff/dashboard` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | One coherent snapshot of operational counts and enriched staff work queues. USER sessions and SERVICE tokens are supported. |
-| `GET /staff/requests` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Filtered, searchable request summaries with opaque cursors and totalCount. Includes closed/declined history; see [Staff request discovery](#staff-request-discovery). |
-| `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review, with the published proposal's optional `servicePlan`, `effectiveServicePlan`, `acceptedServicePlan` (after booking), `servicePlanHistory` and `proposalHistory`. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
+| `GET /staff/requests` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Filtered, searchable request summaries with opaque cursors and totalCount. Includes closed/declined history and each item's `needsReply`/`awaitingReplySince`; see [Staff request discovery](#staff-request-discovery). |
+| `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review, with the published proposal's optional `servicePlan`, `effectiveServicePlan`, `acceptedServicePlan` (after booking), `servicePlanHistory`, `proposalHistory` and the `communication` attention summary. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
+| `GET /staff/requests/{inquiryId}/timeline` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read`; message content also needs `fionas.communications.read` | Provider email messages (plain text) and historical commerce milestones in one deterministic list, with conversation state `READY`/`EMPTY`/`MISSING`/`UNAVAILABLE`/`FORBIDDEN`. Commerce history is always present. See [Email conversations](#email-conversations). |
+| `POST /staff/requests/{inquiryId}/conversation/replies` | `fionas.communications.send`, **staff USER only** | Requires `Idempotency-Key`. Send a plain-text reply to the inquiry's customer in its topic conversation, opening it on the first reply. `201` new, `200` replay, `202` `UNKNOWN` (retry with the same key); `409 conversation_changed`/`IDEMPOTENCY_KEY_REUSED`/`conversation_missing`, `422`, `502 email_send_rejected`, `503`. |
 | `POST /staff/requests/{inquiryId}/quote-preview` | `commerce.financial-document.create`, `commerce.deposit-requirement.manage`, `fionas.financial-terms.manage`, **staff USER only** | Write-free preview of the initial Quote from staff-committed final lines: resolved lines, domain totals, deposit, service plan and `reviewToken`. See [Quote builder](#quote-builder). |
 | `POST /staff/requests/{inquiryId}/proposals` | Same as preview | Atomic initial Quote publication with approved deposit terms; optionally the reviewed `lines`, `servicePlan` and `reviewToken`. See [Atomic canonical proposal publication](#atomic-canonical-proposal-publication). |
 | `POST /staff/requests/{inquiryId}/quote-revision-preview` | Same as preview | Write-free preview of a canonical Quote revision (financial, deposit and/or service changes) with its `reviewToken`. See [Quote and Invoice revisions](#quote-and-invoice-revisions). |
@@ -1083,8 +1085,11 @@ inquiry existence check; a missing inquiry fails before insertion. Same-inquiry 
 preceding commit/rollback; unrelated inquiries remain independent. Sequence gaps are allowed.
 Clearing follows record order; quote inactivity follows actual email `occurredAt`, excluding
 acknowledgements. A backdated inbound recorded after acknowledgement needs reply even when
-its actual email time leaves the Quote stale. The `(inquiry_id, recorded_order)` index
-includes `kind` and `occurred_at` for the aggregate read.
+its actual email time leaves the Quote stale. A staff reply or acknowledgement clears only
+through the observed boundary it acted on (`clears_through`), so inbound recorded after the
+staff member looked stays outstanding even when the clearing fact is recorded later. The
+`(inquiry_id, recorded_order)` index includes `kind`, `occurred_at` and `clears_through` for the
+aggregate read.
 `RecordInquiryCommunication` supports inbound/outbound recording for future adapters.
 No provider/public webhook, email bodies, attachments, delivery tracking, notifications,
 mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
@@ -1524,6 +1529,27 @@ else comes from Maven Central. In CI the workflow's `GITHUB_TOKEN` is used, or a
 `PACKAGES_READ_TOKEN` repository secret if the commerce packages have not granted this
 repository read access.
 
+## Email conversations
+
+The Resend Conversation Service owns email; Fiona owns what it means to an inquiry. Each
+inquiry's conversation is the provider topic (`booking`, inquiry UUID). An optional managed
+JetStream consumer (`FIONAS_CONVERSATION_INTAKE_*`, durable `fionas-commerce-conversations` on
+`RESEND_CONVERSATIONS`/`conversation.events.v1`) records one `CUSTOMER_EMAIL_RECEIVED` fact per
+inbound provider message, deduplicated by event and message identity, so staff attention
+(`needsReply`) follows real email. Staff read messages and commerce milestones on the timeline
+(`FIONAS_CONVERSATION_READ_ENABLED`) and reply through Fiona (`FIONAS_CONVERSATION_SEND_ENABLED`,
+with an explicit `FIONAS_CONVERSATION_RECIPIENT_ALLOWLIST`); each reply is an idempotent command
+recorded before the provider call and reconciled by exact same-key replay, so a timeout never
+causes a second email; an `UNKNOWN` outcome is retried with the same key, body and original
+expectation. A reply clears only the inbound recorded before its staff member's lookup, however
+late the provider accepts it. Provider topic ids are generic: a `booking` topic that is not an
+inquiry's UUID is unrelated and ignored. Timeline payments carry the runtime history (method,
+allocations with exact versions, `DEPOSIT`/`ADDITIONAL`). Everything is disabled by default and
+independent. The verified provider
+contract (0.7.2-rc.2), consumer grants, configuration, failure modes, cutover and deferred work
+(no timeline change signal yet, no backfill, no automatic emails) are in
+[docs/email-conversations.md](docs/email-conversations.md).
+
 ## Configuration
 
 Commerce also owns `InquiryPersisted v3`: new submissions atomically commit the inquiry,
@@ -1585,6 +1611,7 @@ environment variables.
 | `FIONAS_BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password, at least 12 characters; remove after provisioning | none |
 | `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` | First administrator's nonblank display name; required with username and password | none |
 | `FIONAS_BOOTSTRAP_ADMIN_FIRST_NAME`, `FIONAS_BOOTSTRAP_ADMIN_LAST_NAME` | Optional profile fields | none |
+| `FIONAS_CONVERSATION_INTAKE_ENABLED`, `FIONAS_CONVERSATION_READ_ENABLED`, `FIONAS_CONVERSATION_SEND_ENABLED` | Provider conversation consumer, timeline message reads, staff replies; each with its settings in [docs/email-conversations.md](docs/email-conversations.md) | `false` |
 | `LOG_LEVEL` | Level of the application's and runtime's own logs | `INFO` |
 
 Logging is Logback ([`logback.xml`](src/main/resources/logback.xml)): `key=value` lines
@@ -1604,7 +1631,11 @@ in place, preserving every inquiry and existing USER/SERVICE authorship row.
 `V4__service_approval_revisions.sql` gives `fionas.inquiry_service_plans` a per-inquiry
 `revision` primary key (backfilled in Quote-version order), permits a null `plan` for explicit
 clearings, drops the proposal pair uniqueness and binds each proposal to its service approval
-revision (backfilled from the plan of its exact Quote); it also upgrades in place. The historical
+revision (backfilled from the plan of its exact Quote); it also upgrades in place.
+`V5__conversation_sources.sql` adds the provider event, inbound message source and staff reply
+command tables, and `V6__communication_clearing_boundary.sql` adds nullable observed clearing
+boundaries to communication facts and reply commands (NULL keeps the previous meaning); both are
+additive. The historical
 0.0.23 rebaseline instructions below apply only to databases that predate that rebaseline. No
 reset is required for a valid 0.0.23/0.0.24/0.0.25 → 0.0.26 upgrade.
 
@@ -1955,7 +1986,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | Spec | Proves |
 |---|---|
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
-| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates; nothing Fiona-owned in `commerce` or `public`; one baseline per stream; Fiona's additive V2; exactly ten foreign keys into published runtime tables; no catalog/offering/pricing table anywhere; no Fiona table or column restates a ledger fact |
+| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates; nothing Fiona-owned in `commerce` or `public`; one baseline per stream; Fiona's additive V2–V5; exactly eleven foreign keys into published runtime tables; no catalog/offering/pricing table anywhere; no Fiona table or column restates a ledger fact |
 | `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: the runtime baseline first, Fiona's `V1` second, independent version spaces, each history in its own schema, repeat startup applies nothing, failures prevent composition |
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested service round trips strictly |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer and inquiry roll back together, and nothing is visible before commit |
@@ -1973,6 +2004,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `InquiryDeclineSpec`, `InquiryDeclineRoutesSpec` | DECLINED projection and fail-loud contradictions; persisted staff provenance and trimmed reason with history untouched; stale/repeated/illegal declines writing nothing; decline and InquiryDeclined v1 rolling back together; real PostgreSQL contention in both orders against initial Quote issuance, between declines and against RELATED creation; every progression path rejected while reads and settlement remain; dashboard exclusion with outstanding email; staff-USER authority, Origin, codes and ignored client provenance |
 | `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; the three attention queues and onset ordering; durable-order clearing with PostgreSQL contention; SQL/pure projection parity; EXACT/FROM qualifiers from the requested service; event-zone and DST boundaries; eleven set-based SQL reads; declined inquiries in no queue or count; snapshot coherence; strict corrupt-data failures; live USER/SERVICE permissions |
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after issuance, RELATED exclusion, integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, nested response parity, permission intersection and no-store |
+| `ConversationIngestionSpec`, `ConversationNatsSpec`, `ResendConversationReaderSpec`, `StaffConversationSpec` | Provider events: one inbound fact per message across duplicate/replayed deliveries, reused identities halt, unknown inquiries, foreign topics and generic non-inquiry booking topic ids ignored, unsupported/extra-field contracts rejected, delivery updates fabricate nothing, the dedicated least-privilege durable ACKs only after commit; stale acknowledgement conflicts; timeline READY/EMPTY/MISSING/UNAVAILABLE/FORBIDDEN with commerce history kept and plain text only; staff replies opening and continuing the topic as the USER with a trusted signature, stale expectations, lookup failure never opening a replacement, exact same-key reconciliation after errors, timeouts and local failure with one email, inbound recorded during provider acceptance or before a delayed reconciliation kept outstanding in both attention projections, accepted replies establishing the topic for send and timeline without intake, recorded rejections, allow-list, disabled sending and SERVICE refusal |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: staff Estimate, line edits, Quote, deposit, Invoice and final payment; several lineages per inquiry; caller totals never authoritative; carry, override, remove, add and reorder keeping identities; change orders in every stage; stable rejection codes; stale versions; illegal transitions; payment policy and validation; duplicate references; non-Fiona documents `404`; staff-only routes with live permissions; declared methods |
 | `FinancialLedgerExpansionSpec`, `FinancialDocumentAtomicitySpec` | Direct first-snapshot stages from staff lines; invalid line sets append nothing; standalone receipts, partial and split allocations, runtime limits and Fiona stage/version policy; every cross-boundary write (creation, change orders, combined payments, allocations) rolls back the ledger with Fiona's rows |
 | `FinancialDocumentRepositoriesSpec` | Associations (several lineages per inquiry, one inquiry per lineage, first-snapshot FK) and line authorship (USER/SERVICE/INTERNAL round trips, copies to successors, exact-snapshot FK, once per version, transactional rollback, kind check) |

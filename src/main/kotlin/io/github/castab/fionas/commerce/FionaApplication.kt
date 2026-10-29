@@ -10,10 +10,23 @@ import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
 import io.github.castab.commerce.runtime.session.SessionAuthenticator
 import io.github.castab.commerce.runtime.session.SessionCookie
+import io.github.castab.fionas.commerce.conversation.ConversationAvailability
+import io.github.castab.fionas.commerce.conversation.ConversationEstablishment
+import io.github.castab.fionas.commerce.conversation.ConversationRead
+import io.github.castab.fionas.commerce.conversation.ConversationReadConfiguration
+import io.github.castab.fionas.commerce.conversation.ConversationReader
+import io.github.castab.fionas.commerce.conversation.ConversationSendConfiguration
+import io.github.castab.fionas.commerce.conversation.JdbiStaffReplyRepository
+import io.github.castab.fionas.commerce.conversation.ReadStaffTimeline
+import io.github.castab.fionas.commerce.conversation.ResendConversationReader
+import io.github.castab.fionas.commerce.conversation.ResendConversationSender
+import io.github.castab.fionas.commerce.conversation.SendStaffReply
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
+import io.github.castab.fionas.commerce.events.ConversationIntakeConfiguration
 import io.github.castab.fionas.commerce.events.InquiryOutboxPublisher
 import io.github.castab.fionas.commerce.events.NatsIntakeConfiguration
 import io.github.castab.fionas.commerce.events.NatsOutboxConfiguration
+import io.github.castab.fionas.commerce.events.conversationIntake
 import io.github.castab.fionas.commerce.events.inquiryIntake
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.CreateChangeOrder
@@ -58,6 +71,7 @@ import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.DeclineInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryConversationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
@@ -142,6 +156,9 @@ fun fionaApplication(
     eventCalendarZone: ZoneId = fionaEventCalendarZone(),
     outboxPublisher: NatsOutboxConfiguration? = NatsOutboxConfiguration.fromEnvironment(),
     intake: NatsIntakeConfiguration? = NatsIntakeConfiguration.fromEnvironment(),
+    conversations: ConversationIntakeConfiguration? = ConversationIntakeConfiguration.fromEnvironment(),
+    conversationReads: ConversationReadConfiguration? = ConversationReadConfiguration.fromEnvironment(),
+    conversationSends: ConversationSendConfiguration? = ConversationSendConfiguration.fromEnvironment(),
 ): ApplicationContributions =
     ApplicationContributions(
         migrations =
@@ -154,6 +171,7 @@ fun fionaApplication(
             buildList {
                 outboxPublisher?.let { configuration -> add { context -> InquiryOutboxPublisher(context, configuration) } }
                 intake?.let { configuration -> add { context -> inquiryIntake(context, configuration, clock) } }
+                conversations?.let { configuration -> add { context -> conversationIntake(context, configuration) } }
             },
         routes = { context ->
             val customers = JdbiCustomerRepository()
@@ -211,23 +229,54 @@ fun fionaApplication(
                     fulfillment,
                     clock,
                 )
+            val staffRequest =
+                ReadStaffRequest(
+                    context.transactor,
+                    getInquiry,
+                    getFinancialDocument,
+                    ledger,
+                    proposalHistory,
+                    paymentHistories,
+                    servicePlans,
+                    communications,
+                )
+            val staffReplies = JdbiStaffReplyRepository()
+            val conversationEstablishment = ConversationEstablishment(JdbiInquiryConversationRepository(), staffReplies)
+            val timeline =
+                ReadStaffTimeline(
+                    context.transactor,
+                    staffRequest,
+                    ledger,
+                    conversationEstablishment,
+                    conversationReads?.let(::ResendConversationReader)
+                        ?: ConversationReader { ConversationRead(ConversationAvailability.UNAVAILABLE) },
+                )
             val operations =
                 FionaOperations(
+                    sendStaffReply = SendStaffReply(
+                        context.transactor,
+                        getInquiry,
+                        communications,
+                        staffReplies,
+                        conversationEstablishment,
+                        context.authorization::getUser,
+                        conversationSends?.let(::ResendConversationSender),
+                        clock,
+                    )::invoke,
+                    readStaffTimeline = { id, principal ->
+                        timeline(
+                            id,
+                            FionaPermissions.CommunicationsRead in context.authorization.permissionResolver.permissionsFor(principal),
+                        )
+                    },
                     listStaffRequests = ListStaffRequests(
                         context.transactor,
                         ReadInquiryOperationalStates(context.transactor, inquiries, documentOwners, ledger, fulfillment, declines),
                         inquiries,
                         customers,
+                        communications,
                     )::invoke,
-                    readStaffRequest = ReadStaffRequest(
-                        context.transactor,
-                        getInquiry,
-                        getFinancialDocument,
-                        ledger,
-                        proposalHistory,
-                        paymentHistories,
-                        servicePlans,
-                    )::invoke,
+                    readStaffRequest = staffRequest::invoke,
                     issueInquiryProposal = IssueInquiryProposal(context.transactor, proposals)::invoke,
                     previewInquiryQuoteRevision = PreviewInquiryQuoteRevision(
                         context.transactor,

@@ -365,6 +365,12 @@ internal val requireStaffUser: Filter = staffUserOnly(STAFF_USER_REQUIRED)
  */
 internal val requireStaffDecision: Filter = staffUserOnly(STAFF_DECISION_REQUIRED)
 
+/**
+ * Allows only a staff USER to send customer email: the reply is signed and attributed to that user, so a SERVICE
+ * principal is `403` whatever it holds and never impersonates a staff sender.
+ */
+internal val requireStaffSender: Filter = staffUserOnly(STAFF_SENDER_REQUIRED)
+
 private fun staffUserOnly(message: String): Filter =
     Filter { next ->
         { request: Request ->
@@ -394,9 +400,10 @@ internal val requireService: Filter =
 
 internal const val STAFF_USER_REQUIRED = "Committing negotiated financial terms requires a verified staff user"
 internal const val STAFF_DECISION_REQUIRED = "Declining an inquiry requires a verified staff user"
+internal const val STAFF_SENDER_REQUIRED = "Sending customer email requires a verified staff user"
 internal const val SERVICE_REQUIRED = "Priced inquiry submission requires the public pricing authority's service principal"
 
-/** The authenticated staff user; [requireStaffUser] or [requireStaffDecision] has already admitted the request. */
+/** The authenticated staff user; [requireStaffUser], [requireStaffDecision] or [requireStaffSender] admitted the request. */
 internal fun staffUser(request: Request): UserId = authenticatedPrincipal(request) as UserId
 
 /** The authenticated service; [requireService] has already admitted the request. */
