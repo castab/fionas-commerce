@@ -89,11 +89,21 @@ internal fun providerConnection(env: Map<String, String>): Pair<URI, String> {
             base.query == null &&
             base.fragment == null &&
             base.path.isNullOrEmpty() &&
-            (base.scheme == "https" || (base.scheme == "http" && base.host in setOf("localhost", "127.0.0.1", "::1"))),
-    ) { "FIONAS_CONVERSATION_BASE_URL requires HTTPS (HTTP only for loopback) and an origin without credentials" }
+            (base.scheme == "https" || (base.scheme == "http" && permitsProviderHttp(base.host))),
+    ) { "FIONAS_CONVERSATION_BASE_URL requires HTTPS (HTTP only for loopback or Railway private DNS) and an origin without credentials" }
     val credential = env["FIONAS_CONVERSATION_API_KEY"]
     require(!credential.isNullOrBlank() && credential.none { it.isISOControl() }) { "FIONAS_CONVERSATION_API_KEY is required" }
     return base to credential
+}
+
+private val dnsLabel = Regex("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", RegexOption.IGNORE_CASE)
+
+private fun permitsProviderHttp(host: String): Boolean {
+    if (host.lowercase() in setOf("localhost", "127.0.0.1", "::1", "[::1]")) return true
+    // Adjacent Railway services use HTTP over private networking; only their complete private DNS names qualify.
+    val suffix = ".railway.internal"
+    if (host.length > 253 || !host.endsWith(suffix, ignoreCase = true)) return false
+    return host.dropLast(suffix.length).split('.').all { dnsLabel.matches(it) }
 }
 
 internal fun providerTimeout(

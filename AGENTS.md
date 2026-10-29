@@ -2041,6 +2041,12 @@ configuration and cutover are in [docs/email-conversations.md](docs/email-conver
 Verified provider contract: resend-conversation-service **0.7.2-rc.2**; re-verify before
 relying on any other provider behavior, and never guess an endpoint.
 
+- **Provider connection.** Read and send configuration share `providerConnection`: an HTTPS
+  origin, or HTTP only for loopback / a nonempty valid DNS hostname preceding the complete
+  `.railway.internal` suffix (case-insensitive, total host length <=253, each label 1–63
+  ASCII letters/digits or interior hyphens). Optional ports and trailing-slash normalization
+  remain supported; credentials, paths, queries and fragments are rejected. Credentials remain
+  required for either enabled feature; neither client follows redirects. No generic HTTP override.
 - **Identity.** An inquiry's conversation is the provider topic (`booking`, the inquiry's
   canonical lowercase UUID text), resolved on every read and send; no provider conversation id is
   authority. Never correlate by customer email. Processed booking events and accepted replies are
