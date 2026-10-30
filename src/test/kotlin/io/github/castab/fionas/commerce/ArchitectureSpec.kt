@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.FinancialDocumentAuthorshipRepository
@@ -126,6 +127,7 @@ class ArchitectureSpec :
                 JdbiInquiryRepository::class.java,
                 JdbiInquiryFulfillmentRepository::class.java,
                 JdbiInquiryCommunicationRepository::class.java,
+                InquiryTimelineRevisionRepository::class.java,
                 JdbiInquirySubmissionRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
@@ -165,6 +167,7 @@ class ArchitectureSpec :
                 .shouldContainExactlyInAnyOrder(
                     "events/RecordConversationEvent.kt: inTransaction",
                     "conversation/ReadStaffTimeline.kt: inTransaction",
+                    "conversation/ReadInquiryTimelineRevisions.kt: inTransaction",
                     "conversation/SendStaffReply.kt: inTransaction",
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/RecordInquiryCommunication.kt: inTransaction",

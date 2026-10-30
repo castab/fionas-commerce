@@ -96,11 +96,15 @@ class StaffConversationSpec :
         test("a first reply opens the topic conversation as the staff user, signed from the trusted profile, and replays converge") {
             val id = app.createInquiry()
             val key = UUID.randomUUID().toString()
+            val revisions = ReadInquiryTimelineRevisions(app.transactor, InquiryTimelineRevisionRepository())
+            val inquiryId = InquiryId(UUID.fromString(id))
+            revisions(setOf(inquiryId)).getValue(inquiryId) shouldBe 0L
             val first = reply(id, "  Hi Jane,\n\n  we can do the 12th.  ", key = key)
             first.status shouldBe Status.CREATED
             first.header("Cache-Control") shouldBe "no-store"
             first.result().outcome shouldBe StaffReplyOutcomeResponse.ACCEPTED
             first.result().sendState shouldBe "accepted"
+            revisions(setOf(inquiryId)).getValue(inquiryId) shouldBe 1L
             val opening = provider.requests.single()
             opening
                 .getValue("topic")
@@ -127,6 +131,7 @@ class StaffConversationSpec :
             replay.status shouldBe Status.OK
             replay.result().replayed shouldBe true
             replay.result().messageId shouldBe first.result().messageId
+            revisions(setOf(inquiryId)).getValue(inquiryId) shouldBe 1L
             reply(id, "A different reply", key = key).let {
                 it.status shouldBe Status.CONFLICT
                 it.code() shouldBe "IDEMPOTENCY_KEY_REUSED"
