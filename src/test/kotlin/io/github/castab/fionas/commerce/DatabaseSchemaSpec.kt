@@ -54,6 +54,7 @@ class DatabaseSchemaSpec :
                     "inquiry_conversation_events",
                     "inquiry_customer_email_sources",
                     "inquiry_staff_replies",
+                    "inquiry_change_revisions",
                     "inquiry_proposals",
                     "inquiry_service_plans",
                     "inquiry_submissions",
@@ -61,6 +62,20 @@ class DatabaseSchemaSpec :
                     "inquiry_financial_documents",
                     "financial_document_authorship",
                 )
+        }
+
+        test("inquiry invalidation stores only an inquiry identity and a positive revision") {
+            application.database.strings(
+                "SELECT column_name || ':' || data_type || ':' || is_nullable FROM information_schema.columns " +
+                    "WHERE table_schema = 'fionas' AND table_name = 'inquiry_change_revisions' ORDER BY ordinal_position",
+            ) shouldContainExactly listOf("inquiry_id:uuid:NO", "revision:bigint:NO")
+            val id = application.createInquiry()
+            shouldThrow<Exception> {
+                application.transactor.inTransaction {
+                    it.handle.execute("INSERT INTO fionas.inquiry_change_revisions VALUES ('$id', 0)")
+                }
+            }
+            application.database.count("fionas.inquiry_change_revisions") shouldBe 0
         }
 
         /** Every foreign key of Fiona's [table], as `columns → referenced table(columns)`. */

@@ -521,6 +521,12 @@ invites a second email. Acceptance is not delivery.
 
 The staff timeline is a derived read: commerce milestones from immutable history in one
 database snapshot, then a separate provider read that is explicitly not atomic with it.
+Fiona may persist an inquiry-scoped invalidation revision alongside its communication
+facts and processed provider event identities. This is advisory synchronization metadata,
+not a replica of email state, a business event log, or an authoritative timeline snapshot.
+Changes and their revisions commit together; clients still read the authoritative timeline.
+Native streaming transport composition and server lifecycle remain runtime-owned. Missing
+streaming support must be added and released upstream before Fiona exposes a live stream.
 Provider unavailability degrades the conversation, never booking management or commerce
 history. The concrete contract is in [`AGENTS.md`](AGENTS.md#email-conversations) and the
 operational guide in [docs/email-conversations.md](docs/email-conversations.md).

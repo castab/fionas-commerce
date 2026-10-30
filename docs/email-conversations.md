@@ -393,15 +393,26 @@ changed by startup: add the grants through `/admin/access` with read-modify-repl
 
 Rollback: disable the flags. Recorded facts and command records remain valid history.
 
+## Live update foundation
+
+Migration V7 adds an inquiry-scoped revision for every newly recorded provider event and
+communication fact. Delivery updates advance it even without a new message, and duplicate
+event deliveries do not. Accepted replies and acknowledgements advance it through their
+existing communication writes. All revisions commit or roll back with the source fact;
+no message content or delivery state is copied. Historical inquiries start at baseline zero.
+
+The bounded internal subscription core and batched revision read are implemented, but
+**`GET /staff/requests/{id}/updates` is not mounted**. Commerce-runtime 0.0.26 cannot compose
+native SSE alongside HTTP; an upstream release is required. No dispatcher runs, and clients
+continue refreshing explicitly. Financial and lifecycle invalidation remains integration work.
+See [the implementation, runtime seam and frontend handoff](staff-timeline-updates.md).
+
 ## Deferred and upstream
 
-- **Change signal.** There is no `timeline/head` or ETag yet. Commerce-side changes (inbound,
-  sent, acknowledgement, financial and lifecycle milestones) are cheap to detect in Fiona, but
-  delivery-state changes are not recorded in commerce, and computing them would need a provider
-  read on every poll. A trustworthy head needs either a Fiona-owned record of delivery-update
-  events or a cheap provider revision; until then clients refresh the timeline explicitly.
-  `GET /staff/requests/{id}` `communication.throughRecordedOrder` is a cheap signal for new
-  communication facts only.
+- **Streaming and full timeline invalidation.** The internal communication revision is not
+  exposed as a timeline head or ETag. No revision query calls the provider.
+  `communication.throughRecordedOrder` remains a communication-fact watermark only, with its
+  original acknowledgement/reply meaning; it is not the new invalidation revision.
 - Automatic acknowledgement, Quote or Invoice emails; attachments; HTML; provider state
   changes from Fiona; unassigned-conversation assignment; historical backfill.
-- No commerce-domain or commerce-runtime change was needed.
+- Existing conversation behavior needs no upstream change; native streaming composition does.
