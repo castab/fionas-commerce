@@ -4,8 +4,8 @@ import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Transport-independent preparation for native SSE. Not mounted or scheduled until the runtime supports SSE.
- * A future managed dispatcher calls refresh once per second, then stream writers drain their own slots.
+ * Transport-independent coalescing registry for native staff timeline SSE.
+ * The managed dispatcher calls refresh once per second; isolated stream writers drain their own slots.
  * No client callbacks, network writes, threads, or open transactions are owned by this registry.
  */
 class InquiryTimelineSubscriptions(

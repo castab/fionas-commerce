@@ -52,6 +52,13 @@ class OpenApiDocumentSpec :
 
         fun schema(name: String) = document.at("components", "schemas", name).jsonObject
 
+        test("native SSE contract describes event-stream rather than a JSON response") {
+            val endpoint = document.at("paths", "/staff/requests/{inquiryId}/updates", "get")
+            endpoint.at("responses", "200", "content").jsonObject.keys shouldBe setOf("text/event-stream")
+            endpoint.text("description") shouldContain "Last-Event-ID"
+            endpoint.text("description") shouldContain "60s"
+        }
+
         test("change-order contract documents total policy and CLOSED canonical exclusion") {
             val operation = document.at("paths", "/financial-documents/{documentId}/change-orders", "post")
             operation.text("description") shouldContain "nonnegative"
@@ -317,6 +324,8 @@ class OpenApiDocumentSpec :
             mapOf(
                 Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "acknowledgeInquiryCommunication") to
                     listOf("204", "400", "401", "403", "404", "409", "422", "500"),
+                Triple("/staff/requests/{inquiryId}/updates", "get", "subscribeStaffRequestUpdates") to
+                    setOf("200", "400", "401", "403", "404", "500", "503"),
                 Triple("/staff/requests/{inquiryId}/timeline", "get", "readStaffTimeline") to
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/staff/requests/{inquiryId}/conversation/replies", "post", "sendStaffConversationReply") to
@@ -400,6 +409,7 @@ class OpenApiDocumentSpec :
                 "readStaffDashboard" to "Staff dashboard",
                 "listStaffRequests" to "Staff requests",
                 "readStaffRequest" to "Staff requests",
+                "subscribeStaffRequestUpdates" to "Staff requests",
                 "readStaffTimeline" to "Staff requests",
                 "issueInquiryProposal" to "Staff proposals",
                 "previewInquiryQuote" to "Staff proposals",
@@ -730,6 +740,7 @@ class OpenApiDocumentSpec :
                             // Priced submission is the pricing authority's: only its service token is accepted.
                             "createInquiry" -> listOf(setOf("serviceAccessToken"))
                             // Staff-negotiated amounts need a verified staff USER, and only a session authenticates one.
+                            "subscribeStaffRequestUpdates" -> listOf(setOf("staffSession"))
                             in staffTermsOperations -> listOf(setOf("staffSession"))
                             else -> eitherTransport
                         }
@@ -849,6 +860,7 @@ class OpenApiDocumentSpec :
                 "conversation_changed" to
                     setOf(Triple(reply, "post", "409"), Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "409")),
                 "email_send_rejected" to setOf(Triple(reply, "post", "502")),
+                "timeline_updates_unavailable" to setOf(Triple("/staff/requests/{inquiryId}/updates", "get", "503")),
                 "email_provider_unavailable" to setOf(Triple(reply, "post", "503")),
             )
 

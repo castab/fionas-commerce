@@ -521,8 +521,8 @@ invites a second email. Acceptance is not delivery.
 
 The staff timeline is a derived read: commerce milestones from immutable history in one
 database snapshot, then a separate provider read that is explicitly not atomic with it.
-Fiona may persist an inquiry-scoped invalidation revision alongside its communication
-facts and processed provider event identities. This is advisory synchronization metadata,
+Fiona may persist an inquiry-scoped invalidation revision alongside its communication,
+financial orchestration and operational facts, including processed provider event identities. This is advisory synchronization metadata,
 not a replica of email state, a business event log, or an authoritative timeline snapshot.
 Changes and their revisions commit together; clients still read the authoritative timeline.
 Native streaming transport composition and server lifecycle remain runtime-owned. Missing

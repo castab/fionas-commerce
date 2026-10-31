@@ -4,8 +4,25 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.util.UUID
 
-/** Communication invalidation tokens, not a count of messages or an authoritative timeline version. */
+/** Timeline invalidation tokens, not a count of messages or an authoritative timeline version. */
 class InquiryTimelineRevisionRepository {
+    /** Call after business locks/writes; use one sorted set for cross-inquiry changes. */
+    fun advance(
+        transaction: Transaction,
+        inquiries: Collection<InquiryId>,
+    ) {
+        inquiries.distinct().sortedBy { it.value }.forEach { inquiry ->
+            transaction.handle
+                .createUpdate(
+                    """
+                    INSERT INTO fionas.inquiry_change_revisions (inquiry_id, revision) VALUES (:id, 1)
+                    ON CONFLICT (inquiry_id) DO UPDATE SET revision = fionas.inquiry_change_revisions.revision + 1
+                    """.trimIndent(),
+                ).bind("id", inquiry.value)
+                .execute()
+        }
+    }
+
     /** Missing counters mean baseline zero; missing inquiries are omitted. No history or provider reads. */
     fun read(
         transaction: Transaction,

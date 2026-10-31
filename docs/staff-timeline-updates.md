@@ -1,215 +1,186 @@
-# Staff timeline invalidation: foundation and runtime dependency
+# Staff timeline updates
 
-## Availability
+## Availability and ownership
 
-**SSE is not available in this change.** `GET /staff/requests/{inquiryId}/updates`
-is not mounted, advertised in OpenAPI, or enabled by a flag. No stream, background
-poller, connection, executor, or provider request is started by this foundation.
-The existing timeline, replies, acknowledgement and attention contracts are unchanged.
+`GET /staff/requests/{inquiryId}/updates` is a native SSE route on commerce-runtime
+**0.0.27**'s existing JettyLoom listener. http4k remains **6.58.0.0**. Runtime owns
+transport, framing, flushing, pre-stream errors and server lifecycle; Fiona owns
+revision detection, admission, credentials and subscription lifetime. Resend owns email.
+The existing timeline API remains authoritative. No frontend changes are included here.
 
-The independent Fiona work is durable communication revisions, a bounded batch read,
-and a transport-independent subscription registry. Native transport integration,
-authentication of streams, keepalives and connection lifetime enforcement await a
-released runtime composition capability. Do not deploy a frontend subscription yet.
+Enable with `FIONAS_TIMELINE_UPDATES_ENABLED=true` (default **false**). The endpoint is
+always documented and mounted; after authorization and resource validation a disabled
+instance returns `503` with runtime `ErrorResponse`, code `timeline_updates_unavailable`.
+There is no scanner or writer when disabled. Invalid flag values fail startup.
 
-## Implemented revision contract
+Enablement requires the existing shared pool's connection timeout in 1–5000ms and
+`DATABASE_JDBC_URL` containing `socketTimeout=1..5` plus URL-encoded
+`options=-c transaction_timeout=50000 -c statement_timeout=5000`. These are the same
+strictly validated PostgreSQL 18 bounds as [intake](inquiry-intake.md#bounded-database-shutdown).
+They apply to the whole pool, including HTTP and migrations. No separate pool or
+transaction/cancellation infrastructure is introduced.
 
-Fiona migration V7 adds `fionas.inquiry_change_revisions`: inquiry FK/primary key and
-positive BIGINT revision, with no customer, email or financial content. Existing
-inquiries start at the implicit baseline `0`; historical facts are not backfilled.
-No timestamp, provider sequence, message count or financial version acts as a revision.
+## Request and response contract
 
-Two AFTER INSERT triggers advance the counter in the source transaction:
+The caller must be an authenticated human USER with all three permissions:
+`fionas.inquiries.read`, `commerce.financial-document.read`, `fionas.communications.read`.
+Forward the actual staff session cookie (`__Host-fionas_session`), and send
+`Accept: text/event-stream`. Fiona's existing session-first authentication and
+AccessControl filters run through runtime `sseHandshake`. A SERVICE is forbidden,
+even with all permissions. Authorization precedes UUID parsing and inquiry lookup.
+No email provider request occurs during preparation or revision scanning.
 
-| Source | Changes covered |
-|---|---|
-| `inquiry_conversation_events` | Every newly accepted provider event, including outbound intent, delivery updates and conversation state; no provider state is copied |
-| `inquiry_communications` | Inbound communication facts, accepted staff replies, acknowledgements and existing direct communication adapters |
+Pre-stream errors retain runtime JSON and never activate a consumer: 400 malformed
+UUID or missing SSE Accept header, 401 missing/invalid/expired session, 403 wrong
+principal kind or missing permission, 404 unknown inquiry, sanitized 500 unexpected
+failure, 503 disabled (or runtime shutting down). A non-SSE GET is rejected rather
+than returning a fake streaming HTTP body.
 
-`ON CONFLICT DO NOTHING` on an identical provider event does not fire an insert
-trigger. Replayed accepted replies do not append a communication and do not advance
-the counter. A rejected/unknown reply command alone does not advance it. A genuinely
-new event ID naming an already recorded inbound message still adds establishment
-evidence and advances the token; it does not add a second communication. An inbound
-event that creates a fact advances twice. Tokens are opaque invalidation identities,
-not business-event counts; multiple changes can be coalesced into one notification.
-
-Counter UPSERTs serialize on the inquiry's revision row and roll back with the source
-facts. Existing operations already take the inquiry communication lock before these
-writes. No new lock order, transaction boundary, retry loop or runtime-table access is
-introduced. Overflow fails and rolls back rather than wrapping. Do not reset counters.
-Triggers cover old application instances after V7 is applied, including rolling deploys.
-
-`ReadInquiryTimelineRevisions` performs one short transaction with one indexed batch
-query, bounded to 256 inquiry IDs. It joins only inquiry existence and the counter;
-it never loads the timeline or calls Resend. Unknown inquiries are omitted; existing
-inquiries without counters return zero. This is an internal operation, not an endpoint.
-
-## Implemented subscription core
-
-`InquiryTimelineSubscriptions` has at most 256 subscriptions, at most 16 for one
-inquiry, and exactly one pending revision slot per subscription. Capacity exhaustion
-returns no subscription. Each `refresh()` reads distinct active inquiry IDs once,
-then replaces pending tokens with newer ones. It never calls a client or writes a
-socket. A slow consumer does not delay another consumer or accumulate history.
-
-Every new subscription gets the current revision on its first refresh, including
-zero. Reconnecting always gets a fresh synchronization token. Subscribe during an
-in-flight scan is picked up by the next scan. Committing during a read is likewise
-observed by the next scan. No ephemeral wakeup or LISTEN registration can be lost.
-Concurrent scans are suppressed. Duplicate or lower observed revisions are ignored
-within a subscription; tokens need no ordering logic in the frontend.
-
-Closing removes subscriptions and clears their slots, even while a read is in flight;
-late results cannot resurrect them. A database read exception closes affected
-subscriptions and propagates to the future transport owner, without an error payload.
-The registry owns no threads and cannot cancel the caller's database operation.
-The eventual managed dispatcher must enforce the existing bounded pool/JDBC settings
-and join its worker before pool shutdown. An idle registry performs no query.
-
-The intended distribution is one server-side scan per second per instance, only for
-active inquiries. It works across commerce instances against the same PostgreSQL
-database without sticky sessions, per-browser database connections or LISTEN/NOTIFY.
-This is bounded counter sampling on the server; the browser uses SSE. The scanner is
-not composed in this change.
-
-## Exact upstream boundary
-
-Audited against [commerce-runtime v0.0.26](https://github.com/castab/commerce-domain/blob/v0.0.26/runtime/src/main/kotlin/io/github/castab/commerce/runtime/CommerceRuntime.kt)
-and the resolved http4k **6.58.0.0** artifacts. `ApplicationContributions.routes`
-returns `List<RoutingHttpHandler>`. Runtime constructs
-`CommerceErrorHandling.then(routes(...))` and calls `http.asServer(JettyLoom(port))`.
-There is no native SSE contribution point. Fiona cannot replace that server or
-upgrade http4k independently.
-
-The smallest proposed reusable addition, to implement and release upstream first:
-
-```kotlin
-// New optional member of ApplicationContributions; retain routes unchanged.
-val sseRoutes: (CommerceRuntimeContext) -> List<RoutingSseHandler> = { emptyList() }
-```
-
-Runtime composes one `org.http4k.core.PolyHandler(http = http, sse = ...)` and starts
-that through its existing JettyLoom server. Keep `CommerceRuntime.http`, health/ready,
-HTTP filters, migrations, context construction and managed-service ownership intact.
-Expose native SSE types through the runtime's supported dependency surface. Add no
-inquiry, revision, topic or email concepts upstream.
-
-**A new field alone is insufficient acceptance evidence.** The pinned native
-`SseResponse` has status, headers and consumer, but no ordinary HTTP error body.
-Runtime must preserve `ErrorResponse` for pre-stream rejection, including exceptions,
-without committing a 200 first. A maintainable candidate is a shared application
-handshake used by the SSE matcher and the executable HTTP contract: rejected native
-matches fall through (`handled = false`) to the HTTP contract and runtime error filter.
-Verify this fallback on real Jetty; do not recreate error serialization inside Fiona.
-Unhandled SSE paths must still fall through to ordinary HTTP, including `/health`.
-
-The pinned `JettyEventStreamHandler` is a nonblocking handler and invokes its SSE
-consumer after response commitment. Handshake I/O, the consumer, keepalives and slow
-socket writes need explicit execution/lifetime tests: native APIs alone do not prove
-freedom from starvation. Consumers must register bounded work and return promptly.
-Runtime must stop accepting streams and close active native connections with bounded
-shutdown, including partially failed startup, before its shared pool is released.
-
-No upstream artifact was changed or released here. The dependency remains 0.0.26.
-
-## Remaining Fiona integration and financial coverage
-
-Before mounting the route, implement a managed dispatcher and native SSE writer with
-bounded write deadlines, disconnect cleanup and shutdown. Reuse runtime authentication
-and live AccessControl for a human USER with **all three** read permissions:
-`fionas.inquiries.read`, `commerce.financial-document.read`,
-`fionas.communications.read`. Check inquiry existence only after authorization.
-Return existing 400/401/403/404/error conventions before opening the stream.
-
-Revalidate the original credential and current permissions, not the cached
-`authenticatedPrincipal` on the original request. The runtime authentication filter
-deliberately reuses an established principal. A proposed bound is a 60-second maximum
-connection lifetime, also capped by session expiry, with revalidation before each
-notification and at least every 20 seconds. Revocation, failure to revalidate and
-permission removal close the stream without a private error event. Verify expiry and
-revocation with actual sessions before adopting these bounds.
-
-The implemented revision currently covers **communication only**. Complete timeline
-coverage remains an integration requirement:
-
-| Milestone | Correct future revision write boundary |
-|---|---|
-| Quote publication | Fiona proposal append, in its existing transaction |
-| Invoice amendment | Fiona orchestration after the supported ledger mutation, in the same transaction, including amendments without a service-plan write |
-| Served, closed, declined | Fiona operational-fact repository mutations in their existing transactions |
-| Payments, allocations, refunds | Fiona orchestration using supported ledger reads to identify every affected inquiry, in the same transaction; preserve lock ordering, including cross-lineage histories |
-
-Do not add triggers or queries on `commerce` tables, copy financial state, or infer
-that every ledger write produces a Fiona row. Direct upstream ledger writes cannot
-be observed without a supported runtime change notification capability; decide that
-requirement explicitly if such writers must be supported. These financial changes
-are not silently claimed as covered by this foundation.
-
-## Proposed frontend and operations contract (not yet exposed)
-
-After the above release and integration gates, the target is:
+A successful response has:
 
 ```text
-GET /staff/requests/{inquiryId}/updates
+200 OK
 Content-Type: text/event-stream
-Cache-Control: no-store
+Cache-Control: no-store, no-transform
 X-Accel-Buffering: no
 
-event: timeline.changed
-id: 42
-data: {"inquiryId":"<uuid>","revision":"42"}
+retry:3000
+
+event:timeline.changed
+id:42
+data:{"inquiryId":"<canonical-uuid>","revision":"42"}
 ```
 
-Use native SSE event/comment primitives. Emit only inquiry UUID and decimal revision
-string; no personal information, message content, provider IDs, amounts or diagnostics.
-Send a synchronization event on every connection even if Last-Event-ID equals the
-current token. Last-Event-ID is not replay: the server stores no event replay buffer.
-The BFF must forward the staff credential and stream through the admin origin; the
-browser receives no commerce credentials, NATS access or Resend access.
+Data contains exactly the canonical inquiry UUID and the opaque decimal revision
+string. No message, customer, provider, financial or diagnostic content is emitted.
+Every admitted connection synchronizes from the next authoritative scan, including
+baseline `0`. Reconnect always synchronizes again. `Last-Event-ID` is ignored: there
+is no replay log. Changes may coalesce and duplicate hints are harmless. Never use
+revision numbers as business state or compare them across connections.
 
-On each synchronization/change event, fetch the existing authoritative timeline.
-Coalesce refreshes, but if another notification arrives while a fetch is in flight,
-schedule another read after it completes. Never infer reply acceptance, delivery,
-acknowledgement, needs-reply or booking state from a token. Reconnection always
-refreshes, even after database restoration or a token lower than a prior connection.
-Provider outage can still yield an unavailable timeline; a revision does not guarantee
-provider availability or cross-system atomicity. Restore/recovery must disconnect old
-streams rather than resume their in-memory comparison against restored counters.
+## Durable revision coverage
 
-The eventual route should send keepalive comments about every 20 seconds. Disable
-buffering and response compression for the stream at the BFF and reverse proxy; flush
-frames promptly and set idle timeouts above the heartbeat interval. Enforce a bounded
-absolute connection lifetime and allow reconnect during deployment. Verify these
-settings end to end; a healthy `/health` alone says nothing about notification freshness.
+V7 is preserved unchanged. `fionas.inquiry_change_revisions` has one positive BIGINT
+counter per changed inquiry; no row means zero. Existing histories are not backfilled.
+V7 AFTER INSERT triggers cover communication facts and processed provider events,
+including delivery updates without a new message. Duplicate source inserts do not
+advance. An inbound event plus its new communication can advance twice; revisions
+are tokens, not event counts. Accepted-reply replay writes no new communication.
 
-Deploy V7 before any new stream-capable binary. Keep provider event intake enabled and
-monitor its existing retry/halt status; an event never ingested cannot advance a
-revision. Release the runtime, consume that released version, complete transport and
-financial integration, then deploy the BFF. No browser subscription is safe before
-those gates. Counter rows have one row per changed inquiry and no independent retention
-job; do not purge them while retaining the inquiry.
+V8 adds triggers only on Fiona-owned proposal publications, declines and fulfillment
+facts (served insert, changed closed timestamp). Invoice financial amendments through
+`InquiryInvoiceRevisions` and canonical Invoice `CreateChangeOrder` explicitly advance
+in the caller transaction, even without a service-plan write. Service-only Invoice
+amendments and RELATED document snapshots do not change timeline items and do not
+advance. Canonical Quote publications, including deposit/service republication, do.
 
-## OpenAPI and verification gates
+`RecordDocumentPayment`, `AllocatePayment` and `RecordRefund` use
+`AdvancePaymentTimelines` after their successful ledger mutation and business locks.
+The supported runtime payment history includes every historical allocation, including
+fully unwound allocations. Fiona resolves their owners through its own associations,
+selects every inquiry whose canonical lineage appears, and advances distinct inquiry
+IDs in deterministic UUID order. A later allocation to another lineage or refund of
+unapplied money also changes every timeline that displays that receipt's whole history.
+Standalone unallocated receipts and unrelated RELATED-only receipts have no timeline
+to invalidate. Exact deposit acceptance's payment and Invoice promotion commit together.
 
-No endpoint metadata is added for an endpoint that does not exist. On integration,
-retain a single executable route description: its HTTP handshake contract should own
-operationId `subscribeStaffRequestUpdates`, read security and error statuses, with
-200 media type **text/event-stream**, not a JSON DTO. Native matching and documentation
-must share the path/handshake rather than maintain a standalone spec. Any routing
-exception needs a narrow ArchitectureSpec guard and served/generated OpenAPI parity
-tests. Confirm the native fallback mechanism upstream before choosing this shape.
+All increments commit/roll back with their business facts. Rejected and rolled-back
+commands advance nothing. No triggers or SQL target runtime-owned tables, and no
+financial state is copied. Direct callers of the shared ledger bypass Fiona's financial
+notification orchestration; they are **not covered**. All production writes requiring
+notifications must use Fiona operations. During mixed-version rollout, V7/V8 triggers
+cover old writers of Fiona facts, but old binaries do not emit financial increments.
+Finish rollout and reconnect before relying on complete financial notifications.
 
-Foundation tests cover PostgreSQL source/counter rollback, commit visibility,
-same-inquiry contention, deduplication, out-of-order delivery events, staff reply replay,
-acknowledgement conflicts, isolated registries, subscription capacity/coalescing,
-subscribe/read races, disconnect/reconnect, failed reads and close during a stalled read.
+## Dispatcher, authorization and failures
 
-**Release-blocking tests still required:** stream auth/permission/session expiry and
-revocation, real native disconnects, blocked socket writers, keepalive and maximum
-lifetime, runtime shutdown, deployed proxy behavior, and at least two simultaneous SSE
-connections to the **actual commerceRuntime JettyLoom composition** while repeatedly
-checking ordinary reads and `/health` with deadlines. This foundation does not run or
-claim that test. The prior [starvation incident](https://github.com/castab/fionas-ui/blob/main/docs/incidents/2026-09-04-admin-live-updates-event-loop-starvation.md)
-is why no pipe, InputStream response, independent production server or in-memory-only
-claim of working SSE is acceptable.
+Each instance admits at most **256** writers and **16** per inquiry, with one pending
+revision slot each. One scanner reads distinct active inquiry IDs in a single bounded
+query/short transaction every second. No active subscriptions means no database query.
+There are no provider calls, per-client transactions, local event bus, NATS channel,
+Redis or sticky-session requirement. Other instances discover commits in PostgreSQL.
+New subscriptions or commits during a scan are observed on the following scan.
+Duplicate/regressing observations are ignored within a live subscription.
+
+Each admitted client has one isolated virtual writer; native consumers register it
+and return promptly. There is no event executor or unbounded queue. Writer admission
+remains reserved until cleanup completes, even if the registry closes the subscription.
+A separate watchdog checks deadlines every 100ms, interrupting writes after 5s and
+connections at **60s**. Keepalive comments are sent approximately every **20s**; the
+pinned adapter also has its own transport heartbeat. Comments are not revision changes.
+
+Writers re-run the same AccessControl chain on a fresh request carrying the original
+credential headers, without cached authenticatedPrincipal, every second and before
+every change notification. The principal must still match. Revocation, expiry, disabled
+user, permission removal or revalidation failure closes the stream without private
+error details. Session expiry is discovered through runtime SessionManager resolution
+on this cadence (plus bounded database latency); its public API does not expose the
+original session expiry timestamp. No separate identity authority is maintained.
+
+A failed revision scan closes affected subscriptions, logged as `timeline_scan_failed`.
+Reconnect after recovery obtains current authority. A failed/stalled writer affects
+only itself. Capacity exhaustion or shutdown racing post-commit admission closes that
+connection without an initial synchronization; `timeline_subscription_refused` is logged.
+Clients must not treat HTTP 200 alone as successful synchronization. Writer failures
+log `timeline_writer_stopped` at DEBUG. Logs contain no inquiry IDs or content.
+
+Shutdown rejects registrations, closes slots, interrupts scanner/watchdog/writers and
+joins them before runtime stops Jetty and then the pool. The common shutdown deadline
+is 60s (database transactions are bounded at 50s); failure to join is surfaced, never
+silently declared successful. Use deployment grace **at least 100s** when combined with
+intake. Startup/close are idempotent; construction starts no work. Reconnect on deploy.
+Restore/recovery must disconnect existing streams before counters can regress.
+
+Provider changes cannot advance a counter until communication intake processes them.
+Disabled or halted intake therefore limits notification freshness; monitor its existing
+status independently. A revision never proves provider availability, email delivery,
+payment success or cross-system atomicity. Retain manual refresh. Counter rows have
+no separate retention job and must not be purged while their inquiries are retained.
+
+## OpenAPI
+
+`subscribeStaffRequestUpdates` is declared once in the executable HTTP contract in
+`StaffTimelineUpdateRoutes.kt`, with a native route using the same authorization and
+preparation. Its 200 body lens is `text/event-stream`, not JSON. Ordinary HTTP GET
+executes validation then rejects the missing native Accept negotiation; the native
+adapter takes successful streaming requests first. This narrow native routing exception
+is pinned in ArchitectureSpec. Generated and served OpenAPI remain the same rendering;
+there is no standalone maintained spec or second business implementation.
+
+## fionas-web handoff
+
+1. Expose a streaming BFF route through the admin origin and use native browser
+   `EventSource` there. Forward the actual staff session cookie server-side and set
+   `Accept: text/event-stream`; do not substitute a service token or invented actor header.
+   Commerce and provider credentials must never be sent to the browser.
+2. Forward status and content type, preserve `no-store, no-transform` and
+   `X-Accel-Buffering: no`. Disable response buffering and compression, flush frames
+   promptly, propagate downstream cancellation upstream, and use idle timeouts above
+   20s. Verify these settings on the actual proxy; local Jetty tests cannot prove them.
+3. Listen for `timeline.changed`. Both initial synchronization and later changes refresh
+   `GET /staff/requests/{inquiryId}/timeline`. Event IDs and payload revisions are opaque.
+   Ignore Last-Event-ID for replay. Reconnection must refresh even if the token repeats.
+4. Coalesce refreshes, but remember notifications received during a fetch and run another
+   fetch after it finishes. Preserve composer text, original send expectations,
+   unknown-outcome/same-key recovery and disclosure state across refreshes.
+5. Expect backend disconnects at 60s, during deployments, on revocation and failures.
+   Honor the 3s retry hint when received; apply bounded backoff/jitter to repeated
+   pre-stream or pre-synchronization failures (no retry frame is guaranteed on refusal).
+   Handle 401/403 as authentication/authorization changes, 404 as missing resource, and
+   503/network failures as temporary unavailability. Avoid immediate retry loops.
+6. Keep the manual **Refresh conversation** action and show disconnected/stale state
+   when synchronization has not occurred. SSE never acknowledges, sends, books or edits.
+
+## Verification
+
+The existing V7 PostgreSQL/concurrency and registry suites remain. Added real JettyLoom
+socket tests cover simultaneous streams, exact headers/frames, delayed flushing,
+communication and decline hints, reconnect, authorization errors, live session/permission
+changes, scanner failure/recovery and active-stream shutdown. The backpressure test
+amplifies a test-only native payload into a non-reading socket, observes the production
+writer blocked inside Jetty, verifies another subscriber and HTTP, and joins that writer
+before server stop. Managed-writer tests cover deadlines, keepalives, bounded concurrent
+admission, failed writes, blocked scans and cleanup. Financial/lifecycle tests cover
+publication/revision, booking, Invoice amendments, split payment histories and refunds,
+terminal facts, rejected commands and rollback. Production proxy validation remains a
+deployment check, not a claimed local test result.

@@ -85,6 +85,7 @@ const val API_DOCS_PATH = "/docs"
  * supplies the real operations; rendering the contract never calls any of them.
  */
 class FionaOperations(
+    val prepareStaffTimelineUpdates: (InquiryId) -> Boolean,
     val sendStaffReply: (SendStaffReply.Command) -> SendStaffReply.Result,
     val readStaffTimeline: (InquiryId, PrincipalId) -> StaffTimeline,
     val acknowledgeInquiryCommunication: (RecordInquiryCommunication.Acknowledge) -> Unit,
@@ -149,6 +150,7 @@ fun fionaApiRoutes(
         acknowledgeInquiryCommunicationRoute(operations.acknowledgeInquiryCommunication, auth.access),
         listStaffRequestsRoute(operations.listStaffRequests, auth.access),
         readStaffRequestRoute(operations.readStaffRequest, auth.access),
+        staffTimelineUpdatesRoute(operations.prepareStaffTimelineUpdates, auth.access),
         staffTimelineRoute(operations.readStaffTimeline, auth.access),
         sendStaffReplyRoute(operations.sendStaffReply, auth.access),
         previewInquiryQuoteRevisionRoute(operations.previewInquiryQuoteRevision, auth.access),

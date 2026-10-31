@@ -1,10 +1,12 @@
 package io.github.castab.fionas.commerce.financial
 
+import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryDeclineRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
@@ -60,6 +62,11 @@ class CreateChangeOrder(
                 requireRetainedNotes(servicePlans.latest(transaction, current.inquiryId)?.content(), resolved)
             }
             documents.commitLines(transaction, current, resolved, command.author, now)
+            if (current.document is FinancialDocument.Invoice &&
+                documents.isCanonical(transaction, current)
+            ) {
+                InquiryTimelineRevisionRepository().advance(transaction, listOf(current.inquiryId))
+            }
             documents.describeLocked(transaction, current.inquiryId, command.documentId)
         }
     }

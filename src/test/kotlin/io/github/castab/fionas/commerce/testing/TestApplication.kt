@@ -158,6 +158,7 @@ class TestApplication private constructor(
             eventCalendarZone: ZoneId = FIONA_DEFAULT_EVENT_CALENDAR_ZONE,
             conversationReads: ConversationReadConfiguration? = null,
             conversationSends: ConversationSendConfiguration? = null,
+            timelineUpdatesEnabled: Boolean = false,
         ): TestApplication {
             val database = TestDatabase.create()
             try {
@@ -173,6 +174,7 @@ class TestApplication private constructor(
                         conversations = null,
                         conversationReads = conversationReads,
                         conversationSends = conversationSends,
+                        timelineUpdatesEnabled = timelineUpdatesEnabled,
                     )
                 var context: CommerceRuntimeContext? = null
                 val runtime =
@@ -180,7 +182,16 @@ class TestApplication private constructor(
                         configuration =
                             CommerceRuntimeConfiguration(
                                 server = CommerceRuntimeConfiguration.Server(port = 0),
-                                database = database.configuration,
+                                database =
+                                    if (timelineUpdatesEnabled) {
+                                        database.configuration.copy(
+                                            jdbcUrl =
+                                                database.configuration.jdbcUrl.substringBefore('?') +
+                                                    "?socketTimeout=5&options=-c%20transaction_timeout%3D50000%20-c%20statement_timeout%3D5000",
+                                        )
+                                    } else {
+                                        database.configuration
+                                    },
                                 migrations = CommerceRuntimeConfiguration.Migrations(onStartup = OnStartup.MIGRATE),
                                 serviceTokens = TEST_SERVICE_TOKENS,
                             ),
@@ -188,6 +199,8 @@ class TestApplication private constructor(
                             ApplicationContributions(
                                 migrations = fiona.migrations,
                                 permissionDefinitions = fiona.permissionDefinitions,
+                                backgroundServices = fiona.backgroundServices,
+                                sseRoutes = fiona.sseRoutes,
                                 routes = { runtimeContext ->
                                     context = runtimeContext
                                     fiona.routes(runtimeContext)

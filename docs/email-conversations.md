@@ -401,18 +401,18 @@ event deliveries do not. Accepted replies and acknowledgements advance it throug
 existing communication writes. All revisions commit or roll back with the source fact;
 no message content or delivery state is copied. Historical inquiries start at baseline zero.
 
-The bounded internal subscription core and batched revision read are implemented, but
-**`GET /staff/requests/{id}/updates` is not mounted**. Commerce-runtime 0.0.26 cannot compose
-native SSE alongside HTTP; an upstream release is required. No dispatcher runs, and clients
-continue refreshing explicitly. Financial and lifecycle invalidation remains integration work.
-See [the implementation, runtime seam and frontend handoff](staff-timeline-updates.md).
+The native `GET /staff/requests/{id}/updates` endpoint uses commerce-runtime 0.0.27.
+Enable `FIONAS_TIMELINE_UPDATES_ENABLED=true` with the documented database bounds.
+V8 milestone triggers and atomic Fiona financial orchestration complete timeline
+invalidation. Staff sessions need all three read permissions; notifications are
+content-free refresh hints, never authority. See [operations and the frontend handoff](staff-timeline-updates.md).
 
 ## Deferred and upstream
 
-- **Streaming and full timeline invalidation.** The internal communication revision is not
+- **Timeline head/ETag.** The invalidation revision is not
   exposed as a timeline head or ETag. No revision query calls the provider.
   `communication.throughRecordedOrder` remains a communication-fact watermark only, with its
   original acknowledgement/reply meaning; it is not the new invalidation revision.
 - Automatic acknowledgement, Quote or Invoice emails; attachments; HTML; provider state
   changes from Fiona; unassigned-conversation assignment; historical backfill.
-- Existing conversation behavior needs no upstream change; native streaming composition does.
+- Native streaming consumes the released runtime capability; no provider change is needed.

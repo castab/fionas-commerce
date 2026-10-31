@@ -6,7 +6,9 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
 import io.github.castab.fionas.commerce.conversation.PaymentClassification
+import io.github.castab.fionas.commerce.conversation.ReadInquiryTimelineRevisions
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.financial.InquiryInvoiceRevisions
 import io.github.castab.fionas.commerce.financial.InquiryServicePlan
@@ -222,6 +224,120 @@ class CanonicalRevisionsSpec :
             ),
         )
 
+        fun revision(id: String): Long {
+            val inquiry = InquiryId(UUID.fromString(id))
+            return ReadInquiryTimelineRevisions(app.transactor, InquiryTimelineRevisionRepository())(setOf(inquiry)).getValue(inquiry)
+        }
+
+        test("timeline revisions follow publications, booking, invoice amendments and lifecycle, but reject stale commands") {
+            val id = initial()
+            revision(id) shouldBe 1L
+            val quote = quoteInput(id, "1600.00")
+            val token = quotePreview(id, quote).quote.reviewToken
+            approveQuote(id, quote, token).status shouldBe Status.OK
+            revision(id) shouldBe 2L
+            approveQuote(id, quote, token).status shouldBe Status.CONFLICT
+            revision(id) shouldBe 2L
+            pay(id, "400.00").status shouldBe Status.CREATED
+            revision(id) shouldBe 3L
+            val invoice = invoiceInput(id, "1800.00")
+            val review = previewInvoice(id, invoice)
+            approveInvoice(id, invoice, review.reviewToken).status shouldBe Status.OK
+            revision(id) shouldBe 4L // Financial-only amendment, without a new service-plan row.
+            approveInvoice(id, invoice, review.reviewToken).status shouldBe Status.CONFLICT
+            revision(id) shouldBe 4L
+            pay(id, "1400.00").status shouldBe Status.CREATED
+            revision(id) shouldBe 5L
+            app.adminPost("/inquiries/$id/served", "{}").status shouldBe Status.OK
+            revision(id) shouldBe 6L
+            app.adminPost("/inquiries/$id/close", "{}").status shouldBe Status.OK
+            revision(id) shouldBe 7L
+            app.adminPost("/inquiries/$id/close", "{}").status shouldBe Status.CONFLICT
+            revision(id) shouldBe 7L
+        }
+
+        test("revision write failure rolls back the Invoice and generic Invoice change orders also invalidate") {
+            val id = book()
+            val before = read(id)
+            val input = invoiceInput(id, "1500.00")
+            val preview = previewInvoice(id, input)
+            app.database.execute(
+                """
+                CREATE FUNCTION fionas.reject_timeline_test() RETURNS trigger LANGUAGE plpgsql AS
+                'BEGIN RAISE EXCEPTION ''test revision failure''; END;';
+                CREATE TRIGGER reject_timeline_test BEFORE UPDATE ON fionas.inquiry_change_revisions
+                FOR EACH ROW EXECUTE FUNCTION fionas.reject_timeline_test();
+                """.trimIndent(),
+            )
+            try {
+                approveInvoice(id, input, preview.reviewToken).status shouldBe Status.INTERNAL_SERVER_ERROR
+                read(id) shouldBe before
+                revision(id) shouldBe 2L
+            } finally {
+                app.database.execute(
+                    "DROP TRIGGER reject_timeline_test ON fionas.inquiry_change_revisions; " +
+                        "DROP FUNCTION fionas.reject_timeline_test()",
+                )
+            }
+            val body = """{"expectedVersion":${input.expectedDocumentVersion},"lines":${Json.encodeToString(input.lines)}}"""
+            app.adminPost("/financial-documents/${before.financial.id}/change-orders", body).status shouldBe Status.OK
+            revision(id) shouldBe 3L
+            app.adminPost("/financial-documents/${before.financial.id}/change-orders", body).status shouldBe Status.CONFLICT
+            revision(id) shouldBe 3L
+        }
+
+        test("split receipts invalidate every canonical inquiry on allocation and refunds including fully unwound histories") {
+            val a = book()
+            val b = book()
+            val unrelated = book()
+            val payment =
+                CommerceJson.asA(
+                    app
+                        .adminPost(
+                            "/payments",
+                            """{"amount":"100.00","currency":"USD","method":"CASH"}""",
+                        ).bodyString(),
+                    PaymentRecordResponse.serializer(),
+                )
+            revision(a) shouldBe 2L
+
+            fun allocate(id: String) =
+                app.adminPost(
+                    "/payments/${payment.paymentId}/allocations",
+                    """{"documentId":"${read(id).financial.id}","documentVersion":${read(id).financial.version},"amount":"40.00"}""",
+                )
+            allocate(a).status shouldBe Status.CREATED
+            revision(a) shouldBe 3L
+            allocate(b).status shouldBe Status.CREATED
+            revision(a) shouldBe 4L
+            revision(b) shouldBe 3L
+            val histories = app.context.financialLedger.paymentHistory(UUID.fromString(payment.paymentId))
+            val unwinds = histories.allocations.joinToString(",") { """{"paymentAllocationId":"${it.id}","amount":"40.00"}""" }
+            app
+                .adminPost(
+                    "/payments/${payment.paymentId}/refunds",
+                    """{"amount":"80.00","currency":"USD","method":"CASH","allocations":[$unwinds]}""",
+                ).status shouldBe Status.CREATED
+            revision(a) shouldBe 5L
+            revision(b) shouldBe 4L
+            // Refunding the remaining unapplied value still changes both complete histories.
+            app
+                .adminPost(
+                    "/payments/${payment.paymentId}/refunds",
+                    """{"amount":"20.00","currency":"USD","method":"CASH","allocations":[]}""",
+                ).status shouldBe Status.CREATED
+            revision(a) shouldBe 6L
+            revision(b) shouldBe 5L
+            revision(unrelated) shouldBe 2L
+            app
+                .adminPost(
+                    "/payments/${payment.paymentId}/refunds",
+                    """{"amount":"1.00","currency":"USD","method":"CASH","allocations":[]}""",
+                ).status.code shouldBe 422
+            revision(a) shouldBe 6L
+            revision(b) shouldBe 5L
+        }
+
         test("timeline preserves exact historical quote and invoice amounts through later revisions") {
             val id = initial()
             val input = quoteInput(id, "1600.00")
@@ -341,12 +457,14 @@ class CanonicalRevisionsSpec :
                     }
                 }
             val priorCounts = counts()
+            val priorRevision = revision(id)
             shouldThrow<IllegalStateException> {
                 invoiceCore(
                     failing,
                 ).revise(InquiryInvoiceRevisions.Command(input, preview.reviewToken, app.adminId))
             }
             counts() shouldBe priorCounts
+            revision(id) shouldBe priorRevision
             read(id) shouldBe before
         }
 

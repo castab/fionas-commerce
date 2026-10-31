@@ -28,6 +28,8 @@ class RecordRefund(
     private val newRefundId: () -> UUID = UUID::randomUUID,
     private val newRefundAllocationId: () -> UUID = UUID::randomUUID,
 ) {
+    private val advanceTimelines = AdvancePaymentTimelines(ledger)
+
     data class AllocationCommand(
         val paymentAllocationId: UUID,
         val amount: BigDecimal,
@@ -65,7 +67,9 @@ class RecordRefund(
                             )
                         },
                 )
-            ReconciledRefund(recorded, ledger.reconcilePayment(transaction, command.paymentId))
+            val result = ReconciledRefund(recorded, ledger.reconcilePayment(transaction, command.paymentId))
+            advanceTimelines(transaction, command.paymentId)
+            result
         }
     }
 }
