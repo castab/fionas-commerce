@@ -33,6 +33,7 @@ class AllocatePayment(
         val amount: BigDecimal,
     )
 
+    private val advanceTimelines = AdvancePaymentTimelines(ledger, associations)
     private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
     operator fun invoke(command: Command): AllocatedPayment {
@@ -51,6 +52,7 @@ class AllocatePayment(
             val result =
                 view?.let { documents.describeLocked(transaction, current.inquiryId, it) }
                     ?: documents.describeLocked(transaction, current.inquiryId, document.id)
+            advanceTimelines(transaction, command.paymentId)
             AllocatedPayment(allocation, result)
         }
     }

@@ -6,6 +6,7 @@ import io.github.castab.commerce.runtime.authorization.authorizationAdministrati
 import io.github.castab.commerce.runtime.authorization.currentPrincipalHttpCapability
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.authentication
+import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
 import io.github.castab.commerce.runtime.session.SessionAuthenticator
@@ -16,7 +17,10 @@ import io.github.castab.fionas.commerce.conversation.ConversationRead
 import io.github.castab.fionas.commerce.conversation.ConversationReadConfiguration
 import io.github.castab.fionas.commerce.conversation.ConversationReader
 import io.github.castab.fionas.commerce.conversation.ConversationSendConfiguration
+import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
+import io.github.castab.fionas.commerce.conversation.InquiryTimelineSubscriptions
 import io.github.castab.fionas.commerce.conversation.JdbiStaffReplyRepository
+import io.github.castab.fionas.commerce.conversation.ReadInquiryTimelineRevisions
 import io.github.castab.fionas.commerce.conversation.ReadStaffTimeline
 import io.github.castab.fionas.commerce.conversation.ResendConversationReader
 import io.github.castab.fionas.commerce.conversation.ResendConversationSender
@@ -28,6 +32,7 @@ import io.github.castab.fionas.commerce.events.NatsIntakeConfiguration
 import io.github.castab.fionas.commerce.events.NatsOutboxConfiguration
 import io.github.castab.fionas.commerce.events.conversationIntake
 import io.github.castab.fionas.commerce.events.inquiryIntake
+import io.github.castab.fionas.commerce.events.requireIntakeDatabaseBounds
 import io.github.castab.fionas.commerce.financial.AllocatePayment
 import io.github.castab.fionas.commerce.financial.CreateChangeOrder
 import io.github.castab.fionas.commerce.financial.CreateInquiryFinancialDocument
@@ -62,14 +67,17 @@ import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.STAFF_SESSION_COOKIE
+import io.github.castab.fionas.commerce.http.StaffTimelineUpdates
 import io.github.castab.fionas.commerce.http.apiDocs
 import io.github.castab.fionas.commerce.http.authorizationTag
 import io.github.castab.fionas.commerce.http.fionaApi
 import io.github.castab.fionas.commerce.http.fionaServiceAuthentication
+import io.github.castab.fionas.commerce.http.nativeStaffTimelineUpdatesRoute
 import io.github.castab.fionas.commerce.http.staffAdministrationTag
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.DeclineInquiry
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
+import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryConversationRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
@@ -93,6 +101,7 @@ import io.github.castab.fionas.commerce.staff.ReadStaffRequest
 import io.github.castab.fionas.commerce.staff.SetStaffPassword
 import io.github.castab.fionas.commerce.staff.StaffPasswordAuthenticator
 import org.http4k.core.then
+import org.http4k.routing.RoutingSseHandler
 import java.time.Clock
 import java.time.ZoneId
 import java.util.Properties
@@ -159,8 +168,11 @@ fun fionaApplication(
     conversations: ConversationIntakeConfiguration? = ConversationIntakeConfiguration.fromEnvironment(),
     conversationReads: ConversationReadConfiguration? = ConversationReadConfiguration.fromEnvironment(),
     conversationSends: ConversationSendConfiguration? = ConversationSendConfiguration.fromEnvironment(),
-): ApplicationContributions =
-    ApplicationContributions(
+    timelineUpdatesEnabled: Boolean = timelineUpdatesEnabled(),
+): ApplicationContributions {
+    var updates: StaffTimelineUpdates? = null
+    var nativeUpdates: RoutingSseHandler? = null
+    return ApplicationContributions(
         migrations =
             ApplicationMigrations(
                 schema = FIONA_MIGRATION_SCHEMA,
@@ -169,11 +181,19 @@ fun fionaApplication(
         permissionDefinitions = FionaPermissions.definitions,
         backgroundServices =
             buildList {
+                if (timelineUpdatesEnabled) add { checkNotNull(updates) }
                 outboxPublisher?.let { configuration -> add { context -> InquiryOutboxPublisher(context, configuration) } }
                 intake?.let { configuration -> add { context -> inquiryIntake(context, configuration, clock) } }
                 conversations?.let { configuration -> add { context -> conversationIntake(context, configuration) } }
             },
         routes = { context ->
+            if (timelineUpdatesEnabled) requireIntakeDatabaseBounds(context.configuration.database)
+            val revisions = ReadInquiryTimelineRevisions(context.transactor, InquiryTimelineRevisionRepository())
+            if (timelineUpdatesEnabled) updates = StaffTimelineUpdates(InquiryTimelineSubscriptions(revisions::invoke))
+            val prepareUpdates: (InquiryId) -> Boolean = { id ->
+                if (!revisions(setOf(id)).containsKey(id)) throw CommerceFailure.NotFound("Inquiry was not found")
+                timelineUpdatesEnabled
+            }
             val customers = JdbiCustomerRepository()
             val inquiries = JdbiInquiryRepository()
             val credentials = JdbiCredentialRepository()
@@ -188,6 +208,7 @@ fun fionaApplication(
                     ServiceAccessTokenAuthenticator(context.serviceAccessTokens),
                 )
             val access = AccessControl(origin.filter.then(authenticate), context.authorization)
+            nativeUpdates = nativeStaffTimelineUpdatesRoute(prepareUpdates, access) { checkNotNull(updates) }
             val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, loginRateLimit)
             // Generic financial persistence is commerce-runtime's ledger; Fiona stores only its context.
             val ledger = context.financialLedger
@@ -253,6 +274,7 @@ fun fionaApplication(
                 )
             val operations =
                 FionaOperations(
+                    prepareStaffTimelineUpdates = prepareUpdates,
                     sendStaffReply = SendStaffReply(
                         context.transactor,
                         getInquiry,
@@ -395,7 +417,16 @@ fun fionaApplication(
                 apiDocs(),
             )
         },
+        sseRoutes = { listOf(checkNotNull(nativeUpdates)) },
     )
+}
+
+fun timelineUpdatesEnabled(environment: Map<String, String> = System.getenv()): Boolean =
+    when (environment["FIONAS_TIMELINE_UPDATES_ENABLED"]) {
+        null, "false" -> false
+        "true" -> true
+        else -> error("FIONAS_TIMELINE_UPDATES_ENABLED must be true or false")
+    }
 
 private const val BUILD_INFO = "/fionas-commerce.properties"
 

@@ -44,6 +44,7 @@ class RecordDocumentPayment(
     private val newPaymentId: () -> UUID = UUID::randomUUID,
     private val newAllocationId: () -> UUID = UUID::randomUUID,
 ) {
+    private val advanceTimelines = AdvancePaymentTimelines(ledger, associations)
     private val documents = FionaFinancialDocuments(ledger, associations, authorship)
     private val deposits = CanonicalInquiryDepositPaymentPolicy(ledger, documents, proposals)
 
@@ -78,6 +79,7 @@ class RecordDocumentPayment(
             val result =
                 view?.let { documents.describeLocked(transaction, current.inquiryId, it) }
                     ?: documents.describeLocked(transaction, current.inquiryId, document.id)
+            advanceTimelines(transaction, payment.id)
             RecordedPayment(payment, allocation, result)
         }
     }

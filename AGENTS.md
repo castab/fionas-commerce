@@ -582,6 +582,11 @@ There is no later step called "update the spec". The rules:
    in `ArchitectureSpec`: Swagger UI at `/docs`, and the `405` answer for methods a
    contract path does not declare (derived from the contract's own paths). A new exception
    needs a stated reason and a deliberate change to that guard.
+   The deliberate native SSE exception is `StaffTimelineUpdateRoutes.kt`: its executable
+   contract owns stream metadata and ordinary HTTP rejection, while native routing shares
+   authorization/preparation through `sseHandshake`. Runtime handles rejection fallback;
+   200 is documented as text/event-stream, never JSON. Architecture and real-socket/OpenAPI
+   parity tests pin this exception. No additional hand-maintained specification.
 3. **Every operation has a deliberate, stable `operationId`** (`createInquiry`,
    `getInquiry`), chosen by hand, never derived from class or function names. Code
    generators name client methods after it, so **changing one is a breaking API change**.
@@ -811,7 +816,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V7__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V8__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -882,6 +887,15 @@ after runtime-owned migrations.
   recorded before V6). No runtime references or runtime DDL changes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
+- **`V7__inquiry_timeline_revisions`** adds `inquiry_change_revisions` (inquiry FK/primary
+  key and positive BIGINT revision), with AFTER INSERT triggers on communication facts and
+  processed conversation events. Counter UPSERTs join the source transaction, serialize per
+  inquiry and roll back together. Duplicate event inserts do not advance it; delivery events
+  do. An inbound event and its fact advance twice; tokens are not message counts. Existing
+  inquiries without counters have baseline zero, with no backfill. No runtime DDL is touched.
+- **`V8__timeline_milestone_revisions`** adds only Fiona proposal/decline/served/closed
+  revision triggers using V7's counter function. Financial invalidation stays in caller-owned
+  transactions through supported ledger APIs; no runtime-owned object changes.
 - **Expand → migrate → contract** for any change to a deployed schema: add the new
   structure, move code and data to it in a later release, remove the old one only after
   no running version uses it. Old and new instances overlap during rolling deploys.
@@ -1806,7 +1820,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `io.github.castab.fionas.commerce` | `Main.kt`, `FionaApplication.kt` (composition root), `PersistedJson.kt` (strict persisted-JSON configuration shared by the owning repositories) |
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...events` | Separate outgoing (`InquiryPersisted` v3, `InquiryDeclined` v1)/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream worker shape used by inquiry intake and the provider conversation consumer (`ConversationEvent`, `ConversationIntake`, `RecordConversationEvent`), and the exact-sequence recovery CLI |
-| `...conversation` | The typed Resend Conversation Service adapter (`ResendConversationReader`, `ResendConversationSender`, their configuration), `ConversationEstablishment`, staff reply values, record, repository and `SendStaffReply`, and the read-only `ReadStaffTimeline` |
+| `...conversation` | The typed Resend Conversation Service adapter (`ResendConversationReader`, `ResendConversationSender`, their configuration), `ConversationEstablishment`, staff reply values, record, repository and `SendStaffReply`, the read-only `ReadStaffTimeline`, and the durable timeline revision/subscription registry |
 | `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; `InquiryDecline`, its repository and `DeclineInquiry`; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
@@ -1828,7 +1842,7 @@ Not in scope until a dedicated slice decides otherwise: allocation reversals,
 Stripe or any payment provider or SDK, payment
 webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1,
 persisted financial projections, CQRS, separate Booking aggregates,
-Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments or HTML, provider conversation state changes, a timeline change signal, provider event backfill and broader communication workflows,
+Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments or HTML, provider conversation state changes, provider event backfill and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),
 on-behalf-of headers or delegated staff identity,
 a generic line-source identity, stored balances or payment statuses, tax,
@@ -1859,9 +1873,9 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (last audited at commerce 0.0.26)
+### Known upstream gaps (last audited at commerce 0.0.27)
 
-The application consumes commerce-runtime 0.0.26, with matching commerce-domain transitively.
+The application consumes commerce-runtime 0.0.27, with matching commerce-domain transitively.
 Version 0.0.24 adds runtime-owned transactional outbox persistence, sequencing, leases,
 retry coordination, backlog diagnostics and managed background-service lifecycle. Fiona
 consumes those capabilities for InquiryPersisted v3; it owns no delivery persistence or scheduler.
@@ -1876,7 +1890,7 @@ lifecycle mutation take the caller's expected document version (`changeOrder`, `
 the application history schema gap (0.0.15), the payment read gap (0.0.16), unapplied
 discovery, persisted version timestamps and structured validation errors (0.0.17), and added
 service credentials and tokens (0.0.20) and versioned deposits with bulk lineage facts (0.0.22).
-Audit source: the tagged `v0.0.26` sources of castab/commerce-domain (domain financial types,
+Audit source: the tagged `v0.0.27` sources of castab/commerce-domain (domain financial types,
 runtime ledger, capabilities, configuration, migrations, error and health routes). The gaps
 below were rechecked and remain open; they do not justify Fiona workarounds.
 
@@ -1886,6 +1900,10 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   them per OpenAPI document. Fiona mounts the administration one. Never wrap, clone, or rebuild
   a runtime route to rename it here. Minimal upstream fix: a distinct operationId for the
   administration catalog route, or a host-chosen operationId prefix.
+Native SSE composition is supported since 0.0.27 through `ApplicationContributions.sseRoutes`,
+`RoutingSseHandler` and `sseHandshake`. Fiona consumes the exported realtime API at the
+unchanged http4k version; it never supplies its own server or framed HTTP stream.
+
 - **Validation is not a public operation.** `MigrationLifecycle.migrate()` is public, but
   validate-only exists only through `commerceRuntime(...)` with `VALIDATE`.
 - **Hoplite prints a deprecation notice to stdout** on every
@@ -1906,7 +1924,7 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
 - **Capability routes need a composed runtime.** The administration and service-token
   capabilities take a `CommerceRuntimeContext`, whose constructor is `internal`, and only
   `commerceRuntime(...)`, which needs a database, creates one. The generator (`src/openapi`,
-  never the deployable jar) builds a rendering-only context reflectively against the 0.0.26
+  never the deployable jar) builds a rendering-only context reflectively against the 0.0.27
   constructor, including its outbox, with a transactor that opens no connection and a reflectively assembled
   `FinancialLedger` and authorization directory that refuse every call. This is provisional:
   commerce-runtime may eventually need a first-class contract composition seam.
@@ -1970,7 +1988,7 @@ below were rechecked and remain open; they do not justify Fiona workarounds.
   removed routes `404` and permissions absent), `DepositRequirementRoutesSpec` (reads for USER or
   SERVICE; standalone deposit mutations only for a staff USER holding both
   `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage`, refusals writing nothing), `MigrationLifecycleSpec`, `DatabaseSchemaSpec`
-  (one baseline per stream plus Fiona's additive V2–V5, eleven published runtime FKs, no catalog or
+  (one baseline per stream plus Fiona's additive V2–V8, eleven published runtime FKs, no catalog or
   ledger-fact columns),
   `OpenApiDocumentSpec` (paths, operationIds, statuses, decimal-string schemas, no catalog or
   pricing schemas, per-route security including SERVICE-only `createInquiry` and staff-only
@@ -2100,8 +2118,32 @@ relying on any other provider behavior, and never guess an endpoint.
 - **Errors.** Fiona-local codes reuse the runtime `ErrorResponse`: `conversation_changed`,
   `conversation_missing`, `IDEMPOTENCY_KEY_REUSED` (409), `email_recipient_not_allowed` (422),
   `email_send_rejected` (502), `email_sending_disabled`, `email_provider_unavailable` (503).
-- **Deferred.** No timeline head/ETag (delivery state is not recorded in commerce), no backfill,
-  no automatic emails, no provider state writes. No commerce-runtime gap was found.
+- **Timeline invalidation.** Preserve V7 communication/provider-event triggers and its zero
+  baseline. V8 adds proposal/decline/served/closed triggers on Fiona tables only. Canonical
+  Invoice amendments advance through Fiona operations; payments/allocations/refunds resolve
+  every canonical inquiry displaying their whole historical payment via supported runtime
+  reads and Fiona associations, then advance distinct revision rows in sorted UUID order.
+  Business facts and revisions share one transaction. Direct ledger writers bypass this
+  notification boundary. Never trigger/query runtime tables or duplicate financial state.
+- **Native SSE.** `GET /staff/requests/{inquiryId}/updates` uses runtime 0.0.27's handshake
+  and shared listener. Require a USER plus inquiry, financial and communication read before
+  UUID/existence validation. `FIONAS_TIMELINE_UPDATES_ENABLED` defaults false (503); enabled
+  requires the same strict shared database bounds as intake. `StaffTimelineUpdates` owns
+  one scanner, one deadline watchdog and at most 256 isolated writers/16 per inquiry, each
+  with the existing one-slot registry. Scan once/second only while active; no provider read.
+  Fresh original-credential authentication/permissions every second and before hints; close
+  on failure, expiry/revocation, 60s lifetime, 5s blocked write or scanner failure. Keepalive
+  20s, retry 3s, no replay. Every new admission synchronizes, including zero. The consumer
+  returns promptly; close callbacks never join writers. Shutdown cancels/joins workers
+  before Jetty/pool teardown. Capacity remains reserved until writer cleanup completes.
+  Commerce retains truthful HTTP failures and runtime ErrorResponse. The admin-origin BFF
+  translates transient failures into short 200 SSE retry placeholders and terminal failures
+  into browser responses that stop reconnection (normally 204). The disabled-feature 503
+  `timeline_updates_unavailable` is terminal, not a temporary outage. EventSource callbacks
+  expose no HTTP status; refresh only on initial/subsequent `timeline.changed`, never on
+  `onopen`, placeholders or heartbeats. Forward the real staff credential; the BFF is not
+  another authorization authority. See [the exact operational/frontend contract](docs/staff-timeline-updates.md).
+- **Deferred.** No timeline head/ETag, provider backfill, automatic emails or provider state writes.
 
 ## Staff request discovery
 

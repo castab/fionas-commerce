@@ -9,6 +9,7 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.UserId
+import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.time.Clock
@@ -98,6 +99,7 @@ class InquiryInvoiceRevisions(
                     now,
                     command.approvedBy,
                 )
+            if (preview.financialChange) InquiryTimelineRevisionRepository().advance(transaction, listOf(intent.inquiryId))
             RevisedInquiryInvoice(documents.describeLocked(transaction, intent.inquiryId, invoice.id), plan)
         }
 

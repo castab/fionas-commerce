@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.26/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.26/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.27/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.27/domain)
 artifacts.
 
 > **Status: early slices.** Fiona records inquiries and their customers, owns which inquiry
@@ -17,6 +17,16 @@ artifacts.
 > Booking aggregate and no payment-provider integration yet.
 
 ## How it fits together
+
+Staff timeline [native SSE updates](docs/staff-timeline-updates.md) are available at
+`GET /staff/requests/{inquiryId}/updates`, opt-in with `FIONAS_TIMELINE_UPDATES_ENABLED=true`.
+V7 communication revisions and V8 milestone triggers combine with atomic financial
+invalidation. The bounded dispatcher uses runtime 0.0.27's shared JettyLoom listener;
+it requires a human staff session and all three timeline read permissions. Disabled
+instances return 503 (`timeline_updates_unavailable`). The admin-origin BFF translates
+temporary failures into retryable browser SSE responses and disabled/terminal conditions
+into responses that stop reconnection. Refresh on `timeline.changed`, never `onopen`.
+See the guide for database bounds and the `fionas-web` handoff.
 
 Optional [integrated JetStream intake](docs/inquiry-intake.md) consumes `InquirySubmitted v1`
 from the existing `inquiry-to-commerce` durable and invokes the same transactional inquiry
@@ -59,8 +69,8 @@ fionas-web (separate) the customer catalog, its pricing, and the staff UI; calls
                        a SERVICE for submissions and on behalf of a verified staff session
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.26`, which brings
-`commerce-domain:0.0.26` with it. It contributes its migration schema and location,
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.27`, which brings
+`commerce-domain:0.0.27` with it. It contributes its migration schema and location,
 permissions, and routes to the runtime through `ApplicationContributions`, and every write
 goes through the runtime's shared `Transactor`:
 
@@ -1547,7 +1557,7 @@ inquiry's UUID is unrelated and ignored. Timeline payments carry the runtime his
 allocations with exact versions, `DEPOSIT`/`ADDITIONAL`). Everything is disabled by default and
 independent. The verified provider
 contract (0.7.2-rc.2), consumer grants, configuration, failure modes, cutover and deferred work
-(no timeline change signal yet, no backfill, no automatic emails) are in
+(native SSE handoff, no backfill, no automatic emails) are in
 [docs/email-conversations.md](docs/email-conversations.md).
 
 Reads and sends share `FIONAS_CONVERSATION_BASE_URL` origin validation: HTTPS, or HTTP for
@@ -1628,7 +1638,7 @@ Commerce 0.0.24 adds runtime-owned `V2__transactional_outbox.sql` after its unch
 Commerce 0.0.25 adds `V3__outbox_jsonb_payload.sql`, converting valid historical JSON objects
 from text to JSONB without changing their business meaning or destination; invalid/non-object
 history fails migration and needs an explicit operator decision.
-Commerce 0.0.26 adds no runtime migration. These additive migrations upgrade current V1/V2
+Commerce 0.0.26 and 0.0.27 add no runtime migration. These additive migrations upgrade current V1/V2
 databases normally. Fiona's additive `V2__inquiry_declines.sql` likewise only creates
 `fionas.inquiry_declines`, and `V3__internal_line_authorship.sql` only extends
 `fionas.financial_document_authorship` for INTERNAL origins; both upgrade a deployed database
@@ -1640,9 +1650,10 @@ revision (backfilled from the plan of its exact Quote); it also upgrades in plac
 `V5__conversation_sources.sql` adds the provider event, inbound message source and staff reply
 command tables, and `V6__communication_clearing_boundary.sql` adds nullable observed clearing
 boundaries to communication facts and reply commands (NULL keeps the previous meaning); both are
-additive. The historical
+additive. V7 adds communication revision counters; V8 adds proposal/decline/fulfillment
+revision triggers on Fiona tables. Financial increments are application-orchestrated. The historical
 0.0.23 rebaseline instructions below apply only to databases that predate that rebaseline. No
-reset is required for a valid 0.0.23/0.0.24/0.0.25 → 0.0.26 upgrade.
+reset is required for a valid 0.0.23/0.0.24/0.0.25/0.0.26 → 0.0.27 upgrade.
 
 > **Rebaseline for the trusted priced-line release (commerce 0.0.23).** commerce-runtime
 > 0.0.23 replaces its migration history with a single `V1__commerce_baseline`, and Fiona
@@ -1679,7 +1690,7 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
   not create the schema (its SQL still qualifies every object, `fionas.customers`). Nothing
   of Fiona's migrations, tables, or history is in `public`. The runtime's migrations come
   inside the `commerce-runtime` jar; Fiona never lists or copies them.
-- The two streams have independent version spaces: Fiona's next migration is `V3`,
+- The two streams have independent version spaces: Fiona's next migration is `V8`,
   regardless of the runtime's numbering.
 - `V1__fionas_baseline` creates, in `fionas`: `customers` (unique email), `inquiries`
   (customer, message, ZIP, event date/type, `requested_service` jsonb, and the
@@ -1696,6 +1707,12 @@ Fiona migrations               fionas schema      fionas.flyway_schema_history  
 - `V2__inquiry_declines` adds `inquiry_declines` (one row per inquiry → the declined canonical
   Estimate snapshot, its association and the deciding `commerce.users` row; a checked trimmed
   1–500 character reason), bringing the published runtime foreign keys to ten.
+- `V7__inquiry_timeline_revisions` adds `inquiry_change_revisions` and transaction-local
+  triggers on communication and processed provider-event inserts. It adds no runtime foreign
+  key or email-state replica. Existing inquiries without a revision row read as zero;
+  historical events are not backfilled. See [live update status](docs/staff-timeline-updates.md).
+- `V8__timeline_milestone_revisions` adds proposal, decline, served and closed revision
+  triggers on Fiona tables. Financial changes advance revisions through Fiona orchestration.
 - Composing the runtime runs the migration phase before anything is served. By default
   (`MIGRATIONS_ON_STARTUP=migrate`) it applies the runtime's pending migrations, then
   Fiona's; re-running against a current database applies nothing. A deployment that
@@ -1991,7 +2008,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | Spec | Proves |
 |---|---|
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
-| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates; nothing Fiona-owned in `commerce` or `public`; one baseline per stream; Fiona's additive V2–V5; exactly eleven foreign keys into published runtime tables; no catalog/offering/pricing table anywhere; no Fiona table or column restates a ledger fact |
+| `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates; nothing Fiona-owned in `commerce` or `public`; one baseline per stream; Fiona's additive V2–V8; exactly eleven foreign keys into published runtime tables; no catalog/offering/pricing table anywhere; no Fiona table or column restates a ledger fact |
 | `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: the runtime baseline first, Fiona's `V1` second, independent version spaces, each history in its own schema, repeat startup applies nothing, failures prevent composition |
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested service round trips strictly |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer and inquiry roll back together, and nothing is visible before commit |
@@ -2009,6 +2026,7 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `InquiryDeclineSpec`, `InquiryDeclineRoutesSpec` | DECLINED projection and fail-loud contradictions; persisted staff provenance and trimmed reason with history untouched; stale/repeated/illegal declines writing nothing; decline and InquiryDeclined v1 rolling back together; real PostgreSQL contention in both orders against initial Quote issuance, between declines and against RELATED creation; every progression path rejected while reads and settlement remain; dashboard exclusion with outstanding email; staff-USER authority, Origin, codes and ignored client provenance |
 | `InquiryOperationalStatesSpec`, `StaffDashboardSpec`, `StaffDashboardRoutesSpec`, `DashboardAttentionSpec`, `InquiryCommunicationSpec`, `InquiryCommunicationRepositorySpec`, `DashboardEventCalendarSpec` | Complete canonical counts; the three attention queues and onset ordering; durable-order clearing with PostgreSQL contention; SQL/pure projection parity; EXACT/FROM qualifiers from the requested service; event-zone and DST boundaries; eleven set-based SQL reads; declined inquiries in no queue or count; snapshot coherence; strict corrupt-data failures; live USER/SERVICE permissions |
 | `StaffRequestSpec`, `StaffRequestRoutesSpec` | Canonical request detail before/after issuance, RELATED exclusion, integrity failures, one unlocked repeatable snapshot during concurrent Quote/payment commits, nested response parity, permission intersection and no-store |
+| `InquiryTimelineRevisionSpec`, `InquiryTimelineSubscriptionsSpec` | Communication revision commit visibility and rollback, provider deduplication and delivery updates, concurrent writers, initial/reconnect synchronization, bounded coalescing and capacity, inquiry isolation, failed reads and close during an in-flight read; native SSE real-socket, authorization, backpressure, capacity and shutdown coverage is in `StaffTimelineSseSpec`, `StaffTimelineBackpressureSpec` and `StaffTimelineUpdatesSpec` |
 | `ConversationIngestionSpec`, `ConversationNatsSpec`, `ResendConversationReaderSpec`, `StaffConversationSpec` | Provider events: one inbound fact per message across duplicate/replayed deliveries, reused identities halt, unknown inquiries, foreign topics and generic non-inquiry booking topic ids ignored, unsupported/extra-field contracts rejected, delivery updates fabricate nothing, the dedicated least-privilege durable ACKs only after commit; stale acknowledgement conflicts; timeline READY/EMPTY/MISSING/UNAVAILABLE/FORBIDDEN with commerce history kept and plain text only; staff replies opening and continuing the topic as the USER with a trusted signature, stale expectations, lookup failure never opening a replacement, exact same-key reconciliation after errors, timeouts and local failure with one email, inbound recorded during provider acceptance or before a delayed reconciliation kept outstanding in both attention projections, accepted replies establishing the topic for send and timeline without intake, recorded rejections, allow-list, disabled sending and SERVICE refusal |
 | `FinancialDocumentRoutesSpec` | The whole workflow through the complete handler: staff Estimate, line edits, Quote, deposit, Invoice and final payment; several lineages per inquiry; caller totals never authoritative; carry, override, remove, add and reorder keeping identities; change orders in every stage; stable rejection codes; stale versions; illegal transitions; payment policy and validation; duplicate references; non-Fiona documents `404`; staff-only routes with live permissions; declared methods |
 | `FinancialLedgerExpansionSpec`, `FinancialDocumentAtomicitySpec` | Direct first-snapshot stages from staff lines; invalid line sets append nothing; standalone receipts, partial and split allocations, runtime limits and Fiona stage/version policy; every cross-boundary write (creation, change orders, combined payments, allocations) rolls back the ledger with Fiona's rows |

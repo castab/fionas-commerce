@@ -393,15 +393,26 @@ changed by startup: add the grants through `/admin/access` with read-modify-repl
 
 Rollback: disable the flags. Recorded facts and command records remain valid history.
 
+## Live update foundation
+
+Migration V7 adds an inquiry-scoped revision for every newly recorded provider event and
+communication fact. Delivery updates advance it even without a new message, and duplicate
+event deliveries do not. Accepted replies and acknowledgements advance it through their
+existing communication writes. All revisions commit or roll back with the source fact;
+no message content or delivery state is copied. Historical inquiries start at baseline zero.
+
+The native `GET /staff/requests/{id}/updates` endpoint uses commerce-runtime 0.0.27.
+Enable `FIONAS_TIMELINE_UPDATES_ENABLED=true` with the documented database bounds.
+V8 milestone triggers and atomic Fiona financial orchestration complete timeline
+invalidation. Staff sessions need all three read permissions; notifications are
+content-free refresh hints, never authority. See [operations and the frontend handoff](staff-timeline-updates.md).
+
 ## Deferred and upstream
 
-- **Change signal.** There is no `timeline/head` or ETag yet. Commerce-side changes (inbound,
-  sent, acknowledgement, financial and lifecycle milestones) are cheap to detect in Fiona, but
-  delivery-state changes are not recorded in commerce, and computing them would need a provider
-  read on every poll. A trustworthy head needs either a Fiona-owned record of delivery-update
-  events or a cheap provider revision; until then clients refresh the timeline explicitly.
-  `GET /staff/requests/{id}` `communication.throughRecordedOrder` is a cheap signal for new
-  communication facts only.
+- **Timeline head/ETag.** The invalidation revision is not
+  exposed as a timeline head or ETag. No revision query calls the provider.
+  `communication.throughRecordedOrder` remains a communication-fact watermark only, with its
+  original acknowledgement/reply meaning; it is not the new invalidation revision.
 - Automatic acknowledgement, Quote or Invoice emails; attachments; HTML; provider state
   changes from Fiona; unassigned-conversation assignment; historical backfill.
-- No commerce-domain or commerce-runtime change was needed.
+- Native streaming consumes the released runtime capability; no provider change is needed.

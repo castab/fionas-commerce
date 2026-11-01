@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce
 
 import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
 import io.github.castab.fionas.commerce.customer.CustomerRepository
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.financial.FinancialDocumentAuthorshipRepository
@@ -126,6 +127,7 @@ class ArchitectureSpec :
                 JdbiInquiryRepository::class.java,
                 JdbiInquiryFulfillmentRepository::class.java,
                 JdbiInquiryCommunicationRepository::class.java,
+                InquiryTimelineRevisionRepository::class.java,
                 JdbiInquirySubmissionRepository::class.java,
                 JdbiCredentialRepository::class.java,
                 JdbiInquiryFinancialDocumentRepository::class.java,
@@ -165,6 +167,7 @@ class ArchitectureSpec :
                 .shouldContainExactlyInAnyOrder(
                     "events/RecordConversationEvent.kt: inTransaction",
                     "conversation/ReadStaffTimeline.kt: inTransaction",
+                    "conversation/ReadInquiryTimelineRevisions.kt: inTransaction",
                     "conversation/SendStaffReply.kt: inTransaction",
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/RecordInquiryCommunication.kt: inTransaction",
@@ -274,7 +277,13 @@ class ArchitectureSpec :
         test("every Fiona endpoint is a contract route, so none can escape the OpenAPI document") {
             // Ordinary http4k routing is documentation and routing plumbing only, all of it in
             // FionaApi.kt: Swagger UI, and the 405 answer derived from the contract's own paths.
-            sources { it.name != "FionaApi.kt" }.containing(listOf(" bind ", "routes(", "RoutingHttpHandler(")).shouldBeEmpty()
+            sources {
+                it.name !in setOf("FionaApi.kt", "StaffTimelineUpdateRoutes.kt")
+            }.containing(listOf(" bind ", "routes(", "RoutingHttpHandler(")).shouldBeEmpty()
+            // The sole native exception shares its executable contract and handshake in this file.
+            File(mainSources, "http/StaffTimelineUpdateRoutes.kt")
+                .readLines()
+                .count { "STAFF_UPDATES_PATH bind" in it } shouldBe 1
             File(mainSources, "http/FionaApi.kt")
                 .readLines()
                 .map { it.trim() }
@@ -289,6 +298,7 @@ class ArchitectureSpec :
             val routes =
                 fionaApiRoutes(
                     FionaOperations(
+                        prepareStaffTimelineUpdates = { error("not called") },
                         sendStaffReply = { error("not called while rendering") },
                         readStaffTimeline = { _, _ -> error("not called while rendering") },
                         acknowledgeInquiryCommunication = { error("not called while rendering") },
@@ -352,13 +362,13 @@ class ArchitectureSpec :
                 .shouldBeEmpty()
         }
 
-        test("commerce runtime and transitive domain resolve at the adopted 0.0.26 release") {
+        test("commerce runtime and transitive domain resolve at the adopted 0.0.27 release") {
             listOf(
                 io.github.castab.commerce.runtime.financial.FinancialLedger::class.java to "commerce-runtime",
                 io.github.castab.commerce.financial.Money::class.java to "commerce-domain",
             ).forEach { (type, artifact) ->
                 type.protectionDomain.codeSource.location.path
-                    .substringAfterLast('/') shouldBe "$artifact-0.0.26.jar"
+                    .substringAfterLast('/') shouldBe "$artifact-0.0.27.jar"
             }
             File("gradle/libs.versions.toml").readText().contains("http4k = \"6.58.0.0\"") shouldBe true
         }
