@@ -2136,7 +2136,13 @@ relying on any other provider behavior, and never guess an endpoint.
   20s, retry 3s, no replay. Every new admission synchronizes, including zero. The consumer
   returns promptly; close callbacks never join writers. Shutdown cancels/joins workers
   before Jetty/pool teardown. Capacity remains reserved until writer cleanup completes.
-  See [the exact operational/frontend contract](docs/staff-timeline-updates.md).
+  Commerce retains truthful HTTP failures and runtime ErrorResponse. The admin-origin BFF
+  translates transient failures into short 200 SSE retry placeholders and terminal failures
+  into browser responses that stop reconnection (normally 204). The disabled-feature 503
+  `timeline_updates_unavailable` is terminal, not a temporary outage. EventSource callbacks
+  expose no HTTP status; refresh only on initial/subsequent `timeline.changed`, never on
+  `onopen`, placeholders or heartbeats. Forward the real staff credential; the BFF is not
+  another authorization authority. See [the exact operational/frontend contract](docs/staff-timeline-updates.md).
 - **Deferred.** No timeline head/ETag, provider backfill, automatic emails or provider state writes.
 
 ## Staff request discovery

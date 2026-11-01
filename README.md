@@ -23,7 +23,10 @@ Staff timeline [native SSE updates](docs/staff-timeline-updates.md) are availabl
 V7 communication revisions and V8 milestone triggers combine with atomic financial
 invalidation. The bounded dispatcher uses runtime 0.0.27's shared JettyLoom listener;
 it requires a human staff session and all three timeline read permissions. Disabled
-instances return 503. See the guide for database bounds and the `fionas-web` handoff.
+instances return 503 (`timeline_updates_unavailable`). The admin-origin BFF translates
+temporary failures into retryable browser SSE responses and disabled/terminal conditions
+into responses that stop reconnection. Refresh on `timeline.changed`, never `onopen`.
+See the guide for database bounds and the `fionas-web` handoff.
 
 Optional [integrated JetStream intake](docs/inquiry-intake.md) consumes `InquirySubmitted v1`
 from the existing `inquiry-to-commerce` durable and invokes the same transactional inquiry

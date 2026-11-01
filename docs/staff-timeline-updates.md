@@ -54,7 +54,7 @@ data:{"inquiryId":"<canonical-uuid>","revision":"42"}
 Data contains exactly the canonical inquiry UUID and the opaque decimal revision
 string. No message, customer, provider, financial or diagnostic content is emitted.
 Every admitted connection synchronizes from the next authoritative scan, including
-baseline `0`. Reconnect always synchronizes again. `Last-Event-ID` is ignored: there
+baseline `0`. Each newly admitted backend subscription synchronizes again. `Last-Event-ID` is ignored: there
 is no replay log. Changes may coalesce and duplicate hints are harmless. Never use
 revision numbers as business state or compare them across connections.
 
@@ -149,27 +149,139 @@ there is no standalone maintained spec or second business implementation.
 
 ## fionas-web handoff
 
-1. Expose a streaming BFF route through the admin origin and use native browser
-   `EventSource` there. Forward the actual staff session cookie server-side and set
-   `Accept: text/event-stream`; do not substitute a service token or invented actor header.
-   Commerce and provider credentials must never be sent to the browser.
-2. Forward status and content type, preserve `no-store, no-transform` and
-   `X-Accel-Buffering: no`. Disable response buffering and compression, flush frames
-   promptly, propagate downstream cancellation upstream, and use idle timeouts above
-   20s. Verify these settings on the actual proxy; local Jetty tests cannot prove them.
-3. Listen for `timeline.changed`. Both initial synchronization and later changes refresh
-   `GET /staff/requests/{inquiryId}/timeline`. Event IDs and payload revisions are opaque.
-   Ignore Last-Event-ID for replay. Reconnection must refresh even if the token repeats.
-4. Coalesce refreshes, but remember notifications received during a fetch and run another
-   fetch after it finishes. Preserve composer text, original send expectations,
-   unknown-outcome/same-key recovery and disclosure state across refreshes.
-5. Expect backend disconnects at 60s, during deployments, on revocation and failures.
-   Honor the 3s retry hint when received; apply bounded backoff/jitter to repeated
-   pre-stream or pre-synchronization failures (no retry frame is guaranteed on refusal).
-   Handle 401/403 as authentication/authorization changes, 404 as missing resource, and
-   503/network failures as temporary unavailability. Avoid immediate retry loops.
-6. Keep the manual **Refresh conversation** action and show disconnected/stale state
-   when synchronization has not occurred. SSE never acknowledges, sends, books or edits.
+### Three responsibilities
+
+Commerce reports the truthful result of a subscription attempt: 200 for a successful
+SSE response, 400 for malformed requests, 401 for missing/invalid authentication, 403
+for insufficient permissions, 404 for a missing inquiry, 500 for unexpected failures,
+and 503 for disabled capability or temporary unavailability according to the actual
+response. Preserve the backend's runtime `ErrorResponse` contract. Commerce must not
+mask its failures as successful streams.
+
+The admin-origin `fionas-web` BFF preserves the real upstream result internally and
+translates it into browser-facing reconnect or terminal behavior. Native browser
+`EventSource` consumes the same-origin BFF stream; its normal callbacks, including
+`onerror`, cannot inspect commerce HTTP status codes. Do not implement status-based
+browser decisions in `onerror`. To explain unavailability, use an existing ordinary
+authenticated application request or a documented application state transition.
+
+The [historical incident](https://github.com/castab/fionas-ui/blob/main/docs/incidents/2026-09-04-admin-live-updates-event-loop-starvation.md)
+and [PR #238's Chromium evidence](https://github.com/castab/fionas-ui/pull/238)
+showed no automatic reconnect after HTTP 503, but reconnect after a successful short
+200 SSE response containing a retry directive and ending normally. Apply that transport
+lesson here; do not copy the obsolete frontend implementation or its event names.
+
+### Failure handling at the BFF
+
+Before commitment, the BFF chooses the browser-facing response. After commitment,
+only stream termination is available, as distinguished below:
+
+| Commerce/backend condition | BFF/browser-facing behavior |
+| --- | --- |
+| Successful 200 `text/event-stream` | Proxy the stream, preserving framing and flushing. |
+| Temporary 503 | Short, valid 200 SSE retry placeholder, then clean close. |
+| Temporary upstream network/connection failure | Same retry placeholder, with bounded retry policy. |
+| Temporary 500 or 502 | Placeholder only when appropriately classified as transient; not every 5xx is recoverable. |
+| 401 unauthenticated | Terminal response, normally browser-facing 204. |
+| 403 forbidden | Terminal response, normally browser-facing 204. |
+| 404 missing inquiry | Terminal response, normally browser-facing 204. |
+| Permanently disabled SSE capability | Stop automatic reconnection, normally with 204. |
+| Unexpected invalid request | Terminal failure; never create an automatic retry loop. |
+| Established SSE connection closes normally | Allow native EventSource reconnection. |
+| Established SSE connection closes for revocation, permission loss or expiry | Reconnection must pass authentication again; the later handshake decides whether to terminate. |
+
+In this implementation, **503 `timeline_updates_unavailable` explicitly means the
+feature is disabled**. It is terminal, not a recoverable infrastructure interruption.
+Classify the actual upstream response, not just its status. A later enablement can
+create a new EventSource through a deliberate application state change or page lifecycle;
+intentional disablement must not cause infinite reconnect attempts.
+
+Once a real SSE response has been committed, the BFF cannot change its HTTP status.
+When upstream ends or fails, terminate the stream cleanly, without inventing an SSE
+error event or transmitting internal diagnostics. Normal stream termination permits
+native EventSource reconnection, including deployment and the backend's 60s maximum
+lifetime. Closure for revocation, permission loss or expiry does not bypass authentication:
+the next backend handshake rechecks the credential and permissions, and its rejection
+must be translated into a terminal response as above.
+
+### Retryable placeholder
+
+For a classified temporary upstream failure before response commitment, the BFF may send:
+
+```text
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-store, no-transform
+
+retry: 5000
+
+
+```
+
+End this response cleanly after the retry directive and its terminating blank line.
+The 5000ms interval is illustrative; document the chosen frontend retry policy. The
+backend's normal live stream advertises 3000ms. A valid HTTP 200, SSE content type and
+retry directive allow native reconnection after EOF. This is solely a browser-facing
+BFF response, not a change to commerce failure semantics.
+
+The placeholder emits no business event and **no `timeline.changed`**. It makes no
+claim that a real commerce subscription was established. Opening it must not trigger
+an authoritative timeline fetch. For repeated temporary failures or connections that
+end before synchronization, use bounded backoff and jitter where the BFF/frontend
+controls retry policy; document interval caps and any retry budget/resumption policy.
+Avoid immediate reconnect loops and repeated work during outages. A post-commit backend
+admission refusal can close without an initial event or retry directive; do not assume
+every opened transport receives the normal retry hint.
+
+### Synchronization and refresh correctness
+
+`EventSource.onopen` means only that an SSE transport response opened, not that the
+subscription synchronized. Every successfully admitted backend subscription sends an
+initial `timeline.changed`, including revision zero:
+
+```text
+event: timeline.changed
+id: 42
+data: {"inquiryId":"<uuid>","revision":"42"}
+
+
+```
+
+Both the initial notification and subsequent `timeline.changed` notifications trigger
+`GET /staff/requests/{inquiryId}/timeline`. A fresh subscription's initial notification
+must refresh even if its revision repeats the previous connection's token. Neither
+`onopen`, a retry placeholder nor a transport heartbeat refreshes the timeline. Normal
+reconnection does not imply event replay: `Last-Event-ID` is ignored and is neither an
+authoritative business version nor a replay contract.
+
+Coalesce redundant refresh requests, but remember a hint received during an in-flight
+fetch and run another refresh after it completes when necessary. Preserve unsent
+composer text, original message-send expectations and idempotency keys, unknown-outcome
+recovery, and user disclosure/expansion state. Revisions never establish email delivery,
+payment or booking outcomes. Keep the manual **Refresh conversation** control and show
+disconnected/stale state when synchronization has not occurred. Unavailable SSE must
+not prevent staff from using existing request-management functionality. SSE never
+acknowledges, sends, books or edits.
+
+### Authentication and successful-stream proxying
+
+The browser connects to the same-origin BFF with EventSource. The BFF forwards the
+authorized staff request with the actual `__Host-fionas_session` cookie and
+`Accept: text/event-stream`. Never replace it with a SERVICE token or invented actor
+header. Commerce service tokens, Resend credentials and NATS credentials stay out of
+the browser. The BFF must not duplicate business permissions or become a second
+authorization authority; a retry placeholder must never circumvent failed authorization.
+Terminal responses transmit no private errors via SSE. Distinguish session expiry,
+insufficient permissions or a missing inquiry through an existing authenticated ordinary
+HTTP request, or a narrowly justified status mechanism, when the UI needs that detail.
+
+For successful upstream streams, preserve `text/event-stream`, appropriate cache control
+(`no-store, no-transform`) and `X-Accel-Buffering: no`. Disable response buffering,
+compression and transformations that delay delivery. Flush frames promptly, preserve
+ordering/framing, propagate browser cancellation upstream, and never buffer the complete
+response. Set idle timeouts above the backend's 20s heartbeat interval and allow streams
+to end/reconnect during deployment or maximum-lifetime expiration. Verify these settings
+on the deployed proxy; local Jetty tests cannot prove them.
 
 ## Verification
 
