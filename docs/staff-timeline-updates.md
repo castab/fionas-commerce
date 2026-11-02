@@ -99,7 +99,8 @@ commands advance nothing. No triggers or SQL target runtime-owned tables, and no
 financial state is copied. Direct callers of the shared ledger bypass Fiona's financial
 notification orchestration; they are **not covered**. All production writes requiring
 notifications must use Fiona operations. V9 is a pre-production cutover requiring old
-instances to stop; booked development databases require an explicit operator reset.
+instances to stop; booked development databases require an explicit operator reset
+([runbook](preproduction-database-reset.md)).
 There is no mixed-version rollout for the new business revision contract.
 Finish rollout and reconnect before relying on complete financial notifications.
 

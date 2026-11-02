@@ -1519,10 +1519,22 @@ with exact published snapshot/USER FKs and Fiona association/service FKs (thirte
 FKs total). It changes no runtime-owned objects and reads no runtime tables. Existing booked
 pre-production histories cannot identify all prior service-only amendment decisions reliably:
 V9 detects their post-publication authorship in Fiona and fails with an operator-reset
-instruction. Stop all old instances and manually recreate disposable booked development
-databases before upgrading. Quote-only histories migrate in place. There is no automatic
-deletion, fabricated historical approval, compatibility reader or mixed-version rolling
-deployment. This narrow pre-production cutover must not be reused once production data exists.
+instruction. Stop all old instances and reset disposable booked databases before upgrading
+with the operator script `scripts/reset-preproduction-database.sql` (see
+[the reset runbook](docs/preproduction-database-reset.md)). Quote-only histories migrate in
+place. There is no automatic deletion, fabricated historical approval, compatibility reader
+or mixed-version rolling deployment. This narrow pre-production cutover must not be reused
+once production data exists.
+
+The reset is psql-run SQL outside the application: never packaged, composed, invoked at
+startup or by a migration, and never a second Flyway lifecycle (`PreproductionDatabaseResetSpec`).
+It requires the exact connected database name, `confirm` = `RESET <database>`, a non-production
+environment name matching the owner-set comment `fionas-commerce disposable environment=<env>`,
+a dedicated database (only `commerce`, `fionas` and an empty `public`; no extension beyond
+plpgsql) and no other client sessions. In one transaction it then drops exactly the `commerce`
+and `fionas` schemas, with both Flyway histories; it never drops the database. Any refusal or
+error rolls back. It touches no NATS stream or provider data. Keep its refusal and end-to-end
+recreation tests with any change to the script, schemas, or runtime schema ownership.
 
 ## Quote builder: staff-committed lines
 
@@ -2053,7 +2065,8 @@ unchanged http4k version; it never supplies its own server or framed HTTP stream
   cookies; session-only logout; provisioning and rotation), `AuthRoutesSpec` (bootstrap grants,
   removed routes `404` and permissions absent), `DepositRequirementRoutesSpec` (reads for USER or
   SERVICE; standalone deposit mutations only for a staff USER holding both
-  `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage`, refusals writing nothing), `MigrationLifecycleSpec`, `DatabaseSchemaSpec`
+  `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage`, refusals writing nothing), `MigrationLifecycleSpec`, `PreproductionDatabaseResetSpec` (authorized
+  reset of a V9-refused booked database then fresh V1–V9; every refusal writes nothing), `DatabaseSchemaSpec`
   (one baseline per stream plus Fiona's additive V2–V9, thirteen published runtime FKs, no catalog or
   ledger-fact columns),
   `OpenApiDocumentSpec` (paths, operationIds, statuses, decimal-string schemas, no catalog or

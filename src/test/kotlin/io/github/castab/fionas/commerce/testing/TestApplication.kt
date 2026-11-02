@@ -57,6 +57,7 @@ class TestApplication private constructor(
     val database: TestDatabase,
     val runtime: CommerceRuntime,
     val context: CommerceRuntimeContext,
+    private val ownsDatabase: Boolean,
 ) : AutoCloseable {
     val transactor: Transactor get() = context.transactor
     val sessions: SessionManager get() = context.sessions
@@ -143,9 +144,10 @@ class TestApplication private constructor(
                 .body(body),
         )
 
+    /** Stops the runtime; drops the database only when this application created it. */
     override fun close() {
         runtime.close()
-        database.close()
+        if (ownsDatabase) database.close()
     }
 
     companion object {
@@ -159,8 +161,10 @@ class TestApplication private constructor(
             conversationReads: ConversationReadConfiguration? = null,
             conversationSends: ConversationSendConfiguration? = null,
             timelineUpdatesEnabled: Boolean = false,
+            /** An existing database the caller keeps and closes, for restarts against the same data. */
+            existingDatabase: TestDatabase? = null,
         ): TestApplication {
-            val database = TestDatabase.create()
+            val database = existingDatabase ?: TestDatabase.create()
             try {
                 val fiona =
                     fionaApplication(
@@ -207,9 +211,9 @@ class TestApplication private constructor(
                                 },
                             ),
                     )
-                return TestApplication(database, runtime, checkNotNull(context))
+                return TestApplication(database, runtime, checkNotNull(context), ownsDatabase = existingDatabase == null)
             } catch (e: Exception) {
-                database.close()
+                if (existingDatabase == null) database.close()
                 throw e
             }
         }

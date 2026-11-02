@@ -95,9 +95,11 @@ business revision at ledger Invoice version 4. A subsequent service-only amendme
 Invoice revision 5 against ledger version 4, preserving the accepted Quote revision 4.
 
 V9 is a pre-production cutover: stop old backend instances; Quote-only histories backfill
-deterministically. Existing booked development databases must be explicitly recreated by
-the operator because prior service-only Invoice decisions cannot be reconstructed reliably.
-Migration fails with this instruction and deletes nothing automatically. Deploy the frontend
+deterministically. Existing booked development databases must be explicitly reset by the
+operator ([runbook](preproduction-database-reset.md)) because prior service-only Invoice
+decisions cannot be reconstructed reliably. Migration fails with this instruction and deletes
+nothing automatically. After a reset every inquiry, staff session and the fionas-web service
+credential are gone: re-provision the credential and discard cached IDs and review tokens. Deploy the frontend
 contract update with this backend before using the new request checks; no fionas-web code
 is modified in this backend PR.
 
