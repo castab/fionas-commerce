@@ -643,12 +643,9 @@ remain unchanged, but previous review tokens must be discarded. See the
 
 **V9 pre-production cutover:** stop old instances before upgrading. Quote-only databases
 receive deterministic business revision backfills. Databases containing booked inquiries
-fail migration with an operator-reset instruction. Prior service-only Invoice approval
-history cannot be reconstructed reliably. Reset a disposable database explicitly with
-`scripts/reset-preproduction-database.sql`, then redeploy, bootstrap and re-provision
-fionas-web; the [reset runbook](docs/preproduction-database-reset.md) has the exact Railway
-invocation, safeguards and external-state notes. The application never resets/deletes data
-automatically or alters runtime-owned DDL.
+fail migration with an operator-reset instruction: manually recreate disposable development
+databases. Prior service-only Invoice approval history cannot be reconstructed reliably.
+The application never resets/deletes data automatically or alters runtime-owned DDL.
 
 ## Atomic canonical proposal publication
 
@@ -2042,7 +2039,6 @@ authority (`testing/Pricing.kt`), never from production code: Fiona has no prici
 | `CustomerValuesSpec`, `InquiryValuesSpec` | Value-object validation and normalization |
 | `DatabaseSchemaSpec` | Fiona's tables and keys are in `fionas`; `commerce` holds exactly what commerce-runtime creates; nothing Fiona-owned in `commerce` or `public`; one baseline per stream; Fiona's additive V2–V8; exactly eleven foreign keys into published runtime tables; no catalog/offering/pricing table anywhere; no Fiona table or column restates a ledger fact |
 | `MigrationLifecycleSpec` | Fiona as a consumer of the runtime's migration phase: the runtime baseline first, Fiona's `V1` second, independent version spaces, each history in its own schema, repeat startup applies nothing, failures prevent composition |
-| `PreproductionDatabaseResetSpec` | The operator reset script on real PostgreSQL: a booked database V9 refuses is reset only with explicit authorization, then the next start recreates V1–V9 with business revisions; unauthorized, ambiguous, production, undesignated, shared and in-use targets are refused without changes; the application never runs or packages it |
 | `JdbiCustomerRepositorySpec`, `JdbiInquiryRepositorySpec` | Insert/read, email and batch id lookup, unique email conflict, foreign keys; newest-first keyset listing with timestamp ties and an `EXPLAIN` proving a backward index scan without a sort; requested service round trips strictly |
 | `RuntimeTransactionSpec` | Fiona repositories write through the runtime `Transaction`: customer and inquiry roll back together, and nothing is visible before commit |
 | `InquiryOperationsSpec`, `InquiryMaterializationSpec` | Customer + inquiry + Estimate v1 with exactly the authority's lines in order, authored by the SERVICE; customer reuse; requested service recorded as submitted; invalid or negative line sets rejected before any write; rollback across both schemas inside the ledger; one canonical initial Estimate; bespoke lines and credits evolve, quote, pay and refund with no catalog |
