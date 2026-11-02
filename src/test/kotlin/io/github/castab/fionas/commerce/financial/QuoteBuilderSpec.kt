@@ -757,6 +757,7 @@ class QuoteBuilderSpec :
                         DepositRequirementRevision.of(2),
                         DepositTerms.Fixed(money("100.00")),
                         app.adminId,
+                        expectedQuoteRevision = 4,
                     ),
                 )
             depositOnly.servicePlan shouldBe revision.servicePlan

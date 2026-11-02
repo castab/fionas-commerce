@@ -68,11 +68,21 @@ advance. An inbound event plus its new communication can advance twice; revision
 are tokens, not event counts. Accepted-reply replay writes no new communication.
 
 V8 adds triggers only on Fiona-owned proposal publications, declines and fulfillment
-facts (served insert, changed closed timestamp). Invoice financial amendments through
-`InquiryInvoiceRevisions` and canonical Invoice `CreateChangeOrder` explicitly advance
-in the caller transaction, even without a service-plan write. Service-only Invoice
-amendments and RELATED document snapshots do not change timeline items and do not
-advance. Canonical Quote publications, including deposit/service republication, do.
+facts (served insert, changed closed timestamp). V9 adds an AFTER INSERT trigger for
+AMENDED facts in `inquiry_invoice_amendments`, covering both financial and service-only
+amendments through `InquiryInvoiceRevisions` and canonical Invoice `CreateChangeOrder`.
+Their previous explicit financial increments are removed, so each amendment has one
+authoritative invalidation source. INITIAL issuance uses its booking payment's existing
+increment. RELATED snapshots create no canonical amendment or invalidation. Quote
+publications, including deposit/service republication, keep their proposal trigger.
+
+Quote items expose `proposal.quoteRevision`. Invoice items expose `amendment.invoiceRevision`,
+the exact `financial` snapshot, service approval reference and staff `actor`. Service-only
+amendments retain the ledger version and still appear once as INVOICE_AMENDED. Invoice IDs
+include inquiry, zero-padded business revision and immutable amendment UUID, preserving
+revision order for equal approval timestamps. Business and ledger revisions are unrelated
+to the opaque SSE revision: keep the `timeline.changed` protocol unchanged. Refresh staff
+detail and timeline after a hint; never derive a business revision from the hint or item count.
 
 `RecordDocumentPayment`, `AllocatePayment` and `RecordRefund` use
 `AdvancePaymentTimelines` after their successful ledger mutation and business locks.
@@ -88,8 +98,9 @@ All increments commit/roll back with their business facts. Rejected and rolled-b
 commands advance nothing. No triggers or SQL target runtime-owned tables, and no
 financial state is copied. Direct callers of the shared ledger bypass Fiona's financial
 notification orchestration; they are **not covered**. All production writes requiring
-notifications must use Fiona operations. During mixed-version rollout, V7/V8 triggers
-cover old writers of Fiona facts, but old binaries do not emit financial increments.
+notifications must use Fiona operations. V9 is a pre-production cutover requiring old
+instances to stop; booked development databases require an explicit operator reset.
+There is no mixed-version rollout for the new business revision contract.
 Finish rollout and reconnect before relying on complete financial notifications.
 
 ## Dispatcher, authorization and failures

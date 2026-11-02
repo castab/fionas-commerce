@@ -816,7 +816,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V8__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V10__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -1458,6 +1458,72 @@ deposit are historical evidence. Canonical standalone deposit set/replace/withdr
 forbidden. Invoice amendments never recalculate the accepted percentage, collect a second
 deposit, alter payments, refund automatically or modify served/closed provenance.
 
+### Customer-facing business revisions
+
+`InquiryProposal.quoteRevision` is a required positive business revision. Initial
+publication starts at its canonical Quote financial version; each subsequent publication
+increments the latest business revision by exactly one under the existing canonical
+association lock. `documentReference.version` retains its ledger meaning. Service-only
+and deposit-only publications consume a business revision without inventing a financial
+change. Repository append verifies consecutive numbering; V9 enforces positivity and
+per-inquiry uniqueness. Failed/no-op transactions consume nothing. Existing review tokens
+bind the publication UUID and business revision. The dedicated deposit endpoint additionally
+requires `expectedQuoteRevision`, checked after locking, so a service-only publication
+invalidates an old deposit review even when both ledger tokens match.
+
+`InquiryInvoiceAmendment` and its transaction-taking repository own immutable Invoice
+business identities in `fionas.inquiry_invoice_amendments`. Automatic booking writes one
+INITIAL identity atomically with Invoice issuance, beginning at that first Invoice's ledger
+version. Its `approvedAt` is the runtime snapshot creation time and `approvedBy` is absent:
+automatic booking is not a verified staff approval. The immutable accepted proposal/payment
+remain the provenance for that transition. Each AMENDED row requires a verified staff USER,
+Clock approval time, at least one meaningful financial/service change, an exact ledger
+reference and optional effective service approval revision. `recordAmendment` is shared by
+`InquiryInvoiceRevisions` and canonical Invoice `CreateChangeOrder`; exactly one record
+per successful amendment, no RELATED records. Both paths allocate the next consecutive
+business revision under the association lock in the caller's transaction. No amounts,
+payment facts or copied service content are stored.
+
+Invoice review tokens bind the current amendment UUID/revision as well as service, accepted
+proposal and payment facts. The generic change-order command/body adds optional
+`expectedInvoiceRevision`, required by policy for canonical Invoices (422 when absent,
+409 when stale); it remains inapplicable to Estimates and RELATED lineages. Ledger
+expected-version and payment allocation tokens are unchanged. A stale/no-op/failed amendment
+records nothing, preserves the accepted deposit and operational provenance, and cannot
+implicitly pay, refund, serve or close anything.
+
+Quote revision previews add required `currentQuoteRevision`/`resultingQuoteRevision`;
+Invoice previews add required `currentInvoiceRevision`/`resultingInvoiceRevision`. Existing
+`quote.reviewedDocumentVersion`/`quote.quoteVersion` and Invoice
+`reviewedDocumentVersion`/`resultingDocumentVersion` remain financial versions. Preview
+numbers are conditional on approving the exact token, never reservations. Invoice approval
+responses add required `amendment`. Staff detail adds optional `currentQuoteRevision`,
+`acceptedQuoteRevision` (booked only), `currentInvoiceRevision` and ordered
+`invoiceAmendmentHistory` including INITIAL. History records bind `servicePlanHistory` by
+revision; proposal and financial histories remain independent. `ReadStaffRequest` verifies
+Invoice identity/financial/service coherence in its existing REPEATABLE READ snapshot.
+
+Timeline Quote items expose `proposal.quoteRevision`. INVOICE_AMENDED comes exclusively
+from AMENDED records, including service-only records, each with `amendment`, staff `actor`
+and its exact financial snapshot. IDs contain inquiry, zero-padded immutable business revision
+and amendment UUID; equal-time Invoice amendments therefore sort by business revision.
+Deposit classification uses the accepted proposal, avoiding ambiguous matches across
+publications sharing a ledger snapshot. V9 adds an AFTER INSERT trigger for AMENDED only;
+the previous explicit Invoice financial invalidations are removed. Booking retains the
+payment invalidation and Quote publication retains its existing trigger. The SSE protocol,
+security, capacity, timing and opaque invalidation token remain unchanged.
+
+V9 backfills Quote revisions from `recorded_order`, starting at the first publication's
+financial version, without consulting Clock ordering. It adds the Invoice identity table
+with exact published snapshot/USER FKs and Fiona association/service FKs (thirteen runtime
+FKs total). It changes no runtime-owned objects and reads no runtime tables. Existing booked
+pre-production histories cannot identify all prior service-only amendment decisions reliably:
+V9 detects their post-publication authorship in Fiona and fails with an operator-reset
+instruction. Stop all old instances and manually recreate disposable booked development
+databases before upgrading. Quote-only histories migrate in place. There is no automatic
+deletion, fabricated historical approval, compatibility reader or mixed-version rolling
+deployment. This narrow pre-production cutover must not be reused once production data exists.
+
 ## Quote builder: staff-committed lines
 
 Staff compose the canonical Quote from final lines they negotiated, preview it without
@@ -1988,7 +2054,7 @@ unchanged http4k version; it never supplies its own server or framed HTTP stream
   removed routes `404` and permissions absent), `DepositRequirementRoutesSpec` (reads for USER or
   SERVICE; standalone deposit mutations only for a staff USER holding both
   `commerce.deposit-requirement.manage` and `fionas.financial-terms.manage`, refusals writing nothing), `MigrationLifecycleSpec`, `DatabaseSchemaSpec`
-  (one baseline per stream plus Fiona's additive V2–V8, eleven published runtime FKs, no catalog or
+  (one baseline per stream plus Fiona's additive V2–V9, thirteen published runtime FKs, no catalog or
   ledger-fact columns),
   `OpenApiDocumentSpec` (paths, operationIds, statuses, decimal-string schemas, no catalog or
   pricing schemas, per-route security including SERVICE-only `createInquiry` and staff-only

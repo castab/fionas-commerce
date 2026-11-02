@@ -208,4 +208,5 @@ fun replacementLines(lines: List<TestLine>): String =
 fun changeOrderBody(
     expectedVersion: Int,
     lines: List<TestLine>,
-): String = """{"expectedVersion":$expectedVersion,"lines":${replacementLines(lines)}}"""
+    expectedInvoiceRevision: Int? = null,
+): String = """{"expectedVersion":$expectedVersion,"expectedInvoiceRevision":$expectedInvoiceRevision,"lines":${replacementLines(lines)}}"""

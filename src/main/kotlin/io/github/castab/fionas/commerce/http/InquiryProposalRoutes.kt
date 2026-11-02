@@ -73,6 +73,8 @@ data class ReviseInquiryProposalDepositRequest(
     @ApiProperty(description = "Exact reviewed current Quote version.") val expectedDocumentVersion: Int,
     @ApiProperty(description = "Exact reviewed active deposit revision.") val expectedDepositRequirementRevision: Int,
     @Serializable(with = StrictDepositTerms::class) val terms: DepositTermsRequest,
+    @ApiProperty(description = "Exact reviewed Quote business revision; service-only publications also make it stale.")
+    val expectedQuoteRevision: Int,
 )
 
 @Serializable
@@ -86,6 +88,12 @@ data class InquiryProposalResponse(
     @ApiProperty(description = "The verified staff user who published the proposal.", format = "uuid") val issuedBy: String,
     @ApiProperty(description = "INITIAL, QUOTE_REVISED, or DEPOSIT_REVISED; never communication delivery.") val issuanceKind: String,
     val servicePlanRevision: Int? = null,
+    @ApiProperty(
+        description =
+            "Customer-facing Quote business revision. Increases for every material publication, " +
+                "independently of documentVersion.",
+    )
+    val quoteRevision: Int,
 )
 
 @Serializable
@@ -108,6 +116,7 @@ internal fun InquiryProposal.toResponse(): InquiryProposalResponse =
         issuedBy.value.toString(),
         kind.name,
         servicePlanRevision,
+        quoteRevision,
     )
 
 private fun IssuedInquiryProposal.toResponse() =
@@ -134,6 +143,7 @@ private val proposalExample =
             "2026-10-05T17:00:00Z",
             "580a28a1-7417-480a-9089-8f5f3c25c1cd",
             "INITIAL",
+            quoteRevision = 2,
         ),
         exampleEstimate.copy(id = exampleInquiry.lifecycle.documentId, version = 2, previousVersion = 1, stage = "QUOTE"),
         CurrentDepositRequirementResponse.Active(
@@ -150,7 +160,7 @@ private val proposalExample =
 /** The churro example published: Estimate v2 holds the staff lines, Quote v3 is published with an 80.00 deposit. */
 private val composedProposalExample =
     proposalExample.copy(
-        proposal = proposalExample.proposal.copy(documentVersion = 3),
+        proposal = proposalExample.proposal.copy(documentVersion = 3, quoteRevision = 3),
         financial =
             proposalExample.financial.copy(
                 version = 3,
@@ -200,6 +210,7 @@ private val quoteRevisionExample =
                 documentVersion = 3,
                 depositRequirementRevision = 2,
                 issuanceKind = "QUOTE_REVISED",
+                quoteRevision = 3,
             ),
         financial = exampleQuote.copy(id = proposalExample.financial.id),
         depositRequirement =
@@ -210,6 +221,8 @@ private val quoteRevisionExample =
                 requiredAmount = DepositMoneyResponse("165.00", "USD"),
             ),
     )
+
+/** Quote 3 republishes the unchanged ledger Quote v2 of Quote 2 with new deposit terms. */
 private val depositRevisionExample =
     proposalExample.copy(
         proposal =
@@ -217,6 +230,7 @@ private val depositRevisionExample =
                 id = "a0abfa61-3350-4b8b-87d4-3c3e3fb6db25",
                 depositRequirementRevision = 2,
                 issuanceKind = "DEPOSIT_REVISED",
+                quoteRevision = 3,
             ),
         depositRequirement =
             (proposalExample.depositRequirement as CurrentDepositRequirementResponse.Active).copy(
@@ -403,7 +417,7 @@ internal fun reviseInquiryProposalDepositRoute(
             "appends replacement approved deposit and DEPOSIT_REVISED issuance by the staff user atomically. Different term " +
             "forms are meaningful even at equal resolved amounts. Supersedes every prior payment-link target. Any historical " +
             "gross allocation blocks revision even after refunds. Cache-Control: no-store."
-        receiving(depositRevisionBody to ReviseInquiryProposalDepositRequest(2, 1, DepositTermsRequest.Fixed("100.00", "USD")))
+        receiving(depositRevisionBody to ReviseInquiryProposalDepositRequest(2, 1, DepositTermsRequest.Fixed("100.00", "USD"), 2))
         proposalErrors(depositRevisionExample)
     } bindContract Method.POST to { id: String, _: String, _: String ->
         access.staffComposition().then { request: Request ->
@@ -417,6 +431,7 @@ internal fun reviseInquiryProposalDepositRoute(
                         DepositRequirementRevision.of(body.expectedDepositRequirementRevision),
                         body.terms.domain(),
                         staffUser(request),
+                        body.expectedQuoteRevision,
                     )
                 }
             Response(Status.OK).header("Cache-Control", "no-store").with(proposalBody of revise(command).toResponse())

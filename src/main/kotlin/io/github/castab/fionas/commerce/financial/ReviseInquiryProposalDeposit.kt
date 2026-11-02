@@ -17,6 +17,7 @@ class ReviseInquiryProposalDeposit(
         val expectedDepositRequirementRevision: DepositRequirementRevision,
         val terms: DepositTerms,
         val issuedBy: UserId,
+        val expectedQuoteRevision: Int,
     )
 
     operator fun invoke(command: Command): IssuedInquiryProposal = transactor.inTransaction { proposals.reviseDeposit(it, command) }

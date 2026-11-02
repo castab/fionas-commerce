@@ -212,7 +212,8 @@ This is presentation order: provider timestamps and Fiona's clocks are different
 claims no causal order.
 
 Milestones reuse authoritative history: `QUOTE_PUBLISHED` from each proposal with its exact
-Quote snapshot and deposit revision, `INVOICE_AMENDED` for each later Invoice snapshot,
+Quote snapshot and deposit revision, `INVOICE_AMENDED` for each immutable staff amendment
+(including service-only amendments retaining a financial snapshot),
 `PAYMENT_RECORDED` and `REFUND_RECORDED` from the canonical lineage's payment histories,
 `COMMUNICATION_ACKNOWLEDGED`, `SERVED`, `CLOSED` and `DECLINED` from their facts. Historical
 snapshots never show today's amounts. A financial milestone never implies an email was sent.

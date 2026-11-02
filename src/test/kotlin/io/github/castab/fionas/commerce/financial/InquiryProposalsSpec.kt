@@ -78,7 +78,18 @@ class InquiryProposalsSpec :
             rev: Int,
             terms: DepositTerms,
         ) = ReviseInquiryProposalDeposit(app.transactor, core())(
-            ReviseInquiryProposalDeposit.Command(id, Version.of(version), DepositRequirementRevision.of(rev), terms, actor),
+            ReviseInquiryProposalDeposit.Command(
+                id,
+                Version.of(
+                    version,
+                ),
+                DepositRequirementRevision.of(rev),
+                terms,
+                actor,
+                app.transactor.inTransaction {
+                    history.latest(it, id)!!.quoteRevision
+                },
+            ),
         )
 
         fun quote(
@@ -372,7 +383,7 @@ class InquiryProposalsSpec :
                     ReviseInquiryProposalDeposit(
                         app.transactor,
                         core(failing),
-                    )(ReviseInquiryProposalDeposit.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, fixed("300"), actor))
+                    )(ReviseInquiryProposalDeposit.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, fixed("300"), actor, 2))
                 }
             }
         }
@@ -532,7 +543,14 @@ class InquiryProposalsSpec :
             val first =
                 CompletableFuture.supplyAsync {
                     ReviseInquiryProposalDeposit(app.transactor, core(pausing))(
-                        ReviseInquiryProposalDeposit.Command(id, Version.of(2), DepositRequirementRevision.INITIAL, fixed(amount), actor),
+                        ReviseInquiryProposalDeposit.Command(
+                            id,
+                            Version.of(2),
+                            DepositRequirementRevision.INITIAL,
+                            fixed(amount),
+                            actor,
+                            2,
+                        ),
                     )
                 }
             try {
@@ -590,6 +608,7 @@ class InquiryProposalsSpec :
                                     DepositRequirementRevision.INITIAL,
                                     fixed("200"),
                                     actor,
+                                    expectedQuoteRevision = 2,
                                 ),
                             )
                         }.exceptionOrNull()
@@ -701,7 +720,13 @@ class InquiryProposalsSpec :
                 JdbiInquiryFulfillmentRepository(),
                 testClock,
             )(
-                CreateChangeOrder.Command(document, Version.of(4), newLinesProposal(acceptanceLines(guests = 125)), actor),
+                CreateChangeOrder.Command(
+                    document,
+                    Version.of(4),
+                    newLinesProposal(acceptanceLines(guests = 125)),
+                    actor,
+                    expectedInvoiceRevision = 4,
+                ),
             ).latest.document.shouldBeInstanceOf<FinancialDocument.Invoice>()
             forbidden(5)
             historyReads shouldBe 6
@@ -796,7 +821,8 @@ class InquiryProposalsSpec :
                     app.transactor.inTransaction {
                         history.append(
                             it,
-                            a.proposal.copy(kind = ProposalIssuanceKind.DEPOSIT_REVISED),
+                            // The next business revision, so only the duplicate identity conflicts.
+                            a.proposal.copy(kind = ProposalIssuanceKind.DEPOSIT_REVISED, quoteRevision = a.proposal.quoteRevision + 1),
                         )
                     }
                 }
@@ -847,6 +873,7 @@ class InquiryProposalsSpec :
                                     DepositRequirementRevision.INITIAL,
                                     fixed("300"),
                                     actor,
+                                    expectedQuoteRevision = 2,
                                 ),
                             )
                         }
@@ -864,6 +891,7 @@ class InquiryProposalsSpec :
                                         DepositRequirementRevision.INITIAL,
                                         fixed("200"),
                                         actor,
+                                        expectedQuoteRevision = 2,
                                     ),
                                 )
                             }.exceptionOrNull()

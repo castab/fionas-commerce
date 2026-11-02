@@ -6,7 +6,6 @@ import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.UserId
-import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryDeclineRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.JdbiInquiryDeclineRepository
@@ -36,6 +35,8 @@ class CreateChangeOrder(
     private val clock: Clock,
     declines: InquiryDeclineRepository = JdbiInquiryDeclineRepository(),
     private val servicePlans: InquiryServicePlanRepository = JdbiInquiryServicePlanRepository(),
+    private val amendments: InquiryInvoiceAmendmentRepository = JdbiInquiryInvoiceAmendmentRepository(),
+    private val newAmendmentId: () -> UUID = UUID::randomUUID,
 ) {
     data class Command(
         val documentId: UUID,
@@ -43,6 +44,7 @@ class CreateChangeOrder(
         val lines: LineProposal,
         /** The verified staff user committing the lines, from authentication. */
         val author: UserId,
+        val expectedInvoiceRevision: Int? = null,
     )
 
     private val documents = FionaFinancialDocuments(ledger, associations, authorship)
@@ -57,15 +59,33 @@ class CreateChangeOrder(
             if (documents.isCanonical(transaction, current) && fulfillment.find(transaction, current.inquiryId)?.closed != null) {
                 throw CommerceFailure.IllegalTransition("A closed inquiry requires a separate post-close adjustment workflow")
             }
+            if (current.document is FinancialDocument.Invoice && documents.isCanonical(transaction, current)) {
+                val expected =
+                    command.expectedInvoiceRevision
+                        ?: throw CommerceFailure.ValidationFailed("Canonical Invoice change orders require expectedInvoiceRevision")
+                if (amendments.latest(transaction, current.inquiryId)?.invoiceRevision != expected) {
+                    throw CommerceFailure.Conflict("Stale expected Invoice business revision; reload and retry")
+                }
+            }
             val resolved = command.lines.resolveAgainst(current.document)
             if (documents.isCanonical(transaction, current)) {
                 requireRetainedNotes(servicePlans.latest(transaction, current.inquiryId)?.content(), resolved)
             }
-            documents.commitLines(transaction, current, resolved, command.author, now)
+            val changed = documents.commitLines(transaction, current, resolved, command.author, now)
             if (current.document is FinancialDocument.Invoice &&
                 documents.isCanonical(transaction, current)
             ) {
-                InquiryTimelineRevisionRepository().advance(transaction, listOf(current.inquiryId))
+                amendments.recordAmendment(
+                    transaction,
+                    newAmendmentId(),
+                    current.inquiryId,
+                    current.document,
+                    changed as FinancialDocument.Invoice,
+                    servicePlans.latest(transaction, current.inquiryId),
+                    now,
+                    command.author,
+                    false,
+                )
             }
             documents.describeLocked(transaction, current.inquiryId, command.documentId)
         }

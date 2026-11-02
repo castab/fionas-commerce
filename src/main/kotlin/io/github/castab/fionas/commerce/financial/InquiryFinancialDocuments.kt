@@ -91,6 +91,9 @@ internal class FionaFinancialDocuments(
     private val ledger: FinancialLedger,
     private val associations: InquiryFinancialDocumentRepository,
     private val authorship: FinancialDocumentAuthorshipRepository,
+    private val amendments: InquiryInvoiceAmendmentRepository = JdbiInquiryInvoiceAmendmentRepository(),
+    private val servicePlans: InquiryServicePlanRepository = JdbiInquiryServicePlanRepository(),
+    private val newAmendmentId: () -> UUID = UUID::randomUUID,
 ) {
     /** The latest snapshot of a lineage an operation is about to change, and the inquiry that owns it. */
     class Current(
@@ -256,6 +259,23 @@ internal class FionaFinancialDocuments(
     ) {
         val invoice = ledger.issueInvoice(transaction, current.document.id, current.document.version)
         authorship.copy(transaction, current.document.reference, invoice.reference)
+        if (isCanonical(transaction, current)) {
+            amendments.append(
+                transaction,
+                InquiryInvoiceAmendment(
+                    newAmendmentId(),
+                    current.inquiryId,
+                    invoice.version.number,
+                    invoice.reference,
+                    servicePlans.latest(transaction, current.inquiryId)?.revision,
+                    InvoiceAmendmentKind.INITIAL,
+                    ledger.latestVersion(transaction, invoice.id).createdAt,
+                    null,
+                    false,
+                    false,
+                ),
+            )
+        }
     }
 
     /**

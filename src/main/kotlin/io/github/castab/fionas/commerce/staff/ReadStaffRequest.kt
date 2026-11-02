@@ -1,13 +1,17 @@
 package io.github.castab.fionas.commerce.staff
 
+import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.financial.GetFinancialDocument
+import io.github.castab.fionas.commerce.financial.InquiryInvoiceAmendmentRepository
 import io.github.castab.fionas.commerce.financial.InquiryProposalRepository
 import io.github.castab.fionas.commerce.financial.InquiryServicePlanRepository
+import io.github.castab.fionas.commerce.financial.InvoiceAmendmentKind
+import io.github.castab.fionas.commerce.financial.JdbiInquiryInvoiceAmendmentRepository
 import io.github.castab.fionas.commerce.financial.ListFinancialDocumentPaymentHistories
 import io.github.castab.fionas.commerce.financial.requireCoherentProposal
 import io.github.castab.fionas.commerce.inquiry.GetInquiry
@@ -24,6 +28,7 @@ class ReadStaffRequest(
     private val payments: ListFinancialDocumentPaymentHistories,
     private val servicePlans: InquiryServicePlanRepository,
     private val communications: InquiryCommunicationRepository,
+    private val amendments: InquiryInvoiceAmendmentRepository = JdbiInquiryInvoiceAmendmentRepository(),
 ) {
     operator fun invoke(id: InquiryId): StaffRequest =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction -> read(transaction, id) }
@@ -51,6 +56,25 @@ class ReadStaffRequest(
             proposal?.servicePlanRevision?.let { revision ->
                 checkNotNull(history.singleOrNull { it.revision == revision }) { "Missing published service approval" }
             }
+        val invoiceHistory = amendments.history(transaction, id)
+        if (document.latest.document is FinancialDocument.Invoice) {
+            check(invoiceHistory.firstOrNull()?.kind == InvoiceAmendmentKind.INITIAL) { "Missing initial Invoice business identity" }
+            invoiceHistory.forEachIndexed { index, amendment ->
+                check(
+                    ledger.get(transaction, amendment.documentReference) is FinancialDocument.Invoice,
+                ) { "Amendment must reference an Invoice" }
+                check(amendment.invoiceRevision == Math.addExact(invoiceHistory.first().invoiceRevision, index)) { "Invoice revision gap" }
+                amendment.servicePlanRevision?.let { revision ->
+                    check(history.any { it.revision == revision }) { "Missing Invoice service approval" }
+                }
+            }
+            check(
+                invoiceHistory.last().documentReference == document.latest.document.reference &&
+                    invoiceHistory.last().servicePlanRevision == history.lastOrNull()?.revision,
+            ) { "Current Invoice revision disagrees with financial/service state" }
+        } else {
+            check(invoiceHistory.isEmpty()) { "Unbooked inquiry has Invoice business history" }
+        }
         return StaffRequest(
             inquiry,
             document,
@@ -62,6 +86,7 @@ class ReadStaffRequest(
             history,
             proposals.history(transaction, id),
             communications.history(transaction, id),
+            invoiceHistory,
         )
     }
 }

@@ -28,6 +28,8 @@ data class QuoteRevisionPreview(
     val servicePlanChange: Boolean,
     val depositChange: Boolean,
 ) {
+    val currentQuoteRevision get() = currentProposal.quoteRevision
+    val resultingQuoteRevision get() = Math.incrementExact(currentQuoteRevision)
     val resultingServicePlanRevision: Int? get() =
         if (servicePlanChange) (currentServicePlan?.revision ?: 0) + 1 else currentServicePlan?.revision
 }
@@ -94,6 +96,7 @@ internal fun composeQuoteRevision(
             listOf(
                 "QUOTE_REVISION_V1",
                 proposal.id.value.toString(),
+                proposal.quoteRevision.toString(),
                 active.revision.number.toString(),
                 (currentPlan?.revision ?: 0).toString(),
                 intent.servicePlanChange.action.name,

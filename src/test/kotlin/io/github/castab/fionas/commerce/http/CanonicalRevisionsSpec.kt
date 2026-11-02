@@ -229,6 +229,199 @@ class CanonicalRevisionsSpec :
             return ReadInquiryTimelineRevisions(app.transactor, InquiryTimelineRevisionRepository())(setOf(inquiry)).getValue(inquiry)
         }
 
+        test("same-price topping replacement publishes Quote 4 against ledger 3 and preserves the accepted publication") {
+            val id = app.createInquiry()
+            val almonds = plan("Ice cream catering").copy(items = listOf(ServicePlanItemDto("Sliced Almonds", "Toppings", "almonds")))
+            val peanuts = almonds.copy(items = listOf(ServicePlanItemDto("Chopped Peanuts", "Toppings", "peanuts")))
+            val lines = listOf(line("5100.00"))
+            val initialPreview =
+                app.adminPost(
+                    path(id) + "/quote-preview",
+                    Json.encodeToString(PreviewInquiryQuoteRequest(1, lines, almonds, DepositTermsRequest.Percentage("25"))),
+                )
+            initialPreview.status shouldBe Status.OK
+            val initialToken = CommerceJson.asA(initialPreview.bodyString(), InquiryQuotePreviewResponse.serializer()).reviewToken
+            val first =
+                issued(
+                    app.adminPost(
+                        path(id) + "/proposals",
+                        Json.encodeToString(
+                            IssueInquiryProposalRequest(1, DepositTermsRequest.Percentage("25"), lines, almonds, initialToken),
+                        ),
+                    ),
+                )
+            first.proposal.quoteRevision shouldBe 3
+            val before = read(id)
+            val input = quoteInput(id, action = ServicePlanActionRequest.REPLACE, service = peanuts)
+            val preview = quotePreview(id, input)
+            preview.currentQuoteRevision shouldBe 3
+            preview.resultingQuoteRevision shouldBe 4
+            preview.quote.reviewedDocumentVersion shouldBe 3
+            preview.quote.quoteVersion shouldBe 3
+            preview.quote.financialChange shouldBe false
+            preview.servicePlanChange shouldBe true
+            preview.depositChange shouldBe false
+            read(id) shouldBe before // preview writes nothing
+            val second = issued(approveQuote(id, input, preview.quote.reviewToken))
+            second.proposal.quoteRevision shouldBe 4
+            second.proposal.documentVersion shouldBe 3
+            second.proposal.depositRequirementRevision shouldBe first.proposal.depositRequirementRevision
+            second.financial shouldBe first.financial
+            second.servicePlan!!.revision shouldBe first.servicePlan!!.revision + 1
+            read(id).proposalHistory shouldBe listOf(first.proposal, second.proposal)
+            read(id).servicePlanHistory.map { it.items.single().label } shouldBe listOf("Sliced Almonds", "Chopped Peanuts")
+            revision(id) shouldBe 2L
+            val timeline = CommerceJson.asA(app.adminGet(path(id) + "/timeline").bodyString(), StaffTimelineResponse.serializer())
+            timeline.items.filterIsInstance<TimelineItemResponse.Quote>().sortedBy { it.proposal.quoteRevision }.let {
+                it.map { item -> item.proposal.quoteRevision } shouldBe listOf(3, 4)
+                it.map { item -> item.financial.version } shouldBe listOf(3, 3)
+                it.map { item -> item.proposal.servicePlanRevision } shouldBe listOf(1, 2)
+            }
+            val after = read(id)
+            approveQuote(id, input, preview.quote.reviewToken).status shouldBe Status.CONFLICT
+            // The dedicated deposit editor also rejects a business state superseded without financial/deposit changes.
+            app
+                .adminPost(
+                    path(id) + "/proposals/deposit-revisions",
+                    Json.encodeToString(
+                        ReviseInquiryProposalDepositRequest(3, 1, DepositTermsRequest.Percentage("20"), 3),
+                    ),
+                ).status shouldBe Status.CONFLICT
+            read(id) shouldBe after
+            pay(id, "1275.00", first.proposal.id).status shouldBe Status.CONFLICT
+            pay(id, "1275.00", second.proposal.id).status shouldBe Status.CREATED
+            val booked = read(id)
+            booked.acceptedQuoteRevision shouldBe 4
+            booked.currentInvoiceRevision shouldBe 4
+            booked.invoiceAmendmentHistory.single().kind shouldBe "INITIAL"
+            booked.invoiceAmendmentHistory.single().approvedBy shouldBe null
+            booked.acceptedServicePlan shouldBe second.servicePlan
+            val paidTimeline = CommerceJson.asA(app.adminGet(path(id) + "/timeline").bodyString(), StaffTimelineResponse.serializer())
+            paidTimeline.items.filterIsInstance<TimelineItemResponse.Payment>().single().let {
+                it.classification shouldBe PaymentClassification.DEPOSIT
+                it.proposalId shouldBe second.proposal.id
+            }
+        }
+
+        test("Invoice business revisions cover service-only, combined and generic amendments without duplicate milestones") {
+            val id = book()
+            val booked = read(id)
+            booked.currentInvoiceRevision shouldBe 4
+            val input = invoiceInput(id, action = ServicePlanActionRequest.REPLACE, service = plan("New commitment"))
+            val preview = previewInvoice(id, input)
+            preview.currentInvoiceRevision shouldBe 4
+            preview.resultingInvoiceRevision shouldBe 5
+            preview.reviewedDocumentVersion shouldBe 4
+            preview.resultingDocumentVersion shouldBe 4
+            preview.financialChange shouldBe false
+            preview.servicePlanChange shouldBe true
+            val staleGeneric = """{"expectedVersion":4,"expectedInvoiceRevision":4,"lines":${Json.encodeToString(input.lines)}}"""
+            val afterPreview = read(id)
+            afterPreview shouldBe booked
+            approveInvoice(id, input, preview.reviewToken).status shouldBe Status.OK
+            val serviceOnly = read(id)
+            serviceOnly.currentInvoiceRevision shouldBe 5
+            serviceOnly.financial shouldBe booked.financial
+            serviceOnly.invoiceAmendmentHistory.last().let {
+                it.invoiceRevision shouldBe 5
+                it.documentVersion shouldBe 4
+                it.financialChange shouldBe false
+                it.servicePlanChange shouldBe true
+                it.approvedBy shouldBe app.adminId.value.toString()
+            }
+            revision(id) shouldBe 3L
+            approveInvoice(id, input, preview.reviewToken).status shouldBe Status.CONFLICT
+            app.adminPost("/financial-documents/${booked.financial.id}/change-orders", staleGeneric).status shouldBe Status.CONFLICT
+            read(id) shouldBe serviceOnly
+            val combined = reviseInvoice(id, invoiceInput(id, "1500.00", ServicePlanActionRequest.CLEAR))
+            combined.currentInvoiceRevision shouldBe 5
+            combined.resultingInvoiceRevision shouldBe 6
+            val afterCombined = read(id)
+            afterCombined.currentInvoiceRevision shouldBe 6
+            afterCombined.financial.version shouldBe 5
+            val generic = """{"expectedVersion":5,"expectedInvoiceRevision":6,"lines":${Json.encodeToString(
+                invoiceInput(id, "1600.00").lines,
+            )}}"""
+            app.adminPost("/financial-documents/${booked.financial.id}/change-orders", generic).status shouldBe Status.OK
+            val final = read(id)
+            final.currentInvoiceRevision shouldBe 7
+            final.financial.version shouldBe 6
+            final.proposal shouldBe booked.proposal
+            final.acceptedQuoteRevision shouldBe booked.acceptedQuoteRevision
+            final.acceptedServicePlan shouldBe booked.acceptedServicePlan
+            final.depositRequirement shouldBe booked.depositRequirement
+            final.payments shouldBe booked.payments
+            final.invoiceAmendmentHistory.map { it.invoiceRevision } shouldBe listOf(4, 5, 6, 7)
+            final.invoiceAmendmentHistory.map { it.documentVersion } shouldBe listOf(4, 4, 5, 6)
+            val timeline = CommerceJson.asA(app.adminGet(path(id) + "/timeline").bodyString(), StaffTimelineResponse.serializer())
+            val amendments = timeline.items.filterIsInstance<TimelineItemResponse.Invoice>()
+            amendments.map { it.amendment.invoiceRevision } shouldBe listOf(5, 6, 7)
+            amendments.map { it.financial.version } shouldBe listOf(4, 5, 6)
+            amendments.map { it.actor.principalId }.distinct() shouldBe listOf(app.adminId.value.toString())
+            amendments.map { it.id }.distinct().size shouldBe 3
+            CommerceJson.asA(app.adminGet(path(id) + "/timeline").bodyString(), StaffTimelineResponse.serializer()) shouldBe timeline
+            revision(id) shouldBe 5L
+        }
+
+        test("Quote business numbering stays consecutive when service and deposit revisions precede financial edits") {
+            val id = initial()
+            val service = quoteInput(id, action = ServicePlanActionRequest.REPLACE, service = plan("New toppings"))
+            issued(approveQuote(id, service, quotePreview(id, service).quote.reviewToken)).proposal.quoteRevision shouldBe 4
+            val deposit =
+                issued(
+                    app.adminPost(
+                        path(id) + "/proposals/deposit-revisions",
+                        Json.encodeToString(
+                            ReviseInquiryProposalDepositRequest(3, 1, DepositTermsRequest.Percentage("20"), 4),
+                        ),
+                    ),
+                )
+            deposit.proposal.quoteRevision shouldBe 5
+            deposit.proposal.documentVersion shouldBe 3
+            val financial = quoteInput(id, "1300.00", terms = DepositTermsRequest.Percentage("20"))
+            val financialPreview = quotePreview(id, financial)
+            financialPreview.currentQuoteRevision shouldBe 5
+            financialPreview.resultingQuoteRevision shouldBe 6
+            issued(approveQuote(id, financial, financialPreview.quote.reviewToken)).proposal.quoteRevision shouldBe 6
+            val combined = quoteInput(id, "1400.00", ServicePlanActionRequest.CLEAR, terms = DepositTermsRequest.Percentage("30"))
+            val combinedPreview = quotePreview(id, combined)
+            combinedPreview.quote.financialChange shouldBe true
+            combinedPreview.depositChange shouldBe true
+            combinedPreview.servicePlanChange shouldBe true
+            issued(approveQuote(id, combined, combinedPreview.quote.reviewToken)).proposal.quoteRevision shouldBe 7
+            val before = read(id)
+            before.proposalHistory.map { it.quoteRevision } shouldBe listOf(3, 4, 5, 6, 7)
+            before.proposalHistory.map { it.documentVersion } shouldBe listOf(3, 3, 3, 4, 5)
+            val noChange = quoteInput(id, terms = DepositTermsRequest.Percentage("30"))
+            app.adminPost(path(id) + "/quote-revision-preview", Json.encodeToString(noChange)).status shouldBe Status.UNPROCESSABLE_ENTITY
+            read(id) shouldBe before
+            revision(id) shouldBe 5L
+        }
+
+        test("RELATED Invoice change orders do not append canonical Invoice revisions or timeline milestones") {
+            val id = book()
+            val before = read(id)
+            val related =
+                app.adminPost(
+                    "/inquiries/$id/financial-documents",
+                    """{"stage":"INVOICE","lines":[{"description":"Related","unitPrice":"100","taxAmount":"0","currency":"USD"}]}""",
+                )
+            related.status shouldBe Status.CREATED
+            val document = CommerceJson.asA(related.bodyString(), FinancialDocumentResponse.serializer())
+            app
+                .adminPost(
+                    "/financial-documents/${document.id}/change-orders",
+                    Json.encodeToString(ChangeOrderRequest(1, listOf(line("200.00")))),
+                ).status shouldBe Status.OK
+            read(id) shouldBe before
+            revision(id) shouldBe 2L
+            CommerceJson
+                .asA(app.adminGet(path(id) + "/timeline").bodyString(), StaffTimelineResponse.serializer())
+                .items
+                .filterIsInstance<TimelineItemResponse.Invoice>()
+                .size shouldBe 0
+        }
+
         test("timeline revisions follow publications, booking, invoice amendments and lifecycle, but reject stale commands") {
             val id = initial()
             revision(id) shouldBe 1L
@@ -279,7 +472,9 @@ class CanonicalRevisionsSpec :
                         "DROP FUNCTION fionas.reject_timeline_test()",
                 )
             }
-            val body = """{"expectedVersion":${input.expectedDocumentVersion},"lines":${Json.encodeToString(input.lines)}}"""
+            val body = """{"expectedVersion":${input.expectedDocumentVersion},"expectedInvoiceRevision":${before.currentInvoiceRevision},"lines":${Json.encodeToString(
+                input.lines,
+            )}}"""
             app.adminPost("/financial-documents/${before.financial.id}/change-orders", body).status shouldBe Status.OK
             revision(id) shouldBe 3L
             app.adminPost("/financial-documents/${before.financial.id}/change-orders", body).status shouldBe Status.CONFLICT
@@ -413,6 +608,7 @@ class CanonicalRevisionsSpec :
                 "commerce.deposit_requirement_revisions",
                 "fionas.inquiry_service_plans",
                 "fionas.inquiry_proposals",
+                "fionas.inquiry_invoice_amendments",
                 "commerce.payment_records",
             ).map(app.database::count)
 
@@ -776,7 +972,9 @@ class CanonicalRevisionsSpec :
             app
                 .adminPost(
                     "/financial-documents/${read(id).financial.id}/change-orders",
-                    """{"expectedVersion":${replacement.expectedDocumentVersion},"lines":${Json.encodeToString(replacement.lines)}}""",
+                    """{"expectedVersion":${replacement.expectedDocumentVersion},"expectedInvoiceRevision":${read(
+                        id,
+                    ).currentInvoiceRevision},"lines":${Json.encodeToString(replacement.lines)}}""",
                 ).let {
                     it.status shouldBe Status.UNPROCESSABLE_ENTITY
                     violations(it) shouldBe listOf("SERVICE_PLAN_LINE_NOT_FOUND")

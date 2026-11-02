@@ -30,8 +30,11 @@ data class InquiryProposal(
     val issuedBy: UserId,
     val kind: ProposalIssuanceKind,
     val servicePlanRevision: Int? = null,
+    /** Customer-facing offer revision, independent of the financial snapshot version. */
+    val quoteRevision: Int,
 ) {
     init {
+        require(quoteRevision > 0) { "A Quote business revision must be positive" }
         require(documentReference.version.number >= 2) { "A canonical proposal requires an issued Quote" }
     }
 }

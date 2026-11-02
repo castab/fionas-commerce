@@ -618,6 +618,35 @@ Credential administration uses the runtime's permissions: listing needs
 `commerce.principal.read`; creating and revoking need `commerce.service-credential.manage`,
 which only a principal trusted to act as any service should hold.
 
+## Customer-facing business revisions
+
+Display `proposal.quoteRevision` as the customer-facing Quote version and
+`currentInvoiceRevision` from staff detail as the Invoice version. Each material service,
+financial or deposit publication advances the Quote business revision; each material
+canonical Invoice amendment advances its own business revision. Initial numbers start at
+the first issued financial snapshot's version. Later business revisions increment once,
+independently of ledger versions. A $5,100 Quote 3 can become Quote 4 by replacing Sliced
+Almonds with Chopped Peanuts while its financial snapshot stays at version 3.
+
+Staff detail exposes current/accepted business revisions and immutable
+`invoiceAmendmentHistory`, including automatic INITIAL issuance. Amendment responses and
+timeline items carry exact financial/service references and staff approval provenance.
+Service-only Invoice amendments appear once on the timeline and invalidate SSE atomically.
+Financial accounting, accepted deposits and lifecycle rules retain their existing meaning.
+
+Revision previews supply current/resulting business revisions. Continue using financial
+versions for ledger operations and exact proposal IDs for deposit acceptance. The dedicated
+deposit revision request now requires `expectedQuoteRevision`; canonical Invoice generic
+change orders require `expectedInvoiceRevision`. Unified preview/approve request shapes
+remain unchanged, but previous review tokens must be discarded. See the
+[complete frontend integration contract](docs/quote-invoice-revisions-frontend-handoff.md).
+
+**V9 pre-production cutover:** stop old instances before upgrading. Quote-only databases
+receive deterministic business revision backfills. Databases containing booked inquiries
+fail migration with an operator-reset instruction: manually recreate disposable development
+databases. Prior service-only Invoice approval history cannot be reconstructed reliably.
+The application never resets/deletes data automatically or alters runtime-owned DDL.
+
 ## Atomic canonical proposal publication
 
 Fiona publishes its canonical `INITIAL_ESTIMATE` Quote only through `IssueInquiryProposal`:
