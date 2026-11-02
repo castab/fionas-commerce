@@ -121,6 +121,8 @@ sealed class TimelineItemResponse {
         override val id: String,
         override val occurredAt: String,
         val financial: FinancialDocumentResponse,
+        val amendment: InquiryInvoiceAmendmentResponse,
+        @ApiProperty(description = "Verified staff USER who approved this amendment.") val actor: TimelineActorResponse,
     ) : TimelineItemResponse()
 
     @Serializable
@@ -314,6 +316,8 @@ internal fun StaffTimeline.toResponse(): StaffTimelineResponse =
                         item.id,
                         at,
                         item.snapshot.toResponse(request.inquiry.inquiry.id, null),
+                        item.amendment.toResponse(),
+                        checkNotNull(item.amendment.approvedBy).timelineActor(),
                     )
                 is TimelineItem.Payment -> item.toResponse()
                 is TimelineItem.Refund -> item.toResponse()

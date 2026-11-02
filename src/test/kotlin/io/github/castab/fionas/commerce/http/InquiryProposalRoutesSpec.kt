@@ -87,7 +87,7 @@ class InquiryProposalRoutesSpec :
             val changed =
                 app.adminPost(
                     path(id) + "/deposit-revisions",
-                    """{"expectedDocumentVersion":3,"expectedDepositRequirementRevision":2,"terms":{"type":"FIXED","amount":"300.00","currency":"USD"}}""",
+                    """{"expectedDocumentVersion":3,"expectedQuoteRevision":3,"expectedDepositRequirementRevision":2,"terms":{"type":"FIXED","amount":"300.00","currency":"USD"}}""",
                 )
             changed.status shouldBe Status.OK
             val c = response(changed.bodyString())
@@ -164,7 +164,7 @@ class InquiryProposalRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$document/change-orders",
-                    changeOrderBody(4, acceptanceLines(guests = 100)),
+                    changeOrderBody(4, acceptanceLines(guests = 100), expectedInvoiceRevision = 4),
                 ).status shouldBe
                 Status.OK
             val related = app.adminPost("/inquiries/$id/estimates", """{"lines":${linesJson(acceptanceLines())}}""")
@@ -319,7 +319,7 @@ class InquiryProposalRoutesSpec :
             val stale =
                 app.adminPost(
                     path(id) + "/deposit-revisions",
-                    """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":2,"terms":{"type":"PERCENTAGE","percentage":"25"}}""",
+                    """{"expectedDocumentVersion":2,"expectedQuoteRevision":2,"expectedDepositRequirementRevision":2,"terms":{"type":"PERCENTAGE","percentage":"25"}}""",
                 )
             stale.status shouldBe Status.CONFLICT
             Json
@@ -330,7 +330,7 @@ class InquiryProposalRoutesSpec :
             val noChange =
                 app.adminPost(
                     path(id) + "/deposit-revisions",
-                    """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,"terms":{"type":"PERCENTAGE","percentage":"20.00"}}""",
+                    """{"expectedDocumentVersion":2,"expectedQuoteRevision":2,"expectedDepositRequirementRevision":1,"terms":{"type":"PERCENTAGE","percentage":"20.00"}}""",
                 )
             noChange.status shouldBe Status.UNPROCESSABLE_ENTITY
             app.adminGet(path(id)).status shouldBe Status.METHOD_NOT_ALLOWED
@@ -360,7 +360,7 @@ class InquiryProposalRoutesSpec :
                     .adminPost(
                         path(id) + "/deposit-revisions",
                         """{"expectedDocumentVersion":${if (corruption == "quote") 3 else 2},"expectedDepositRequirementRevision":1,""" +
-                            """"terms":{"type":"PERCENTAGE","percentage":"25"}}""",
+                            """"expectedQuoteRevision":2,"terms":{"type":"PERCENTAGE","percentage":"25"}}""",
                     ).status shouldBe
                     Status.INTERNAL_SERVER_ERROR
                 app.context.financialLedger

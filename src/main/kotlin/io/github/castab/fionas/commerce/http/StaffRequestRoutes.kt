@@ -118,6 +118,20 @@ data class StaffRequestResponse(
     )
     val proposalHistory: List<InquiryProposalResponse> = emptyList(),
     val communication: CommunicationSummaryResponse = CommunicationSummaryResponse(false, 0),
+    @ApiProperty(description = "Latest published Quote business revision, retained as historical context after booking.")
+    val currentQuoteRevision: Int? = null,
+    @ApiProperty(description = "Immutable accepted Quote business revision; present only after booking.")
+    val acceptedQuoteRevision: Int? = null,
+    @ApiProperty(
+        description = "Current Invoice business revision; present only after booking. financial.version remains the ledger version.",
+    )
+    val currentInvoiceRevision: Int? = null,
+    @ApiProperty(
+        description =
+            "Immutable Invoice identities in increasing business revision order, " +
+                "starting with automatic INITIAL, then staff AMENDED records.",
+    )
+    val invoiceAmendmentHistory: List<InquiryInvoiceAmendmentResponse> = emptyList(),
 )
 
 internal fun readStaffRequestRoute(
@@ -206,6 +220,10 @@ internal fun readStaffRequestRoute(
                                 request.servicePlanHistory.map { it.toResponse() },
                                 request.proposalHistory.map { it.toResponse() },
                                 request.communicationResponse(),
+                                request.currentQuoteRevision,
+                                request.acceptedQuoteRevision,
+                                request.currentInvoiceRevision,
+                                request.invoiceAmendmentHistory.map { it.toResponse() },
                             ),
                     )
             }

@@ -27,13 +27,16 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
             .mapTo(UUID::class.java)
             .findOne()
             .orElseThrow { CommerceFailure.NotFound("Canonical inquiry financial lineage was not found") }
+        val previous = latest(transaction, proposal.inquiryId)
+        val expected = previous?.let { Math.incrementExact(it.quoteRevision) } ?: proposal.documentReference.version.number
+        check(proposal.quoteRevision == expected) { "Quote business revisions must be consecutive" }
         try {
             transaction.handle
                 .createUpdate(
                     """
                     INSERT INTO fionas.inquiry_proposals
-                        (id, inquiry_id, document_id, document_version, deposit_requirement_revision, kind, issued_at, issued_by, service_plan_revision)
-                    VALUES (:id, :inquiry, :document, :version, :revision, :kind, :at, :issuedBy, :planRevision)
+                        (id, inquiry_id, document_id, document_version, deposit_requirement_revision, kind, issued_at, issued_by, service_plan_revision, quote_revision)
+                    VALUES (:id, :inquiry, :document, :version, :revision, :kind, :at, :issuedBy, :planRevision, :quoteRevision)
                     """.trimIndent(),
                 ).bind("id", proposal.id.value)
                 .bind("inquiry", proposal.inquiryId.value)
@@ -44,6 +47,7 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
                 .bind("at", proposal.issuedAt)
                 .bind("issuedBy", proposal.issuedBy.value)
                 .bind("planRevision", proposal.servicePlanRevision)
+                .bind("quoteRevision", proposal.quoteRevision)
                 .execute()
         } catch (failure: Exception) {
             if (failure.isUniqueViolation()) throw CommerceFailure.Conflict("Proposal has already been issued", failure)
@@ -95,5 +99,6 @@ class JdbiInquiryProposalRepository : InquiryProposalRepository {
             UserId(row.getObject("issued_by", UUID::class.java)),
             ProposalIssuanceKind.valueOf(row.getString("kind")),
             row.getObject("service_plan_revision", Int::class.javaObjectType),
+            row.getInt("quote_revision"),
         )
 }

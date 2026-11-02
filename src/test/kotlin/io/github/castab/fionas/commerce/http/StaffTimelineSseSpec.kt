@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce.http
 
 import io.github.castab.commerce.runtime.commerceRuntime
+import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
@@ -11,9 +12,13 @@ import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.TestApplication
 import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import org.http4k.core.Status
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -49,6 +54,97 @@ class StaffTimelineSseSpec :
             .build()
 
         fun open(id: String) = SocketEvents(client.send(request("/staff/requests/$id/updates"), HttpResponse.BodyHandlers.ofInputStream()))
+
+        test("service-only publications and Invoice amendments notify native streams atomically, including rollback") {
+            val id = app.createInquiry()
+            app.issueProposal(InquiryId(UUID.fromString(id)), "100")
+
+            fun read() = CommerceJson.asA(app.adminGet("/staff/requests/$id").bodyString(), StaffRequestResponse.serializer())
+
+            fun lines() =
+                read().financial.lines.map {
+                    ProposedLineRequest(
+                        it.id,
+                        null,
+                        it.description,
+                        it.subDescription,
+                        it.quantity,
+                        it.unitPrice,
+                        it.taxAmount,
+                        it.currency,
+                    )
+                }
+            val plan = ServicePlanRequest("Same-price topping change", 100, 120, listOf(ServicePlanItemDto("Chopped Peanuts")), emptyList())
+            open(id).use { stream ->
+                stream.changed(id, 1)
+                val quoteInput =
+                    QuoteRevisionPreviewRequest(
+                        2,
+                        1,
+                        lines(),
+                        DepositTermsRequest.Fixed("100", "USD"),
+                        ServicePlanActionRequest.REPLACE,
+                        plan,
+                    )
+                val previewResponse = app.adminPost("/staff/requests/$id/quote-revision-preview", Json.encodeToString(quoteInput))
+                previewResponse.status shouldBe Status.OK
+                val preview = CommerceJson.asA(previewResponse.bodyString(), QuoteRevisionPreviewResponse.serializer())
+                preview.quote.financialChange shouldBe false
+                preview.depositChange shouldBe false
+                app
+                    .adminPost(
+                        "/staff/requests/$id/proposals/quote-revisions",
+                        Json.encodeToString(
+                            ReviseInquiryQuoteProposalRequest(
+                                2,
+                                1,
+                                lines(),
+                                quoteInput.terms,
+                                plan,
+                                preview.quote.reviewToken,
+                                ServicePlanActionRequest.REPLACE,
+                            ),
+                        ),
+                    ).status shouldBe Status.OK
+                stream.changed(id, 2)
+                val proposal = read().proposal!!
+                app
+                    .adminPost(
+                        "/financial-documents/${proposal.documentId}/payments",
+                        """{"documentVersion":2,"amount":"100","method":"CASH","expectedProposalId":"${proposal.id}"}""",
+                    ).status shouldBe Status.CREATED
+                stream.changed(id, 3)
+                val before = read()
+                val input = InvoiceRevisionPreviewRequest(3, lines(), ServicePlanActionRequest.CLEAR)
+                val invoicePreview = app.adminPost("/staff/requests/$id/invoice-revision-preview", Json.encodeToString(input))
+                invoicePreview.status shouldBe Status.OK
+                val reviewed = CommerceJson.asA(invoicePreview.bodyString(), InvoiceRevisionPreviewResponse.serializer())
+                val command = InvoiceRevisionRequest(3, input.lines, reviewed.reviewToken, ServicePlanActionRequest.CLEAR)
+                app.database.execute(
+                    """
+                    CREATE FUNCTION fionas.reject_amendment_test() RETURNS trigger LANGUAGE plpgsql AS
+                    'BEGIN RAISE EXCEPTION ''test amendment failure''; END;';
+                    CREATE TRIGGER reject_amendment_test AFTER INSERT ON fionas.inquiry_invoice_amendments
+                    FOR EACH ROW EXECUTE FUNCTION fionas.reject_amendment_test();
+                    """.trimIndent(),
+                )
+                try {
+                    app.adminPost("/staff/requests/$id/invoice-revisions", Json.encodeToString(command)).status shouldBe
+                        Status.INTERNAL_SERVER_ERROR
+                    read() shouldBe before
+                    stream.frames.poll(1200, TimeUnit.MILLISECONDS) shouldBe null
+                } finally {
+                    app.database.execute(
+                        "DROP TRIGGER reject_amendment_test ON fionas.inquiry_invoice_amendments; " +
+                            "DROP FUNCTION fionas.reject_amendment_test()",
+                    )
+                }
+                app.adminPost("/staff/requests/$id/invoice-revisions", Json.encodeToString(command)).status shouldBe Status.OK
+                stream.changed(id, 4)
+                read().financial.version shouldBe 3
+                read().currentInvoiceRevision shouldBe 4
+            }
+        }
 
         test("two native streams synchronize, flush committed changes, isolate inquiries and reconnect while HTTP stays healthy") {
             val id = app.createInquiry()

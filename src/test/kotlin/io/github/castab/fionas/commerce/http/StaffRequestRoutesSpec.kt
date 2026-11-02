@@ -48,7 +48,9 @@ class StaffRequestRoutesSpec :
                     "servicePlanHistory",
                     "proposalHistory",
                     "communication",
+                    "invoiceAmendmentHistory",
                 )
+            json.getValue("invoiceAmendmentHistory") shouldBe Json.parseToJsonElement("[]")
             json.getValue("servicePlanHistory") shouldBe Json.parseToJsonElement("[]")
             json.getValue("proposalHistory") shouldBe Json.parseToJsonElement("[]")
             json.getValue("payments") shouldBe Json.parseToJsonElement("[]")

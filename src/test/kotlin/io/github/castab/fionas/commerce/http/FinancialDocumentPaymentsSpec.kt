@@ -214,7 +214,7 @@ class FinancialDocumentPaymentsSpec :
             val revised =
                 application.adminPost(
                     "/staff/requests/${inquiryId.value}/proposals/deposit-revisions",
-                    """{"expectedDocumentVersion":2,"expectedDepositRequirementRevision":1,"terms":{"type":"FIXED","amount":"200","currency":"USD"}}""",
+                    """{"expectedDocumentVersion":2,"expectedQuoteRevision":2,"expectedDepositRequirementRevision":1,"terms":{"type":"FIXED","amount":"200","currency":"USD"}}""",
                 )
             revised.status shouldBe Status.OK
             val proposal = CommerceJson.asA(revised.bodyString(), IssuedInquiryProposalResponse.serializer()).proposal

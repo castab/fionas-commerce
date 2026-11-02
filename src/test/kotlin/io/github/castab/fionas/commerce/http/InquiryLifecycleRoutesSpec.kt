@@ -67,7 +67,8 @@ class InquiryLifecycleRoutesSpec :
             app
                 .adminPost(
                     "/financial-documents/$document/change-orders",
-                    changeOrderBody(3, acceptanceLines(guests = 80)),
+                    // Booking issued Invoice v3 as Invoice business revision 3.
+                    changeOrderBody(3, acceptanceLines(guests = 80), expectedInvoiceRevision = 3),
                 ).status shouldBe Status.OK
             detail().lifecycle.stage shouldBe InquiryStageResponse.BOOKED
             service("close").status shouldBe Status.CONFLICT

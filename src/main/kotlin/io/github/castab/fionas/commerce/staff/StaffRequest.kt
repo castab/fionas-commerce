@@ -6,6 +6,7 @@ import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.fionas.commerce.financial.FIONAS_DEFAULT_DEPOSIT_TERMS
 import io.github.castab.fionas.commerce.financial.InquiryFinancialDocument
+import io.github.castab.fionas.commerce.financial.InquiryInvoiceAmendment
 import io.github.castab.fionas.commerce.financial.InquiryProposal
 import io.github.castab.fionas.commerce.financial.InquiryServicePlan
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationAttention
@@ -25,7 +26,11 @@ data class StaffRequest(
     val servicePlanHistory: List<InquiryServicePlan> = emptyList(),
     val proposalHistory: List<InquiryProposal> = emptyList(),
     val communicationHistory: List<RecordedInquiryCommunication> = emptyList(),
+    val invoiceAmendmentHistory: List<InquiryInvoiceAmendment> = emptyList(),
 ) {
+    val currentQuoteRevision get() = proposal?.quoteRevision
+    val acceptedQuoteRevision get() = proposal?.quoteRevision?.takeIf { financial.latest.document is FinancialDocument.Invoice }
+    val currentInvoiceRevision get() = invoiceAmendmentHistory.lastOrNull()?.invoiceRevision
     val communicationAttention get() = InquiryCommunicationAttention.project(communicationHistory)
     val needsReply get() = DashboardAttentionPolicy().needsReply(inquiry.lifecycle.stage, communicationAttention) != null
     val suggestedDepositTerms get() = FIONAS_DEFAULT_DEPOSIT_TERMS

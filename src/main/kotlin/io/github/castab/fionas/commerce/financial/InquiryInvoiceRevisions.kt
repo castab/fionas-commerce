@@ -9,11 +9,11 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.UserId
-import io.github.castab.fionas.commerce.conversation.InquiryTimelineRevisionRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryFulfillmentRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.time.Clock
 import java.time.temporal.ChronoUnit
+import java.util.UUID
 
 data class InvoiceRevisionIntent(
     val inquiryId: InquiryId,
@@ -31,7 +31,10 @@ data class InvoiceRevisionPreview(
     val currentServicePlan: InquiryServicePlan?,
     val reconciliation: FinancialDocumentReconciliation,
     val reviewToken: QuoteReviewToken,
+    val currentAmendment: InquiryInvoiceAmendment,
 ) {
+    val currentInvoiceRevision get() = currentAmendment.invoiceRevision
+    val resultingInvoiceRevision get() = Math.incrementExact(currentInvoiceRevision)
     val financialChange get() = lines.changes != null
     val servicePlanChange get() = servicePlan != currentServicePlan?.content()
     val resultingServicePlanRevision: Int? get() =
@@ -41,6 +44,7 @@ data class InvoiceRevisionPreview(
 data class RevisedInquiryInvoice(
     val financial: InquiryFinancialDocument,
     val servicePlan: InquiryServicePlan?,
+    val amendment: InquiryInvoiceAmendment,
 )
 
 /** Canonical Invoice amendments compose the existing ledger with independent Fiona service approvals. */
@@ -53,6 +57,8 @@ class InquiryInvoiceRevisions(
     private val plans: InquiryServicePlanRepository,
     private val fulfillment: InquiryFulfillmentRepository,
     private val clock: Clock,
+    private val amendments: InquiryInvoiceAmendmentRepository = JdbiInquiryInvoiceAmendmentRepository(),
+    private val newAmendmentId: () -> UUID = UUID::randomUUID,
 ) {
     private val documents = FionaFinancialDocuments(ledger, associations, authorship)
 
@@ -99,8 +105,19 @@ class InquiryInvoiceRevisions(
                     now,
                     command.approvedBy,
                 )
-            if (preview.financialChange) InquiryTimelineRevisionRepository().advance(transaction, listOf(intent.inquiryId))
-            RevisedInquiryInvoice(documents.describeLocked(transaction, intent.inquiryId, invoice.id), plan)
+            val amendment =
+                amendments.recordAmendment(
+                    transaction,
+                    newAmendmentId(),
+                    intent.inquiryId,
+                    current.document as FinancialDocument.Invoice,
+                    invoice as FinancialDocument.Invoice,
+                    plan,
+                    now,
+                    command.approvedBy,
+                    preview.servicePlanChange,
+                )
+            RevisedInquiryInvoice(documents.describeLocked(transaction, intent.inquiryId, invoice.id), plan, amendment)
         }
 
     private fun canonical(
@@ -124,6 +141,11 @@ class InquiryInvoiceRevisions(
         val proposal = proposals.latest(transaction, intent.inquiryId)
         requireCoherentProposal(intent.inquiryId, proposal, view)
         val currentPlan = plans.latest(transaction, intent.inquiryId)
+        val currentAmendment =
+            checkNotNull(amendments.latest(transaction, intent.inquiryId)) { "Booked inquiry has no Invoice business identity" }
+        check(currentAmendment.documentReference == document.reference && currentAmendment.servicePlanRevision == currentPlan?.revision) {
+            "Invoice business, financial and service histories disagree"
+        }
         currentPlan?.let {
             check(it.describes(ledger.get(transaction, it.document))) { "Service approval disagrees with its financial snapshot" }
         }
@@ -143,6 +165,8 @@ class InquiryInvoiceRevisions(
         val context =
             listOf(
                 "INVOICE_REVISION_V1",
+                currentAmendment.id.toString(),
+                currentAmendment.invoiceRevision.toString(),
                 proposal!!.id.value.toString(),
                 (currentPlan?.revision ?: 0).toString(),
                 intent.servicePlanChange.action.name,
@@ -153,6 +177,16 @@ class InquiryInvoiceRevisions(
                             history.refunds.map { it.id } + history.refundAllocations.map { it.id }
                     }.map { it.toString() }
         val token = QuoteComposer.reviewToken(intent.inquiryId, document, lines, invoice, null, null, plan, context)
-        return InvoiceRevisionPreview(intent.inquiryId, document, invoice, lines, plan, currentPlan, reconciliation, token)
+        return InvoiceRevisionPreview(
+            intent.inquiryId,
+            document,
+            invoice,
+            lines,
+            plan,
+            currentPlan,
+            reconciliation,
+            token,
+            currentAmendment,
+        )
     }
 }

@@ -201,7 +201,7 @@ class QuoteBuilderRoutesSpec :
             val depositResponse =
                 app.adminPost(
                     proposals(id) + "/deposit-revisions",
-                    """{"expectedDocumentVersion":4,"expectedDepositRequirementRevision":2,"terms":{"type":"FIXED","amount":"100.00","currency":"USD"}}""",
+                    """{"expectedDocumentVersion":4,"expectedQuoteRevision":4,"expectedDepositRequirementRevision":2,"terms":{"type":"FIXED","amount":"100.00","currency":"USD"}}""",
                 )
             depositResponse.status shouldBe Status.OK
             val deposit = issued(depositResponse)

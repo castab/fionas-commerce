@@ -1,8 +1,105 @@
 # Canonical Quote and Invoice revisions: frontend handoff
 
-This backend consumes commerce-runtime 0.0.26. It introduces no pricing rules, booking
+This backend consumes commerce-runtime 0.0.27. It introduces no pricing rules, booking
 aggregate, delivery workflow or payment provider. All amounts are exact decimal strings.
 The generated OpenAPI (`build/openapi`, also GET `/openapi.json`) is authoritative for DTOs.
+
+## Business revision integration
+
+Customer-facing revisions are now independent of ledger versions. Regenerate frontend
+contract validation from this backend's OpenAPI; accept the added response properties and
+validate required business revision integers. Keep all existing financial fields and exact
+decimal-string handling. No endpoint or operationId changed.
+
+| Response property | Type | Frontend use |
+|---|---|---|
+| proposal.quoteRevision (also every proposalHistory entry and timeline Quote proposal) | required positive integer | Display “Quote vN” |
+| proposal.documentVersion | required integer, unchanged | Exact ledger Quote snapshot; never a display revision |
+| financial.version | required integer, unchanged | Ledger expected-version and allocation inputs |
+| Quote revision preview currentQuoteRevision / resultingQuoteRevision | required integers | Display the business revision before/after publication |
+| Quote preview quote.reviewedDocumentVersion / quote.quoteVersion | required integers, unchanged | Current/resulting ledger versions |
+| Invoice revision preview currentInvoiceRevision / resultingInvoiceRevision | required integers | Display the business revision before/after amendment |
+| Invoice preview reviewedDocumentVersion / resultingDocumentVersion | required integers, unchanged | Current/resulting ledger versions |
+| staff detail currentQuoteRevision | optional integer | Latest publication, historical after booking |
+| staff detail acceptedQuoteRevision | optional integer | Immutable accepted Quote; present only after booking |
+| staff detail currentInvoiceRevision | optional integer | Display “Invoice vN”; present only after booking |
+| staff detail invoiceAmendmentHistory | array (empty before booking) | Independent Invoice history in increasing business revision order |
+| Invoice approval response amendment | required InquiryInvoiceAmendmentResponse | Committed business identity and approval |
+| INVOICE_AMENDED amendment / actor | required amendment object / principal object | Render the exact revision and verified approver |
+
+`InquiryInvoiceAmendmentResponse` has required `id: UUID string`, `inquiryId: UUID string`,
+`invoiceRevision: integer`, `documentId: UUID string`, `documentVersion: integer`,
+`kind: "INITIAL" | "AMENDED"`, `approvedAt: UTC timestamp string`,
+`financialChange: boolean` and `servicePlanChange: boolean`. Optional properties are
+`servicePlanRevision: integer` and `approvedBy: staff USER UUID string`. CommerceJson omits
+absent properties. INITIAL records automatic deposit-driven booking and has no staff
+approvedBy; approvedAt is the ledger issuance time and both change flags are false.
+AMENDED always has approvedBy and at least one change flag. The initial business number
+equals the first canonical Invoice version; each subsequent amendment increments it once.
+The initial record belongs in revision history, not as an INVOICE_AMENDED timeline item.
+
+For the Quote/Invoice preview UI, show the backend's resulting business revision, total,
+and the independent financial/service/deposit change flags. Quote `depositChange` includes
+reapproval against genuinely changed financial lines. Service-only previews retain their
+ledger version and deposit revision. Do not calculate revisions by adding to financial
+versions or counting events. Preview numbers are conditional predictions, never reservations.
+
+For Serving Plan and Revision History, join each proposal/amendment's optional
+`servicePlanRevision` to `servicePlanHistory[].revision`. An absent reference means no
+approval; a referenced `cleared=true` approval is an intentional clearing. Retain separate
+financial and service histories. Display each business revision once even if its ledger
+reference repeats. Use `approvedBy`/`approvedAt` for amendments, `issuedBy`/`issuedAt` for
+publications. `effectiveServicePlan` governs current fulfillment; acceptedServicePlan and
+the accepted Quote/deposit remain fixed after booking. Earlier proposalHistory entries
+are superseded; after booking no proposal is payable.
+
+For Conversation rendering, label QUOTE_PUBLISHED with `proposal.quoteRevision` and
+INVOICE_AMENDED with `amendment.invoiceRevision`. Render the supplied historical financial
+snapshot and service reference, never current financial data substituted into old items.
+Use item `id` verbatim as the stable key. Invoice IDs now identify amendment facts rather
+than financial versions; equal-time amendments sort by immutable business revision. There
+is one Invoice milestone per amendment, including service-only changes, and no duplicate
+milestone for its ledger change. Deposit milestones still name the exact accepted proposal
+ID even when several publications share a financial snapshot.
+
+The unified preview/approval request shapes are unchanged. Discard cached review tokens
+on deployment, any refresh/change invalidation, or `409 QUOTE_REVIEW_STALE`; obtain a new
+preview and require review of its result. Invoice tokens now bind the current amendment
+UUID and business revision; Quote tokens bind the publication business revision too.
+Do not automatically approve a replacement preview after a conflict.
+
+Two concurrency request changes are intentional:
+
+- Dedicated `/proposals/deposit-revisions` now requires `expectedQuoteRevision: integer`
+  from staff detail, in addition to expectedDocumentVersion and
+  expectedDepositRequirementRevision. Missing is 400; stale is 409.
+- Generic `/financial-documents/{id}/change-orders` adds optional
+  `expectedInvoiceRevision: integer`, required by policy for canonical Invoices (missing
+  is 422, stale is 409). Read it from staff detail. Estimates and RELATED lineages keep
+  their existing contract. Prefer the reviewed Invoice amendment workflow for the editor.
+
+Business revisions never replace proposal IDs, financial expected versions, deposit
+requirement revisions or allocation identities in payment requests. SSE remains exactly
+`timeline.changed` with an opaque string invalidation revision. Refresh authority after
+a hint; the SSE token is neither a Quote nor an Invoice business revision.
+
+The acceptance scenario now has these distinct immutable references:
+
+| Publication | quoteRevision | documentVersion | servicePlanRevision | depositRequirementRevision | Total |
+|---|---:|---:|---:|---:|---:|
+| Sliced Almonds | 3 | 3 | 1 | 1 | 5100.00 USD |
+| Chopped Peanuts | 4 | 3 | 2 | 1 | 5100.00 USD |
+
+Only the second proposal ID can accept the deposit. Booking creates the first Invoice
+business revision at ledger Invoice version 4. A subsequent service-only amendment creates
+Invoice revision 5 against ledger version 4, preserving the accepted Quote revision 4.
+
+V9 is a pre-production cutover: stop old backend instances; Quote-only histories backfill
+deterministically. Existing booked development databases must be explicitly recreated by
+the operator because prior service-only Invoice decisions cannot be reconstructed reliably.
+Migration fails with this instruction and deletes nothing automatically. Deploy the frontend
+contract update with this backend before using the new request checks; no fionas-web code
+is modified in this backend PR.
 
 ## Endpoints and authority
 
@@ -111,7 +208,9 @@ POST this to `/quote-revision-preview`. Its response nests the existing Quote pr
   "currentServicePlanRevision": 1,
   "resultingServicePlanRevision": 2,
   "servicePlanChange": true,
-  "depositChange": true
+  "depositChange": true,
+  "currentQuoteRevision": 3,
+  "resultingQuoteRevision": 4
 }
 ```
 
@@ -134,12 +233,12 @@ To change only the deposit, the dedicated route is still available:
 {
   "expectedDocumentVersion": 4,
   "expectedDepositRequirementRevision": 2,
+  "expectedQuoteRevision": 4,
   "terms": {"type": "FIXED", "amount": "300.00", "currency": "USD"}
 }
 ```
 
-POST to `/proposals/deposit-revisions`. This route retains its existing version-check
-contract, needs no reviewToken, and returns the retained service approval as well.
+POST to `/proposals/deposit-revisions`. This route additionally requires the current `expectedQuoteRevision`, needs no reviewToken, and returns the retained service approval as well.
 It does not append a financial version. Equal numeric terms in the same form reject;
 percentage-to-fixed is meaningful even if the resolved amount is unchanged.
 
@@ -226,12 +325,14 @@ Response:
   "netApplied": "300.00",
   "balance": "1150.00",
   "settlement": "UNDERPAID",
-  "reviewToken": "0000000000000000000000000000000000000000000000000000000000000000"
+  "reviewToken": "0000000000000000000000000000000000000000000000000000000000000000",
+  "currentInvoiceRevision": 4,
+  "resultingInvoiceRevision": 5
 }
 ```
 
 Publish identical inputs plus the actual top-level `reviewToken` to `/invoice-revisions`.
-Its response is `{financial, servicePlan?}` using existing financial and approved-plan DTOs.
+Its response is `{financial, servicePlan?, amendment}` using existing financial and approved-plan DTOs.
 Refetch staff detail for the complete workspace. A service-only amendment sends the unchanged
 complete lines plus REPLACE/CLEAR: `financialChange=false`, resultingDocumentVersion stays
 the same and resultingServicePlanRevision advances. Combined changes commit or roll back

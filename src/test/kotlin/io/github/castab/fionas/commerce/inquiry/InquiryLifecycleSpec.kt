@@ -224,7 +224,11 @@ class InquiryLifecycleSpec :
             fun reprice(guests: Int) =
                 app.adminPost(
                     "/financial-documents/$document/change-orders",
-                    changeOrderBody(ledger.latest(document).version.number, acceptanceLines(guests = guests)),
+                    changeOrderBody(
+                        ledger.latest(document).version.number,
+                        acceptanceLines(guests = guests),
+                        expectedInvoiceRevision = ledger.latest(document).version.number,
+                    ),
                 )
 
             reprice(100).status shouldBe Status.OK

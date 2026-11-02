@@ -117,6 +117,9 @@ class InquiryProposals(
     ): IssuedInquiryProposal {
         val current = canonical(transaction, command.inquiryId, command.expectedDocumentVersion)
         val active = reviewed(transaction, current, command.expectedDepositRequirementRevision)
+        if (proposals.latest(transaction, command.inquiryId)!!.quoteRevision != command.expectedQuoteRevision) {
+            throw CommerceFailure.Conflict("Stale expected Quote business revision; reload and retry")
+        }
         if (sameTerms(active.terms, command.terms)) throw CommerceFailure.ValidationFailed("The revised deposit terms produce no change")
         documents.approveDeposit(transaction, current.document, command.terms, command.expectedDepositRequirementRevision)
         return publish(transaction, command.inquiryId, current.document, command.issuedBy, ProposalIssuanceKind.DEPOSIT_REVISED)
@@ -177,7 +180,9 @@ class InquiryProposals(
         val view: FinancialLineageView = ledger.financialLineages(transaction, listOf(quote.id)).single()
         val requirement = view.depositRequirement!!.requirement as DepositRequirement.Active
         val plan = servicePlans.latest(transaction, inquiryId)
-        val proposal = InquiryProposal(newId(), inquiryId, quote.reference, requirement.revision, now(), issuedBy, kind, plan?.revision)
+        val revision = proposals.latest(transaction, inquiryId)?.let { Math.incrementExact(it.quoteRevision) } ?: quote.version.number
+        val proposal =
+            InquiryProposal(newId(), inquiryId, quote.reference, requirement.revision, now(), issuedBy, kind, plan?.revision, revision)
         proposals.append(transaction, proposal)
         requireCoherentProposal(inquiryId, proposal, view)
         return IssuedInquiryProposal(proposal, documents.describeLocked(transaction, inquiryId, view), view, plan)

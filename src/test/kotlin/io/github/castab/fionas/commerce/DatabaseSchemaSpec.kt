@@ -56,6 +56,7 @@ class DatabaseSchemaSpec :
                     "inquiry_staff_replies",
                     "inquiry_change_revisions",
                     "inquiry_proposals",
+                    "inquiry_invoice_amendments",
                     "inquiry_service_plans",
                     "inquiry_submissions",
                     "user_credentials",
@@ -121,6 +122,7 @@ class DatabaseSchemaSpec :
                     "issued_at",
                     "issued_by",
                     "service_plan_revision",
+                    "quote_revision",
                 )
             application.database
                 .strings(
@@ -129,7 +131,7 @@ class DatabaseSchemaSpec :
             application.database.strings(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fionas.inquiry_proposals'::regclass AND contype = 'u'",
             ) shouldContainExactlyInAnyOrder
-                listOf("UNIQUE (recorded_order)")
+                listOf("UNIQUE (recorded_order)", "UNIQUE (inquiry_id, quote_revision)")
         }
 
         test("a staff reply command stores identities, provenance and digests but never the message body") {

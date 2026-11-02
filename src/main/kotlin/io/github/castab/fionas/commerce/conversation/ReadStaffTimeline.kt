@@ -10,7 +10,9 @@ import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.fionas.commerce.financial.DocumentSnapshot
+import io.github.castab.fionas.commerce.financial.InquiryInvoiceAmendment
 import io.github.castab.fionas.commerce.financial.InquiryProposal
+import io.github.castab.fionas.commerce.financial.InvoiceAmendmentKind
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.staff.ReadStaffRequest
@@ -39,9 +41,13 @@ sealed interface TimelineItem {
 
     data class Invoice(
         val snapshot: DocumentSnapshot,
+        val amendment: InquiryInvoiceAmendment,
     ) : TimelineItem {
-        override val id = "invoice:${snapshot.document.id}:${snapshot.document.version.number}"
-        override val occurredAt = snapshot.createdAt
+        override val id = "invoice-amendment:${amendment.inquiryId.value}:${amendment.invoiceRevision.toString().padStart(
+            10,
+            '0',
+        )}:${amendment.id}"
+        override val occurredAt = amendment.approvedAt
     }
 
     /**
@@ -115,15 +121,14 @@ class ReadStaffTimeline(
                             val deposit = deposits.single { it.requirement.revision == proposal.depositRequirementRevision }
                             add(TimelineItem.Quote(proposal, DocumentSnapshot(version, null), deposit))
                         }
-                        versions
-                            .filter { it.document is FinancialDocument.Invoice }
-                            .drop(
-                                1,
-                            ).forEach { add(TimelineItem.Invoice(DocumentSnapshot(it, null))) }
+                        request.invoiceAmendmentHistory.filter { it.kind == InvoiceAmendmentKind.AMENDED }.forEach { amendment ->
+                            val version = versions.single { it.document.reference == amendment.documentReference }
+                            add(TimelineItem.Invoice(DocumentSnapshot(version, null), amendment))
+                        }
                         val canonicalDocuments = versions.associate { it.document.reference to it.document }
                         request.payments.forEach { history ->
                             val accepted =
-                                request.proposalHistory.singleOrNull { proposal ->
+                                request.proposal?.takeIf { proposal ->
                                     history.allocations.any { it.financialDocumentReference == proposal.documentReference }
                                 }
                             val payment =

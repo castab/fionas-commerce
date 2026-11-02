@@ -274,7 +274,7 @@ It must not redefine **what those facts mean**.
 Examples:
 
 - Fiona may decide when a quote can be accepted.
-- Fiona does not redefine quote version semantics.
+- Fiona does not redefine shared financial-document version semantics.
 - Fiona may decide that a deposit is required before a workflow transition.
 - Fiona does not store its own mutable `depositPaid` truth.
 - Fiona may decide whether a refund is allowed.
@@ -323,6 +323,17 @@ requirement approved against that exact Quote. Staff explicitly approves the ter
 a suggestion does not constitute approval. Quote, deposit approval and publication commit
 atomically, as do subsequent republications. Publication is an independent Fiona business
 fact, beyond the financial stage derived from shared commerce history.
+
+The complete customer-facing commitment has its own Fiona business revision. Every
+material publication advances that revision, including service-only and deposit-only
+changes. Invoice issuance and each subsequent material canonical amendment likewise have
+independent business identities and revisions. These immutable decisions bind exact
+shared financial snapshots and optional service approvals; they never duplicate amounts
+or advance the ledger solely to obtain a display number. Financial, publication, service,
+deposit and timeline invalidation revisions are independent identities. Review and
+acceptance must identify the appropriate business state as well as the financial snapshot.
+Concrete numbering, provenance and persistence rules belong in
+[AGENTS.md](AGENTS.md#customer-facing-business-revisions).
 
 Changing the Quote, deposit terms, or approved service commitment requires republication and
 supersedes the earlier customer proposal. A publication has its own identity even when its

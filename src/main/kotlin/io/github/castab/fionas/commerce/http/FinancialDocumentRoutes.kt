@@ -90,6 +90,12 @@ data class ChangeOrderRequest(
                 "removed. Lines identical to the current ones are no financial change.",
     )
     val lines: List<ProposedLineRequest>,
+    @ApiProperty(
+        description =
+            "Required for canonical Invoices: exact reviewed business revision from staff detail. " +
+                "Independent of expectedVersion.",
+    )
+    val expectedInvoiceRevision: Int? = null,
 )
 
 /** The body of the quote and invoice transitions. */
@@ -1119,6 +1125,7 @@ fun createChangeOrderRoute(
                         Version.of(body.expectedVersion),
                         body.lines.domain(identities),
                         staffUser(request),
+                        body.expectedInvoiceRevision,
                     )
                 }
             Response(Status.OK).with(documentResponse of changeOrder(command).toResponse())

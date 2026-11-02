@@ -186,7 +186,7 @@ class OpenApiDocumentSpec :
             schema("ReviseInquiryQuoteProposalRequest").strings("required") shouldContainExactly
                 listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "lines", "terms", "reviewToken")
             schema("ReviseInquiryProposalDepositRequest").strings("required") shouldContainExactly
-                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "terms")
+                listOf("expectedDocumentVersion", "expectedDepositRequirementRevision", "terms", "expectedQuoteRevision")
             schema("ReviseInquiryQuoteProposalRequest").text("properties", "lines", "items", "\$ref") shouldBe
                 "#/components/schemas/ProposedLineRequest"
             schema("ReviseInquiryQuoteProposalRequest").text("properties", "servicePlan", "\$ref") shouldBe
@@ -226,6 +226,7 @@ class OpenApiDocumentSpec :
                     "issuedAt",
                     "issuedBy",
                     "issuanceKind",
+                    "quoteRevision",
                 )
             schema("StaffRequestResponse").text("properties", "proposal", "\$ref") shouldBe "#/components/schemas/InquiryProposalResponse"
             val issuances =
@@ -527,6 +528,7 @@ class OpenApiDocumentSpec :
                 "InvoiceRevisionRequest",
                 "InvoiceRevisionPreviewResponse",
                 "RevisedInquiryInvoiceResponse",
+                "InquiryInvoiceAmendmentResponse",
                 "PreviewInquiryQuoteRequest",
                 "InquiryQuotePreviewResponse",
                 "QuotePreviewLineResponse",
@@ -1424,7 +1426,9 @@ class OpenApiDocumentSpec :
                 "ChangeOrderRequest" to listOf("expectedVersion", "lines"),
             ).forEach { (name, required) ->
                 val request = schema(name)
-                request.at("properties").jsonObject.keys shouldBe required.toSet()
+                // Canonical Invoices additionally require expectedInvoiceRevision by policy, not by schema.
+                val optional = if (name == "ChangeOrderRequest") setOf("expectedInvoiceRevision") else emptySet()
+                request.at("properties").jsonObject.keys shouldBe required.toSet() + optional
                 request.strings("required") shouldContainExactly required
             }
             schema("CreateInquiryEstimateRequest").text("properties", "lines", "items", "\$ref") shouldBe
@@ -1678,6 +1682,43 @@ class OpenApiDocumentSpec :
                     parameter.at("required") shouldBe JsonPrimitive(true)
                     parameter.text("schema", "format") shouldBe "uuid"
                 }
+        }
+
+        test("business Quote and Invoice revisions are explicit fields beside unchanged ledger versions") {
+            schema("QuoteRevisionPreviewResponse").strings("required").let {
+                it.contains("currentQuoteRevision") shouldBe true
+                it.contains("resultingQuoteRevision") shouldBe true
+            }
+            schema("InvoiceRevisionPreviewResponse").strings("required").let {
+                listOf("currentInvoiceRevision", "resultingInvoiceRevision", "reviewedDocumentVersion", "resultingDocumentVersion")
+                    .forEach { field -> it.contains(field) shouldBe true }
+            }
+            schema("RevisedInquiryInvoiceResponse").strings("required") shouldContainExactly listOf("financial", "amendment")
+            schema("InquiryInvoiceAmendmentResponse").strings("required") shouldContainExactly
+                listOf(
+                    "id",
+                    "inquiryId",
+                    "invoiceRevision",
+                    "documentId",
+                    "documentVersion",
+                    "kind",
+                    "approvedAt",
+                    "financialChange",
+                    "servicePlanChange",
+                )
+            schema("InquiryInvoiceAmendmentResponse").text("properties", "approvedBy", "format") shouldBe "uuid"
+            schema("StaffRequestResponse").let { request ->
+                listOf("currentQuoteRevision", "acceptedQuoteRevision", "currentInvoiceRevision", "invoiceAmendmentHistory").forEach {
+                    request.at("properties").jsonObject shouldContainKey it
+                    request.strings("required").contains(it) shouldBe false
+                }
+            }
+            schema("TimelineItemResponse_INVOICE_AMENDED").strings("required").let {
+                it.contains("amendment") shouldBe true
+                it.contains("actor") shouldBe true
+            }
+            schema("ReviseInquiryProposalDepositRequest").strings("required").contains("expectedQuoteRevision") shouldBe true
+            schema("ChangeOrderRequest").strings("required").contains("expectedInvoiceRevision") shouldBe false
         }
 
         test("resolves every reference, and holds only Fiona's and runtime capability schemas") {

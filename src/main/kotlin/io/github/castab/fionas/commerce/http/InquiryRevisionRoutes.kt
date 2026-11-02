@@ -8,6 +8,7 @@ import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.fionas.commerce.financial.ComposedServicePlan
+import io.github.castab.fionas.commerce.financial.InquiryInvoiceAmendment
 import io.github.castab.fionas.commerce.financial.InquiryInvoiceRevisions
 import io.github.castab.fionas.commerce.financial.InvoiceRevisionIntent
 import io.github.castab.fionas.commerce.financial.InvoiceRevisionPreview
@@ -60,6 +61,12 @@ data class QuoteRevisionPreviewResponse(
     val resultingServicePlanRevision: Int? = null,
     val servicePlanChange: Boolean,
     val depositChange: Boolean,
+    @ApiProperty(
+        description = "Current customer-facing Quote business revision; quote.reviewedDocumentVersion is the independent ledger version.",
+    )
+    val currentQuoteRevision: Int,
+    @ApiProperty(description = "Business revision on successful publication of this exact reviewed result, including service-only changes.")
+    val resultingQuoteRevision: Int,
 )
 
 @Serializable
@@ -100,13 +107,51 @@ data class InvoiceRevisionPreviewResponse(
     val balance: String,
     val settlement: InvoiceSettlementResponse,
     val reviewToken: String,
+    @ApiProperty(description = "Current customer-facing Invoice business revision, independent of reviewedDocumentVersion.")
+    val currentInvoiceRevision: Int,
+    @ApiProperty(
+        description = "Invoice business revision if this exact reviewed amendment commits, even when the ledger version stays unchanged.",
+    )
+    val resultingInvoiceRevision: Int,
 )
 
 @Serializable
 data class RevisedInquiryInvoiceResponse(
     val financial: FinancialDocumentResponse,
     val servicePlan: ServicePlanResponse? = null,
+    val amendment: InquiryInvoiceAmendmentResponse,
 )
+
+@Serializable
+data class InquiryInvoiceAmendmentResponse(
+    @ApiProperty(format = "uuid") val id: String,
+    @ApiProperty(format = "uuid") val inquiryId: String,
+    @ApiProperty(description = "Customer-facing Invoice business revision, independent of documentVersion.") val invoiceRevision: Int,
+    @ApiProperty(format = "uuid") val documentId: String,
+    @ApiProperty(description = "Exact immutable financial snapshot; service-only amendments retain this version.") val documentVersion: Int,
+    val servicePlanRevision: Int? = null,
+    @ApiProperty(description = "INITIAL is automatic booking; AMENDED is a material staff-approved amendment.") val kind: String,
+    @ApiProperty(format = "date-time") val approvedAt: String,
+    @ApiProperty(description = "Verified staff USER for AMENDED; absent for automatic INITIAL issuance.", format = "uuid")
+    val approvedBy: String? = null,
+    val financialChange: Boolean,
+    val servicePlanChange: Boolean,
+)
+
+internal fun InquiryInvoiceAmendment.toResponse() =
+    InquiryInvoiceAmendmentResponse(
+        id.toString(),
+        inquiryId.value.toString(),
+        invoiceRevision,
+        documentReference.id.toString(),
+        documentReference.version.number,
+        servicePlanRevision,
+        kind.name,
+        approvedAt.toString(),
+        approvedBy?.value?.toString(),
+        financialChange,
+        servicePlanChange,
+    )
 
 internal fun ComposedServicePlan.toResponse() =
     ServicePlanPreviewResponse(
@@ -142,6 +187,8 @@ internal fun InvoiceRevisionPreview.toResponse() =
             else -> InvoiceSettlementResponse.OVERPAID
         },
         reviewToken.value,
+        currentInvoiceRevision,
+        resultingInvoiceRevision,
     )
 
 private fun AccessControl.invoiceAmendment() =
@@ -207,6 +254,8 @@ internal fun previewInquiryQuoteRevisionRoute(
                     1,
                     servicePlanChange = false,
                     depositChange = true,
+                    currentQuoteRevision = 3,
+                    resultingQuoteRevision = 4,
                 ),
         )
         revisionErrors()
@@ -238,6 +287,8 @@ internal fun previewInquiryQuoteRevisionRoute(
                         result.resultingServicePlanRevision,
                         result.servicePlanChange,
                         result.depositChange,
+                        result.currentQuoteRevision,
+                        result.resultingQuoteRevision,
                     ),
             )
         }
@@ -294,7 +345,11 @@ internal fun reviseInquiryInvoiceRoute(
         receiving(body to InvoiceRevisionRequest(3, exampleProposedLines, "0".repeat(64)))
         returning(
             Status.OK,
-            response to RevisedInquiryInvoiceResponse(exampleQuote.copy(stage = "INVOICE", version = 4, previousVersion = 3)),
+            response to
+                RevisedInquiryInvoiceResponse(
+                    exampleQuote.copy(stage = "INVOICE", version = 4, previousVersion = 3),
+                    amendment = exampleInvoiceAmendment,
+                ),
         )
         revisionErrors()
     } bindContract Method.POST to { id: String, _: String ->
@@ -317,7 +372,12 @@ internal fun reviseInquiryInvoiceRoute(
                 }
             val result = revise(command)
             Response(Status.OK).header("Cache-Control", "no-store").with(
-                response of RevisedInquiryInvoiceResponse(result.financial.toResponse(), result.servicePlan?.toResponse()),
+                response of
+                    RevisedInquiryInvoiceResponse(
+                        result.financial.toResponse(),
+                        result.servicePlan?.toResponse(),
+                        result.amendment.toResponse(),
+                    ),
             )
         }
     }
@@ -339,6 +399,21 @@ private val exampleRevisionQuotePreview =
         QuoteDepositPreviewResponse(DepositTermsRequest.Percentage("20"), DepositMoneyResponse("290.00", "USD")),
         reviewToken = "0".repeat(64),
     )
+
+internal val exampleInvoiceAmendment =
+    InquiryInvoiceAmendmentResponse(
+        "907a6adf-1c06-4286-a6cb-1ba395095c62",
+        exampleInquiry.id,
+        4,
+        exampleInquiry.lifecycle.documentId,
+        4,
+        null,
+        "AMENDED",
+        "2026-10-06T17:00:00Z",
+        "580a28a1-7417-480a-9089-8f5f3c25c1cd",
+        true,
+        false,
+    )
 private val exampleInvoiceRevisionPreview =
     InvoiceRevisionPreviewResponse(
         exampleInquiry.id,
@@ -357,4 +432,6 @@ private val exampleInvoiceRevisionPreview =
         balance = "1150.00",
         settlement = InvoiceSettlementResponse.UNDERPAID,
         reviewToken = "0".repeat(64),
+        currentInvoiceRevision = 3,
+        resultingInvoiceRevision = 4,
     )
