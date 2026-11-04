@@ -55,6 +55,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
+import io.github.castab.fionas.commerce.payments.PaymentOperations
 import io.github.castab.fionas.commerce.staff.ListStaffRequests
 import io.github.castab.fionas.commerce.staff.SecretPassword
 import io.github.castab.fionas.commerce.staff.StaffDashboard
@@ -85,6 +86,7 @@ const val API_DOCS_PATH = "/docs"
  * supplies the real operations; rendering the contract never calls any of them.
  */
 class FionaOperations(
+    val payments: PaymentOperations? = null,
     val prepareStaffTimelineUpdates: (InquiryId) -> Boolean,
     val sendStaffReply: (SendStaffReply.Command) -> SendStaffReply.Result,
     val readStaffTimeline: (InquiryId, PrincipalId) -> StaffTimeline,
@@ -190,7 +192,7 @@ fun fionaApiRoutes(
         logoutRoute(auth.sessions, auth.cookie, auth.access, auth.origin),
         currentUserRoute(operations.currentUser, operations.currentPermissions, auth.access),
         setStaffPasswordRoute(operations.setStaffPassword, auth.access),
-    )
+    ) + paymentRoutes(operations.payments, auth.access)
 
 /**
  * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of the

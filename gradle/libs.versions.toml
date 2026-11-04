@@ -21,6 +21,7 @@ logback = "1.6.3"
 kotlin-logging = "8.0.4"
 argon2 = "2.12"
 jnats = "2.26.4"
+stripe = "34.1.0"
 
 [libraries]
 commerce-runtime = { module = "io.github.castab:commerce-runtime", version.ref = "commerce" }
@@ -30,6 +31,7 @@ logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "lo
 kotlin-logging-jvm = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = "kotlin-logging" }
 argon2-jvm = { module = "de.mkammerer:argon2-jvm", version.ref = "argon2" }
 jnats = { module = "io.nats:jnats", version.ref = "jnats" }
+stripe-java = { module = "com.stripe:stripe-java", version.ref = "stripe" }
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
 

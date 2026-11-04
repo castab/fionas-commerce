@@ -885,6 +885,35 @@ If the answer points to reusable commerce semantics, address the missing abstrac
 
 # 22. Do Not Work Around Missing Shared Capabilities Locally
 
+## Customer payment capabilities and provider integration
+
+Fiona owns inquiry-scoped customer payment access and its relationship to provider
+authorizations. A revocable capability authorizes a limited customer-safe read and a
+deliberate payment against reviewed canonical terms. It is independent of customer email,
+staff identity, financial snapshot version and the derived inquiry lifecycle. Possessing
+it grants no authority to change commercial terms or fulfillment.
+
+Provider attempts record independent integration facts: authorized terms, provider
+identities, ambiguous outcomes and their ledger receipt relationship. Their authorized
+amounts and processing/reconciliation outcomes are not a second ledger, stored balance,
+or substitute for runtime reconciliation. Only confirmed received money enters the shared
+ledger. Provider capture and application of money are different facts: stale commercial
+terms may require an unapplied receipt and an explicit staff reconciliation exception.
+
+Network calls never hold a database transaction. Durable authorization precedes provider
+creation; a permanent local command identity and provider idempotency support recovery
+without assuming indefinite provider deduplication. Signed webhooks acknowledge only a
+committed outcome. Provider event identity and payment identity independently guard
+replays. External refunds/disputes are actionable integration evidence, never speculative
+refunds, allocation reversals or lifecycle transitions.
+
+Canonical deposit acceptance reuses the existing atomic payment/allocation/Invoice path;
+RELATED lineages remain excluded. The public link survives Invoice issuance and
+amendments, but never overrides current payment eligibility. Revoking customer access
+cannot revoke the responsibility to reconcile money already initiated. Concrete token
+retrieval tradeoffs, contracts and operations live in
+[AGENTS.md](AGENTS.md#customer-payments-and-stripe).
+
 When the shared runtime lacks an operation or read model Fiona legitimately needs, do not automatically compensate with:
 
 - direct SQL against `commerce`;

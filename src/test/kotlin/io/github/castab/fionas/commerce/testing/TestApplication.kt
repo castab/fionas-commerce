@@ -159,8 +159,10 @@ class TestApplication private constructor(
             conversationReads: ConversationReadConfiguration? = null,
             conversationSends: ConversationSendConfiguration? = null,
             timelineUpdatesEnabled: Boolean = false,
+            stripe: io.github.castab.fionas.commerce.payments.StripeConfiguration? = null,
+            stripeGateway: io.github.castab.fionas.commerce.payments.StripeGateway? = null,
+            database: TestDatabase = TestDatabase.create(),
         ): TestApplication {
-            val database = TestDatabase.create()
             try {
                 val fiona =
                     fionaApplication(
@@ -175,6 +177,8 @@ class TestApplication private constructor(
                         conversationReads = conversationReads,
                         conversationSends = conversationSends,
                         timelineUpdatesEnabled = timelineUpdatesEnabled,
+                        stripe = stripe,
+                        stripeGateway = stripeGateway,
                     )
                 var context: CommerceRuntimeContext? = null
                 val runtime =

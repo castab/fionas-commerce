@@ -62,7 +62,52 @@ class DatabaseSchemaSpec :
                     "user_credentials",
                     "inquiry_financial_documents",
                     "financial_document_authorship",
+                    "inquiry_payment_access",
+                    "stripe_payment_attempts",
+                    "stripe_webhook_events",
                 )
+        }
+
+        test("provider storage contains independent authorization facts and no ledger settlement replica") {
+            application.database.strings(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                    "AND table_name = 'stripe_payment_attempts' ORDER BY ordinal_position",
+            ) shouldContainExactly
+                listOf(
+                    "id",
+                    "inquiry_id",
+                    "public_id",
+                    "request_key",
+                    "request_fingerprint",
+                    "document_id",
+                    "document_version",
+                    "purpose",
+                    "business_revision",
+                    "proposal_id",
+                    "deposit_revision",
+                    "authorized_minor",
+                    "currency",
+                    "stripe_account",
+                    "live_mode",
+                    "provider_key",
+                    "created_at",
+                    "expires_at",
+                    "session_id",
+                    "payment_intent_id",
+                    "provider_state",
+                    "outcome",
+                    "ledger_payment_id",
+                    "diagnostic",
+                )
+            application.database.strings(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                    "AND table_name = 'inquiry_payment_access' ORDER BY ordinal_position",
+            ) shouldContainExactly listOf("inquiry_id", "public_id", "generation", "token_hash", "revoked", "issued_at", "issued_by")
+            application.database.strings(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' " +
+                    "AND table_name = 'stripe_webhook_events' ORDER BY ordinal_position",
+            ) shouldContainExactly
+                listOf("event_id", "event_type", "object_id", "payment_intent_id", "attempt_id", "received_at", "disposition")
         }
 
         test("inquiry invalidation stores only an inquiry identity and a positive revision") {
@@ -448,6 +493,7 @@ class DatabaseSchemaSpec :
                     """
                     SELECT table_name || '.' || column_name FROM information_schema.columns
                     WHERE table_schema = 'fionas'
+                      AND table_name NOT IN ('inquiry_payment_access', 'stripe_payment_attempts', 'stripe_webhook_events')
                       AND regexp_replace(table_name || '.' || column_name, 'decline', '', 'g')
                         ~ '(line|amount|price|total|tax|balance|stage|status|payment|refund|allocation|reconciliation|currency)'
                     """.trimIndent(),
@@ -457,6 +503,7 @@ class DatabaseSchemaSpec :
                     """
                     SELECT table_name FROM information_schema.tables
                     WHERE table_schema = 'fionas'
+                      AND table_name NOT IN ('inquiry_payment_access', 'stripe_payment_attempts', 'stripe_webhook_events')
                       AND regexp_replace(table_name, 'decline', '', 'g') ~ '(line|payment|refund|allocation|reconciliation|balance|status|snapshot)'
                     """.trimIndent(),
                 ).shouldBeEmpty()

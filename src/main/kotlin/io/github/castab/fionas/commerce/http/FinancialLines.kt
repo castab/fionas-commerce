@@ -374,6 +374,8 @@ internal val requireStaffSender: Filter = staffUserOnly(STAFF_SENDER_REQUIRED)
 /** Staff timeline subscriptions require the human user's credential, even when a BFF proxies the stream. */
 internal val requireStaffTimelineReader: Filter = staffUserOnly("Timeline updates require an authenticated staff USER")
 
+internal val requireStaffPaymentManager: Filter = staffUserOnly("Managing customer payment access requires an authenticated staff USER")
+
 private fun staffUserOnly(message: String): Filter =
     Filter { next ->
         { request: Request ->

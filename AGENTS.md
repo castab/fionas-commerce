@@ -816,7 +816,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V10__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V11__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -1339,8 +1339,8 @@ Every publication binds the exact `(documentId, documentVersion, depositRequirem
 and its optional `servicePlanRevision`. `IsCurrentPayableInquiryProposal` reads one REPEATABLE
 READ snapshot: only the latest publication whose exact Quote and active approval/revision
 still match is payable. Every reissue, service-only included, supersedes all earlier ids; Invoice makes all publication targets non-payable.
-Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
-contact collection, cancellation, or post-payment adjustment workflow is introduced.
+Business UUIDs are not bearer secrets. The separate [customer payments capability](#customer-payments-and-stripe)
+owns public access and Stripe integration. Publication itself grants no access and sends no email.
 
 `IsCurrentPayableInquiryProposal` remains only a read/query seam. Canonical payment
 acceptance uses `CanonicalInquiryDepositPaymentPolicy` inside `RecordDocumentPayment`'s
@@ -1897,6 +1897,86 @@ There is no `offering` package. Do not create empty packages or layers for futur
 `service`, `manager`, `handler`, `util`, `common`, `base`, or `framework` packages and classes
 unless they acquire a concrete, well-defined responsibility.
 
+## Customer payments and Stripe
+
+`payments` owns Fiona's capability, provider attempts, narrow `StripeGateway` and official
+SDK adapter. HTTP DTOs remain in `http/CustomerPaymentRoutes.kt`; all nine endpoints are
+ordinary executable contract routes registered through FionaApi, including raw webhook
+verification. No raw-routing/architecture exception, second pool, scheduler, framework,
+local financial replica or upstream change is needed. `commerce-runtime` remains 0.0.27.
+
+- **Capability.** One immutable public UUID per inquiry, random 256-bit generation nonce,
+  HMAC-SHA256 bearer under the separately managed `FIONAS_PAYMENT_ACCESS_KEY`, and only
+  its SHA-256 hash in persistence. Staff can retrieve/resend the stable link without
+  per-link recoverable bearer storage. The global derivation key can reconstruct links
+  with database access: protect/back up it separately and plan global rotation around
+  pending provider authorizations. Ordinary rotation changes nonce/hash under the
+  canonical association lock and invalidates old access immediately. The URL is
+  `{publicOrigin}/pay/{publicId}#{secret}`; backend authorization uses exactly one
+  `X-Fionas-Payment-Token` header. No bearer enters backend paths, provider URLs, public
+  responses, logs or diagnostics. Staff link/Checkout wrappers redact `toString`.
+- **Staff authority.** GET/POST `/staff/requests/{id}/payment-access`, POST suffixes
+  `/rotate` and `/revoke`, GET `/payment-attempts`, and POST
+  `/payment-attempts/{attemptId}/reconcile` require a USER and all of
+  `fionas.payment-access.manage`, `fionas.inquiries.read`, `commerce.financial-document.read`.
+  The new catalog permission has no automatic role grants. Unsafe cookie requests retain
+  trusted-Origin policy. GET never mutates. Issue/reactivate/rotate only QUOTED/BOOKED/SERVED;
+  CLOSED allows existing link retrieval/revocation, never new access. No email is sent.
+- **Public contracts.** GET `/public/payments/{publicId}` reads one unlocked REPEATABLE
+  READ with ReadStaffRequest's canonical integrity checks; only event date, inquiry/document
+  identity, lifecycle, business revision, exact decimal-string totals/paid/balance/deposit,
+  safe receipt history and provider pending indicators escape. Accepted Quote evidence
+  remains immutable; the latest Invoice/business revision governs current obligations.
+  POST suffix `/checkout-sessions` requires one bounded Idempotency-Key, reviewed ledger
+  and business revisions, and optional integer USD cents. Deposits must be complete;
+  Invoice partials are positive, bounded by balance, and Stripe's 50..99999999 cents.
+  No public staff/SERVICE authentication. All responses are no-store; frontend must use
+  noindex/no-referrer, remove fragments, preserve credentials only in tab sessionStorage,
+  and exclude sensitive headers/responses from observability.
+- **Durable creation.** V10 stores only independent provider authorizations/outcomes in
+  `inquiry_payment_access`, `stripe_payment_attempts`, `stripe_webhook_events`. This is
+  the deliberate exception to blanket financial-column-name guards: authorized money
+  and currency describe integration input, not ledger settlement. No balances, ledger
+  snapshots/lines, refunds or allocation replicas exist. The only new runtime FK is
+  issuance's published USER key (fourteen runtime FKs total). An active-attempt partial
+  unique index and canonical association lock serialize across instances. Key/body
+  fingerprints precede creation; no transaction spans Stripe I/O. Permanent attempt UUID
+  is provider idempotency; replay only within 25 minutes of authorization, then bounded
+  discovery without replacement creation. Unknown absence stays reserved for investigation.
+  One-hour sessions use trusted public-ID-only return URLs, never customer-supplied origins.
+- **Provider boundary.** Official stripe-java 34.1.0 / snapshot 2026-10-28.endive, USD,
+  card-only eligibility (including card wallets), one line item, no discounts, automatic
+  tax, adaptive pricing, saved-method setup, Billing or delayed bank/BNPL. Session recovery
+  verifies a server HMAC authorization proof as well as durable IDs/amount/environment/
+  account, never metadata identity alone. The adapter independently validates succeeded
+  PaymentIntent status and received amount before exposing paid state.
+- **Webhook transaction.** POST `/integrations/stripe/webhook` authenticates the original
+  strict UTF-8 bytes (max 256 KiB) with SDK Stripe-Signature verification, not a session.
+  Unsupported snapshot versions fail closed. Authoritative Stripe retrieval precedes
+  one association-locked transaction. The transaction-taking `RecordDocumentPayment.record`
+  core preserves exact-deposit acceptance, provenance, Invoice identity and timeline
+  invalidation; Invoice payments additionally match authorized business terms/current
+  balance. Captured stale terms use runtime `recordPayment(transaction, …)` as unapplied
+  money with an attempt relationship and RECONCILIATION_REQUIRED. No speculative booking,
+  forced allocation or automatic closure. Event disposition and attempt/ledger identity
+  commit together. Duplicate event/payment identities cannot double-credit. A pending
+  completed Checkout never settles. Unknown/transient failures return non-success for retry.
+- **External adjustments.** Refund/dispute events persist minimal IDs as EXTERNAL_ADJUSTMENT
+  exceptions and log static support diagnostics, even before original payment. No automatic
+  refund/unwind or BOOKED change. Operators verify actual provider outcomes and use existing
+  runtime refund/allocation operations with their unchanged permissions. Exceptions remain
+  historical; no silent acknowledgement/automatic clearing is implemented. Public collection
+  blocks only while supported runtime payment history still has unallocated value from
+  a reconciliation-required attempt; a verified manual refund/allocation can resolve that
+  block without changing the historical provider outcome.
+- **Disabled/deployment.** FIONAS_STRIPE_ENABLED=false by default; enabled requires
+  explicit account, environment, key, webhook secret, public origin and access key.
+  No client/service is composed when disabled; payment routes document 503 stripe_disabled.
+  No live infrastructure/webhook registration is part of this change. See
+  [operations](docs/stripe-payments-operations.md) and the exact
+  [frontend handoff](docs/stripe-payments-frontend-handoff.md) for rollout, recovery limits,
+  mandatory adjustment monitoring and test-mode acceptance.
+
 ## Premature abstraction rule
 
 Do not create generic frameworks, `Repository<T, ID>`, `CrudRepository`,
@@ -1905,8 +1985,8 @@ future requirements. Repositories are narrow and intention-revealing. Extract on
 real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: allocation reversals,
-Stripe or any payment provider or SDK, payment
-webhooks, caller/actor delegation, OAuth/OIDC, refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1,
+providers beyond the dedicated Stripe Checkout slice, caller/actor delegation, OAuth/OIDC,
+refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1,
 persisted financial projections, CQRS, separate Booking aggregates,
 Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments or HTML, provider conversation state changes, provider event backfill and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),

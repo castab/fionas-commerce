@@ -105,9 +105,9 @@ class MigrationLifecycleSpec :
                 // Independent histories: the runtime's additive outbox V2 and JSONB V3 needs no Fiona migration,
                 // and Fiona's additive V2 is the next integer of Fiona's own history.
                 database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
                 database.history(FIONA_MIGRATION_SCHEMA).first() shouldContain "V1__fionas_baseline.sql"
-                database.history(FIONA_MIGRATION_SCHEMA).last() shouldContain "V9__customer_facing_revisions.sql"
+                database.history(FIONA_MIGRATION_SCHEMA).last() shouldContain "V10__customer_payment_access.sql"
                 database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2", "3")
                 database.history("commerce").first() shouldContain "V1__commerce_baseline.sql"
                 database.history("commerce").last() shouldContain "V3__outbox_jsonb_payload.sql"
@@ -136,7 +136,7 @@ class MigrationLifecycleSpec :
                         "SELECT count(*) FROM pg_constraint WHERE connamespace = 'fionas'::regnamespace AND contype = 'f' " +
                             "AND confrelid IN ('commerce.users'::regclass, 'commerce.financial_document_snapshots'::regclass)",
                     ).single()
-                    .toInt() shouldBe 13
+                    .toInt() shouldBe 14
             }
         }
 
