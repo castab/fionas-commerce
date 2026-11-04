@@ -162,6 +162,12 @@ explicit allocation unwinds. Those operations require their existing financial p
 link-management permission grants no refund authority. Never reverse allocations, change
 BOOKED or close an inquiry speculatively. Track event IDs in the operator incident record.
 
+A lost dispute is not a Stripe refund. Keep chargeback losses as actionable incidents;
+do not invent a refund ID or assume that an existing refund operation represents them.
+Any automated or ledger-level chargeback mapping needs a separate explicit shared-commerce
+semantics decision. This is deferred work, not a blocker for this slice's required exception
+reporting, and must be part of the operational acceptance before live collection.
+
 For stale deposits, leave the receipt unapplied and the inquiry QUOTED. Do not force it
 through a different proposal or split it into a canonical deposit. Staff can return the
 actual money in Stripe and then record the verified refund through existing APIs, or
