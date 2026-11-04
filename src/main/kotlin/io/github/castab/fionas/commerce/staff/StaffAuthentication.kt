@@ -58,6 +58,7 @@ class PasswordHasher {
  * example the server-side web frontend) holds them only through its current roles.
  */
 object FionaPermissions {
+    val PaymentAccessManage = PermissionKey("fionas.payment-access.manage")
     val CredentialsManage = PermissionKey("fionas.credentials.manage")
     val InquiriesRead = PermissionKey("fionas.inquiries.read")
     val InquiriesCreate = PermissionKey("fionas.inquiries.create")
@@ -79,6 +80,12 @@ object FionaPermissions {
 
     val definitions =
         listOf(
+            PermissionDefinition(
+                PaymentAccessManage,
+                "Manage customer payment access",
+                "As a verified staff USER, retrieve, issue, rotate and revoke inquiry payment links and reconcile Stripe attempts",
+                PermissionGroup("fionas.payments"),
+            ),
             PermissionDefinition(
                 CredentialsManage,
                 "Manage staff credentials",

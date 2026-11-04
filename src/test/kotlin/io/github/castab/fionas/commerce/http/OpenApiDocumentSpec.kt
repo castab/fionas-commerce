@@ -52,6 +52,21 @@ class OpenApiDocumentSpec :
 
         fun schema(name: String) = document.at("components", "schemas", name).jsonObject
 
+        test("customer checkout documents explicit bounded recovery and a side-effect-free local summary hint") {
+            val checkout = document.at("paths", "/public/payments/{publicId}/checkout-sessions", "post")
+            listOf(
+                "checkout_in_progress",
+                "payment_processing",
+                "payment_state_changed",
+                "checkout_recovery_conflict",
+                "checkout_reconciliation_required",
+            ).forEach { checkout.text("description") shouldContain it }
+            checkout.text("operationId") shouldBe "createCustomerCheckoutSession"
+            val hint = schema("CustomerPaymentResponse").at("properties", "checkoutRecoveryAvailable")
+            hint.text("type") shouldBe "boolean"
+            hint.text("description") shouldContain "no provider I/O"
+            schema("CustomerPaymentResponse").strings("required").contains("checkoutRecoveryAvailable") shouldBe false
+        }
         test("native SSE contract describes event-stream rather than a JSON response") {
             val endpoint = document.at("paths", "/staff/requests/{inquiryId}/updates", "get")
             endpoint.at("responses", "200", "content").jsonObject.keys shouldBe setOf("text/event-stream")
@@ -323,6 +338,24 @@ class OpenApiDocumentSpec :
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
+                Triple("/staff/requests/{inquiryId}/payment-access", "get", "getInquiryPaymentAccess") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
+                Triple("/staff/requests/{inquiryId}/payment-access", "post", "issueInquiryPaymentAccess") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
+                Triple("/staff/requests/{inquiryId}/payment-access/rotate", "post", "rotateInquiryPaymentAccess") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
+                Triple("/staff/requests/{inquiryId}/payment-access/revoke", "post", "revokeInquiryPaymentAccess") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
+                Triple("/staff/requests/{inquiryId}/payment-attempts", "get", "listInquiryPaymentAttempts") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
+                Triple("/staff/requests/{inquiryId}/payment-attempts/{attemptId}/reconcile", "post", "reconcileInquiryPaymentAttempt") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
+                Triple("/public/payments/{publicId}", "get", "readCustomerPaymentSummary") to
+                    listOf("200", "400", "404", "409", "422", "500", "503"),
+                Triple("/public/payments/{publicId}/checkout-sessions", "post", "createCustomerCheckoutSession") to
+                    listOf("200", "400", "404", "409", "422", "500", "503"),
+                Triple("/integrations/stripe/webhook", "post", "receiveStripeWebhook") to
+                    listOf("204", "400", "404", "409", "422", "500", "503"),
                 Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "acknowledgeInquiryCommunication") to
                     listOf("204", "400", "401", "403", "404", "409", "422", "500"),
                 Triple("/staff/requests/{inquiryId}/updates", "get", "subscribeStaffRequestUpdates") to
@@ -407,6 +440,15 @@ class OpenApiDocumentSpec :
         // Each Fiona operation's tag.
         val tags =
             mapOf(
+                "getInquiryPaymentAccess" to "Customer payments",
+                "issueInquiryPaymentAccess" to "Customer payments",
+                "rotateInquiryPaymentAccess" to "Customer payments",
+                "revokeInquiryPaymentAccess" to "Customer payments",
+                "listInquiryPaymentAttempts" to "Customer payments",
+                "reconcileInquiryPaymentAttempt" to "Customer payments",
+                "readCustomerPaymentSummary" to "Customer payments",
+                "createCustomerCheckoutSession" to "Customer payments",
+                "receiveStripeWebhook" to "Customer payments",
                 "readStaffDashboard" to "Staff dashboard",
                 "listStaffRequests" to "Staff requests",
                 "readStaffRequest" to "Staff requests",
@@ -493,6 +535,14 @@ class OpenApiDocumentSpec :
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
+                "PaymentAccessResponse",
+                "CustomerPaymentDocumentResponse",
+                "CustomerPaymentReceiptResponse",
+                "CustomerPaymentResponse",
+                "CreateCheckoutRequest",
+                "CheckoutResponse",
+                "StripeAttemptResponse",
+                "StripeAttemptsResponse",
                 "StaffDashboardResponse",
                 "StaffRequestResponse",
                 "AcknowledgeCommunicationRequest",
@@ -646,6 +696,7 @@ class OpenApiDocumentSpec :
             document.text("info", "version") shouldBe fionaVersion()
             document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder
                 listOf(
+                    "Customer payments",
                     "Staff dashboard",
                     "Staff requests",
                     "Staff proposals",
@@ -695,6 +746,12 @@ class OpenApiDocumentSpec :
                 "declineInquiry",
                 // Customer email is signed by and attributed to the sending staff USER.
                 "sendStaffConversationReply",
+                "getInquiryPaymentAccess",
+                "issueInquiryPaymentAccess",
+                "rotateInquiryPaymentAccess",
+                "revokeInquiryPaymentAccess",
+                "listInquiryPaymentAttempts",
+                "reconcileInquiryPaymentAttempt",
             )
 
         test("line amounts document precise unit rates with settlement-exact subtotals and minor-unit tax") {
@@ -735,7 +792,7 @@ class OpenApiDocumentSpec :
                     requirements(path, method) shouldBe
                         when (operationId) {
                             // Public: credentials obtain a session, so none is required.
-                            "login" -> emptyList()
+                            "login", "readCustomerPaymentSummary", "createCustomerCheckoutSession", "receiveStripeWebhook" -> emptyList()
                             // Logout revokes browser sessions only and is idempotent cleanup without one:
                             // staffSession OR anonymous ({}). A service token is never advertised for it.
                             "logout" -> listOf(setOf("staffSession"), emptySet())
@@ -859,6 +916,23 @@ class OpenApiDocumentSpec :
         val reply = "/staff/requests/{inquiryId}/conversation/replies"
         val fionaLocalCodes =
             mapOf(
+                "stripe_disabled" to
+                    operations.keys
+                        .filter {
+                            it.third in
+                                setOf(
+                                    "getInquiryPaymentAccess",
+                                    "issueInquiryPaymentAccess",
+                                    "rotateInquiryPaymentAccess",
+                                    "revokeInquiryPaymentAccess",
+                                    "listInquiryPaymentAttempts",
+                                    "reconcileInquiryPaymentAttempt",
+                                    "readCustomerPaymentSummary",
+                                    "createCustomerCheckoutSession",
+                                    "receiveStripeWebhook",
+                                )
+                        }.map { Triple(it.first, it.second, "503") }
+                        .toSet(),
                 "conversation_changed" to
                     setOf(Triple(reply, "post", "409"), Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "409")),
                 "email_send_rejected" to setOf(Triple(reply, "post", "502")),
@@ -1045,7 +1119,8 @@ class OpenApiDocumentSpec :
             replyKey.text("description") shouldContain "SAME key"
             operations.keys
                 .filter { (path, method) ->
-                    (path to method) !in setOf("/inquiries" to "post", reply to "post")
+                    (path to method) !in
+                        setOf("/inquiries" to "post", reply to "post", "/public/payments/{publicId}/checkout-sessions" to "post")
                 }.forEach { (path, method) ->
                     operation(path, method)
                         .jsonObject["parameters"]

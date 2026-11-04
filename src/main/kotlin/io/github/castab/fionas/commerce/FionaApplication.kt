@@ -89,6 +89,11 @@ import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
+import io.github.castab.fionas.commerce.payments.CustomerPayments
+import io.github.castab.fionas.commerce.payments.PaymentOperations
+import io.github.castab.fionas.commerce.payments.StripeConfiguration
+import io.github.castab.fionas.commerce.payments.StripeGateway
+import io.github.castab.fionas.commerce.payments.StripeJavaGateway
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.BootstrapFirstAdmin
 import io.github.castab.fionas.commerce.staff.FionaPermissions
@@ -169,6 +174,10 @@ fun fionaApplication(
     conversationReads: ConversationReadConfiguration? = ConversationReadConfiguration.fromEnvironment(),
     conversationSends: ConversationSendConfiguration? = ConversationSendConfiguration.fromEnvironment(),
     timelineUpdatesEnabled: Boolean = timelineUpdatesEnabled(),
+    stripe: StripeConfiguration? =
+        StripeConfiguration
+            .fromEnvironment(),
+    stripeGateway: StripeGateway? = null,
 ): ApplicationContributions {
     var updates: StaffTimelineUpdates? = null
     var nativeUpdates: RoutingSseHandler? = null
@@ -274,6 +283,29 @@ fun fionaApplication(
                 )
             val operations =
                 FionaOperations(
+                    payments =
+                        stripe?.let { configuration ->
+                            val payments =
+                                CustomerPayments(
+                                    context.transactor,
+                                    ledger,
+                                    documentOwners,
+                                    staffRequest,
+                                    RecordDocumentPayment(context.transactor, ledger, documentOwners, authorship, clock, proposalHistory),
+                                    stripeGateway ?: StripeJavaGateway(configuration),
+                                    configuration,
+                                    clock,
+                                )
+                            PaymentOperations(
+                                payments::staffAccess,
+                                payments::manageAccess,
+                                payments::summary,
+                                payments::checkout,
+                                payments::webhook,
+                                payments::staffAttempts,
+                                payments::recover,
+                            )
+                        },
                     prepareStaffTimelineUpdates = prepareUpdates,
                     sendStaffReply = SendStaffReply(
                         context.transactor,

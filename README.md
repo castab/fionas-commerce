@@ -691,8 +691,9 @@ Every publication binds the exact `(documentId, documentVersion, depositRequirem
 and its optional `servicePlanRevision`. `IsCurrentPayableInquiryProposal` reads one REPEATABLE
 READ snapshot: only the latest publication whose exact Quote and active approval/revision
 still match is payable. Every reissue, service-only included, supersedes all earlier ids; Invoice makes all publication targets non-payable.
-Business UUIDs are not bearer secrets. No public payment link, payment provider, delivery,
-contact collection, cancellation, or post-payment adjustment workflow is introduced.
+Business UUIDs are not bearer secrets. Customer payment access and Stripe Checkout use the
+separate capability described in [Customer payments](#customer-payments-stripe-checkout).
+Proposal publication itself sends no email and introduces no cancellation workflow.
 
 `IsCurrentPayableInquiryProposal` is only a read/query seam. `RecordDocumentPayment` validates
 the expected proposal id and exact frozen deposit amount under the association lock, then
@@ -2007,6 +2008,35 @@ replaces it with identical content; the GitHub Release is created if it does not
 otherwise only its two assets are replaced. The tag is never created, moved, or rewritten by the
 workflow. So if the image was pushed but the GitHub Release step failed (for example, a
 transient API error), rerun the failed workflow run from the Actions tab.
+
+## Customer payments (Stripe Checkout)
+
+Opt-in backend support provides a stable, inquiry-scoped customer capability, a limited
+payment summary, USD card/wallet hosted Checkout and signed synchronous webhook
+reconciliation. The exact canonical deposit books through the existing ledger operation;
+BOOKED/SERVED Invoices support partial or full outstanding payments. Money captured against
+stale terms is recorded once as unapplied and flagged for staff review. No frontend or
+automatic payment email is included.
+
+The feature defaults off (`FIONAS_STRIPE_ENABLED=false`). Enabled deployments require
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `FIONAS_STRIPE_ACCOUNT_ID`,
+`FIONAS_PUBLIC_BASE_URL`, and `FIONAS_PAYMENT_ACCESS_KEY` (base64 of 32 random bytes).
+`FIONAS_STRIPE_LIVE_MODE` explicitly selects live mode; there is no test/live fallback.
+The official Java SDK is pinned to 34.1.0 / snapshot API 2026-10-28.endive.
+Requests authenticate as Fiona's direct merchant: no `Stripe-Account`/Connect context;
+the key's own merchant identity is checked once per adapter. An explicit checkout POST can
+recover an abandoned Session without the original browser key: only confirmed provider
+expiration/failure permits replacement, while open, processing and unknown outcomes stay
+protected. Summary GET is side-effect-free and exposes `checkoutRecoveryAvailable` for
+the frontend's deliberate recovery action.
+Staff must explicitly receive the new `fionas.payment-access.manage` permission;
+no role grants are silently changed. Existing manual payment APIs retain their behavior.
+
+Read the [complete frontend/API handoff](docs/stripe-payments-frontend-handoff.md) and
+[configuration, Railway, Stripe CLI and reconciliation runbook](docs/stripe-payments-operations.md)
+before enabling. External refunds/disputes are durable exceptions requiring verified
+manual ledger reconciliation. CI uses a deterministic fake gateway and real PostgreSQL;
+actual test-mode Checkout and webhook configuration still require an operator exercise.
 
 ## Testing
 

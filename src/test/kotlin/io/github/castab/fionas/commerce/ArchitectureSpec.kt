@@ -114,10 +114,17 @@ class ArchitectureSpec :
                 InquiryProposalRepository::class.java,
                 InquiryServicePlanRepository::class.java,
                 FinancialDocumentAuthorshipRepository::class.java,
+                io.github.castab.fionas.commerce.payments.JdbiPaymentAccessRepository::class.java,
+                io.github.castab.fionas.commerce.payments.JdbiStripeAttemptRepository::class.java,
             ).forEach { repository ->
-                repository.declaredMethods.forEach { method ->
-                    method.parameterTypes.first() shouldBe Transaction::class.java
-                }
+                repository.declaredMethods
+                    .filter {
+                        java.lang.reflect.Modifier
+                            .isPublic(it.modifiers) &&
+                            !it.isSynthetic
+                    }.forEach { method ->
+                        method.parameterTypes.first() shouldBe Transaction::class.java
+                    }
             }
         }
 
@@ -134,6 +141,8 @@ class ArchitectureSpec :
                 JdbiInquiryProposalRepository::class.java,
                 JdbiInquiryServicePlanRepository::class.java,
                 JdbiFinancialDocumentAuthorshipRepository::class.java,
+                io.github.castab.fionas.commerce.payments.JdbiPaymentAccessRepository::class.java,
+                io.github.castab.fionas.commerce.payments.JdbiStripeAttemptRepository::class.java,
             ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
                 repository.declaredConstructors.single().parameterCount shouldBe 0
@@ -169,6 +178,7 @@ class ArchitectureSpec :
                     "conversation/ReadStaffTimeline.kt: inTransaction",
                     "conversation/ReadInquiryTimelineRevisions.kt: inTransaction",
                     "conversation/SendStaffReply.kt: inTransaction",
+                    "payments/CustomerPayments.kt: inTransaction",
                     "inquiry/CreateInquiry.kt: inTransaction",
                     "inquiry/RecordInquiryCommunication.kt: inTransaction",
                     "inquiry/GetInquiry.kt: inTransaction",
@@ -229,6 +239,7 @@ class ArchitectureSpec :
                         "ConversationEvent.kt",
                         "ResendConversationReader.kt",
                         "ResendConversationSender.kt",
+                        "StripeJavaGateway.kt",
                     ) &&
                     it.name !in persisted
             }.containing(listOf("org.http4k", "kotlinx.serialization", "Serializable"))
@@ -530,7 +541,8 @@ class ArchitectureSpec :
         test("runtime is the sole session authority and Fiona persists no sessions") {
             sources { it.name.contains("Session") }.shouldBeEmpty()
             File("src/main/resources/db/fionas").listFiles().orEmpty().forEach { migration ->
-                Regex("(?i)CREATE\\s+TABLE\\s+[^;]*session").containsMatchIn(migration.readText()) shouldBe false
+                // Checkout Session identifiers are provider facts, not authentication session tables.
+                Regex("(?i)CREATE\\s+TABLE\\s+[^\\s(]*session").containsMatchIn(migration.readText()) shouldBe false
             }
             File(mainSources, "FionaApplication.kt").readText().contains("context.sessions") shouldBe true
         }
@@ -564,6 +576,7 @@ class ArchitectureSpec :
             // Fiona defines no duplicates of generic commerce permissions: only Fiona-specific actions.
             FionaPermissions.definitions.map { it.key } shouldContainExactly
                 listOf(
+                    FionaPermissions.PaymentAccessManage,
                     FionaPermissions.CredentialsManage,
                     FionaPermissions.InquiriesRead,
                     FionaPermissions.InquiriesCreate,

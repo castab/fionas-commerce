@@ -6,6 +6,7 @@ import io.github.castab.commerce.payment.PaymentMethod
 import io.github.castab.commerce.payment.PaymentRecord
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.operation.validating
+import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.math.BigDecimal
 import java.time.Clock
@@ -65,22 +66,31 @@ class RecordDocumentPayment(
     operator fun invoke(command: Command): RecordedPayment {
         val now = clock.instant().truncatedTo(ChronoUnit.MICROS)
         return transactor.inTransaction { transaction ->
-            val current = documents.expectLatest(transaction, command.documentId, command.documentVersion)
-            val document = current.document
-            document.requirePaymentDestination()
-            val amount = paymentMoney(command.amount, document.currency)
-            val accepted = deposits.validate(transaction, current, command.expectedProposalId, amount)
-            val payment =
-                validating { PaymentRecord(newPaymentId(), amount, command.method, command.receivedAt ?: now, command.externalReference) }
-            val allocation =
-                ledger.recordPaymentAgainstDocument(transaction, payment, newAllocationId(), document.reference, payment.amount, now)
-            val view = documents.bookIfDepositSatisfied(transaction, current)
-            accepted?.let { deposits.requireBooked(it, view) }
-            val result =
-                view?.let { documents.describeLocked(transaction, current.inquiryId, it) }
-                    ?: documents.describeLocked(transaction, current.inquiryId, document.id)
-            advanceTimelines(transaction, payment.id)
-            RecordedPayment(payment, allocation, result)
+            record(transaction, command, now)
         }
+    }
+
+    /** Caller-owned composition for provider receipts and their durable reconciliation outcome. */
+    internal fun record(
+        transaction: Transaction,
+        command: Command,
+        now: Instant,
+    ): RecordedPayment {
+        val current = documents.expectLatest(transaction, command.documentId, command.documentVersion)
+        val document = current.document
+        document.requirePaymentDestination()
+        val amount = paymentMoney(command.amount, document.currency)
+        val accepted = deposits.validate(transaction, current, command.expectedProposalId, amount)
+        val payment =
+            validating { PaymentRecord(newPaymentId(), amount, command.method, command.receivedAt ?: now, command.externalReference) }
+        val allocation =
+            ledger.recordPaymentAgainstDocument(transaction, payment, newAllocationId(), document.reference, payment.amount, now)
+        val view = documents.bookIfDepositSatisfied(transaction, current)
+        accepted?.let { deposits.requireBooked(it, view) }
+        val result =
+            view?.let { documents.describeLocked(transaction, current.inquiryId, it) }
+                ?: documents.describeLocked(transaction, current.inquiryId, document.id)
+        advanceTimelines(transaction, payment.id)
+        return RecordedPayment(payment, allocation, result)
     }
 }
