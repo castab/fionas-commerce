@@ -29,8 +29,10 @@ class StripeJavaGateway internal constructor(
     // Verify the key's direct merchant once per adapter, never during construction or inside PostgreSQL.
     private val verifiedMerchant: Unit by lazy {
         val account = client.v1().accounts().retrieveCurrent(options())
-        check(account.id == configuration.accountId) { "Stripe key does not belong to the configured merchant" }
+        if (account.id != configuration.accountId) throw StripeMerchantMismatch()
     }
+
+    override fun verifyMerchant() = call {}
 
     private fun options(key: String? = null): RequestOptions =
         RequestOptions

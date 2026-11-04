@@ -17,6 +17,7 @@ import io.github.castab.fionas.commerce.testing.withBearer
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import org.http4k.core.Method
 import org.http4k.core.Request
@@ -67,7 +68,15 @@ internal class FakeStripe(
     val retrieves = AtomicInteger()
     val discoveries = AtomicInteger()
 
+    /** Simulates a secret key belonging to another merchant: every provider operation refuses, as the SDK adapter does. */
+    var merchantMismatch = false
+
+    override fun verifyMerchant() {
+        if (merchantMismatch) throw StripeMerchantMismatch()
+    }
+
     override fun create(attempt: StripeAttempt): StripeCheckout {
+        verifyMerchant()
         onCreate?.invoke()
         authorizations[attempt.id] = attempt
         val session =
@@ -96,6 +105,7 @@ internal class FakeStripe(
     }
 
     override fun retrieve(sessionId: String): StripeCheckout {
+        verifyMerchant()
         retrieves.incrementAndGet()
         val result = checkNotNull(sessions[sessionId])
         onRetrieve?.invoke(result)
@@ -157,7 +167,10 @@ class StripePaymentsSpec :
             app.authorization.replaceRolePermissions(CommerceRoles.Administrator, grants + FionaPermissions.PaymentAccessManage)
         }
         afterSpec { app.close() }
-        afterTest { fake.onCreate = null }
+        afterTest {
+            fake.onCreate = null
+            fake.merchantMismatch = false
+        }
 
         fun initial(email: String = "stripe-${UUID.randomUUID()}@example.com"): String {
             val id = app.createInquiry(email = email)
@@ -361,6 +374,40 @@ class StripePaymentsSpec :
             checkout(link, snapshot = before).status shouldBe Status.CONFLICT
             attempts(id).items.size shouldBe 1
             summary(link).unavailableReason shouldBe "PAYMENT_IN_PROGRESS"
+        }
+        test("a key for another merchant refuses checkout as stripe_disabled and authorizes no attempt") {
+            val id = initial()
+            val link = link(id)
+            val before = summary(link)
+            val key = UUID.randomUUID().toString()
+            fake.merchantMismatch = true
+            val created = fake.created.get()
+            repeat(2) {
+                val refused = checkout(link, key, snapshot = before)
+                refused.status shouldBe Status.SERVICE_UNAVAILABLE
+                refused.header("Cache-Control") shouldBe "no-store"
+                refused.bodyString() shouldContain "\"stripe_disabled\""
+            }
+            fake.created.get() shouldBe created
+            attempts(id).items.size shouldBe 0
+            val after = summary(link)
+            after.canPay shouldBe true
+            after.paymentInProgress shouldBe false
+            // Once the deployment is corrected the same reviewed command proceeds with no recovery or reconciliation.
+            fake.merchantMismatch = false
+            redirect(checkout(link, key, snapshot = before)).state shouldBe "OPEN"
+            attempts(id).items.size shouldBe 1
+        }
+        test("staff recovery under a mismatched merchant is unavailable and leaves the attempt untouched") {
+            val id = initial()
+            val link = link(id)
+            val opened = redirect(checkout(link))
+            fake.merchantMismatch = true
+            val refused = app.adminPost("/staff/requests/$id/payment-attempts/${opened.attemptId}/reconcile")
+            refused.status shouldBe Status.SERVICE_UNAVAILABLE
+            refused.bodyString() shouldContain "\"stripe_disabled\""
+            attempts(id).items.single().state shouldBe "OPEN"
+            summary(link).paymentInProgress shouldBe true
         }
         test("timeout after provider creation recovers the same session and committed authorization") {
             val id = initial()

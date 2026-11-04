@@ -64,8 +64,20 @@ data class StripeSignal(
     val paymentIntentId: String? = null,
 )
 
+/**
+ * The configured secret key belongs to a different Stripe merchant than `FIONAS_STRIPE_ACCOUNT_ID`. A deployment
+ * error, never a payment outcome: no provider request beyond the account lookup was made.
+ */
+class StripeMerchantMismatch : IllegalStateException("Stripe key does not belong to the configured merchant")
+
 /** Fiona's hosted card Checkout boundary. No network call runs inside a database transaction. */
 interface StripeGateway {
+    /**
+     * Confirms the key's direct merchant before a checkout command authorizes anything, so a misconfigured
+     * deployment refuses payment without leaving an active attempt behind. Throws [StripeMerchantMismatch].
+     */
+    fun verifyMerchant()
+
     fun create(attempt: StripeAttempt): StripeCheckout
 
     fun retrieve(sessionId: String): StripeCheckout

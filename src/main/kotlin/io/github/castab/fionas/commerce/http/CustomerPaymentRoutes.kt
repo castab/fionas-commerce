@@ -15,6 +15,7 @@ import io.github.castab.fionas.commerce.payments.PaymentAccessAction
 import io.github.castab.fionas.commerce.payments.PaymentBearer
 import io.github.castab.fionas.commerce.payments.PaymentOperations
 import io.github.castab.fionas.commerce.payments.StaffPaymentAccess
+import io.github.castab.fionas.commerce.payments.StripeMerchantMismatch
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.Serializable
 import org.http4k.contract.ContractRoute
@@ -123,6 +124,7 @@ data class StripeAttemptsResponse(
 
 private val paymentErrors = jsonBody(ErrorResponse.serializer())
 private val disabledStripe = ErrorResponse("stripe_disabled", "Online payments are disabled")
+private val unavailableStripe = ErrorResponse("stripe_disabled", "Online payments are unavailable")
 private val paymentTag = Tag("Customer payments", "Inquiry-scoped customer access and hosted Stripe Checkout.")
 private val paymentSecret = Header.required("X-Fionas-Payment-Token")
 private val checkoutKey = Header.required("Idempotency-Key")
@@ -186,7 +188,12 @@ private fun RouteMetaDsl.paymentMetadata(
         "Unexpected or transient failure. Webhook sender must retry; no committed receipt is lost.",
         INTERNAL_FAILURE,
     )
-    returning(Status.SERVICE_UNAVAILABLE, paymentErrors to disabledStripe, "`stripe_disabled`: Online payments are disabled.")
+    returning(
+        Status.SERVICE_UNAVAILABLE,
+        paymentErrors to disabledStripe,
+        "`stripe_disabled`: Online payments are disabled, or the deployment's Stripe key does not belong to its configured " +
+            "merchant (checkout and staff recovery; no attempt is authorized).",
+    )
 }
 
 private fun AccessControl.paymentStaff(): Filter =
@@ -210,6 +217,21 @@ private fun paymentEnabled(operations: PaymentOperations?) =
             if (operations == null) Response(Status.SERVICE_UNAVAILABLE).with(paymentErrors of disabledStripe) else next(request)
         }
     }
+
+/** A misconfigured merchant is a definite refusal, not an unknown outcome the caller should retry. */
+private val merchantMismatchUnavailable =
+    Filter { next ->
+        { request ->
+            try {
+                next(request)
+            } catch (_: StripeMerchantMismatch) {
+                Response(Status.SERVICE_UNAVAILABLE).with(paymentErrors of unavailableStripe)
+            }
+        }
+    }
+
+/** Payments are enabled and the deployment's key belongs to its configured merchant (provider-calling routes). */
+private fun paymentUsable(operations: PaymentOperations?) = paymentEnabled(operations).then(merchantMismatchUnavailable)
 
 private val checkoutRecoveryErrors =
     Filter { next ->
@@ -287,7 +309,7 @@ internal fun paymentRoutes(
         receiving(checkoutBody to CreateCheckoutRequest(2, 2))
         returning(Status.OK, redirectBody to exampleCheckout)
     } bindContract Method.POST to { id: String, _: String ->
-        noPaymentCache.then(paymentEnabled(operations)).then(checkoutRecoveryErrors).then { request: Request ->
+        noPaymentCache.then(paymentUsable(operations)).then(checkoutRecoveryErrors).then { request: Request ->
             val input = checkoutBody(request)
             val key = oneHeader(request, "Idempotency-Key")
             if (!key.matches(Regex("[A-Za-z0-9_-]{1,128}"))) throw LensFailure(Invalid(checkoutKey.meta))
@@ -343,7 +365,7 @@ internal fun paymentRoutes(
         )
         returning(Status.OK, redirectBody to exampleCheckout)
     } bindContract Method.POST to { id: String, _: String, attempt: String, _: String ->
-        noPaymentCache.then(access.paymentStaff()).then(paymentEnabled(operations)).then { _: Request ->
+        noPaymentCache.then(access.paymentStaff()).then(paymentUsable(operations)).then { _: Request ->
             Response(Status.OK).with(redirectBody of checkNotNull(operations).recover(inquiryId(id), paymentUuid(attempt)).response())
         }
     }

@@ -32,7 +32,12 @@ is an expected merchant identity, not a request-routing header. Before its first
 operation each adapter retrieves `/v1/account` using that same key and checks the returned
 ID. A successful verification is cached for that adapter's lifetime; construction and
 signature-only parsing do not connect. A failed check never reaches Checkout and is retried
-on a later operation. All Checkout, discovery, expiration, PaymentIntent and Charge calls
+on a later operation. Checkout commands and staff reconcile run the check before recording
+or touching any attempt: a key that belongs to another merchant (a common case is a key
+from a Stripe Sandbox, whose `acct_…` differs from the main account) answers
+503 `stripe_disabled`, authorizes nothing and logs `Stripe merchant mismatch` at ERROR.
+Fix the variables and restart; the customer's same reviewed command then proceeds normally.
+All Checkout, discovery, expiration, PaymentIntent and Charge calls
 use the same verified direct client. Credentials are not changed on a running instance;
 restart after secret changes so verification runs again.
 

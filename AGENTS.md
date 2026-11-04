@@ -1963,7 +1963,10 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   Only direct merchant mode is supported. All SDK requests use the configured secret key
   without Stripe-Account or Stripe-Context headers. The first provider operation verifies
   `GET /v1/account` against the configured merchant ID, cached per adapter; constructor and
-  signature parsing perform no network I/O. Signed direct snapshots normally omit top-level
+  signature parsing perform no network I/O. Checkout commands and staff reconcile call
+  `StripeGateway.verifyMerchant()` first, outside PostgreSQL, so a key for another merchant
+  (`StripeMerchantMismatch`) authorizes no attempt and answers 503 `stripe_disabled`, never
+  a retryable 500. A failed check is not cached. Signed direct snapshots normally omit top-level
   `account`; any non-null Connect context and any live/test mismatch are rejected. Deployment
   independently verifies that the destination signing secret belongs to the same merchant.
 - **Webhook transaction.** POST `/integrations/stripe/webhook` authenticates the original
@@ -1991,7 +1994,8 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   by a timestamp watermark. No acknowledgement workflow or new administration endpoint.
 - **Disabled/deployment.** FIONAS_STRIPE_ENABLED=false by default; enabled requires
   explicit account, environment, key, webhook secret, public origin and access key.
-  No client/service is composed when disabled; payment routes document 503 stripe_disabled.
+  No client/service is composed when disabled; payment routes document 503 stripe_disabled,
+  which checkout and staff reconcile also return for a merchant mismatch.
   No live infrastructure/webhook registration is part of this change. See
   [operations](docs/stripe-payments-operations.md) and the exact
   [frontend handoff](docs/stripe-payments-frontend-handoff.md) for rollout, recovery limits,
