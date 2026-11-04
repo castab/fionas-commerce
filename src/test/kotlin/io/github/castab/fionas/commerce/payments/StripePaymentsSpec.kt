@@ -62,6 +62,10 @@ internal class FakeStripe(
     val created = AtomicInteger()
     var timeoutNext = false
     var onCreate: (() -> Unit)? = null
+    var onRetrieve: ((StripeCheckout) -> Unit)? = null
+    var onDiscover: (() -> Unit)? = null
+    val retrieves = AtomicInteger()
+    val discoveries = AtomicInteger()
 
     override fun create(attempt: StripeAttempt): StripeCheckout {
         onCreate?.invoke()
@@ -91,9 +95,18 @@ internal class FakeStripe(
         return session
     }
 
-    override fun retrieve(sessionId: String) = checkNotNull(sessions[sessionId])
+    override fun retrieve(sessionId: String): StripeCheckout {
+        retrieves.incrementAndGet()
+        val result = checkNotNull(sessions[sessionId])
+        onRetrieve?.invoke(result)
+        return result
+    }
 
-    override fun discover(attempt: StripeAttempt): StripeCheckout? = sessions.values.singleOrNull { it.attemptId == attempt.id }
+    override fun discover(attempt: StripeAttempt): StripeCheckout? {
+        discoveries.incrementAndGet()
+        onDiscover?.invoke()
+        return sessions.values.singleOrNull { it.attemptId == attempt.id }
+    }
 
     override fun expire(sessionId: String): StripeCheckout = change(sessionId, "expired", "unpaid")
 
@@ -102,7 +115,7 @@ internal class FakeStripe(
         state: String = "complete",
         paid: String = "paid",
     ): StripeCheckout {
-        val original = retrieve(sessionId)
+        val original = checkNotNull(sessions[sessionId])
         return StripeCheckout(
             original.id,
             original.attemptId,

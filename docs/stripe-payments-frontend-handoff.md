@@ -92,6 +92,7 @@ Example:
   "canPay": true,
   "paymentInProgress": false,
   "reconciliationPending": false,
+  "checkoutRecoveryAvailable": false,
   "history": []
 }
 ```
@@ -179,13 +180,40 @@ fetch the summary; never declare a payment received from a query parameter. Canc
 not expire the session or release its reservation. Keep the pending key/body and resume
 with that same key until Stripe confirms completion/expiry.
 
-While a payment is in progress, show “Payment confirmation pending” and suppress another
-payment. Poll the summary with bounded backoff while visible. If it remains pending after
-an interrupted checkout, retry the saved checkout command to retrieve/reconcile that
-session. A confirmed expired/failed attempt releases the reservation; only then create a
-new key for a new deliberate payment. An ambiguous creation never releases merely because
-time passed. Creation replay is limited to the first 25 minutes; later recovery discovers
-the original provider session and never recreates it after Stripe idempotency retention.
+`checkoutRecoveryAvailable` (optional, default false) is a local hint that an active attempt
+can be checked by an explicit POST. It does **not** mean Stripe has expired it. GET remains
+lightweight and side-effect-free, and performs no provider I/O. Do not hide all actions
+solely because `canPay:false` / `PAYMENT_IN_PROGRESS`: when recovery is available, offer
+“Check previous payment and continue”. Keep the ordinary Pay button disabled.
+
+If the original key/body are available, retry them to recover exactly that authorization.
+If the customer returned in another browser or lost sessionStorage, their stable link is
+sufficient: fetch the current summary, show its terms, then submit the existing checkout
+endpoint with a fresh UUID key and reviewed versions on a deliberate click. The server
+checks at most one observed active attempt outside PostgreSQL and reconciles it before
+deciding whether to authorize anything new. Confirmed expired/failed Sessions permit a
+replacement against current terms. A still-open Session never gets a replacement; the
+customer can resume the original checkout if available or wait for confirmed expiration.
+PROCESSING never becomes failure merely because time passed. A paid Session is reconciled,
+then the API requires a fresh summary/decision rather than immediately charging an Invoice.
+
+Recovery conflicts below create no new authorization and claim no new key. They must not
+start a fresh-key retry loop. Poll the summary with bounded backoff while visible; another
+recovery POST is a deliberate check. An ambiguous transport/500 result can still have
+committed a new authorization: preserve and retry the SAME key/body. Once a key did create
+an authorization, all later identical retries still target it, even after a replacement
+exists; changed input under that key conflicts. A successful old-key replay of EXPIRED or
+FAILED is historical and does not create a replacement—use a fresh deliberate command.
+
+Creation replay is limited to the first 25 minutes; later recovery discovers the original
+provider Session and never recreates it after Stripe idempotency retention. Discovery
+failure, truncation or absence without conclusive identity stays blocked for staff review.
+
+Example recovery conflict (runtime ErrorResponse, no provider credentials):
+
+```json
+{"code":"payment_processing","message":"An existing payment is awaiting provider confirmation; do not start another payment"}
+```
 
 When `reconciliationPending:true`, show “We received a payment that needs staff review.
 Please contact Fiona's before paying again.” Never show BOOKED unless the backend says
@@ -199,9 +227,12 @@ All errors use runtime `ErrorResponse` (or its validation response): `code`, `me
 | 404 `not_found` | Link unavailable; ask staff for a current link |
 | 409 `conflict`, message `PAYMENT_TERMS_CHANGED` | Refresh; require review before a new key/payment |
 | 409 `conflict`, message `CHECKOUT_KEY_REUSED` | Programming error: changed input reused a durable key |
-| 409 `conflict`, message `PAYMENT_IN_PROGRESS` | Resume saved command, otherwise await confirmation/contact staff |
+| 409 `checkout_in_progress` | Original Session is still open. Resume its saved URL/key if available or await expiration; never automatically create another key |
+| 409 `payment_processing` | Provider payment is unsettled. Show pending and suppress new collection |
+| 409 `payment_state_changed` | Recovery recorded a payment. Fetch summary and require a fresh decision before any further payment |
+| 409 `checkout_recovery_conflict` | A competing command changed attempts. Refresh; do not follow it in an automatic recovery loop |
+| 409 `checkout_reconciliation_required` | Provider identity/outcome remains uncertain. Preserve context and contact staff |
 | 409 `conflict`, message `RECONCILIATION_PENDING` | Stop collection and contact staff |
-| 409 `conflict`, message `CHECKOUT_CREATION_UNKNOWN_REQUIRES_RECONCILIATION` or `STRIPE_DISCOVERY_LIMIT_REQUIRES_RECONCILIATION` | Preserve key; staff recovery needed |
 | 422 `validation_failed` | Show safe validation; never reduce a deposit to a partial payment |
 | 503 `stripe_disabled` | Online payment unavailable; preserve all other staff/manual workflows |
 | 500 `internal_failure`, timeout, lost response | Outcome unknown: retry SAME key/body with bounded backoff |
@@ -228,3 +259,9 @@ Implement staff copy/revoke/rotate controls separately from send-email controls;
 email is introduced. Refresh both authoritative staff detail and attempt diagnostics after
 `timeline.changed`. The operational manual for external refunds/disputes, webhook setup,
 recovery and production acceptance is [stripe-payments-operations.md](stripe-payments-operations.md).
+
+Stripe is a direct merchant integration. Commerce verifies the API key's own account;
+the configured merchant ID does not become a `Stripe-Account`/Connect header. The BFF
+continues to send only Fiona's customer bearer header, never Stripe credentials or account
+routing headers. Real merchant Checkout/wallet and signed webhook connectivity still need
+the operations runbook's Stripe test-mode acceptance exercise.

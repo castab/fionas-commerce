@@ -111,36 +111,96 @@ class CustomerPayments(
 
     fun checkout(command: CheckoutCommand): CheckoutRedirect {
         val fingerprint = "v1:${command.documentVersion}:${command.businessRevision}:${command.amountMinor ?: "BALANCE"}"
-        val attempt =
-            transactor.inTransaction { transaction ->
-                val initial = authorized(transaction, command.publicId, command.bearer)
-                lock(transaction, initial.inquiryId)
-                // Recheck after the same lock used by revocation/rotation, including a waiting request.
-                val capability = authorized(transaction, command.publicId, command.bearer)
-                val existing = attempts.forKey(transaction, capability.inquiryId, command.key)
-                if (existing != null) {
-                    if (existing.requestFingerprint != fingerprint) throw CommerceFailure.Conflict("CHECKOUT_KEY_REUSED")
-                    return@inTransaction existing
+        val selected = selectCheckout(command, fingerprint)
+        if (!selected.recoverActive) return synchronizeCustomer(selected.attempt)
+        // One observed attempt per command. A competing replacement is never followed in a retry loop.
+        synchronizeCustomer(selected.attempt)
+        return synchronizeCustomer(selectCheckout(command, fingerprint, selected).attempt)
+    }
+
+    private fun synchronizeCustomer(attempt: StripeAttempt): CheckoutRedirect =
+        try {
+            synchronize(attempt)
+        } catch (failure: CommerceFailure.Conflict) {
+            if (failure.message in
+                setOf("CHECKOUT_CREATION_UNKNOWN_REQUIRES_RECONCILIATION", "STRIPE_DISCOVERY_LIMIT_REQUIRES_RECONCILIATION")
+            ) {
+                throw CheckoutRecoveryProblem.UNKNOWN.conflict()
+            }
+            throw failure
+        }
+
+    private data class CheckoutSelection(
+        val attempt: StripeAttempt,
+        val recoverActive: Boolean,
+        val observedAttempts: Set<UUID> = emptySet(),
+    )
+
+    private fun selectCheckout(
+        command: CheckoutCommand,
+        fingerprint: String,
+        recovered: CheckoutSelection? = null,
+    ): CheckoutSelection =
+        transactor.inTransaction { transaction ->
+            val initial = authorized(transaction, command.publicId, command.bearer)
+            lock(transaction, initial.inquiryId)
+            // Recheck after the same lock used by revocation/rotation, including a waiting request.
+            val capability = authorized(transaction, command.publicId, command.bearer)
+            val existing = attempts.forKey(transaction, capability.inquiryId, command.key)
+            if (existing != null) {
+                if (existing.requestFingerprint != fingerprint) throw CommerceFailure.Conflict("CHECKOUT_KEY_REUSED")
+                return@inTransaction CheckoutSelection(existing, false)
+            }
+            val active = attempts.active(transaction, capability.inquiryId)
+            if (recovered != null && attempts.history(transaction, capability.inquiryId).any { it.id !in recovered.observedAttempts }) {
+                throw CheckoutRecoveryProblem.COMPETING.conflict()
+            }
+            if (active != null) {
+                if (recovered == null) {
+                    return@inTransaction CheckoutSelection(
+                        active,
+                        true,
+                        attempts.history(transaction, capability.inquiryId).map { it.id }.toSet(),
+                    )
                 }
-                val request = requests.read(transaction, capability.inquiryId)
-                val summary = customerPaymentSummary(request, collectionAttempts(transaction, capability.inquiryId))
-                if (!summary.canPay) throw CommerceFailure.Conflict(summary.unavailableReason ?: "PAYMENT_UNAVAILABLE")
-                if (summary.documentVersion != command.documentVersion || summary.businessRevision != command.businessRevision) {
-                    throw CommerceFailure.Conflict("PAYMENT_TERMS_CHANGED")
+                if (active.id != recovered.attempt.id) throw CheckoutRecoveryProblem.COMPETING.conflict()
+                throw (
+                    if (active.state ==
+                        StripeAttemptState.PROCESSING
+                    ) {
+                        CheckoutRecoveryProblem.PROCESSING
+                    } else {
+                        CheckoutRecoveryProblem.OPEN
+                    }
+                ).conflict()
+            }
+            if (recovered != null) {
+                val previous = checkNotNull(attempts.find(transaction, recovered.attempt.id))
+                if (previous.ledgerPaymentId != null) throw CheckoutRecoveryProblem.CHANGED.conflict()
+                check(previous.state in setOf(StripeAttemptState.EXPIRED, StripeAttemptState.FAILED)) {
+                    "Checkout recovery did not establish a terminal outcome"
                 }
-                val selected = command.amountMinor ?: stripeMinor(summary.required)
-                val selectedAmount = BigDecimal.valueOf(selected, 2)
-                if (summary.purpose == PaymentPurpose.DEPOSIT && selectedAmount.compareTo(summary.required) != 0) {
-                    throw CommerceFailure.ValidationFailed("The complete approved deposit is required")
-                }
-                if (selected <= 0 ||
-                    selectedAmount > summary.required
-                ) {
-                    throw CommerceFailure.ValidationFailed("Payment exceeds the positive outstanding amount")
-                }
-                stripeMinor(selectedAmount)
-                val id = UUID.randomUUID()
-                val at = now()
+            }
+            val request = requests.read(transaction, capability.inquiryId)
+            val summary = customerPaymentSummary(request, collectionAttempts(transaction, capability.inquiryId))
+            if (!summary.canPay) throw CommerceFailure.Conflict(summary.unavailableReason ?: "PAYMENT_UNAVAILABLE")
+            if (summary.documentVersion != command.documentVersion || summary.businessRevision != command.businessRevision) {
+                throw CommerceFailure.Conflict("PAYMENT_TERMS_CHANGED")
+            }
+            val selected = command.amountMinor ?: stripeMinor(summary.required)
+            val selectedAmount = BigDecimal.valueOf(selected, 2)
+            if (summary.purpose == PaymentPurpose.DEPOSIT && selectedAmount.compareTo(summary.required) != 0) {
+                throw CommerceFailure.ValidationFailed("The complete approved deposit is required")
+            }
+            if (selected <= 0 ||
+                selectedAmount > summary.required
+            ) {
+                throw CommerceFailure.ValidationFailed("Payment exceeds the positive outstanding amount")
+            }
+            stripeMinor(selectedAmount)
+            val id = UUID.randomUUID()
+            val at = now()
+            val attempt =
                 StripeAttempt(
                     id,
                     capability.inquiryId,
@@ -161,9 +221,8 @@ class CustomerPayments(
                     at,
                     at.plusSeconds(3600),
                 ).also { attempts.insert(transaction, it) }
-            }
-        return synchronize(attempt)
-    }
+            CheckoutSelection(attempt, false)
+        }
 
     /** Staff recovery also works after public access revocation and after a process restart. */
     fun recover(
@@ -195,13 +254,22 @@ class CustomerPayments(
             }
         verifySession(attempt, session)
         if (session.state == "open") {
-            val obsolete =
+            val observed =
                 transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
+                    val latest = checkNotNull(attempts.find(transaction, attempt.id))
+                    if (latest.ledgerPaymentId != null) return@inTransaction latest to false
                     val request = requests.read(transaction, attempt.inquiryId)
-                    !termsMatch(attempt, request, customerPaymentSummary(request, emptyList())) ||
-                        access.forInquiry(transaction, attempt.inquiryId)?.revoked == true
+                    latest to (
+                        !termsMatch(attempt, request, customerPaymentSummary(request, emptyList())) ||
+                            access.forInquiry(transaction, attempt.inquiryId)?.revoked == true
+                    )
                 }
-            if (obsolete) session = gateway.expire(session.id)
+            if (observed.first.ledgerPaymentId !=
+                null
+            ) {
+                return CheckoutRedirect(attempt.id, null, observed.first.state, observed.first.outcome)
+            }
+            if (observed.second) session = gateway.expire(session.id)
         }
         val saved = reconcile(session)
         return CheckoutRedirect(saved.id, session.url?.takeIf { saved.state == StripeAttemptState.OPEN }, saved.state, saved.outcome)
@@ -213,7 +281,7 @@ class CustomerPayments(
         signature: String,
     ) {
         val signal = gateway.verify(rawBody, signature)
-        if (signal.liveMode != configuration.liveMode || signal.account != null && signal.account != configuration.accountId) {
+        if (signal.liveMode != configuration.liveMode || signal.account != null) {
             throw CommerceFailure.ValidationFailed("Stripe event environment does not match this deployment")
         }
         if (transactor.inTransaction { attempts.hasEvent(it, signal.id) }) return
@@ -316,6 +384,8 @@ class CustomerPayments(
                                 setOf(StripeAttemptState.EXPIRED, StripeAttemptState.FAILED)
                             ) {
                                 attempt.state
+                            } else if (attempt.state == StripeAttemptState.PROCESSING && state == StripeAttemptState.OPEN) {
+                                StripeAttemptState.PROCESSING
                             } else {
                                 state
                             },
@@ -333,6 +403,7 @@ class CustomerPayments(
     ) {
         check(
             session.attemptId == attempt.id &&
+                (session.paymentStatus != "paid" || session.state == "complete") &&
                 session.amountMinor == attempt.authorizedMinor &&
                 session.currency == "usd" &&
                 session.liveMode == attempt.liveMode &&
@@ -343,7 +414,11 @@ class CustomerPayments(
                     configuration.authorizationProof(attempt).toByteArray(),
                 ) &&
                 (attempt.sessionId == null || session.id == attempt.sessionId) &&
-                (attempt.paymentIntentId == null || session.paymentIntentId == attempt.paymentIntentId) &&
+                (
+                    attempt.paymentIntentId == null ||
+                        session.paymentIntentId == null ||
+                        session.paymentIntentId == attempt.paymentIntentId
+                ) &&
                 session.expiresAt == attempt.expiresAt,
         ) { "Stripe session disagrees with the durable authorization" }
     }

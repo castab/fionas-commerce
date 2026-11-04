@@ -52,6 +52,14 @@ class StripeBoundarySpec :
             val malformed = payload.replace('"', '\'')
             shouldThrow<CommerceFailure.ValidationFailed> { gateway.verify(malformed, signature(malformed)) }
         }
+        test("direct merchant snapshots accept absent account and reject Connect contexts and the wrong environment") {
+            gateway.verify(payload, signature(payload)).account shouldBe null
+            listOf(
+                payload.replace("\"livemode\":false", "\"livemode\":true"),
+                payload.replace("\"livemode\":false", "\"livemode\":false,\"account\":\"acct_other\""),
+                payload.replace("\"livemode\":false", "\"livemode\":false,\"account\":\"${configuration.accountId}\""),
+            ).forEach { shouldThrow<CommerceFailure.ValidationFailed> { gateway.verify(it, signature(it)) } }
+        }
         test("the complete raw-body contract verifies an SDK-signed delivery without staff authentication or provider I/O") {
             TestApplication.create(stripe = configuration, stripeGateway = gateway).use { app ->
                 val raw = " \n" + payload.replace("checkout.session.completed", "customer.updated")

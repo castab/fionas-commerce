@@ -52,6 +52,21 @@ class OpenApiDocumentSpec :
 
         fun schema(name: String) = document.at("components", "schemas", name).jsonObject
 
+        test("customer checkout documents explicit bounded recovery and a side-effect-free local summary hint") {
+            val checkout = document.at("paths", "/public/payments/{publicId}/checkout-sessions", "post")
+            listOf(
+                "checkout_in_progress",
+                "payment_processing",
+                "payment_state_changed",
+                "checkout_recovery_conflict",
+                "checkout_reconciliation_required",
+            ).forEach { checkout.text("description") shouldContain it }
+            checkout.text("operationId") shouldBe "createCustomerCheckoutSession"
+            val hint = schema("CustomerPaymentResponse").at("properties", "checkoutRecoveryAvailable")
+            hint.text("type") shouldBe "boolean"
+            hint.text("description") shouldContain "no provider I/O"
+            schema("CustomerPaymentResponse").strings("required").contains("checkoutRecoveryAvailable") shouldBe false
+        }
         test("native SSE contract describes event-stream rather than a JSON response") {
             val endpoint = document.at("paths", "/staff/requests/{inquiryId}/updates", "get")
             endpoint.at("responses", "200", "content").jsonObject.keys shouldBe setOf("text/event-stream")

@@ -2023,6 +2023,12 @@ The feature defaults off (`FIONAS_STRIPE_ENABLED=false`). Enabled deployments re
 `FIONAS_PUBLIC_BASE_URL`, and `FIONAS_PAYMENT_ACCESS_KEY` (base64 of 32 random bytes).
 `FIONAS_STRIPE_LIVE_MODE` explicitly selects live mode; there is no test/live fallback.
 The official Java SDK is pinned to 34.1.0 / snapshot API 2026-10-28.endive.
+Requests authenticate as Fiona's direct merchant: no `Stripe-Account`/Connect context;
+the key's own merchant identity is checked once per adapter. An explicit checkout POST can
+recover an abandoned Session without the original browser key: only confirmed provider
+expiration/failure permits replacement, while open, processing and unknown outcomes stay
+protected. Summary GET is side-effect-free and exposes `checkoutRecoveryAvailable` for
+the frontend's deliberate recovery action.
 Staff must explicitly receive the new `fionas.payment-access.manage` permission;
 no role grants are silently changed. Existing manual payment APIs retain their behavior.
 

@@ -4,9 +4,11 @@ import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
+import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.fionas.commerce.payments.CheckoutCommand
+import io.github.castab.fionas.commerce.payments.CheckoutRecoveryRequired
 import io.github.castab.fionas.commerce.payments.CheckoutRedirect
 import io.github.castab.fionas.commerce.payments.CustomerPaymentSummary
 import io.github.castab.fionas.commerce.payments.PaymentAccessAction
@@ -76,6 +78,8 @@ data class CustomerPaymentResponse(
     val paymentInProgress: Boolean,
     val reconciliationPending: Boolean,
     val history: List<CustomerPaymentReceiptResponse>,
+    @ApiProperty(description = "An active attempt can be checked by POST checkout-sessions with a fresh key; GET performs no provider I/O.")
+    val checkoutRecoveryAvailable: Boolean = false,
 )
 
 @Serializable
@@ -207,6 +211,18 @@ private fun paymentEnabled(operations: PaymentOperations?) =
         }
     }
 
+private val checkoutRecoveryErrors =
+    Filter { next ->
+        { request ->
+            try {
+                next(request)
+            } catch (failure: CommerceFailure.Conflict) {
+                val recovery = failure.cause as? CheckoutRecoveryRequired ?: throw failure
+                Response(Status.CONFLICT).with(paymentErrors of ErrorResponse(recovery.problem.code, recovery.problem.description))
+            }
+        }
+    }
+
 /** All endpoints, including raw-body webhook verification, remain executable contract routes. */
 internal fun paymentRoutes(
     operations: PaymentOperations?,
@@ -262,12 +278,16 @@ internal fun paymentRoutes(
     }
     routes += "/public/payments" / publicPaymentPath / "checkout-sessions" meta {
         paymentMetadata("createCustomerCheckoutSession", "Create or recover one hosted Checkout attempt")
+        description += " A new key checks at most one existing active attempt outside PostgreSQL, reconciles it, then " +
+            "rechecks current eligibility under the canonical lock. Only confirmed expiration/failure permits a new authorization. " +
+            "Recovery-only conflicts claim no new key: checkout_in_progress, payment_processing, payment_state_changed, " +
+            "checkout_recovery_conflict, checkout_reconciliation_required. Refresh the summary and require a deliberate action."
         headers += paymentSecret
         headers += checkoutKey
         receiving(checkoutBody to CreateCheckoutRequest(2, 2))
         returning(Status.OK, redirectBody to exampleCheckout)
     } bindContract Method.POST to { id: String, _: String ->
-        noPaymentCache.then(paymentEnabled(operations)).then { request: Request ->
+        noPaymentCache.then(paymentEnabled(operations)).then(checkoutRecoveryErrors).then { request: Request ->
             val input = checkoutBody(request)
             val key = oneHeader(request, "Idempotency-Key")
             if (!key.matches(Regex("[A-Za-z0-9_-]{1,128}"))) throw LensFailure(Invalid(checkoutKey.meta))
@@ -407,4 +427,5 @@ private fun CustomerPaymentSummary.response() =
         inProgress,
         reconciliationPending,
         history.map { CustomerPaymentReceiptResponse(it.amount.toPlainString(), it.refunded.toPlainString(), it.receivedAt) },
+        checkoutRecoveryAvailable,
     )

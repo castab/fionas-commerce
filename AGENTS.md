@@ -1944,12 +1944,28 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   is provider idempotency; replay only within 25 minutes of authorization, then bounded
   discovery without replacement creation. Unknown absence stays reserved for investigation.
   One-hour sessions use trusted public-ID-only return URLs, never customer-supplied origins.
+  A new-key POST encountering an active attempt observes it under the association lock,
+  releases PostgreSQL for one bounded provider recovery, then locks/rechecks authorization,
+  key identity, all observed attempt identities and current terms before replacement. Only
+  confirmed EXPIRED/FAILED permits a new authorization. A competing replacement, even if
+  already settled, ends this request with a safe conflict; no recovery loop. Same-key
+  replays always retain their original attempt. Recovery-only rejections claim no new key.
+  Summary GET stays side-effect-free; optional `checkoutRecoveryAvailable` defaults false
+  and offers explicit POST recovery even when `canPay` is false. Stable runtime-envelope
+  409 codes are `checkout_in_progress`, `payment_processing`, `payment_state_changed`,
+  `checkout_recovery_conflict`, `checkout_reconciliation_required`.
 - **Provider boundary.** Official stripe-java 34.1.0 / snapshot 2026-10-28.endive, USD,
   card-only eligibility (including card wallets), one line item, no discounts, automatic
   tax, adaptive pricing, saved-method setup, Billing or delayed bank/BNPL. Session recovery
   verifies a server HMAC authorization proof as well as durable IDs/amount/environment/
   account, never metadata identity alone. The adapter independently validates succeeded
   PaymentIntent status and received amount before exposing paid state.
+  Only direct merchant mode is supported. All SDK requests use the configured secret key
+  without Stripe-Account or Stripe-Context headers. The first provider operation verifies
+  `GET /v1/account` against the configured merchant ID, cached per adapter; constructor and
+  signature parsing perform no network I/O. Signed direct snapshots normally omit top-level
+  `account`; any non-null Connect context and any live/test mismatch are rejected. Deployment
+  independently verifies that the destination signing secret belongs to the same merchant.
 - **Webhook transaction.** POST `/integrations/stripe/webhook` authenticates the original
   strict UTF-8 bytes (max 256 KiB) with SDK Stripe-Signature verification, not a session.
   Unsupported snapshot versions fail closed. Authoritative Stripe retrieval precedes
@@ -1969,6 +1985,10 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   blocks only while supported runtime payment history still has unallocated value from
   a reconciliation-required attempt; a verified manual refund/allocation can resolve that
   block without changing the historical provider outcome.
+  The operational guide provides an indexed Fiona-only inventory joined to attempt/inquiry/
+  ledger IDs, suitable for alerting by durable event identity. The monitor tracks incident
+  resolution externally and scans the full exception set so late commits cannot be skipped
+  by a timestamp watermark. No acknowledgement workflow or new administration endpoint.
 - **Disabled/deployment.** FIONAS_STRIPE_ENABLED=false by default; enabled requires
   explicit account, environment, key, webhook secret, public origin and access key.
   No client/service is composed when disabled; payment routes document 503 stripe_disabled.

@@ -35,6 +35,7 @@ data class CustomerPaymentSummary(
     val inProgress: Boolean,
     val reconciliationPending: Boolean,
     val history: List<CustomerPaymentHistory>,
+    val checkoutRecoveryAvailable: Boolean = false,
 )
 
 internal fun customerPaymentSummary(
@@ -109,6 +110,7 @@ internal fun customerPaymentSummary(
                 history.payment.receivedAt.toString(),
             )
         },
+        checkoutRecoveryAvailable = inProgress && !pending,
     )
 }
 

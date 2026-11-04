@@ -902,8 +902,11 @@ terms may require an unapplied receipt and an explicit staff reconciliation exce
 
 Network calls never hold a database transaction. Durable authorization precedes provider
 creation; a permanent local command identity and provider idempotency support recovery
-without assuming indefinite provider deduplication. Signed webhooks acknowledge only a
-committed outcome. Provider event identity and payment identity independently guard
+without assuming indefinite provider deduplication. Customer-triggered recovery observes
+an existing authorization, releases database locks for provider I/O, then serializes reconciliation and reevaluates authority
+before allowing replacement. Uncertainty never authorizes additional collection; a
+competing replacement ends that recovery attempt rather than starting a retry loop.
+Signed webhooks acknowledge only a committed outcome. Provider event identity and payment identity independently guard
 replays. External refunds/disputes are actionable integration evidence, never speculative
 refunds, allocation reversals or lifecycle transitions.
 

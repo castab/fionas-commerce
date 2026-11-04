@@ -26,7 +26,17 @@ validates before route composition; SDK construction performs no network calls.
 
 The adapter uses official `stripe-java` **34.1.0**, pinned to **2026-10-28.endive**. It
 enforces that SDK/API pairing at construction and rejects any other signed snapshot
-version. Network calls use the configured Stripe account context, 5s connect / 10s read
+version. This deployment is a **direct merchant**, authenticated with `STRIPE_SECRET_KEY`;
+no API call sends `Stripe-Account` or selects a connected account. `FIONAS_STRIPE_ACCOUNT_ID`
+is an expected merchant identity, not a request-routing header. Before its first provider
+operation each adapter retrieves `/v1/account` using that same key and checks the returned
+ID. A successful verification is cached for that adapter's lifetime; construction and
+signature-only parsing do not connect. A failed check never reaches Checkout and is retried
+on a later operation. All Checkout, discovery, expiration, PaymentIntent and Charge calls
+use the same verified direct client. Credentials are not changed on a running instance;
+restart after secret changes so verification runs again.
+
+Network calls use 5s connect / 10s read
 timeouts, and zero implicit SDK retries; explicit command retries retain the durable key.
 No live infrastructure, webhook registration or Stripe account setting is changed by this PR.
 
@@ -37,6 +47,9 @@ Railway checklist:
    the dedicated webhook on HTTPS. Do not put staff/session authentication in front of
    `/integrations/stripe/webhook`, or rewrite/parse its body at a proxy. Limit body size at
    the edge as well; the contract rejects bodies over 256 KiB and invalid UTF-8.
+   Independently check that the key's `GET /v1/account` response is the configured merchant;
+   use the CLI/API authenticated to that exact key, without a `Stripe-Account` header.
+   No Stripe Connect setup is required or supported.
 3. Configure a **your-account snapshot event destination** for the exact API version above,
    posting to `https://<commerce-host>/integrations/stripe/webhook`. Select:
    `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
@@ -103,7 +116,16 @@ for operator investigation; a clock or a missing local response is not proof of 
 The session's client-reference UUID and amount alone do not establish ownership. A
 server-generated HMAC proof binds the durable authorization, exact amount, expiry and
 provider key. Reconciliation validates it, the session/PaymentIntent identities, account
-context, environment, currency and amount. Paid Checkout must be complete; the SDK adapter
+context, environment, currency and amount. Direct-account snapshots normally omit top-level
+`account`; any non-null connected-account context is rejected, even if it names the configured
+merchant. The signing secret authenticates the your-account destination configured by the
+operator; its API version and live/test bit are separately validated. API retrieval uses the
+cached, key-verified merchant client. These guarantees are independent: a missing event
+`account` field does not disable API identity verification, and the API key cannot prove
+which account an incorrectly configured signing secret belongs to. The deployment exercise
+must confirm both secrets belong to the same merchant/environment.
+
+Paid Checkout must be complete; the SDK adapter
 also retrieves a succeeded PaymentIntent with exactly the received amount. An unpaid
 completed session is PROCESSING, never received money. Unknown or mismatched sessions
 return non-success and require investigation; no metadata-only ledger writes occur.
@@ -123,6 +145,25 @@ the same payment rediscover its committed ledger identity. Old failure/expiry ev
 cannot undo a receipt; authoritative current Stripe status decides. There is no volatile
 queue and no success response before commit. Configure upstream HTTP timeouts to allow
 provider reads plus database work; a lost webhook response is safe to redeliver.
+
+Customer POST `/public/payments/{publicId}/checkout-sessions` now performs bounded on-demand
+recovery when a **new** command key encounters a locally active attempt. Under the canonical
+association lock it observes that attempt and the existing attempt identities, then releases
+PostgreSQL before retrieving/replaying/discovering Stripe. It validates the original durable
+authorization and commits the actual provider/ledger result through the normal reconciler.
+A second locked decision reauthenticates the capability, rechecks the key and current terms,
+and creates a new authorization only after confirmed EXPIRED/FAILED. A competing new attempt,
+including one that has already settled, produces a retryable conflict; it is never followed
+in another recovery loop. Confirmed payment instead requests a fresh summary/decision.
+
+Thus a returning customer with the stable link and no old browser key can recover a missing
+expiration webhook. Still-open and PROCESSING Sessions remain protected; wall-clock expiry
+is not proof. Unknown discovery/absence remains reserved for staff. Rejected recovery does
+not claim the new key. Same-key requests remain bound to their original authorization,
+including terminal old-key retries after a replacement exists. GET summary never calls Stripe
+and exposes `checkoutRecoveryAvailable` as a local hint for the explicit POST action. See the
+handoff for stable 409 recovery codes; the frontend must not hide recovery solely because
+`canPay` is false.
 
 Use `POST /staff/requests/{id}/payment-attempts/{attemptId}/reconcile` after a restart,
 ambiguous response, or missed webhook; it works after access revocation. It retrieves or
@@ -146,11 +187,23 @@ refunds or allocation reversals. Their signed event/object/PaymentIntent IDs are
 stored even if delivered before the original payment, and logged at ERROR. Inspect:
 
 ```sql
-SELECT event_id, event_type, object_id, payment_intent_id, received_at
-FROM fionas.stripe_webhook_events
-WHERE disposition = 'EXTERNAL_ADJUSTMENT'
-ORDER BY received_at, event_id;
+SELECT e.event_id, e.event_type, e.object_id, e.payment_intent_id, e.received_at,
+       a.id AS attempt_id, a.inquiry_id, a.ledger_payment_id
+FROM fionas.stripe_webhook_events e
+LEFT JOIN fionas.stripe_payment_attempts a
+       ON a.id = e.attempt_id OR a.payment_intent_id = e.payment_intent_id
+WHERE e.disposition = 'EXTERNAL_ADJUSTMENT'
+ORDER BY e.received_at, e.event_id;
 ```
+
+Run this inventory from an operator monitoring connection and alert on event IDs without
+a verified incident resolution. Persist/deduplicate incident ownership by `event_id` in the
+monitoring system; scan the complete EXTERNAL_ADJUSTMENT set rather than advancing a timestamp
+watermark that could miss a late commit. Routine IGNORED events are excluded by disposition.
+The inventory preserves all history, not a financial "unresolved" flag: resolving a ledger
+refund or an incident does not delete or overwrite its provider event. A null join is itself
+actionable and can occur before the original payment is reconciled. This supplies a durable
+alert source without requiring log searches or another payment administration API.
 
 This queries only Fiona-owned integration facts. Match PaymentIntent IDs to the attempt
 and its ledger receipt; for dispute/charge records use Stripe's Dashboard to resolve the
@@ -202,7 +255,7 @@ are not a second credit ledger.
 ## Production limits
 
 No live Stripe call is part of CI. Fake-gateway PostgreSQL tests and official SDK signature
-tests establish local contracts; the owning-account/header behavior, actual snapshot
+and actual SDK request-construction tests establish local contracts; actual merchant credentials, snapshot
 destination configuration, wallet availability and end-to-end browser return need the
 test-mode exercise above. No frontend, payment emails, automatic refund/dispute mapping,
 periodic recovery scheduler, exception-resolution UI, customer accounts or saved methods

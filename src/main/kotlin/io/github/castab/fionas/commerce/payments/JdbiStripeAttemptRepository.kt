@@ -53,6 +53,20 @@ class JdbiStripeAttemptRepository {
             .map { row, _ -> restore(row) }
             .list()
 
+    /** Authorization/recovery decisions call this under the canonical association lock. */
+    fun active(
+        transaction: Transaction,
+        inquiry: InquiryId,
+    ): StripeAttempt? =
+        transaction.handle
+            .createQuery(
+                "SELECT * FROM fionas.stripe_payment_attempts WHERE inquiry_id = :id " +
+                    "AND provider_state IN ('CREATING', 'OPEN', 'PROCESSING')",
+            ).bind("id", inquiry.value)
+            .map { row, _ -> restore(row) }
+            .findOne()
+            .orElse(null)
+
     fun insert(
         transaction: Transaction,
         attempt: StripeAttempt,

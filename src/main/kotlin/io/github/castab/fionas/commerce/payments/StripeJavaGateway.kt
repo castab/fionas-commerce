@@ -20,15 +20,21 @@ import java.time.Instant
 import java.util.UUID
 
 /** Official SDK adapter. Its JSON implementation is confined here and never replaces CommerceJson. */
-class StripeJavaGateway(
+class StripeJavaGateway internal constructor(
     private val configuration: StripeConfiguration,
+    private val client: StripeClient,
 ) : StripeGateway {
-    private val client = StripeClient(configuration.secretKey)
+    constructor(configuration: StripeConfiguration) : this(configuration, StripeClient(configuration.secretKey))
+
+    // Verify the key's direct merchant once per adapter, never during construction or inside PostgreSQL.
+    private val verifiedMerchant: Unit by lazy {
+        val account = client.v1().accounts().retrieveCurrent(options())
+        check(account.id == configuration.accountId) { "Stripe key does not belong to the configured merchant" }
+    }
 
     private fun options(key: String? = null): RequestOptions =
         RequestOptions
             .builder()
-            .setStripeAccount(configuration.accountId)
             .setIdempotencyKey(key)
             .setConnectTimeout(5_000)
             .setReadTimeout(10_000)
@@ -41,6 +47,7 @@ class StripeJavaGateway(
 
     override fun create(attempt: StripeAttempt): StripeCheckout =
         call {
+            requireMerchantAuthorization(attempt)
             val line =
                 SessionCreateParams.LineItem
                     .builder()
@@ -104,7 +111,8 @@ class StripeJavaGateway(
                     .v1()
                     .checkout()
                     .sessions()
-                    .retrieve(sessionId, options()),
+                    .retrieve(sessionId, options())
+                    .also { check(it.id == sessionId) { "Stripe returned a different Checkout identity" } },
             )
         }
 
@@ -115,12 +123,14 @@ class StripeJavaGateway(
                     .v1()
                     .checkout()
                     .sessions()
-                    .expire(sessionId, options()),
+                    .expire(sessionId, options())
+                    .also { check(it.id == sessionId) { "Stripe returned a different Checkout identity" } },
             )
         }
 
     override fun discover(attempt: StripeAttempt): StripeCheckout? =
         call {
+            requireMerchantAuthorization(attempt)
             // Ten pages bound one recovery call. Refuse ambiguity or truncation; never guess absence.
             var after: String? = null
             val found = mutableListOf<StripeCheckout>()
@@ -190,8 +200,9 @@ class StripeJavaGateway(
                     text("type") == event.type &&
                     text("api_version") == StripeConfiguration.API_VERSION,
             )
+            require(event.account == null) { "Connected-account events are not supported" }
             val mode = checkNotNull(envelope["livemode"]?.jsonPrimitive)
-            require(!mode.isString && mode.booleanOrNull == event.livemode)
+            require(!mode.isString && mode.booleanOrNull == event.livemode && event.livemode == configuration.liveMode)
             val created = checkNotNull(envelope["created"]?.jsonPrimitive)
             require(!created.isString && (created.longOrNull ?: -1) >= 0)
             require(event.id?.matches(Regex("evt_[A-Za-z0-9_]{1,200}")) == true)
@@ -213,13 +224,15 @@ class StripeJavaGateway(
     }
 
     private fun describe(session: Session): StripeCheckout {
+        check(session.livemode == configuration.liveMode) { "Stripe Checkout environment disagrees with deployment" }
         check(session.mode == "payment" && session.paymentMethodTypes == listOf("card")) { "Unexpected Stripe checkout configuration" }
         val intent =
             if (session.paymentStatus == "paid") {
                 val id = checkNotNull(session.paymentIntent) { "Paid Stripe session has no PaymentIntent" }
                 client.v1().paymentIntents().retrieve(id, options()).also {
                     check(
-                        it.status == "succeeded" &&
+                        it.id == id &&
+                            it.status == "succeeded" &&
                             it.currency == session.currency &&
                             it.amountReceived == session.amountTotal &&
                             it.livemode == session.livemode,
@@ -232,7 +245,8 @@ class StripeJavaGateway(
             intent?.let {
                 client.v1().charges().retrieve(checkNotNull(it.latestCharge), options()).also { captured ->
                     check(
-                        captured.paid &&
+                        captured.id == it.latestCharge &&
+                            captured.paid &&
                             captured.captured &&
                             captured.amountCaptured == session.amountTotal &&
                             captured.currency == session.currency &&
@@ -259,8 +273,15 @@ class StripeJavaGateway(
         )
     }
 
+    private fun requireMerchantAuthorization(attempt: StripeAttempt) {
+        check(attempt.stripeAccount == configuration.accountId && attempt.liveMode == configuration.liveMode && attempt.currency == "USD") {
+            "Stripe authorization merchant or environment disagrees with deployment"
+        }
+    }
+
     private fun <T> call(block: () -> T): T =
         try {
+            verifiedMerchant
             block()
         } catch (_: StripeException) {
             // SDK exceptions can include request parameters and private URLs. Do not attach their causes.
