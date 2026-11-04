@@ -111,6 +111,8 @@ class CustomerPayments(
 
     fun checkout(command: CheckoutCommand): CheckoutRedirect {
         val fingerprint = "v1:${command.documentVersion}:${command.businessRevision}:${command.amountMinor ?: "BALANCE"}"
+        // Outside PostgreSQL and before any authorization: a merchant mismatch must not leave an active attempt.
+        verifyMerchant()
         val selected = selectCheckout(command, fingerprint)
         if (!selected.recoverActive) return synchronizeCustomer(selected.attempt)
         // One observed attempt per command. A competing replacement is never followed in a retry loop.
@@ -234,8 +236,20 @@ class CustomerPayments(
                 attempts.find(transaction, attemptId)?.takeIf { it.inquiryId == inquiry }
                     ?: throw CommerceFailure.NotFound("Payment attempt was not found")
             }
+        verifyMerchant()
         return synchronize(attempt)
     }
+
+    /** A deployment error refuses payment loudly for operators; it is never reported as an unknown payment outcome. */
+    private fun verifyMerchant() =
+        try {
+            gateway.verifyMerchant()
+        } catch (mismatch: StripeMerchantMismatch) {
+            logger.error {
+                "Stripe merchant mismatch: STRIPE_SECRET_KEY does not belong to FIONAS_STRIPE_ACCOUNT_ID; checkout refused"
+            }
+            throw mismatch
+        }
 
     fun staffAttempts(inquiry: InquiryId): List<StripeAttempt> =
         transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->

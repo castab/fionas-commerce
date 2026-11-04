@@ -134,8 +134,19 @@ class StripeSdkRequestsSpec :
         }
         test("the secret key must own the configured merchant before any Checkout request") {
             val transport = Transport().apply { merchant = "acct_unexpected" }
-            shouldThrow<IllegalStateException> { gateway(transport).create(attempt) }
-            transport.requests.map { it.url().path } shouldBe listOf("/v1/account")
+            val gateway = gateway(transport)
+            shouldThrow<StripeMerchantMismatch> { gateway.verifyMerchant() }
+            shouldThrow<StripeMerchantMismatch> { gateway.create(attempt) }
+            // A failed check is not cached: each operation asks again and never reaches Checkout.
+            transport.requests.map { it.url().path } shouldBe listOf("/v1/account", "/v1/account")
+        }
+        test("an explicit merchant check is cached with every later provider operation") {
+            val transport = Transport()
+            val gateway = gateway(transport)
+            gateway.verifyMerchant()
+            gateway.verifyMerchant()
+            gateway.create(attempt)
+            transport.requests.count { it.url().path == "/v1/account" } shouldBe 1
         }
         test("authorization account and live mode cannot select another API context") {
             val transport = Transport()

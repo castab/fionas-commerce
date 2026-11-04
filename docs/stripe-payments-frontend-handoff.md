@@ -234,7 +234,7 @@ All errors use runtime `ErrorResponse` (or its validation response): `code`, `me
 | 409 `checkout_reconciliation_required` | Provider identity/outcome remains uncertain. Preserve context and contact staff |
 | 409 `conflict`, message `RECONCILIATION_PENDING` | Stop collection and contact staff |
 | 422 `validation_failed` | Show safe validation; never reduce a deposit to a partial payment |
-| 503 `stripe_disabled` | Online payment unavailable; preserve all other staff/manual workflows |
+| 503 `stripe_disabled` | Online payment unavailable (disabled, or a deployment merchant mismatch; no attempt was authorized); preserve all other staff/manual workflows |
 | 500 `internal_failure`, timeout, lost response | Outcome unknown: retry SAME key/body with bounded backoff |
 
 Do not interpret arbitrary internal failure messages. New unavailable reasons/codes must
