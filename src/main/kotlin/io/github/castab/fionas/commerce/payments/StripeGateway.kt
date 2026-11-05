@@ -4,6 +4,8 @@ import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.time.Instant
 import java.util.UUID
 
+enum class CheckoutMode { HOSTED, EMBEDDED }
+
 enum class PaymentPurpose { DEPOSIT, INVOICE }
 
 enum class StripeAttemptState { CREATING, OPEN, PROCESSING, EXPIRED, FAILED, SUCCEEDED }
@@ -35,9 +37,10 @@ data class StripeAttempt(
     val outcome: StripeReconciliation = StripeReconciliation.PENDING,
     val ledgerPaymentId: UUID? = null,
     val diagnostic: String? = null,
+    val checkoutMode: CheckoutMode = CheckoutMode.HOSTED,
 )
 
-/** The URL is a short-lived bearer credential; never log this object. */
+/** The URL and client secret are short-lived bearer credentials; never log this object. */
 class StripeCheckout(
     val id: String,
     val attemptId: UUID,
@@ -51,6 +54,8 @@ class StripeCheckout(
     val url: String?,
     val paidAt: Instant?,
     val authorizationProof: String = "",
+    val uiMode: CheckoutMode = CheckoutMode.HOSTED,
+    val clientSecret: String? = null,
 ) {
     override fun toString() = "StripeCheckout([redacted])"
 }
@@ -70,7 +75,7 @@ data class StripeSignal(
  */
 class StripeMerchantMismatch : IllegalStateException("Stripe key does not belong to the configured merchant")
 
-/** Fiona's hosted card Checkout boundary. No network call runs inside a database transaction. */
+/** Fiona's card Checkout boundary. No network call runs inside a database transaction. */
 interface StripeGateway {
     /**
      * Confirms the key's direct merchant before a checkout command authorizes anything, so a misconfigured

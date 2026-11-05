@@ -51,11 +51,12 @@ class StripeSdkRequestsSpec :
             var captured = true
             var expired = false
             var currency = "usd"
+            var uiMode = "hosted_page"
 
             fun session() =
                 """
                 {"id":"cs_test_payment","object":"checkout.session","client_reference_id":"$attemptId",
-                "mode":"payment","payment_method_types":["card"],"amount_total":10000,"currency":"$currency",
+                "ui_mode":"$uiMode","client_secret":"cs_secret_test","mode":"payment","payment_method_types":["card"],"amount_total":10000,"currency":"$currency",
                 "livemode":$live,"status":"${if (paid) {
                     "complete"
                 } else if (expired) {
@@ -131,6 +132,42 @@ class StripeSdkRequestsSpec :
             creation.headers().firstValue("Idempotency-Key").orElse("") shouldBe attempt.providerKey
             creation.params()["allowed_payment_method_types"] shouldBe listOf("card")
             creation.params()["client_reference_id"] shouldBe attemptId.toString()
+        }
+        test("embedded requests preserve financial parameters and use only embedded return behavior") {
+            val transport = Transport().apply { uiMode = "embedded_page" }
+            val embedded = attempt.copy(checkoutMode = CheckoutMode.EMBEDDED)
+            val result = gateway(transport).create(embedded)
+            result.uiMode shouldBe CheckoutMode.EMBEDDED
+            result.clientSecret shouldBe "cs_secret_test"
+            val params = transport.requests.last().params()
+            params["ui_mode"] shouldBe "embedded_page"
+            params["redirect_on_completion"] shouldBe "if_required"
+            params["return_url"] shouldBe "${config.publicOrigin}/pay/${attempt.publicId}?checkout=returned"
+            params.containsKey("success_url") shouldBe false
+            params.containsKey("cancel_url") shouldBe false
+            val hosted = Transport()
+            gateway(hosted).create(attempt)
+            val hostedParams = hosted.requests.last().params()
+            hostedParams.containsKey("ui_mode") shouldBe false
+            hostedParams.containsKey("return_url") shouldBe false
+            hostedParams.containsKey("redirect_on_completion") shouldBe false
+            hostedParams["success_url"] shouldBe "${config.publicOrigin}/pay/${attempt.publicId}?checkout=returned"
+            hostedParams["cancel_url"] shouldBe "${config.publicOrigin}/pay/${attempt.publicId}?checkout=cancelled"
+            val presentation = setOf("ui_mode", "redirect_on_completion", "return_url", "success_url", "cancel_url")
+            params.filterKeys { it !in presentation } shouldBe hostedParams.filterKeys { it !in presentation }
+            gateway(transport).create(embedded)
+            transport.requests
+                .filter { it.method().name == "POST" }
+                .map { it.params() }
+                .distinct()
+                .size shouldBe 1
+            result.toString() shouldBe "StripeCheckout([redacted])"
+        }
+        test("missing or unknown provider UI modes are rejected without echoing provider values") {
+            listOf("", "elements", "secret_unknown").forEach { mode ->
+                val error = shouldThrow<IllegalStateException> { gateway(Transport().apply { uiMode = mode }).create(attempt) }
+                error.message shouldBe "Unexpected Stripe Checkout UI mode"
+            }
         }
         test("the secret key must own the configured merchant before any Checkout request") {
             val transport = Transport().apply { merchant = "acct_unexpected" }

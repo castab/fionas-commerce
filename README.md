@@ -2012,7 +2012,7 @@ transient API error), rerun the failed workflow run from the Actions tab.
 ## Customer payments (Stripe Checkout)
 
 Opt-in backend support provides a stable, inquiry-scoped customer capability, a limited
-payment summary, USD card/wallet hosted Checkout and signed synchronous webhook
+payment summary, USD card/wallet hosted or Embedded Checkout and signed synchronous webhook
 reconciliation. The exact canonical deposit books through the existing ledger operation;
 BOOKED/SERVED Invoices support partial or full outstanding payments. Money captured against
 stale terms is recorded once as unapplied and flagged for staff review. No frontend or
@@ -2022,6 +2022,12 @@ The feature defaults off (`FIONAS_STRIPE_ENABLED=false`). Enabled deployments re
 `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `FIONAS_STRIPE_ACCOUNT_ID`,
 `FIONAS_PUBLIC_BASE_URL`, and `FIONAS_PAYMENT_ACCESS_KEY` (base64 of 32 random bytes).
 `FIONAS_STRIPE_LIVE_MODE` explicitly selects live mode; there is no test/live fallback.
+`FIONAS_STRIPE_CHECKOUT_MODE` accepts `hosted` (default) or `embedded` for new attempts only.
+V11 preserves existing attempts as HOSTED; retries retain their original mode. Deploy
+frontend support for both variants before enabling embedded. OPEN Checkout responses add
+`uiMode` with hosted `url` or embedded `clientSecret`; other states return neither.
+Staff reconciliation is status-only. Never log or persist client secrets. Executable routes
+generate these contracts in OpenAPI.
 The official Java SDK is pinned to 34.1.0 / snapshot API 2026-10-28.endive.
 Requests authenticate as Fiona's direct merchant: no `Stripe-Account`/Connect context;
 the key's own merchant identity is checked once per adapter, before any checkout attempt is

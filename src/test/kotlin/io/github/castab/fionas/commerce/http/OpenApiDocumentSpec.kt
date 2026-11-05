@@ -67,6 +67,20 @@ class OpenApiDocumentSpec :
             hint.text("description") shouldContain "no provider I/O"
             schema("CustomerPaymentResponse").strings("required").contains("checkoutRecoveryAvailable") shouldBe false
         }
+        test("Checkout launch fields are customer-only and mode is required") {
+            schema("CheckoutResponse").strings("required") shouldContainAll listOf("attemptId", "uiMode", "state", "outcome")
+            schema("CheckoutResponse").at("properties").jsonObject.keys shouldContainAll listOf("url", "clientSecret")
+            schema("CheckoutStatusResponse").at("properties").jsonObject.keys shouldBe setOf("attemptId", "uiMode", "state", "outcome")
+            val staff = document.at("paths", "/staff/requests/{inquiryId}/payment-attempts/{attemptId}/reconcile", "post")
+            staff.text("responses", "200", "content", "application/json", "schema", "${'$'}ref") shouldBe
+                "#/components/schemas/CheckoutStatusResponse"
+            listOf("CustomerPaymentResponse", "StripeAttemptResponse").forEach {
+                schema(it)
+                    .at("properties")
+                    .jsonObject.keys
+                    .contains("clientSecret") shouldBe false
+            }
+        }
         test("native SSE contract describes event-stream rather than a JSON response") {
             val endpoint = document.at("paths", "/staff/requests/{inquiryId}/updates", "get")
             endpoint.at("responses", "200", "content").jsonObject.keys shouldBe setOf("text/event-stream")
@@ -541,6 +555,7 @@ class OpenApiDocumentSpec :
                 "CustomerPaymentResponse",
                 "CreateCheckoutRequest",
                 "CheckoutResponse",
+                "CheckoutStatusResponse",
                 "StripeAttemptResponse",
                 "StripeAttemptsResponse",
                 "StaffDashboardResponse",

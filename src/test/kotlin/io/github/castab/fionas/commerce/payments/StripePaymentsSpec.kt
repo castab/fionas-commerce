@@ -35,7 +35,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-internal fun testStripeConfiguration() =
+internal fun testStripeConfiguration(mode: CheckoutMode = CheckoutMode.HOSTED) =
     StripeConfiguration(
         "sk_test_fake_no_network_12345",
         "whsec_fake_no_network_12345",
@@ -43,6 +43,7 @@ internal fun testStripeConfiguration() =
         "https://payments.test",
         "acct_test",
         false,
+        mode,
     )
 
 internal class PaymentTestClock : Clock() {
@@ -78,7 +79,8 @@ internal class FakeStripe(
     override fun create(attempt: StripeAttempt): StripeCheckout {
         verifyMerchant()
         onCreate?.invoke()
-        authorizations[attempt.id] = attempt
+        val previous = authorizations.putIfAbsent(attempt.id, attempt)
+        check(previous == null || previous.checkoutMode == attempt.checkoutMode) { "Changed idempotent Checkout mode" }
         val session =
             sessions.computeIfAbsent("cs_test_${attempt.id}") {
                 created.incrementAndGet()
@@ -92,9 +94,11 @@ internal class FakeStripe(
                     "unpaid",
                     null,
                     attempt.expiresAt,
-                    "https://checkout.stripe.com/c/pay/$it",
+                    "https://checkout.stripe.com/c/pay/$it".takeIf { attempt.checkoutMode == CheckoutMode.HOSTED },
                     null,
                     configuration.authorizationProof(attempt),
+                    attempt.checkoutMode,
+                    "${it}_secret_test".takeIf { attempt.checkoutMode == CheckoutMode.EMBEDDED },
                 )
             }
         if (timeoutNext) {
@@ -139,6 +143,8 @@ internal class FakeStripe(
             if (state == "open") original.url else null,
             TEST_INSTANT,
             original.authorizationProof,
+            original.uiMode,
+            original.clientSecret,
         ).also { sessions[sessionId] = it }
     }
 
@@ -152,12 +158,16 @@ internal class FakeStripe(
     }
 }
 
-class StripePaymentsSpec :
-    FunSpec({
+class StripePaymentsSpec : FunSpec(stripePaymentsTests(CheckoutMode.HOSTED))
+
+class StripeEmbeddedPaymentsSpec : FunSpec(stripePaymentsTests(CheckoutMode.EMBEDDED))
+
+private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
+    {
         lateinit var app: TestApplication
         lateinit var fake: FakeStripe
         lateinit var clock: PaymentTestClock
-        val config = testStripeConfiguration()
+        val config = testStripeConfiguration(mode)
         beforeSpec {
             fake = FakeStripe(config)
             clock = PaymentTestClock()
@@ -236,7 +246,15 @@ class StripePaymentsSpec :
 
         fun redirect(response: Response): CheckoutResponse {
             response.status shouldBe Status.OK
-            return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer())
+            return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer()).also {
+                if (it.state == "OPEN") {
+                    (it.url != null) shouldBe (it.uiMode == "HOSTED")
+                    (it.clientSecret != null) shouldBe (it.uiMode == "EMBEDDED")
+                } else {
+                    it.url shouldBe null
+                    it.clientSecret shouldBe null
+                }
+            }
         }
 
         fun session(redirect: CheckoutResponse) = fake.sessions.values.single { it.attemptId.toString() == redirect.attemptId }
@@ -273,6 +291,139 @@ class StripePaymentsSpec :
                 Status.OK
         }
 
+        test("customer launch credentials are mode-specific and absent from staff and summary responses") {
+            val id = initial()
+            val link = link(id)
+            val snapshot = summary(link)
+            val key = UUID.randomUUID().toString()
+            val response = checkout(link, key, snapshot = snapshot)
+            response.header("Cache-Control") shouldBe "no-store"
+            val opened = redirect(response)
+            opened.uiMode shouldBe mode.name
+            (opened.url != null) shouldBe (mode == CheckoutMode.HOSTED)
+            (opened.clientSecret != null) shouldBe (mode == CheckoutMode.EMBEDDED)
+            val credential = checkNotNull(opened.clientSecret ?: opened.url)
+            opened.toString() shouldNotContain credential
+            session(opened).toString() shouldNotContain credential
+            listOf(
+                publicRequest(link),
+                app.adminGet("/staff/requests/$id/payment-attempts"),
+                app.adminPost("/staff/requests/$id/payment-attempts/${opened.attemptId}/reconcile"),
+            ).forEach {
+                it.status shouldBe Status.OK
+                it.header("Cache-Control") shouldBe "no-store"
+                it.bodyString() shouldNotContain credential
+                it.bodyString() shouldNotContain "clientSecret"
+            }
+            app.database
+                .strings(
+                    "SELECT row_to_json(a)::text FROM fionas.stripe_payment_attempts a WHERE id = '${opened.attemptId}'",
+                ).single() shouldNotContain
+                credential
+            fake.change(session(opened).id)
+            val completed = redirect(checkout(link, key, snapshot = snapshot))
+            completed.state shouldBe "SUCCEEDED"
+            completed.url shouldBe null
+            completed.clientSecret shouldBe null
+        }
+        test("missing launch credentials reserve the Session for same-key recovery and never authorize replacement") {
+            val id = initial()
+            val link = link(id)
+            val snapshot = summary(link)
+            val key = UUID.randomUUID().toString()
+            val opened = redirect(checkout(link, key, snapshot = snapshot))
+            val original = session(opened)
+            fake.sessions[original.id] =
+                StripeCheckout(
+                    original.id,
+                    original.attemptId,
+                    original.amountMinor,
+                    original.currency,
+                    original.liveMode,
+                    original.state,
+                    original.paymentStatus,
+                    original.paymentIntentId,
+                    original.expiresAt,
+                    null,
+                    original.paidAt,
+                    original.authorizationProof,
+                    original.uiMode,
+                    null,
+                )
+            checkout(link, key, snapshot = snapshot).status shouldBe Status.CONFLICT
+            checkout(link, snapshot = snapshot).status shouldBe Status.CONFLICT
+            attempts(id).items.size shouldBe 1
+            attempts(id).items.single().sessionId shouldBe original.id
+            app.adminPost("/staff/requests/$id/payment-attempts/${opened.attemptId}/reconcile").status shouldBe Status.OK
+            fake.sessions[original.id] = original
+            redirect(checkout(link, key, snapshot = snapshot)) shouldBe opened
+        }
+        test("provider mode disagreement prevents synchronization and any webhook ledger credit") {
+            val id = initial()
+            val link = link(id)
+            val snapshot = summary(link)
+            val key = UUID.randomUUID().toString()
+            val opened = redirect(checkout(link, key, snapshot = snapshot))
+            val original = fake.change(session(opened).id)
+            val other = if (mode == CheckoutMode.HOSTED) CheckoutMode.EMBEDDED else CheckoutMode.HOSTED
+            fake.sessions[original.id] =
+                StripeCheckout(
+                    original.id,
+                    original.attemptId,
+                    original.amountMinor,
+                    original.currency,
+                    original.liveMode,
+                    original.state,
+                    original.paymentStatus,
+                    original.paymentIntentId,
+                    original.expiresAt,
+                    original.url,
+                    original.paidAt,
+                    original.authorizationProof,
+                    other,
+                    original.clientSecret,
+                )
+            checkout(link, key, snapshot = snapshot).status shouldBe Status.INTERNAL_SERVER_ERROR
+            webhook(original.id).status shouldBe Status.INTERNAL_SERVER_ERROR
+            summary(link).history.size shouldBe 0
+            summary(link).lifecycle shouldBe "QUOTED"
+            attempts(id).items.single().ledgerPaymentId shouldBe null
+            fake.sessions[original.id] = original
+            webhook(original.id).status shouldBe Status.NO_CONTENT
+            summary(link).history.size shouldBe 1
+        }
+        test("V11 preserves existing V10 attempts and backfills hosted presentation") {
+            val id = initial()
+            val link = link(id)
+            val opened = redirect(checkout(link))
+            val migration = checkNotNull(javaClass.getResource("/db/fionas/V11__stripe_checkout_mode.sql")).readText()
+            app.database.connect { connection ->
+                connection.autoCommit = false
+                try {
+                    connection.createStatement().use { statement ->
+                        statement.execute("ALTER TABLE fionas.stripe_payment_attempts DROP COLUMN checkout_mode")
+
+                        fun rows(): List<String> =
+                            statement
+                                .executeQuery(
+                                    "SELECT row_to_json(a)::text FROM fionas.stripe_payment_attempts a ORDER BY id",
+                                ).use { rs ->
+                                    buildList { while (rs.next()) add(rs.getString(1)) }
+                                }
+                        val before = rows()
+                        statement.execute(migration)
+                        statement.executeQuery("SELECT checkout_mode FROM fionas.stripe_payment_attempts").use { rs ->
+                            while (rs.next()) rs.getString(1) shouldBe "HOSTED"
+                        }
+                        statement.execute("ALTER TABLE fionas.stripe_payment_attempts DROP COLUMN checkout_mode")
+                        rows() shouldBe before
+                    }
+                } finally {
+                    connection.rollback()
+                }
+            }
+            attempts(id).items.single().id shouldBe opened.attemptId
+        }
         test("stable retrieval stores only a hash and inquiry-specific capabilities separate returning customers") {
             val email = "same-${UUID.randomUUID()}@example.com"
             val first = initial(email)
@@ -425,7 +576,14 @@ class StripePaymentsSpec :
             val link = link(id)
             val before = summary(link)
             val key = UUID.randomUUID().toString()
-            val other = TestApplication.create(clock = clock, stripe = config, stripeGateway = fake, database = app.database)
+            val otherMode = if (mode == CheckoutMode.HOSTED) CheckoutMode.EMBEDDED else CheckoutMode.HOSTED
+            val other =
+                TestApplication.create(
+                    clock = clock,
+                    stripe = testStripeConfiguration(otherMode),
+                    stripeGateway = fake,
+                    database = app.database,
+                )
             try {
                 val first = CompletableFuture.supplyAsync { checkout(link, key, snapshot = before) }
                 val second =
@@ -770,4 +928,4 @@ class StripePaymentsSpec :
             summary(link).history.size shouldBe 1
             attempts(id).items.single().ledgerPaymentId shouldBe paymentId
         }
-    })
+    }

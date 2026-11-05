@@ -10,12 +10,43 @@ Fiona integration tables. All payment-integration routes remain in OpenAPI and r
 ```text
 FIONAS_STRIPE_ENABLED=true
 FIONAS_STRIPE_LIVE_MODE=false
+FIONAS_STRIPE_CHECKOUT_MODE=hosted
 STRIPE_SECRET_KEY=<Stripe test secret key>
 STRIPE_WEBHOOK_SECRET=<snapshot destination signing secret>
 FIONAS_STRIPE_ACCOUNT_ID=<acct_... owning the payments>
 FIONAS_PUBLIC_BASE_URL=https://<fionas-web-public-origin>
 FIONAS_PAYMENT_ACCESS_KEY=<base64 of 32 cryptographically random bytes>
 ```
+
+`FIONAS_STRIPE_CHECKOUT_MODE` accepts exactly `hosted` (default) or `embedded`;
+invalid enabled configuration fails at startup. V11 adds constrained, non-null
+`checkout_mode` to attempts and preserves all V10 rows as HOSTED. The mode is inserted
+once and never updated. Client secrets are never persisted.
+
+Deploy this backend in hosted mode, deploy frontend handling for both response variants,
+then enable embedded and verify a newly authorized attempt. Rollback to hosted affects
+future attempts only. Retain frontend embedded support for existing attempts. No database
+reset, attempt rewrite or link replacement is needed.
+
+Retries and discovery use the durable mode across restarts and configuration changes.
+Hosted parameters remain unchanged, including implicit UI mode. Embedded sends
+`ui_mode=embedded_page`, `redirect_on_completion=if_required`, and the trusted
+`/pay/{publicId}?checkout=returned` return URL without success/cancel URLs. See the
+[Stripe API reference](https://docs.stripe.com/api/checkout/sessions/create) and
+[pinned SDK parameters](https://github.com/stripe/stripe-java/blob/v34.1.0/src/main/java/com/stripe/param/checkout/SessionCreateParams.java).
+No SDK/API upgrade is required.
+
+Provider mode must match the durable authorization before reconciliation. Missing open
+launch credentials fail with a recovery conflict and leave the authorization reserved.
+The 25-minute replay window, bounded discovery, one-active guard, locks and ledger path
+are unchanged. The HMAC proof stays byte-compatible for historical keys; mode is additionally
+checked against durable authorization. Unknown results never permit replacement.
+
+Exclude customer Checkout response bodies from logging, tracing, monitoring and persistence.
+Client secrets never enter attempts, webhook records or events. Staff reconciliation returns
+status only. The [frontend handoff](stripe-payments-frontend-handoff.md) documents both
+variants, publishable-key setup and authoritative completion refresh. Browser mounting is
+verified in the subsequent fionas-web work; CI needs no live Stripe calls.
 
 Use an HTTPS origin with no path, trailing slash, userinfo, query or fragment. Test mode
 alone permits `http://localhost:<port>`. Live mode must explicitly be true and requires

@@ -11,6 +11,7 @@ class StripeConfiguration(
     val publicOrigin: String,
     val accountId: String,
     val liveMode: Boolean,
+    val checkoutMode: CheckoutMode = CheckoutMode.HOSTED,
 ) {
     init {
         require(
@@ -64,6 +65,11 @@ class StripeConfiguration(
                 required("FIONAS_PUBLIC_BASE_URL"),
                 required("FIONAS_STRIPE_ACCOUNT_ID"),
                 flag("FIONAS_STRIPE_LIVE_MODE"),
+                when (environment["FIONAS_STRIPE_CHECKOUT_MODE"] ?: "hosted") {
+                    "hosted" -> CheckoutMode.HOSTED
+                    "embedded" -> CheckoutMode.EMBEDDED
+                    else -> error("FIONAS_STRIPE_CHECKOUT_MODE must be hosted or embedded")
+                },
             )
         }
     }

@@ -45,6 +45,8 @@ class CheckoutRedirect(
     val url: String?,
     val state: StripeAttemptState,
     val outcome: StripeReconciliation,
+    val uiMode: CheckoutMode = CheckoutMode.HOSTED,
+    val clientSecret: String? = null,
 ) {
     override fun toString() = "CheckoutRedirect([redacted])"
 }
@@ -222,6 +224,7 @@ class CustomerPayments(
                     "fionas-checkout:$id",
                     at,
                     at.plusSeconds(3600),
+                    checkoutMode = configuration.checkoutMode,
                 ).also { attempts.insert(transaction, it) }
             CheckoutSelection(attempt, false)
         }
@@ -237,7 +240,7 @@ class CustomerPayments(
                     ?: throw CommerceFailure.NotFound("Payment attempt was not found")
             }
         verifyMerchant()
-        return synchronize(attempt)
+        return synchronize(attempt, customerLaunch = false)
     }
 
     /** A deployment error refuses payment loudly for operators; it is never reported as an unknown payment outcome. */
@@ -257,8 +260,11 @@ class CustomerPayments(
             attempts.history(transaction, inquiry)
         }
 
-    private fun synchronize(attempt: StripeAttempt): CheckoutRedirect {
-        if (attempt.ledgerPaymentId != null) return CheckoutRedirect(attempt.id, null, attempt.state, attempt.outcome)
+    private fun synchronize(
+        attempt: StripeAttempt,
+        customerLaunch: Boolean = true,
+    ): CheckoutRedirect {
+        if (attempt.ledgerPaymentId != null) return CheckoutRedirect(attempt.id, null, attempt.state, attempt.outcome, attempt.checkoutMode)
         var session =
             when {
                 attempt.sessionId != null -> gateway.retrieve(attempt.sessionId)
@@ -281,12 +287,19 @@ class CustomerPayments(
             if (observed.first.ledgerPaymentId !=
                 null
             ) {
-                return CheckoutRedirect(attempt.id, null, observed.first.state, observed.first.outcome)
+                return CheckoutRedirect(attempt.id, null, observed.first.state, observed.first.outcome, attempt.checkoutMode)
             }
             if (observed.second) session = gateway.expire(session.id)
         }
         val saved = reconcile(session)
-        return CheckoutRedirect(saved.id, session.url?.takeIf { saved.state == StripeAttemptState.OPEN }, saved.state, saved.outcome)
+        val launch = customerLaunch && saved.state == StripeAttemptState.OPEN
+        val url = session.url?.takeIf { launch && saved.checkoutMode == CheckoutMode.HOSTED }
+        val secret = session.clientSecret?.takeIf { launch && saved.checkoutMode == CheckoutMode.EMBEDDED }
+        if (launch && (if (saved.checkoutMode == CheckoutMode.HOSTED) url else secret).isNullOrBlank()) {
+            // Keep the reconciled Session identity reserved; missing browser credentials never permit replacement.
+            throw CheckoutRecoveryProblem.UNKNOWN.conflict()
+        }
+        return CheckoutRedirect(saved.id, url, saved.state, saved.outcome, saved.checkoutMode, secret)
     }
 
     /** Signature authentication is independent of staff sessions. No acknowledgement precedes a committed outcome. */
@@ -417,6 +430,7 @@ class CustomerPayments(
     ) {
         check(
             session.attemptId == attempt.id &&
+                session.uiMode == attempt.checkoutMode &&
                 (session.paymentStatus != "paid" || session.state == "complete") &&
                 session.amountMinor == attempt.authorizedMinor &&
                 session.currency == "usd" &&

@@ -26,9 +26,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-class StripeRecoverySpec :
-    FunSpec({
-        val config = testStripeConfiguration()
+class StripeRecoverySpec : FunSpec(stripeRecoveryTests(CheckoutMode.HOSTED))
+
+class StripeEmbeddedRecoverySpec : FunSpec(stripeRecoveryTests(CheckoutMode.EMBEDDED))
+
+private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
+    {
+        val config = testStripeConfiguration(mode)
         val clock = PaymentTestClock()
         val fake = FakeStripe(config)
         lateinit var app: TestApplication
@@ -98,7 +102,15 @@ class StripeRecoverySpec :
 
         fun redirect(response: Response): CheckoutResponse {
             response.status shouldBe Status.OK
-            return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer())
+            return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer()).also {
+                if (it.state == "OPEN") {
+                    (it.url != null) shouldBe (it.uiMode == "HOSTED")
+                    (it.clientSecret != null) shouldBe (it.uiMode == "EMBEDDED")
+                } else {
+                    it.url shouldBe null
+                    it.clientSecret shouldBe null
+                }
+            }
         }
 
         fun session(checkout: CheckoutResponse) = fake.sessions.values.single { it.attemptId.toString() == checkout.attemptId }
@@ -129,12 +141,49 @@ class StripeRecoverySpec :
             summary(s).lifecycle shouldBe "BOOKED"
         }
 
-        fun restart() {
+        fun restart(configuration: StripeConfiguration = config) {
             val database = app.database
             app.runtime.close()
-            app = TestApplication.create(clock = clock, stripe = config, stripeGateway = fake, database = database)
+            app = TestApplication.create(clock = clock, stripe = configuration, stripeGateway = fake, database = database)
         }
 
+        test("restart and rollout preserve both ambiguous and attached attempt modes") {
+            val originalApp = app
+            app = TestApplication.create(clock = clock, stripe = config, stripeGateway = fake)
+            val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
+            app.authorization.replaceRolePermissions(CommerceRoles.Administrator, grants + FionaPermissions.PaymentAccessManage)
+            try {
+                // Provision all inquiries before restarting: the harness's web SERVICE is created lazily per instance.
+                val cases = listOf(false, true).flatMap { lost -> listOf(false, true).map { Triple(lost, it, scenario()) } }
+                val other = if (mode == CheckoutMode.HOSTED) CheckoutMode.EMBEDDED else CheckoutMode.HOSTED
+                for ((lost, discovery, s) in cases) {
+                    restart(config)
+                    val snapshot = summary(s)
+                    val key = UUID.randomUUID().toString()
+                    fake.timeoutNext = lost
+                    val first = checkout(s, key, snapshot = snapshot)
+                    first.status shouldBe if (lost) Status.INTERNAL_SERVER_ERROR else Status.OK
+                    val original = attempts(s).single()
+                    restart(testStripeConfiguration(other))
+                    if (discovery) clock.instant = clock.instant.plusSeconds(1501)
+                    val recovered = redirect(checkout(s, key, snapshot = snapshot))
+                    recovered.attemptId shouldBe original.id
+                    recovered.uiMode shouldBe mode.name
+                    (recovered.url != null) shouldBe (mode == CheckoutMode.HOSTED)
+                    (recovered.clientSecret != null) shouldBe (mode == CheckoutMode.EMBEDDED)
+                    app.database.strings("SELECT checkout_mode FROM fionas.stripe_payment_attempts WHERE id = '${original.id}'") shouldBe
+                        listOf(mode.name)
+                    code(checkout(s, snapshot = snapshot)) shouldBe "checkout_in_progress"
+                    attempts(s).size shouldBe 1
+                    fake.sessions.values.count { it.attemptId.toString() == original.id } shouldBe 1
+                    fake.expire(session(recovered).id)
+                    redirect(checkout(s, snapshot = snapshot)).uiMode shouldBe other.name
+                }
+            } finally {
+                app.close()
+                app = originalApp
+            }
+        }
         test("a new browser key recovers confirmed expiration without a webhook and old keys remain pinned") {
             val s = scenario()
             val original = summary(s)
@@ -328,7 +377,14 @@ class StripeRecoverySpec :
                     check(release.await(15, TimeUnit.SECONDS))
                 }
             }
-            val other = TestApplication.create(clock = clock, stripe = config, stripeGateway = fake, database = app.database)
+            val otherMode = if (mode == CheckoutMode.HOSTED) CheckoutMode.EMBEDDED else CheckoutMode.HOSTED
+            val other =
+                TestApplication.create(
+                    clock = clock,
+                    stripe = testStripeConfiguration(otherMode),
+                    stripeGateway = fake,
+                    database = app.database,
+                )
             try {
                 val a = CompletableFuture.supplyAsync { checkout(s, snapshot = snapshot) }
                 val b = CompletableFuture.supplyAsync { checkout(s, snapshot = snapshot, instance = other) }
@@ -417,4 +473,4 @@ class StripeRecoverySpec :
             redirect(checkout(s)).attemptId shouldNotBe old.attemptId
             attempts(s).size shouldBe 2
         }
-    })
+    }
