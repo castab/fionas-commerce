@@ -97,6 +97,13 @@ class StripeBoundarySpec :
                     "FIONAS_PUBLIC_BASE_URL" to configuration.publicOrigin,
                     "FIONAS_STRIPE_ACCOUNT_ID" to configuration.accountId,
                 )
+            StripeConfiguration.fromEnvironment(env)!!.checkoutMode shouldBe CheckoutMode.HOSTED
+            mapOf("hosted" to CheckoutMode.HOSTED, "embedded" to CheckoutMode.EMBEDDED).forEach { (value, mode) ->
+                StripeConfiguration.fromEnvironment(env + ("FIONAS_STRIPE_CHECKOUT_MODE" to value))!!.checkoutMode shouldBe mode
+            }
+            listOf("", "EMBEDDED", " embedded", "elements").forEach {
+                shouldThrow<IllegalStateException> { StripeConfiguration.fromEnvironment(env + ("FIONAS_STRIPE_CHECKOUT_MODE" to it)) }
+            }
             StripeConfiguration.fromEnvironment(env)!!.publicOrigin shouldBe "https://payments.test"
             shouldThrow<IllegalArgumentException> { StripeConfiguration.fromEnvironment(env + ("FIONAS_STRIPE_LIVE_MODE" to "true")) }
             listOf(
@@ -107,6 +114,14 @@ class StripeBoundarySpec :
             ).forEach {
                 shouldThrow<IllegalArgumentException> { StripeConfiguration.fromEnvironment(env + ("FIONAS_PUBLIC_BASE_URL" to it)) }
             }
+            CheckoutRedirect(
+                java.util.UUID.randomUUID(),
+                null,
+                StripeAttemptState.OPEN,
+                StripeReconciliation.PENDING,
+                CheckoutMode.EMBEDDED,
+                "cs_secret_test",
+            ).toString() shouldBe "CheckoutRedirect([redacted])"
             configuration.toString() shouldBe "StripeConfiguration([redacted])"
             PaymentBearer("secret").toString() shouldBe "PaymentBearer([redacted])"
         }

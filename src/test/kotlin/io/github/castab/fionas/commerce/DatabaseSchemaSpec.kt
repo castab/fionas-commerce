@@ -98,6 +98,7 @@ class DatabaseSchemaSpec :
                     "outcome",
                     "ledger_payment_id",
                     "diagnostic",
+                    "checkout_mode",
                 )
             application.database.strings(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fionas' " +

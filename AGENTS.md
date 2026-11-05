@@ -1954,6 +1954,19 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   and offers explicit POST recovery even when `canPay` is false. Stable runtime-envelope
   409 codes are `checkout_in_progress`, `payment_processing`, `payment_state_changed`,
   `checkout_recovery_conflict`, `checkout_reconciliation_required`.
+- **Checkout presentation.** V11 adds immutable constrained `checkout_mode` (HOSTED/EMBEDDED),
+  preserving V10 attempts as HOSTED. `FIONAS_STRIPE_CHECKOUT_MODE` accepts `hosted` (default)
+  or `embedded` for new attempts only. Replay/discovery uses stored mode. Hosted parameters
+  stay unchanged, including implicit UI mode and success/cancel URLs. Embedded sends
+  `ui_mode=embedded_page`, `redirect_on_completion=if_required`, and the trusted public-ID-only
+  return URL without success/cancel URLs. Provider mode must match before synchronization
+  or reconciliation. The HMAC proof remains byte-compatible. OPEN customer responses carry
+  `uiMode` and either hosted `url` or embedded `clientSecret`; other states carry neither.
+  Missing credentials fail with a recovery conflict and reserve the attempt. Wrappers redact
+  stringification; no launch credential enters persistence, logs, summaries, events or staff
+  diagnostics. Staff reconciliation uses a separate status-only DTO, without requiring or
+  returning launch credentials. Both modes share financial/recovery paths. Frontend support
+  for both variants must precede enabling embedded.
 - **Provider boundary.** Official stripe-java 34.1.0 / snapshot 2026-10-28.endive, USD,
   card-only eligibility (including card wallets), one line item, no discounts, automatic
   tax, adaptive pricing, saved-method setup, Billing or delayed bank/BNPL. Session recovery

@@ -62,8 +62,8 @@ endpoint.
 
 Every response is `Cache-Control: no-store`. Serve the page and BFF with the same policy,
 `Referrer-Policy: no-referrer`, and `X-Robots-Tag: noindex, nofollow`; include a robots
-meta tag. Do not prefetch these routes, cache them in a service worker, or load third-party
-scripts on the payment page. Backend URLs contain only nonsecret public IDs.
+meta tag. Do not prefetch these routes, cache them in a service worker, or load unrelated
+scripts on the payment page; use official Stripe.js for Embedded Checkout. Backend URLs contain only nonsecret public IDs.
 
 ## Current summary
 
@@ -154,22 +154,60 @@ a fresh read and deliberate payment action.
 ```json
 {
   "attemptId": "8cf42464-739b-43ca-b684-d0f802245c55",
+  "uiMode": "HOSTED",
   "url": "https://checkout.stripe.com/c/pay/...",
   "state": "OPEN",
   "outcome": "PENDING"
 }
 ```
 
-Navigate the same tab to `url` only when state is OPEN and a URL is present. This is a
-short-lived credential; never persist it beyond the current operation or send it to
-analytics. There is one active attempt per inquiry across all instances and keys.
-Same-key retries recover the original authorization, including after terms change; they
-never silently substitute new terms. A response without a URL requires refreshing the
-summary and handling the returned state.
+For an open embedded Session:
 
-Stripe uses one card-only hosted line item, not a mirrored catalog. No subscriptions,
-saved card setup, discounts, tax recalculation, BNPL or delayed bank methods. Card wallets
-are available according to Stripe/browser eligibility. Adaptive pricing is disabled.
+```json
+{
+  "attemptId": "8cf42464-739b-43ca-b684-d0f802245c55",
+  "uiMode": "EMBEDDED",
+  "clientSecret": "<Checkout Session client secret>",
+  "state": "OPEN",
+  "outcome": "PENDING"
+}
+```
+
+When OPEN, branch on `uiMode`: HOSTED navigates the same tab to `url`; EMBEDDED initializes
+official Stripe.js Embedded Checkout with `clientSecret`. The Stripe publishable key belongs
+in frontend configuration for the same merchant/environment. The customer bearer still
+authenticates every BFF-to-commerce request. Existing links and fragment/sessionStorage
+bearer handling remain unchanged; client secrets never replace the payment bearer.
+
+Only OPEN customer responses carry launch credentials, exactly one of `url` or `clientSecret`;
+nullable fields are omitted. PROCESSING, SUCCEEDED, EXPIRED and FAILED carry neither.
+Refresh the summary and handle the returned state. Missing open-session launch credentials
+fail with `409 checkout_reconciliation_required`, preserving the attempt for same-key
+recovery or investigation. Never replace an authorization to obtain a client secret.
+Staff reconciliation has a separate status-only response (`attemptId`, `uiMode`, `state`,
+`outcome`). Staff attempts and customer summaries contain no launch credentials.
+
+Do not log, persist (including sessionStorage), trace, instrument, or place client secrets
+in URLs, analytics, server-rendered props or error reports. Hold them only in memory for
+Stripe.js; retrieve them again through authenticated Checkout using the same key/body.
+Treat hosted URLs as short-lived credentials too.
+
+There is one active attempt per inquiry across all instances, modes and keys. Same-key
+retries retain the original authorization and presentation across configuration or terms
+changes. Stripe uses one card-only line item, no mirrored catalog, subscriptions, saved
+card setup, discounts, tax recalculation, BNPL or delayed bank methods. Adaptive pricing
+is disabled; card wallets depend on Stripe/browser eligibility.
+
+Embedded uses `redirect_on_completion=if_required`. On Stripe.js completion, refresh the
+authoritative commerce summary with bounded polling while settlement is pending. Completion
+callbacks cannot mark Invoices paid or Quotes BOOKED: verified reconciliation and the runtime
+ledger establish received money. Staff still control SERVED/CLOSED. Required authentication
+redirects return to the trusted payment page with no bearer or client secret in the URL.
+
+Deploy backend support with `FIONAS_STRIPE_CHECKOUT_MODE=hosted` (default), then frontend
+handling for both variants. Only then select `embedded` and verify a new attempt. Rollback
+to `hosted` affects future attempts; existing embedded attempts still need frontend support.
+No database reset or link replacement is required.
 
 ## Returns, pending work and errors
 

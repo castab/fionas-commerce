@@ -94,9 +94,20 @@ class StripeJavaGateway internal constructor(
                     .setClientReferenceId(attempt.id.toString())
                     .putMetadata("fionas_authorization", configuration.authorizationProof(attempt))
                     .setExpiresAt(attempt.expiresAt.epochSecond)
-                    .setSuccessUrl("$returnUrl?checkout=returned")
-                    .setCancelUrl("$returnUrl?checkout=cancelled")
-                    .build()
+                    .apply {
+                        when (attempt.checkoutMode) {
+                            // Leave ui_mode implicit: historical hosted idempotency keys must replay identical parameters.
+                            CheckoutMode.HOSTED -> {
+                                setSuccessUrl("$returnUrl?checkout=returned")
+                                setCancelUrl("$returnUrl?checkout=cancelled")
+                            }
+                            CheckoutMode.EMBEDDED -> {
+                                setUiMode(SessionCreateParams.UiMode.EMBEDDED_PAGE)
+                                setRedirectOnCompletion(SessionCreateParams.RedirectOnCompletion.IF_REQUIRED)
+                                setReturnUrl("$returnUrl?checkout=returned")
+                            }
+                        }
+                    }.build()
             describe(
                 client
                     .v1()
@@ -272,6 +283,12 @@ class StripeJavaGateway internal constructor(
             session.url,
             charge?.let { Instant.ofEpochSecond(it.created) },
             session.metadata["fionas_authorization"] ?: "",
+            when (session.uiMode) {
+                "hosted_page" -> CheckoutMode.HOSTED
+                "embedded_page" -> CheckoutMode.EMBEDDED
+                else -> error("Unexpected Stripe Checkout UI mode")
+            },
+            session.clientSecret,
         )
     }
 
