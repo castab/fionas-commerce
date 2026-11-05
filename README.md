@@ -2179,8 +2179,11 @@ existing conversation sender and customer payments, explicitly grant the five pe
 and verify that sender-domain tracking is disabled before setting
 `FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED=true` (default false). Migrate V12 before enabling.
 Preview is write-free; acceptance is not delivery; recovery retains the original key and
-command. Timeline bodies on financial-email inquiries are withheld, including quoted
-payment credentials, while safe send/delivery metadata remains. Keep this secret-safe
+command. Timeline MESSAGEs carry an explicit visibility reason: financial originals are
+protected, and other raw bodies remain unverified after accepted/UNKNOWN financial sends.
+Ordinary replies after definitive first-dispatch rejections remain readable. The provider
+has no trusted credential-free reply field, so post-send readability remains an unresolved
+limitation. Safe send/delivery metadata remains. Keep this secret-safe
 reader on rollback after any send attempt. See the [complete frontend and operations
 handoff](docs/financial-emails-frontend-handoff.md). No frontend, automatic reminders,
 attachments or Stripe Checkout changes are included.

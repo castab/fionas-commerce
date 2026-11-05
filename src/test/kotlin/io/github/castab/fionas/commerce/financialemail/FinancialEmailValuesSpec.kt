@@ -7,6 +7,20 @@ import io.kotest.matchers.shouldNotBe
 
 class FinancialEmailValuesSpec :
     FunSpec({
+        test("greeting names use the first Unicode whitespace-delimited component with a blank fallback") {
+            mapOf(
+                "Maria Delgado" to "Maria",
+                "Ana María López" to "Ana",
+                "José García" to "José",
+                "  Sofia   Martinez  " to "Sofia",
+                "\t\nSofia\tMartinez\n" to "Sofia",
+                "\u00a0\u2003José\u00a0García\u2003" to "José",
+                "李 小龍" to "李",
+                "" to "there",
+                " \t\n\u00a0\u2003" to "there",
+            ).forEach { (name, expected) -> customerGreetingName(name) shouldBe expected }
+            escapeEmailHtml(customerGreetingName("<José&> García")) shouldBe "&lt;José&amp;&gt;"
+        }
         test("staff message normalization preserves paragraphs and non-BMP Unicode while rejecting invalid Unicode and controls") {
             FinancialEmailMessage.ofOptional(" \nHello 🍦\n\nAnother paragraph\t \n")!!.value shouldBe "Hello 🍦\n\nAnother paragraph"
             FinancialEmailMessage.ofOptional(" \r\n\t") shouldBe null

@@ -238,10 +238,22 @@ reclassify a receipt, and nothing is recomputed or rounded.
 disabled) or `FORBIDDEN` (the caller lacks `fionas.communications.read`, or the provider refused
 Fiona). Commerce milestones are present in every state; message content only for `READY`.
 Messages normally carry plain `text` only, with whitespace preserved; provider HTML, routing
-tokens and diagnostic text never cross the boundary. Once a financial-email intent exists,
-all provider bodies for that inquiry are withheld, including quoted inbound trails. The
-timeline carries safe purpose/send/delivery metadata and `textOmittedForPaymentSecurity`
-instead. See [financial emails](financial-emails-frontend-handoff.md#activity-and-secrets).
+tokens and diagnostic text never cross the boundary. Each MESSAGE now has `textVisibility`:
+READABLE, FINANCIAL_EMAIL_PROTECTED, PAYMENT_CONTENT_UNVERIFIED or PROVIDER_CONTENT_UNAVAILABLE.
+Matched financial message IDs remain protected even when the command is UNKNOWN. Other raw
+text is unverified when any financial command may have sent payment content. Only definitively
+REJECTED first dispatches establish no send and allow the ordinary conversation behavior.
+Missing provider text is explicitly unavailable rather than an empty reply.
+
+The provider supplies no trusted safe reply field. Simple customer and ordinary staff replies
+after accepted/UNKNOWN financial sends still cannot be safely displayed; this remains an
+unresolved usability limitation. Quoting heuristics cannot establish absence of encoded,
+fragmented or pasted credentials, even in outbound staff text. Both protected states omit
+`text` and set `textOmittedForPaymentSecurity:true`, retaining message identity, ordering,
+purpose, send/delivery states, attention and reply composition. Show an explicit withheld
+placeholder using the reason; never an empty message or an original-body link. The post-provider
+database safety read remains mandatory, including newly committed UNKNOWN commands.
+See [the exact policy and provider gap](financial-emails-frontend-handoff.md#activity-and-secrets).
 
 ## Staff replies
 

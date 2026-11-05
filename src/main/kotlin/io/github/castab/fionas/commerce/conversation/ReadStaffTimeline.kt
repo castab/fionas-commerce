@@ -194,15 +194,13 @@ class ReadStaffTimeline(
         // Read AFTER provider I/O. A pre-send database snapshot could otherwise precede the command's commit
         // while the subsequent provider read already contains its secret-bearing message.
         val financialEmails = transactor.inTransaction { emails.history(it, inquiry) }
-        if (financialEmails.isNotEmpty()) {
-            conversation =
-                conversation.copy(
-                    conversation =
-                        conversation.conversation?.let { thread ->
-                            thread.copy(messages = thread.messages.map { it.copy(text = null, textOmittedForPaymentSecurity = true) })
-                        },
-                )
-        }
+        conversation =
+            conversation.copy(
+                conversation =
+                    conversation.conversation?.let { thread ->
+                        thread.copy(messages = thread.messages.map { it.withTextVisibility(financialEmails) })
+                    },
+            )
         val all =
             items +
                 conversation.conversation

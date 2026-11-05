@@ -4,6 +4,9 @@ Staff manually preview and send the current published Quote or a balance-due Inv
 the inquiry's existing Conversation Service thread. Publishing, revising, amending,
 serving and receiving payment never send email. There is no frontend implementation here.
 Generate clients from the executable `/openapi.json` contract.
+Quote, revised Quote and Invoice greetings use the authoritative customer's first name,
+with Unicode whitespace handling and a blank fallback of `there`. HTML escapes that name;
+plain text uses the same name. Full names in customer records and event facts are unchanged.
 
 ## Authorization and deployment
 
@@ -196,16 +199,45 @@ matters for service/deposit-only republication, even when ledger versions match.
 provider `sendState`/`deliveryState` for pending, delivered or failed presentation; absent
 provider state means unavailable, never successful delivery. UNKNOWN always needs recovery.
 
-**Once any financial-email intent exists, every provider message body for that inquiry is
-withheld permanently on the staff timeline**, including inbound quoted trails and failed or
-UNKNOWN attempts. MESSAGE has `text:null` (omitted under CommerceJson) and
-`textOmittedForPaymentSecurity:true`; HTML was already excluded. This conservative policy
-protects bare, encoded or rewrapped quoted credentials without guessing at email quoting
-formats. It deliberately withholds ordinary reply bodies on these threads too; the same
-normal staff reply send operation remains available. Do not offer “View exact original.”
-Message identities, send/delivery state, safe email purpose and financial milestones remain.
-An additional post-provider database read closes the snapshot-before-send disclosure race.
-No full original body or quoted trail may be copied to ordinary staff read APIs.
+MESSAGE adds a static `textVisibility` classification:
+
+| Value | Body handling |
+|---|---|
+| `READABLE` | Ordinary provider text, unchanged. Applies with no financial commands or only definitive first-dispatch rejections. |
+| `FINANCIAL_EMAIL_PROTECTED` | ID matches a financial command, including UNKNOWN. Original body is withheld; safe `financialEmail` metadata remains. |
+| `PAYMENT_CONTENT_UNVERIFIED` | Other raw correspondence when any financial command may have sent payment content. Quoted/pasted credentials cannot be excluded. |
+| `PROVIDER_CONTENT_UNAVAILABLE` | Provider supplied no text. This is distinct from a withheld body or an empty message. |
+
+The two protected states have `text:null` (omitted under CommerceJson) and
+`textOmittedForPaymentSecurity:true`. Provider HTML is always excluded. Only a command in
+REJECTED with exactly one dispatch proves no send; an UNKNOWN intent without message identity
+also enforces protection. Unavailable text has the omission flag false unless its ID is a
+known financial send. Classification does not depend on direction, timestamps or acceptance
+alone. Message IDs, chronological ordering, send/delivery state, safe purpose metadata,
+conversation availability and financial milestones remain unchanged.
+
+**Readability remains incomplete with the current provider contract.** Its
+[Message schema at the verified revision](https://github.com/castab/resend-conversation-service/blob/a5a77f378d34178efb8534eaf40009f4c3c9ade3/public/openapi.json)
+exposes only raw nullable `text` and `html`; there is no trusted credential-free reply field.
+Even a simple customer question after a Quote or Invoice and an ordinary outbound staff
+reply therefore remain PAYMENT_CONTENT_UNVERIFIED. A body cannot be declared safe merely
+because it lacks `/pay/` or resembles ordinary prose. Credentials may be pasted, forwarded,
+encoded as entities/percent escapes, or fragmented by wrapping. A Gmail/Outlook quote splitter
+cannot establish confidentiality, so no best-effort extraction is presented as secure.
+
+The security boundary is denial of unverified raw content at the server read boundary,
+using durable financial command provenance read **after provider I/O**. This preserves the
+snapshot-before-send race protection, including newly committed UNKNOWN intents. A stronger
+upstream content/provenance contract establishing credential exclusion is required to restore
+those bodies. No new raw-message endpoint, permission bypass or secret/body persistence is
+introduced. Existing payment-access authority does not implicitly grant original-message access.
+
+Frontend changes are needed to label the new reasons: render readable text normally, a
+financial summary for FINANCIAL_EMAIL_PROTECTED, an explicit security placeholder for
+PAYMENT_CONTENT_UNVERIFIED, and an unavailable placeholder for PROVIDER_CONTENT_UNAVAILABLE.
+Older clients may continue using the omission flag, but must not treat withheld content as
+an empty customer message. Keep the normal reply operation and acknowledgement watermarks;
+do not offer “View exact original.” No frontend implementation is included here.
 
 Quote/Invoice publication/amendment history remains independent. Accepted sends append one
 STAFF_EMAIL_SENT with authenticated USER and a zero clearing boundary, so no customer mail

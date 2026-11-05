@@ -23,6 +23,13 @@ private fun usd(value: BigDecimal): String =
 
 private fun multiline(value: String) = escapeEmailHtml(value).replace("\r\n", "\n").replace("\n", "<br>")
 
+/** Greeting only: keep the authoritative full name in the event facts and customer record. */
+internal fun customerGreetingName(name: String): String =
+    name
+        .trim { it.isWhitespace() || Character.isSpaceChar(it) }
+        .takeWhile { !it.isWhitespace() && !Character.isSpaceChar(it) }
+        .ifEmpty { "there" }
+
 /** Exact ledger amounts, including precise unit rates. No rounding, catalog lookup or inferred payment terms. */
 internal fun renderFinancialEmail(
     kind: FinancialEmailKind,
@@ -40,13 +47,14 @@ internal fun renderFinancialEmail(
     val quote = kind == FinancialEmailKind.QUOTE
     require(!quote || summary.required.signum() > 0) { "A payment-oriented Quote email requires a positive deposit" }
     val name = customer.name.value
+    val greetingName = customerGreetingName(name)
     val revision = if (quote) checkNotNull(request.currentQuoteRevision) else checkNotNull(request.currentInvoiceRevision)
     val revised = quote && request.proposalHistory.size > 1
     val title =
         if (quote) {
-            "Hi $name, here's your ${if (revised) "revised " else ""}Quote v$revision"
+            "Hi $greetingName, here's your ${if (revised) "revised " else ""}Quote v$revision"
         } else {
-            "Thank you, $name — Invoice v$revision"
+            "Thank you, $greetingName — Invoice v$revision"
         }
     val introduction =
         message?.value ?: if (quote) {

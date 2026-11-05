@@ -158,6 +158,7 @@ fun TestApplication.createInquiry(
     email: String = "jane-${UUID.randomUUID()}@example.com",
     lines: List<TestLine> = acceptanceLines(),
     guestCountIsMinimum: Boolean = false,
+    name: String = "Jane Doe",
 ): String {
     val response =
         http(
@@ -165,7 +166,7 @@ fun TestApplication.createInquiry(
                 .withSubmissionKey()
                 .asFionasWeb(this)
                 .header("Content-Type", "application/json")
-                .body(inquiryBody(email, lines, requestedServiceJson(guestCountIsMinimum = guestCountIsMinimum))),
+                .body(inquiryBody(email, lines, requestedServiceJson(guestCountIsMinimum = guestCountIsMinimum), name = name)),
         )
     check(response.status == Status.CREATED) { "Recording an inquiry failed: ${response.status} ${response.bodyString()}" }
     return checkNotNull(response.header("Location")).substringAfterLast('/')

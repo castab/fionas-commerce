@@ -95,7 +95,12 @@ class OpenApiDocumentSpec :
             ).at("properties").jsonObject.keys.intersect(setOf("text", "html", "url", "balance")) shouldBe
                 emptySet()
             schema("TimelineItemResponse_MESSAGE").at("properties").jsonObject.keys shouldContainAll
-                listOf("textOmittedForPaymentSecurity", "financialEmail")
+                listOf("textOmittedForPaymentSecurity", "financialEmail", "textVisibility")
+            schema("TimelineItemResponse_MESSAGE").strings("required") shouldContainAll listOf("textVisibility")
+            schema("TimelineItemResponse_MESSAGE").strings("properties", "textVisibility", "enum") shouldContainExactly
+                listOf("READABLE", "FINANCIAL_EMAIL_PROTECTED", "PAYMENT_CONTENT_UNVERIFIED", "PROVIDER_CONTENT_UNAVAILABLE")
+            schema("TimelineItemResponse_MESSAGE").text("properties", "textVisibility", "description") shouldContain
+                "A withheld body is not an empty reply"
             send.text("description") shouldContain "Acceptance never means delivery"
             send.text("responses", "409", "description") shouldContain "financial_email_reconciliation_required"
         }

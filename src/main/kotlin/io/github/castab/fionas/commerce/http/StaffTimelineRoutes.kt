@@ -10,6 +10,7 @@ import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.conversation.ConversationAvailability
+import io.github.castab.fionas.commerce.conversation.MessageTextVisibility
 import io.github.castab.fionas.commerce.conversation.MilestoneKind
 import io.github.castab.fionas.commerce.conversation.PaymentClassification
 import io.github.castab.fionas.commerce.conversation.StaffTimeline
@@ -134,11 +135,18 @@ sealed class TimelineItemResponse {
         val deliveryState: String?,
         @ApiProperty(
             description =
-                "Bodies of all messages in a financial-email conversation are withheld, including " +
-                    "quoted inbound trails and unknown sends.",
+                "True when this body is withheld for payment confidentiality. See textVisibility for the reason. " +
+                    "Message identity, delivery state and financial metadata remain available.",
         )
         val textOmittedForPaymentSecurity: Boolean = false,
         val financialEmail: FinancialEmailHistoryResponse? = null,
+        @ApiProperty(
+            description =
+                "READABLE: ordinary provider text; FINANCIAL_EMAIL_PROTECTED: matched financial send, including UNKNOWN; " +
+                    "PAYMENT_CONTENT_UNVERIFIED: raw correspondence may contain payment credentials and no trusted safe " +
+                    "projection exists; PROVIDER_CONTENT_UNAVAILABLE: provider supplied no text. A withheld body is not an empty reply.",
+        )
+        val textVisibility: MessageTextVisibility,
     ) : TimelineItemResponse()
 
     @Serializable
@@ -339,6 +347,7 @@ internal fun StaffTimeline.toResponse(): StaffTimelineResponse =
                             it.deliveryState,
                             it.textOmittedForPaymentSecurity,
                             financialEmails.singleOrNull { email -> email.messageId == it.id }?.historyResponse(this),
+                            it.textVisibility,
                         )
                     }
                 is TimelineItem.Quote ->

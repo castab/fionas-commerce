@@ -2384,6 +2384,9 @@ balance and permitted collection without active/unresolved provider payment. USD
 Render ordered exact ledger lines, business revision and approved service. Quote balance
 after deposit is total less the runtime-resolved required deposit. No catalog, due date,
 refund/expiry promise or zero-deposit booking is introduced.
+Quote, revised Quote and Invoice greetings use the first nonempty Unicode-whitespace-delimited
+component of the authoritative customer name (blank fallback `there`), escaped for HTML and
+identical in plain text. Full names remain unchanged in customer records and event facts.
 
 Review binds customer/recipient, inquiry/document/business/service/deposit references,
 rendered content/signature, payment identities, access public ID/hash and provider configuration.
@@ -2410,10 +2413,26 @@ inbound mail; they still count as email activity for inactivity policy. They als
 the thread without provider intake. Confirmed conversation identities on financial commands
 are establishment evidence even when send outcome remains UNKNOWN. V12 intent/outcome triggers join timeline SSE invalidation.
 Timeline adds financialEmails history and optional MESSAGE purpose metadata. Provider state
-stays a live read. Once any financial intent exists, withhold all provider bodies for that
-inquiry, including inbound quoted trails, with textOmittedForPaymentSecurity. Read the safety
-facts after provider I/O to close the earlier-snapshot/later-send disclosure race. Never add
-an exact-original-body read. Normal plain-text staff reply sending remains available.
+stays a live read. `MessageTextVisibility` classifies each message: a financial-command
+message ID is FINANCIAL_EMAIL_PROTECTED even for UNKNOWN; missing provider text is
+PROVIDER_CONTENT_UNAVAILABLE; other raw text is PAYMENT_CONTENT_UNVERIFIED whenever any
+command may have sent payment content; otherwise READABLE. Only a REJECTED command with
+exactly one dispatch proves no send; UNKNOWN, zero dispatches and inconsistent histories
+fail closed. Both protected states null text and set textOmittedForPaymentSecurity; unavailable
+text is not a security omission. Never drop the message, its delivery state or safe metadata.
+
+The verified provider Message schema has only raw nullable text/html, no trustworthy
+credential-free/reply-only projection. Consequently even a simple post-financial customer
+reply or ordinary staff reply currently remains PAYMENT_CONTENT_UNVERIFIED. This is an
+unresolved usability gap, not a claim that the readability correction is complete. Gmail,
+Outlook, forwarded, inline, encoded and wrapped history cannot safely be reconstructed from
+this contract. Neither quote delimiters, direction, send time, staff authorship nor a regex
+proves absence of pasted bearer credentials. Do not copy the web quote splitter as a security
+boundary or add a raw-body bypass. A stronger content/provenance contract must establish
+credential exclusion before more text can become READABLE. Existing payment-access permission
+does not implicitly authorize an original-message read. Read the safety facts after provider
+I/O to close the earlier-snapshot/later-send disclosure race, including newly committed
+UNKNOWN intents. Normal plain-text staff reply sending remains available.
 
 FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED=true asserts the actual sender domain has click tracking
 and downstream URL rewriting disabled and a delivered HTML/plain-text fragment link has been

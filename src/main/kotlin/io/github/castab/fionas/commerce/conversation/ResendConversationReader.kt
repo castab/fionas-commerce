@@ -28,6 +28,8 @@ data class ConversationMessage(
     val text: String?,
     val createdAt: Instant,
     val textOmittedForPaymentSecurity: Boolean = false,
+    val textVisibility: MessageTextVisibility =
+        if (text == null) MessageTextVisibility.PROVIDER_CONTENT_UNAVAILABLE else MessageTextVisibility.READABLE,
 )
 
 data class EmailConversation(
