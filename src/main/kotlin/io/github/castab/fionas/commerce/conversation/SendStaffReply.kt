@@ -183,7 +183,7 @@ class SendStaffReply(
                 replyLogger.warn { "event=staff_reply_rejected inquiry=${record.inquiryId.value}" }
                 rejected()
             }
-            ProviderSendOutcome.Unknown -> {
+            ProviderSendOutcome.Unknown, is ProviderSendOutcome.Indeterminate -> {
                 replyLogger.warn { "event=staff_reply_outcome_unknown inquiry=${record.inquiryId.value} action=replay_same_key" }
                 Result(Outcome.UNKNOWN, replayed, record.conversationId)
             }

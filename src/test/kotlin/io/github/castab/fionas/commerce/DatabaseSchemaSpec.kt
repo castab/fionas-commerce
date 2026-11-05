@@ -65,6 +65,7 @@ class DatabaseSchemaSpec :
                     "inquiry_payment_access",
                     "stripe_payment_attempts",
                     "stripe_webhook_events",
+                    "inquiry_financial_emails",
                 )
         }
 

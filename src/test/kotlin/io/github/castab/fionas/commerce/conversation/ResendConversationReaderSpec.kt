@@ -66,6 +66,19 @@ class ResendConversationReaderSpec :
             reader.read(inquiry).availability shouldBe ConversationAvailability.FORBIDDEN
             calls shouldBe 3
         }
+        test("provider null text is unavailable while empty text is readable and neither changes message identity") {
+            val original = response
+            listOf("null" to null, "\"\"" to "").forEach { (json, text) ->
+                response = original.replace("\"text\":\"  hello\\nworld  \"", "\"text\":$json")
+                val result = reader.read(inquiry)
+                result.availability shouldBe ConversationAvailability.READY
+                val read = result.conversation!!.messages.single()
+                read.id shouldBe message
+                read.text shouldBe text
+                read.textVisibility shouldBe
+                    if (text == null) MessageTextVisibility.PROVIDER_CONTENT_UNAVAILABLE else MessageTextVisibility.READABLE
+            }
+        }
         test("malformed success, wrong topic and repeated pagination cursor fail closed") {
             val valid = response
             response = "{}"

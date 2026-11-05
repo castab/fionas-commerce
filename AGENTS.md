@@ -120,6 +120,8 @@ Fiona owns, and persists in its own tables:
   event and message source identities, staff reply commands, and the staff timeline (see
   [Email conversations](#email-conversations)); the Resend Conversation Service owns email itself;
 - contacts (future);
+- manual financial-email eligibility, rendering, reviewed command identities, stable payment-link
+  orchestration and safe communication-purpose metadata (see [Financial emails](#financial-emails));
 - event and service details, and service locations (future);
 - further relationships between these records and generic commerce facts (future), for
   example which lineage a booking produced.
@@ -816,7 +818,7 @@ after runtime-owned migrations.
 - **Runtime first.** `commerceRuntime(...)` applies the runtime's migrations, then Fiona's,
   before anything is composed or served. A Fiona migration may therefore depend on
   runtime-owned structures, never the reverse.
-- **Independent version space.** Fiona's next migration is `V11__…`, the next integer in
+- **Independent version space.** Fiona's next migration is `V13__…`, the next integer in
   Fiona's own history, unrelated to the runtime's numbering (both have a `V1`). If two
   branches add the same `V<n>`, the one merged second renumbers before merging. Never use
   timestamps as versions.
@@ -887,6 +889,10 @@ after runtime-owned migrations.
   recorded before V6). No runtime references or runtime DDL changes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
+- **V12 financial email commands** adds `inquiry_financial_emails`, its command/history
+  indexes and a Fiona-only timeline trigger. USER and exact runtime snapshot FKs bring the
+  current published-runtime FK total to sixteen. No amount, body, address, delivery state
+  or bearer URL is stored. Conversation bodies remain provider-owned and permission-gated.
 - **`V7__inquiry_timeline_revisions`** adds `inquiry_change_revisions` (inquiry FK/primary
   key and positive BIGINT revision), with AFTER INSERT triggers on communication facts and
   processed conversation events. Counter UPSERTs join the source transaction, serialize per
@@ -1311,7 +1317,7 @@ microsecond Clock time and the approving staff USER (`issued_by` references `com
 exact published runtime snapshot and the exact service approval. One INITIAL publication per
 inquiry is unique; since V4 a financial/deposit pair is not, because a service-only revision
 republishes it under a new UUID. Durable identity ordering follows the association lock,
-independent of Clock timestamps. Re-sending a publication is a future communication action,
+independent of Clock timestamps. Re-sending a publication is a separate manual financial-email action,
 not another proposal. No amounts, terms, totals, stages,
 mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
 
@@ -1378,7 +1384,7 @@ frontend workflow is introduced in this slice.
 
 The durable proposal row is the business event for future at-least-once integrations.
 It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
-Actual delivery alone may append communication activity. A future generic durable dispatch
+Only accepted staff email appends communication activity; acceptance is never delivery. A future generic durable dispatch
 capability belongs upstream when needed; no after-commit crash-window publisher exists here.
 
 POST `/staff/requests/{inquiryId}/proposals` (`issueInquiryProposal`), its `/quote-revisions`
@@ -1887,6 +1893,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...customer` | `Customer` and its values, `CustomerRepository`, `JdbiCustomerRepository` |
 | `...events` | Separate outgoing (`InquiryPersisted` v3, `InquiryDeclined` v1)/incoming event boundaries and transport diagnostics, scoped NATS configuration, outbox transport/managed dispatcher, one managed JetStream worker shape used by inquiry intake and the provider conversation consumer (`ConversationEvent`, `ConversationIntake`, `RecordConversationEvent`), and the exact-sequence recovery CLI |
 | `...conversation` | The typed Resend Conversation Service adapter (`ResendConversationReader`, `ResendConversationSender`, their configuration), `ConversationEstablishment`, staff reply values, record, repository and `SendStaffReply`, the read-only `ReadStaffTimeline`, and the durable timeline revision/subscription registry |
+| `...financialemail` | Manual Quote/Invoice email review, eligibility, exact command recovery, branded HTML/text rendering and command-purpose repository; uses the existing conversation sender and payment capability |
 | `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; `InquiryDecline`, its repository and `DeclineInquiry`; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
@@ -2025,7 +2032,7 @@ Not in scope until a dedicated slice decides otherwise: allocation reversals,
 providers beyond the dedicated Stripe Checkout slice, caller/actor delegation, OAuth/OIDC,
 refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1,
 persisted financial projections, CQRS, separate Booking aggregates,
-Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments or HTML, provider conversation state changes, provider event backfill and broader communication workflows,
+Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments, arbitrary staff HTML, provider conversation state changes, provider event backfill and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),
 on-behalf-of headers or delegated staff identity,
 a generic line-source identity, stored balances or payment statuses, tax,
@@ -2250,8 +2257,9 @@ relying on any other provider behavior, and never guess an endpoint.
   required for either enabled feature; neither client follows redirects. No generic HTTP override.
 - **Identity.** An inquiry's conversation is the provider topic (`booking`, the inquiry's
   canonical lowercase UUID text), resolved on every read and send; no provider conversation id is
-  authority. Never correlate by customer email. Processed booking events and accepted replies are
-  *establishment evidence*, decided by the one `ConversationEstablishment` shared by
+  authority. Never correlate by customer email. Processed booking events, accepted replies and confirmed
+  financial-email conversation identities are *establishment evidence*, decided by the one
+  `ConversationEstablishment` shared by
   `SendStaffReply` and `ReadStaffTimeline` (accepted replies count with the consumer disabled):
   a topic `404` with evidence is MISSING and never opens a replacement; only `404` without
   evidence is EMPTY. Timeouts, credential errors and malformed answers are never absence.
@@ -2353,3 +2361,82 @@ Sort is creation time descending then UUID string descending, never JVM signed U
 promised. Successful compact summaries are no-store and preserve exact financial strings
 and the dashboard EXACT/FROM rule. Invalid query/cursor values are 400 runtime errors.
 See README's Staff request discovery section for client semantics and scale tradeoffs.
+
+## Financial emails
+
+The synchronous Conversation Service 0.7.2-rc.2 MessageContentV2 accepts HTML and text
+on the existing create/reply endpoints. `conversationSendRequest` is the one shared adapter;
+never use provider outbox endpoints or direct Resend calls. See the
+[exact API/frontend handoff](docs/financial-emails-frontend-handoff.md) for provider evidence,
+deployment controls, DTOs, errors and recovery.
+
+The two staff financial-email POSTs require USER, trusted cookie Origin and all of
+InquiriesRead, FinancialDocumentRead, CommunicationsRead, CommunicationsSend and
+PaymentAccessManage. Existing grants never expand. Preview changes nothing and returns
+only inert payment actions. Send takes an inquiry-scoped Idempotency-Key, exact reviewed
+email/token and original EMPTY/latest-message expectation. Browser prices, addresses, HTML,
+sender and payment URLs are never authority; publishing or amending never emails automatically.
+
+`FinancialEmails` composes `ReadStaffRequest` and the existing transaction-taking collection
+summary. QUOTE requires current QUOTED publication, business/ledger/deposit identities and
+positive approved online deposit. INVOICE requires SERVED/current Invoice, positive runtime
+balance and permitted collection without active/unresolved provider payment. USD only.
+Render ordered exact ledger lines and approved service; keep business revisions in command/metadata DTOs. Quote balance
+after deposit is total less the runtime-resolved required deposit. No catalog, due date,
+refund/expiry promise or zero-deposit booking is introduced.
+Quote, revised Quote and Invoice greetings use the first nonempty Unicode-whitespace-delimited
+component of the authoritative customer name (blank fallback `there`), escaped for HTML and
+identical in plain text. Full names remain unchanged in customer records and event facts.
+Generated greetings/section headings say `your quote`, `your updated quote`, or `your invoice`,
+without `vN` labels. Preserve deliberate staff version references in custom text. This is
+presentation only; reviewed ledger/business/deposit revisions remain required and unchanged.
+
+Review binds customer/recipient, inquiry/document/business/service/deposit references,
+rendered content/signature, payment identities, access public ID/hash and provider configuration.
+New send rechecks under the canonical association and runtime payment locks, then issues
+missing access through transaction-taking `CustomerPayments.manageAccess` and records intent
+atomically. Active links never rotate. Revoked links need separate deliberate reactivation
+and fresh preview. Release locks before network I/O. Currentness is the authorization snapshot;
+the stable payment page remains authoritative if facts change in flight. Resolve runtime
+directory convenience reads outside these transactions.
+
+V12 stores only command identity, exact references, provenance, digests and a dispatch counter, no financial
+amount/content/URL replica. Unresolved intent reserves further financial sends. Same-key
+duplicates use one UUID-based provider identity. UNKNOWN recovery must reconstruct the exact
+request and match the saved digest, using the original expectation without checking it
+against the newer thread. Changed financial/customer/access/template/provider state fails
+closed with financial_email_reconciliation_required. Never replace an uncertain key, guess
+failure, sweep/TTL, fabricate facts or hand-edit outcomes. Known indeterminate provider
+message identities are retained without acceptance; the dispatch counter prevents a later
+or competing refusal from refuting an earlier ambiguous send. Accepted replay short-circuits
+historical state checks; definitive rejection is durable. Acceptance is never delivery.
+
+Accepted sends append one USER STAFF_EMAIL_SENT with clearsThrough=0, acknowledging no
+inbound mail; they still count as email activity for inactivity policy. They also establish
+the thread without provider intake. Confirmed conversation identities on financial commands
+are establishment evidence even when send outcome remains UNKNOWN. V12 intent/outcome triggers join timeline SSE invalidation.
+Timeline adds financialEmails history and optional MESSAGE purpose metadata. Provider state
+stays a live read. Existing InquiriesRead + FinancialDocumentRead gate the timeline;
+CommunicationsRead additionally gates all provider content. A caller without it receives
+FORBIDDEN conversation availability and no MESSAGE items, while commerce history remains.
+Authorized readers receive complete provider plain text, including payment links, financial
+emails and quoted/forwarded correspondence, independent of command existence or outcome.
+`MessageTextVisibility` has only READABLE (non-null text, including empty) and
+PROVIDER_CONTENT_UNAVAILABLE (null text). `textOmittedForPaymentSecurity` is retained as an
+always-false compatibility field; no parsing/redaction, extra endpoint or permission is needed.
+Keep command history reads after provider I/O for correlation with newly committed sends,
+including UNKNOWN. Preserve internal document/business versions, outcomes, delivery states,
+ordering, attention, acknowledgement boundaries and SSE. Message bodies are never persisted
+locally or included in logs/traces/analytics/errors/diagnostics. The accepted capability and
+public-data boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md#email-conversations).
+
+FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED=true asserts the actual sender domain has click tracking
+and downstream URL rewriting disabled and a delivered HTML/plain-text fragment link has been
+verified. Default false blocks financial preview/send only. The verified provider offers no
+per-message tracking override; never invent one. The application does not inspect Resend
+account settings. Keep the assertion synchronized with deployment policy and preserve
+conversation permission checks and response-body observability exclusions during rollout/rollback.
+
+Keep focused rendering/route/real-PostgreSQL tests, immutable-request recovery, concurrent
+same-key sends, revision/payment/access races, authorized quoted-text visibility, public/diagnostic secrecy, attention preservation,
+existing reply regressions and executable OpenAPI parity.

@@ -29,6 +29,7 @@ class ConversationSendConfiguration private constructor(
     val fromAddress: String,
     val fromName: String,
     val replyToAddress: String,
+    val financialLinksUntracked: Boolean,
     private val recipients: Set<String>?,
 ) {
     /** Pre-production safety: only exact normalized addresses, unless the operator configured `*`. */
@@ -74,6 +75,7 @@ class ConversationSendConfiguration private constructor(
                 from,
                 fromName,
                 replyTo,
+                env["FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED"] == "true",
                 recipients,
             )
         }
@@ -85,6 +87,8 @@ sealed interface TopicLookup {
     data class Found(
         val conversationId: UUID,
         val latestMessageId: UUID?,
+        val subject: String = STAFF_CONVERSATION_SUBJECT,
+        val participantAddress: String? = null,
     ) : TopicLookup
 
     /** The provider answered 404 for the topic: no conversation exists for this inquiry. */
@@ -121,6 +125,12 @@ sealed interface ProviderSendOutcome {
 
     /** Neither confirmed nor refuted. Reconcile only by replaying the exact request and key. */
     data object Unknown : ProviderSendOutcome
+
+    /** The provider identifies a durable message but cannot establish whether transport sent it. */
+    data class Indeterminate(
+        val conversationId: UUID,
+        val messageId: UUID,
+    ) : ProviderSendOutcome
 }
 
 interface ConversationSender {
@@ -162,6 +172,8 @@ class ResendConversationSender(
                             .jsonArray
                             .lastOrNull()
                             ?.let { UUID.fromString(it.jsonObject.text("id")) },
+                        data.text("subject"),
+                        data["participant"]?.jsonObject?.text("address"),
                     )
                 }
                 404 -> TopicLookup.Missing
@@ -178,7 +190,12 @@ class ResendConversationSender(
     /** Ambiguous results get exactly one replay with the identical request and key, never a new key. */
     override fun send(request: ProviderSendRequest): ProviderSendOutcome =
         when (val first = attempt(request)) {
-            null -> attempt(request) ?: ProviderSendOutcome.Unknown
+            null ->
+                when (val replay = attempt(request)) {
+                    // A refusal of this replay cannot refute acceptance of the earlier ambiguous request.
+                    null, ProviderSendOutcome.Rejected -> ProviderSendOutcome.Unknown
+                    else -> replay
+                }
             else -> first
         }
 
@@ -228,7 +245,7 @@ internal fun classifySend(
         status in setOf(200, 201, 202) && result != null && result.third in setOf("pending", "accepted") ->
             ProviderSendOutcome.Accepted(result.first, result.second, result.third)
         status == 502 && result?.third == "failed" -> ProviderSendOutcome.Rejected
-        status == 502 && result?.third == "indeterminate" -> ProviderSendOutcome.Unknown
+        status == 502 && result?.third == "indeterminate" -> ProviderSendOutcome.Indeterminate(result.first, result.second)
         // Validation, identity policy, credentials, missing conversation/parent and transport limits fail before intent.
         status in setOf(400, 401, 404, 413, 415) -> ProviderSendOutcome.Rejected
         // 409 (idempotency/topic conflict), 5xx and malformed success are ambiguous.
@@ -245,9 +262,30 @@ internal fun staffReplyRequest(
     participant: Email,
     participantName: String,
     text: String,
-): ProviderSendRequest {
-    val providerKey = "fionas-commerce:inquiry:${inquiry.value}:staff-reply:${key.value}:v1"
+): ProviderSendRequest =
+    conversationSendRequest(
+        configuration,
+        "fionas-commerce:inquiry:${inquiry.value}:staff-reply:${key.value}:v1",
+        inquiry,
+        conversationId,
+        participant,
+        participantName,
+        STAFF_CONVERSATION_SUBJECT,
+        text,
+    )
 
+/** Both staff replies and financial emails use the same verified synchronous provider boundary. */
+internal fun conversationSendRequest(
+    configuration: ConversationSendConfiguration,
+    providerKey: String,
+    inquiry: InquiryId,
+    conversationId: UUID?,
+    participant: Email,
+    participantName: String,
+    subject: String,
+    text: String,
+    html: String? = null,
+): ProviderSendRequest {
     fun JsonObjectBuilder.identities() {
         putJsonObject("from") {
             put("address", configuration.fromAddress)
@@ -272,9 +310,10 @@ internal fun staffReplyRequest(
                     put("email", participant.value)
                     put("name", participantName)
                 }
-                put("subject", STAFF_CONVERSATION_SUBJECT)
+                put("subject", subject)
                 putJsonObject("message") {
                     put("text", text)
+                    html?.let { put("html", it) }
                     identities()
                 }
             },
@@ -285,6 +324,7 @@ internal fun staffReplyRequest(
             providerKey,
             buildJsonObject {
                 put("text", text)
+                html?.let { put("html", it) }
                 identities()
             },
         )

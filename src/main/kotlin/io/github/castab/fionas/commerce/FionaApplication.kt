@@ -62,6 +62,7 @@ import io.github.castab.fionas.commerce.financial.ReviseInquiryProposalDeposit
 import io.github.castab.fionas.commerce.financial.ReviseInquiryQuoteProposal
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
+import io.github.castab.fionas.commerce.financialemail.FinancialEmails
 import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
@@ -272,6 +273,33 @@ fun fionaApplication(
                 )
             val staffReplies = JdbiStaffReplyRepository()
             val conversationEstablishment = ConversationEstablishment(JdbiInquiryConversationRepository(), staffReplies)
+            val conversationSender = conversationSends?.let(::ResendConversationSender)
+            val customerPayments =
+                stripe?.let { configuration ->
+                    CustomerPayments(
+                        context.transactor,
+                        ledger,
+                        documentOwners,
+                        staffRequest,
+                        RecordDocumentPayment(context.transactor, ledger, documentOwners, authorship, clock, proposalHistory),
+                        stripeGateway ?: StripeJavaGateway(configuration),
+                        configuration,
+                        clock,
+                    )
+                }
+            val financialEmails =
+                FinancialEmails(
+                    context.transactor,
+                    staffRequest,
+                    documentOwners,
+                    ledger,
+                    communications,
+                    conversationEstablishment,
+                    context.authorization::getUser,
+                    conversationSender,
+                    customerPayments,
+                    clock,
+                )
             val timeline =
                 ReadStaffTimeline(
                     context.transactor,
@@ -283,19 +311,10 @@ fun fionaApplication(
                 )
             val operations =
                 FionaOperations(
+                    previewFinancialEmail = financialEmails::preview,
+                    sendFinancialEmail = financialEmails::send,
                     payments =
-                        stripe?.let { configuration ->
-                            val payments =
-                                CustomerPayments(
-                                    context.transactor,
-                                    ledger,
-                                    documentOwners,
-                                    staffRequest,
-                                    RecordDocumentPayment(context.transactor, ledger, documentOwners, authorship, clock, proposalHistory),
-                                    stripeGateway ?: StripeJavaGateway(configuration),
-                                    configuration,
-                                    clock,
-                                )
+                        customerPayments?.let { payments ->
                             PaymentOperations(
                                 payments::staffAccess,
                                 payments::manageAccess,
@@ -314,7 +333,7 @@ fun fionaApplication(
                         staffReplies,
                         conversationEstablishment,
                         context.authorization::getUser,
-                        conversationSends?.let(::ResendConversationSender),
+                        conversationSender,
                         clock,
                     )::invoke,
                     readStaffTimeline = { id, principal ->

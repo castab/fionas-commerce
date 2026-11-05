@@ -80,27 +80,42 @@ class CustomerPayments(
     ): StaffPaymentAccess =
         transactor.inTransaction { transaction ->
             lock(transaction, id)
-            val request = requests.read(transaction, id)
-            val existing = access.forInquiry(transaction, id)
-            if (action == PaymentAccessAction.REVOKE) {
-                existing?.let { access.save(transaction, it.copy(revoked = true)) }
-                return@inTransaction secrets.describe(existing?.copy(revoked = true))
-            }
-            if (action == PaymentAccessAction.ISSUE &&
-                existing != null &&
-                !existing.revoked
-            ) {
-                return@inTransaction secrets.describe(existing)
-            }
-            if (request.inquiry.lifecycle.stage !in setOf(InquiryStage.QUOTED, InquiryStage.BOOKED, InquiryStage.SERVED)) {
-                throw CommerceFailure.IllegalTransition("Payment access can be issued only for published, active inquiries")
-            }
-            val publicId = existing?.publicId ?: UUID.randomUUID()
-            val generation = secrets.generation()
-            val next = PaymentAccess(id, publicId, generation, secrets.hash(secrets.bearer(publicId, generation)), false, now(), actor)
-            access.save(transaction, next)
-            secrets.describe(next)
+            manageAccess(transaction, id, action, actor)
         }
+
+    /** Caller holds the canonical association lock; used to atomically issue access with an email intent. */
+    internal fun manageAccess(
+        transaction: Transaction,
+        id: InquiryId,
+        action: PaymentAccessAction,
+        actor: UserId,
+    ): StaffPaymentAccess {
+        val request = requests.read(transaction, id)
+        val existing = access.forInquiry(transaction, id)
+        if (action == PaymentAccessAction.REVOKE) {
+            existing?.let { access.save(transaction, it.copy(revoked = true)) }
+            return secrets.describe(existing?.copy(revoked = true))
+        }
+        if (action == PaymentAccessAction.ISSUE &&
+            existing != null &&
+            !existing.revoked
+        ) {
+            return secrets.describe(existing)
+        }
+        if (request.inquiry.lifecycle.stage !in setOf(InquiryStage.QUOTED, InquiryStage.BOOKED, InquiryStage.SERVED)) {
+            throw CommerceFailure.IllegalTransition("Payment access can be issued only for published, active inquiries")
+        }
+        val publicId = existing?.publicId ?: UUID.randomUUID()
+        val generation = secrets.generation()
+        val next = PaymentAccess(id, publicId, generation, secrets.hash(secrets.bearer(publicId, generation)), false, now(), actor)
+        access.save(transaction, next)
+        return secrets.describe(next)
+    }
+
+    internal fun collectionSummary(
+        transaction: Transaction,
+        request: StaffRequest,
+    ): CustomerPaymentSummary = customerPaymentSummary(request, collectionAttempts(transaction, request.inquiry.inquiry.id))
 
     fun summary(
         id: UUID,
