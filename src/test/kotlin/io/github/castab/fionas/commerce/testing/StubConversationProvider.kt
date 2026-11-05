@@ -30,7 +30,8 @@ class StubConversationProvider : AutoCloseable {
         val id: UUID,
         val direction: String,
         val state: String,
-        val text: String,
+        /** Null models a provider message whose plain text is unavailable, distinct from empty text. */
+        val text: String?,
         val createdAt: Instant,
         val html: String? = null,
     )
@@ -109,7 +110,7 @@ class StubConversationProvider : AutoCloseable {
     /** A customer email arriving in [inquiry]'s conversation, creating it as provider-side threading would. */
     fun inbound(
         inquiry: String,
-        text: String = "Can we change the date?",
+        text: String? = "Can we change the date?",
         at: Instant = Instant.parse("2026-10-01T12:00:00Z"),
     ): UUID {
         val conversation = conversations.computeIfAbsent(inquiry) { Conversation(UUID.randomUUID()) }
@@ -228,7 +229,7 @@ class StubConversationProvider : AutoCloseable {
         return """{"id":"${message.id}","direction":"${message.direction}","state":"${message.state}",
             "deliveryState":${if (outbound) "\"unknown\"" else "null"},"from":{"address":"$from","name":null},
             "to":"${if (outbound) "customer@example.com" else "replies@mail.fionas.test"}",
-            "text":${Json.encodeToString(String.serializer(), message.text)},"html":"<p>untrusted</p>",
+            "text":${message.text?.let { Json.encodeToString(String.serializer(), it) } ?: "null"},"html":"<p>untrusted</p>",
             "createdAt":"${message.createdAt}"}"""
     }
 

@@ -55,6 +55,7 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import org.slf4j.Logger.ROOT_LOGGER_NAME
 import org.slf4j.LoggerFactory
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
@@ -464,6 +465,28 @@ class FinancialEmailsSpec :
             message.text shouldBe "Could we replace the almonds with chopped peanuts?"
             message.textVisibility shouldBe MessageTextVisibility.READABLE
             message.textOmittedForPaymentSecurity shouldBe false
+        }
+
+        test("after a financial send, provider-missing text stays distinct from empty text without losing message identity") {
+            val id = initial()
+            val input = intent(id)
+            send(id, input, preview(id, input).reviewToken).status shouldBe Status.CREATED
+            val missing = provider.inbound(id, null, Instant.parse("2026-10-02T12:00:00Z"))
+            val empty = provider.inbound(id, "", Instant.parse("2026-10-03T12:00:00Z"))
+            val messages = timeline(id).items.filterIsInstance<TimelineItemResponse.Message>().associateBy { it.messageId }
+            messages.size shouldBe 3
+            with(messages.getValue(missing.toString())) {
+                text shouldBe null
+                textVisibility shouldBe MessageTextVisibility.PROVIDER_CONTENT_UNAVAILABLE
+                direction shouldBe "inbound"
+                financialEmail shouldBe null
+            }
+            with(messages.getValue(empty.toString())) {
+                text shouldBe ""
+                textVisibility shouldBe MessageTextVisibility.READABLE
+                financialEmail shouldBe null
+            }
+            messages.values.single { it.direction == "outbound" }.textVisibility shouldBe MessageTextVisibility.READABLE
         }
 
         test("staff-authored version references remain intact while generated headings omit versions and commands retain them") {
