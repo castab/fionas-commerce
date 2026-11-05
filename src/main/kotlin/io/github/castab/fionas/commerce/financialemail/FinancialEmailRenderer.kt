@@ -48,13 +48,13 @@ internal fun renderFinancialEmail(
     require(!quote || summary.required.signum() > 0) { "A payment-oriented Quote email requires a positive deposit" }
     val name = customer.name.value
     val greetingName = customerGreetingName(name)
-    val revision = if (quote) checkNotNull(request.currentQuoteRevision) else checkNotNull(request.currentInvoiceRevision)
     val revised = quote && request.proposalHistory.size > 1
+    val documentTitle = if (quote) "Your quote" else "Your invoice"
     val title =
         if (quote) {
-            "Hi $greetingName, here's your ${if (revised) "revised " else ""}Quote v$revision"
+            "Hi $greetingName, here's your ${if (revised) "updated " else ""}quote"
         } else {
-            "Thank you, $greetingName — Invoice v$revision"
+            "Thank you, $greetingName — here's your invoice"
         }
     val introduction =
         message?.value ?: if (quote) {
@@ -129,7 +129,7 @@ internal fun renderFinancialEmail(
             add(introduction)
             add("Your event\n" + facts.joinToString("\n") { "${it.first}: ${it.second}" })
             if (selections.isNotEmpty()) add(selections.joinToString("\n") { "${it.first}: ${it.second}" })
-            add("${if (quote) "Quote" else "Invoice"} v$revision\n" + lines.joinToString("\n") { "${it.first}\n${it.second}\n${it.third}" })
+            add("$documentTitle\n" + lines.joinToString("\n") { "${it.first}\n${it.second}\n${it.third}" })
             add(totals.joinToString("\n") { "${it.first}: ${it.second}" })
             add("$action\n$paymentUrl\n$paymentNote")
             add(invitation)
@@ -179,7 +179,7 @@ internal fun renderFinancialEmail(
                 selections,
             )}</table>"
         }}
-        <h2 style="font-size:18px">${if (quote) "Quote" else "Invoice"} v$revision</h2>
+        <h2 style="font-size:18px">$documentTitle</h2>
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">$financialRows</table>
         <table role="presentation" width="100%" style="margin:20px 0;background:#ede5d3;font-weight:600">${rows(totals)}</table>
         <table role="presentation" align="center"><tr><td bgcolor="#5f5b40" style="border-radius:24px;text-align:center">

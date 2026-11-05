@@ -622,8 +622,8 @@ which only a principal trusted to act as any service should hold.
 
 ## Customer-facing business revisions
 
-Display `proposal.quoteRevision` as the customer-facing Quote version and
-`currentInvoiceRevision` from staff detail as the Invoice version. Each material service,
+Use `proposal.quoteRevision` and `currentInvoiceRevision` internally and in staff history;
+customer email and public payment-page labels omit numeric revisions. Each material service,
 financial or deposit publication advances the Quote business revision; each material
 canonical Invoice amendment advances its own business revision. Initial numbers start at
 the first issued financial snapshot's version. Later business revisions increment once,
@@ -2179,11 +2179,11 @@ existing conversation sender and customer payments, explicitly grant the five pe
 and verify that sender-domain tracking is disabled before setting
 `FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED=true` (default false). Migrate V12 before enabling.
 Preview is write-free; acceptance is not delivery; recovery retains the original key and
-command. Timeline MESSAGEs carry an explicit visibility reason: financial originals are
-protected, and other raw bodies remain unverified after accepted/UNKNOWN financial sends.
-Ordinary replies after definitive first-dispatch rejections remain readable. The provider
-has no trusted credential-free reply field, so post-send readability remains an unresolved
-limitation. Safe send/delivery metadata remains. Keep this secret-safe
-reader on rollback after any send attempt. See the [complete frontend and operations
+command. Authorized conversation readers receive complete provider text, including financial
+emails, replies and quoted payment links after accepted or UNKNOWN sends. Text availability
+distinguishes null from empty; internal send/delivery/version metadata remains intact.
+Customer email headings use first names and omit generated version labels. Public payment
+access remains bearer-protected and minimally informative. Exclude conversation bodies and
+payment credentials from observability. See the [complete frontend and operations
 handoff](docs/financial-emails-frontend-handoff.md). No frontend, automatic reminders,
 attachments or Stripe Checkout changes are included.

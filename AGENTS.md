@@ -892,7 +892,7 @@ after runtime-owned migrations.
 - **V12 financial email commands** adds `inquiry_financial_emails`, its command/history
   indexes and a Fiona-only timeline trigger. USER and exact runtime snapshot FKs bring the
   current published-runtime FK total to sixteen. No amount, body, address, delivery state
-  or bearer URL is stored. Retain the secret-safe timeline reader on rollback after any intent.
+  or bearer URL is stored. Conversation bodies remain provider-owned and permission-gated.
 - **`V7__inquiry_timeline_revisions`** adds `inquiry_change_revisions` (inquiry FK/primary
   key and positive BIGINT revision), with AFTER INSERT triggers on communication facts and
   processed conversation events. Counter UPSERTs join the source transaction, serialize per
@@ -2381,12 +2381,15 @@ sender and payment URLs are never authority; publishing or amending never emails
 summary. QUOTE requires current QUOTED publication, business/ledger/deposit identities and
 positive approved online deposit. INVOICE requires SERVED/current Invoice, positive runtime
 balance and permitted collection without active/unresolved provider payment. USD only.
-Render ordered exact ledger lines, business revision and approved service. Quote balance
+Render ordered exact ledger lines and approved service; keep business revisions in command/metadata DTOs. Quote balance
 after deposit is total less the runtime-resolved required deposit. No catalog, due date,
 refund/expiry promise or zero-deposit booking is introduced.
 Quote, revised Quote and Invoice greetings use the first nonempty Unicode-whitespace-delimited
 component of the authoritative customer name (blank fallback `there`), escaped for HTML and
 identical in plain text. Full names remain unchanged in customer records and event facts.
+Generated greetings/section headings say `your quote`, `your updated quote`, or `your invoice`,
+without `vN` labels. Preserve deliberate staff version references in custom text. This is
+presentation only; reviewed ledger/business/deposit revisions remain required and unchanged.
 
 Review binds customer/recipient, inquiry/document/business/service/deposit references,
 rendered content/signature, payment identities, access public ID/hash and provider configuration.
@@ -2413,34 +2416,27 @@ inbound mail; they still count as email activity for inactivity policy. They als
 the thread without provider intake. Confirmed conversation identities on financial commands
 are establishment evidence even when send outcome remains UNKNOWN. V12 intent/outcome triggers join timeline SSE invalidation.
 Timeline adds financialEmails history and optional MESSAGE purpose metadata. Provider state
-stays a live read. `MessageTextVisibility` classifies each message: a financial-command
-message ID is FINANCIAL_EMAIL_PROTECTED even for UNKNOWN; missing provider text is
-PROVIDER_CONTENT_UNAVAILABLE; other raw text is PAYMENT_CONTENT_UNVERIFIED whenever any
-command may have sent payment content; otherwise READABLE. Only a REJECTED command with
-exactly one dispatch proves no send; UNKNOWN, zero dispatches and inconsistent histories
-fail closed. Both protected states null text and set textOmittedForPaymentSecurity; unavailable
-text is not a security omission. Never drop the message, its delivery state or safe metadata.
-
-The verified provider Message schema has only raw nullable text/html, no trustworthy
-credential-free/reply-only projection. Consequently even a simple post-financial customer
-reply or ordinary staff reply currently remains PAYMENT_CONTENT_UNVERIFIED. This is an
-unresolved usability gap, not a claim that the readability correction is complete. Gmail,
-Outlook, forwarded, inline, encoded and wrapped history cannot safely be reconstructed from
-this contract. Neither quote delimiters, direction, send time, staff authorship nor a regex
-proves absence of pasted bearer credentials. Do not copy the web quote splitter as a security
-boundary or add a raw-body bypass. A stronger content/provenance contract must establish
-credential exclusion before more text can become READABLE. Existing payment-access permission
-does not implicitly authorize an original-message read. Read the safety facts after provider
-I/O to close the earlier-snapshot/later-send disclosure race, including newly committed
-UNKNOWN intents. Normal plain-text staff reply sending remains available.
+stays a live read. Existing InquiriesRead + FinancialDocumentRead gate the timeline;
+CommunicationsRead additionally gates all provider content. A caller without it receives
+FORBIDDEN conversation availability and no MESSAGE items, while commerce history remains.
+Authorized readers receive complete provider plain text, including payment links, financial
+emails and quoted/forwarded correspondence, independent of command existence or outcome.
+`MessageTextVisibility` has only READABLE (non-null text, including empty) and
+PROVIDER_CONTENT_UNAVAILABLE (null text). `textOmittedForPaymentSecurity` is retained as an
+always-false compatibility field; no parsing/redaction, extra endpoint or permission is needed.
+Keep command history reads after provider I/O for correlation with newly committed sends,
+including UNKNOWN. Preserve internal document/business versions, outcomes, delivery states,
+ordering, attention, acknowledgement boundaries and SSE. Message bodies are never persisted
+locally or included in logs/traces/analytics/errors/diagnostics. The accepted capability and
+public-data boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md#email-conversations).
 
 FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED=true asserts the actual sender domain has click tracking
 and downstream URL rewriting disabled and a delivered HTML/plain-text fragment link has been
 verified. Default false blocks financial preview/send only. The verified provider offers no
 per-message tracking override; never invent one. The application does not inspect Resend
-account settings. Keep the assertion synchronized with deployment policy and retain this
-secret-safe timeline reader on rollback after any financial command has been attempted.
+account settings. Keep the assertion synchronized with deployment policy and preserve
+conversation permission checks and response-body observability exclusions during rollout/rollback.
 
 Keep focused rendering/route/real-PostgreSQL tests, immutable-request recovery, concurrent
-same-key sends, revision/payment/access races, quoted-body secrecy, attention preservation,
+same-key sends, revision/payment/access races, authorized quoted-text visibility, public/diagnostic secrecy, attention preservation,
 existing reply regressions and executable OpenAPI parity.

@@ -47,6 +47,8 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
@@ -201,10 +203,14 @@ class FinancialEmailsSpec :
             val input = intent(id, "Hello <script>alert('x')</script> & friends\n\nSecond paragraph 🍦")
             val review = preview(id, input)
             review.subject shouldBe "Your quote from Fiona's Ice Cream"
-            review.text.substringBefore('\n') shouldBe "Hi Jane, here's your Quote v2"
-            review.html shouldContain "Hi Jane, here&#39;s your Quote v2</h1>"
+            review.text.substringBefore('\n') shouldBe "Hi Jane, here's your quote"
+            review.html shouldContain "Hi Jane, here&#39;s your quote</h1>"
             review.text shouldContain "Customer: Jane Doe"
-            review.text shouldContain "Quote v2"
+            review.text shouldContain "Your quote\n"
+            review.html shouldContain ">Your quote</h2>"
+            Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(review.text + review.html + review.subject) shouldBe null
+            review.financial.version shouldBe input.expectedDocumentVersion
+            review.businessRevision shouldBe input.expectedBusinessRevision
             review.html shouldContain "&lt;script&gt;"
             review.html shouldNotContain "<script>"
             review.html shouldContain "Second paragraph 🍦</p>"
@@ -295,21 +301,27 @@ class FinancialEmailsSpec :
             detail(id).communication.needsReply shouldBe true
         }
 
-        test("timeline withholds financial bodies and all quoted trails, with safe accepted and delivery metadata") {
+        test("authorized timeline includes the complete financial email and quoted payment links with accepted and delivery metadata") {
             val id = initial()
             val input = intent(id)
             send(id, input, preview(id, input).reviewToken).status shouldBe Status.CREATED
             val secret = checkNotNull(access(id).url).substringAfter('#')
             provider.inbound(id, "Thanks!\n> ${provider.conversations.getValue(id).messages.first().text}\nBare token: $secret")
             val response = app.adminGet(path(id) + "/timeline")
-            response.bodyString() shouldNotContain secret
-            response.bodyString() shouldNotContain "/pay/"
+            response.bodyString() shouldContain secret
             val read = timeline(id)
             val messages = read.items.filterIsInstance<TimelineItemResponse.Message>()
             messages.size shouldBe 2
-            messages.all { it.text == null && it.textOmittedForPaymentSecurity } shouldBe true
-            messages.single { it.direction == "outbound" }.textVisibility shouldBe MessageTextVisibility.FINANCIAL_EMAIL_PROTECTED
-            messages.single { it.direction == "inbound" }.textVisibility shouldBe MessageTextVisibility.PAYMENT_CONTENT_UNVERIFIED
+            messages.all {
+                it.text != null && !it.textOmittedForPaymentSecurity && it.textVisibility == MessageTextVisibility.READABLE
+            } shouldBe
+                true
+            val providerMessages =
+                provider.conversations
+                    .getValue(id)
+                    .messages
+                    .associateBy { it.id.toString() }
+            messages.forEach { it.text shouldBe providerMessages.getValue(it.messageId).text }
             messages.single { it.direction == "outbound" }.financialEmail!!.sendId shouldBe read.financialEmails.single().sendId
             read.financialEmails.single().current shouldBe true
             read.financialEmails.single().acceptedAt shouldNotBe null
@@ -323,17 +335,17 @@ class FinancialEmailsSpec :
                 ->
                 val id = initial(email = "greeting-$index@example.com", name = name)
                 val quote = preview(id, intent(id))
-                quote.text.substringBefore('\n') shouldBe "Hi $first, here's your Quote v2"
-                quote.html shouldContain "${escapeEmailHtml("Hi $first, here's your Quote v2")}</h1>"
+                quote.text.substringBefore('\n') shouldBe "Hi $first, here's your quote"
+                quote.html shouldContain "${escapeEmailHtml("Hi $first, here's your quote")}</h1>"
                 served(id)
                 val invoice = preview(id, intent(id))
-                invoice.text.substringBefore('\n') shouldBe "Thank you, $first — Invoice v3"
-                invoice.html shouldContain "${escapeEmailHtml("Thank you, $first — Invoice v3")}</h1>"
+                invoice.text.substringBefore('\n') shouldBe "Thank you, $first — here's your invoice"
+                invoice.html shouldContain "${escapeEmailHtml("Thank you, $first — here's your invoice")}</h1>"
                 invoice.text shouldContain "Customer: ${name.trim()}"
             }
         }
 
-        test("raw customer and ordinary staff replies after a Quote remain explicitly unverified until a safe provider projection exists") {
+        test("customer and ordinary staff replies after a Quote retain their complete provider text") {
             val id = initial()
             val input = intent(id)
             send(id, input, preview(id, input).reviewToken).status shouldBe Status.CREATED
@@ -349,15 +361,20 @@ class FinancialEmailsSpec :
                 ).status shouldBe Status.CREATED
             val messages = timeline(id).items.filterIsInstance<TimelineItemResponse.Message>()
             messages.size shouldBe 3
-            messages.filter { it.financialEmail == null }.forEach {
-                it.text shouldBe null
-                it.textVisibility shouldBe MessageTextVisibility.PAYMENT_CONTENT_UNVERIFIED
-                it.textOmittedForPaymentSecurity shouldBe true
+            val providerMessages =
+                provider.conversations
+                    .getValue(id)
+                    .messages
+                    .associateBy { it.id.toString() }
+            messages.forEach {
+                it.text shouldBe providerMessages.getValue(it.messageId).text
+                it.textVisibility shouldBe MessageTextVisibility.READABLE
+                it.textOmittedForPaymentSecurity shouldBe false
             }
         }
 
         test(
-            "Quote and Invoice raw quoted, encoded, wrapped and ambiguous correspondence fails closed without a quote-parser security claim",
+            "authorized Quote and Invoice correspondence preserves quoted, encoded, forwarded and wrapped payment links verbatim",
         ) {
             listOf(false, true).forEach { invoice ->
                 val id = initial()
@@ -391,24 +408,27 @@ class FinancialEmailsSpec :
                     )
                 fixtures.forEach { provider.inbound(id, it) }
                 val response = app.adminGet(path(id) + "/timeline")
-                response.bodyString() shouldNotContain secret
-                response.bodyString() shouldNotContain "/pay/"
-                response.bodyString() shouldNotContain "&#"
                 val messages =
                     CommerceJson
                         .asA(response.bodyString(), StaffTimelineResponse.serializer())
                         .items
                         .filterIsInstance<TimelineItemResponse.Message>()
                 messages.size shouldBe fixtures.size + 1
-                messages.filter { it.direction == "inbound" }.forEach {
-                    it.text shouldBe null
-                    it.textOmittedForPaymentSecurity shouldBe true
-                    it.textVisibility shouldBe MessageTextVisibility.PAYMENT_CONTENT_UNVERIFIED
+                val providerMessages =
+                    provider.conversations
+                        .getValue(id)
+                        .messages
+                        .associateBy { it.id.toString() }
+                messages.forEach {
+                    it.text shouldBe providerMessages.getValue(it.messageId).text
+                    it.textOmittedForPaymentSecurity shouldBe false
+                    it.textVisibility shouldBe MessageTextVisibility.READABLE
                 }
+                messages.single { it.direction == "outbound" }.financialEmail!!.kind shouldBe input.kind
             }
         }
 
-        test("a financial intent committed during the provider read is protected even when its result is UNKNOWN") {
+        test("a financial intent committed during the provider read correlates without suppressing text even when UNKNOWN") {
             listOf(false, true).forEach { unknown ->
                 val id = initial()
                 val input = intent(id)
@@ -420,11 +440,16 @@ class FinancialEmailsSpec :
                 }
                 val response = app.adminGet(path(id) + "/timeline")
                 val secret = checkNotNull(access(id).url).substringAfter('#')
-                response.bodyString() shouldNotContain secret
+                response.bodyString() shouldContain secret
                 val read = CommerceJson.asA(response.bodyString(), StaffTimelineResponse.serializer())
                 val message = read.items.filterIsInstance<TimelineItemResponse.Message>().single()
-                message.textVisibility shouldBe MessageTextVisibility.FINANCIAL_EMAIL_PROTECTED
-                message.text shouldBe null
+                message.textVisibility shouldBe MessageTextVisibility.READABLE
+                message.text shouldBe
+                    provider.conversations
+                        .getValue(id)
+                        .messages
+                        .single()
+                        .text
                 message.financialEmail!!.outcome shouldBe if (unknown) "UNKNOWN" else "ACCEPTED"
             }
         }
@@ -439,6 +464,109 @@ class FinancialEmailsSpec :
             message.text shouldBe "Could we replace the almonds with chopped peanuts?"
             message.textVisibility shouldBe MessageTextVisibility.READABLE
             message.textOmittedForPaymentSecurity shouldBe false
+        }
+
+        test("staff-authored version references remain intact while generated headings omit versions and commands retain them") {
+            listOf(false, true).forEach { invoice ->
+                val id = initial(email = "custom-${UUID.randomUUID()}@example.com")
+                if (invoice) served(id)
+                val before = detail(id)
+                val custom = "As discussed in Quote v99, compare Invoice v42.\n\nKeep this <exact> staff note."
+                val input = intent(id, custom)
+                val email = preview(id, input)
+                email.text shouldContain custom
+                email.html shouldContain "As discussed in Quote v99, compare Invoice v42."
+                email.html shouldContain "Keep this &lt;exact&gt; staff note."
+                email.financial.version shouldBe input.expectedDocumentVersion
+                email.businessRevision shouldBe input.expectedBusinessRevision
+                email.text.substringBefore('\n') shouldBe
+                    if (invoice) "Thank you, Jane — here's your invoice" else "Hi Jane, here's your quote"
+                detail(id) shouldBe before
+            }
+        }
+
+        test("financial messages require conversation read permission while public payment responses remain token-protected and minimal") {
+            val id = initial(name = "Private Customer")
+            val input = intent(id)
+            send(id, input, preview(id, input).reviewToken).status shouldBe Status.CREATED
+            provider.inbound(id, "Private customer correspondence")
+            val link = access(id)
+            val url = checkNotNull(link.url)
+            val secret = url.substringAfter('#')
+            val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
+            try {
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, grants - FionaPermissions.CommunicationsRead)
+                val restricted = app.adminGet(path(id) + "/timeline")
+                restricted.status shouldBe Status.OK
+                restricted.bodyString() shouldNotContain secret
+                restricted.bodyString() shouldNotContain "Private customer correspondence"
+                val read = CommerceJson.asA(restricted.bodyString(), StaffTimelineResponse.serializer())
+                read.conversation.state.name shouldBe "FORBIDDEN"
+                read.items.none { it is TimelineItemResponse.Message } shouldBe true
+                read.financialEmails.single().messageId shouldNotBe null
+                previewResponse(id, input).status shouldBe Status.FORBIDDEN
+                send(id, input, "a".repeat(64)).status shouldBe Status.FORBIDDEN
+                listOf(path(id), "/inquiries/$id", "/financial-documents/${input.documentId}").forEach { endpoint ->
+                    val response = app.adminGet(endpoint)
+                    response.status shouldBe Status.OK
+                    response.bodyString() shouldNotContain secret
+                    response.bodyString() shouldNotContain "Private customer correspondence"
+                }
+            } finally {
+                app.authorization.replaceRolePermissions(CommerceRoles.Administrator, grants)
+            }
+            val reader =
+                app.serviceToken(
+                    app.provisionService(
+                        "no-message-reader-${UUID.randomUUID()}",
+                        setOf(FionaPermissions.InquiriesRead, CommercePermissions.FinancialDocumentRead),
+                    ),
+                )
+            val restricted = app.http(Request(Method.GET, path(id) + "/timeline").withBearer(reader))
+            restricted.bodyString() shouldNotContain secret
+            CommerceJson
+                .asA(restricted.bodyString(), StaffTimelineResponse.serializer())
+                .conversation.state.name shouldBe "FORBIDDEN"
+            val logs = ListAppender<ILoggingEvent>().apply { start() }
+            val logger = LoggerFactory.getLogger(ROOT_LOGGER_NAME) as Logger
+            logger.addAppender(logs)
+            try {
+                val authorized = app.adminGet(path(id) + "/timeline")
+                authorized.bodyString() shouldContain secret
+                val publicPath = "/public/payments/${link.publicId}"
+                app.http(Request(Method.GET, path(id) + "/timeline")).status shouldBe Status.UNAUTHORIZED
+                app.http(Request(Method.GET, publicPath)).status shouldBe Status.BAD_REQUEST
+                val denied = app.http(Request(Method.GET, publicPath).header("X-Fionas-Payment-Token", "wrong-$secret"))
+                denied.status shouldBe Status.NOT_FOUND
+                denied.bodyString() shouldNotContain secret
+                val summary = app.http(Request(Method.GET, publicPath).header("X-Fionas-Payment-Token", secret))
+                summary.status shouldBe Status.OK
+                summary.header("Cache-Control") shouldBe "no-store"
+                summary.bodyString() shouldNotContain secret
+                summary.bodyString() shouldNotContain "Private Customer"
+                summary.bodyString() shouldNotContain "customer@example.com"
+                summary.bodyString() shouldNotContain "Private customer correspondence"
+                Json.parseToJsonElement(summary.bodyString()).jsonObject.keys shouldBe
+                    setOf(
+                        "inquiryId",
+                        "eventDate",
+                        "lifecycle",
+                        "document",
+                        "mode",
+                        "requiredAmount",
+                        "paidAmount",
+                        "balance",
+                        "canPay",
+                        "paymentInProgress",
+                        "reconciliationPending",
+                        "history",
+                        "checkoutRecoveryAvailable",
+                    )
+                app.adminGet(path(id) + "/payment-attempts").bodyString() shouldNotContain secret
+            } finally {
+                logger.detachAppender(logs)
+            }
+            logs.list.joinToString("\n") { it.formattedMessage + (it.throwableProxy?.message ?: "") } shouldNotContain secret
         }
 
         test("UNKNOWN exact recovery uses the original request and expectation; later inbound stays unacknowledged") {
@@ -527,7 +655,9 @@ class FinancialEmailsSpec :
             invoicePayment(id, "45.00")
             val input = intent(id, "Thank you!\n\nPlease reach out with any questions.")
             val review = preview(id, input)
-            review.text shouldContain "Invoice v3"
+            review.text shouldContain "Your invoice\n"
+            review.html shouldContain ">Your invoice</h2>"
+            Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(review.text + review.html + review.subject) shouldBe null
             review.text shouldContain "Recorded payments (net applied): $181.25"
             review.text shouldContain "Remaining balance: $500.00"
             review.html shouldContain "Pay remaining balance"
@@ -698,9 +828,11 @@ class FinancialEmailsSpec :
                 "financial_email_review_stale"
             val current = intent(id)
             val email = preview(id, current)
-            email.text.substringBefore('\n') shouldBe "Hi Jane, here's your revised Quote v3"
-            email.html shouldContain "Hi Jane, here&#39;s your revised Quote v3</h1>"
-            email.text shouldContain "revised Quote v3"
+            email.text.substringBefore('\n') shouldBe "Hi Jane, here's your updated quote"
+            email.html shouldContain "Hi Jane, here&#39;s your updated quote</h1>"
+            Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(email.text + email.html + email.subject) shouldBe null
+            email.financial.version shouldBe current.expectedDocumentVersion
+            email.businessRevision shouldBe current.expectedBusinessRevision
             email.text shouldContain "Ice cream: Vanilla & chocolate"
             email.html shouldContain "Cinnamon &lt;sugar&gt;"
             val descriptions = detail(id).financial.lines.map { it.description }
@@ -756,7 +888,8 @@ class FinancialEmailsSpec :
             val current = intent(id)
             current.expectedDocumentVersion shouldBe old.expectedDocumentVersion
             val email = preview(id, current)
-            email.text shouldContain "Invoice v4"
+            email.text shouldContain "Your invoice\n"
+            Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(email.text + email.html + email.subject) shouldBe null
             email.text shouldContain "Remaining balance: $545.00"
             send(id, current, email.reviewToken).status shouldBe Status.CREATED
             java.io.File("build/reports/financial-email").mkdirs()

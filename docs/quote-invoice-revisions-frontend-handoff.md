@@ -6,14 +6,16 @@ The generated OpenAPI (`build/openapi`, also GET `/openapi.json`) is authoritati
 
 ## Business revision integration
 
-Customer-facing revisions are now independent of ledger versions. Regenerate frontend
+Business revisions are independent of ledger versions. Numeric labels belong in staff
+review/history, not customer financial emails or the public payment page; see the
+[customer presentation handoff](financial-emails-frontend-handoff.md#subsequent-fionas-web-changes). Regenerate frontend
 contract validation from this backend's OpenAPI; accept the added response properties and
 validate required business revision integers. Keep all existing financial fields and exact
 decimal-string handling. No endpoint or operationId changed.
 
 | Response property | Type | Frontend use |
 |---|---|---|
-| proposal.quoteRevision (also every proposalHistory entry and timeline Quote proposal) | required positive integer | Display “Quote vN” |
+| proposal.quoteRevision (also every proposalHistory entry and timeline Quote proposal) | required positive integer | Staff review/history and internal concurrency; no customer version label |
 | proposal.documentVersion | required integer, unchanged | Exact ledger Quote snapshot; never a display revision |
 | financial.version | required integer, unchanged | Ledger expected-version and allocation inputs |
 | Quote revision preview currentQuoteRevision / resultingQuoteRevision | required integers | Display the business revision before/after publication |
@@ -22,7 +24,7 @@ decimal-string handling. No endpoint or operationId changed.
 | Invoice preview reviewedDocumentVersion / resultingDocumentVersion | required integers, unchanged | Current/resulting ledger versions |
 | staff detail currentQuoteRevision | optional integer | Latest publication, historical after booking |
 | staff detail acceptedQuoteRevision | optional integer | Immutable accepted Quote; present only after booking |
-| staff detail currentInvoiceRevision | optional integer | Display “Invoice vN”; present only after booking |
+| staff detail currentInvoiceRevision | optional integer | Staff review/history; present only after booking; no customer version label |
 | staff detail invoiceAmendmentHistory | array (empty before booking) | Independent Invoice history in increasing business revision order |
 | Invoice approval response amendment | required InquiryInvoiceAmendmentResponse | Committed business identity and approval |
 | INVOICE_AMENDED amendment / actor | required amendment object / principal object | Render the exact revision and verified approver |

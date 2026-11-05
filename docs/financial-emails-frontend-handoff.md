@@ -7,6 +7,11 @@ Generate clients from the executable `/openapi.json` contract.
 Quote, revised Quote and Invoice greetings use the authoritative customer's first name,
 with Unicode whitespace handling and a blank fallback of `there`. HTML escapes that name;
 plain text uses the same name. Full names in customer records and event facts are unchanged.
+Generated customer copy says `Hi Maria, here's your quote`, `Hi Maria, here's your updated
+quote`, or `Thank you, Maria — here's your invoice`; section headings are `Your quote` or
+`Your invoice`. No application-generated `vN` labels are included in HTML, text or subjects.
+Staff-authored custom text remains exact, including deliberate version references. Internal
+ledger/business/deposit revisions remain in commands, previews, fingerprints and Activity metadata.
 
 ## Authorization and deployment
 
@@ -38,11 +43,10 @@ policy; this application does not call Resend directly.
 
 Migration V12 adds only `fionas.inquiry_financial_emails`, its indexes, published identity
 FKs and a Fiona-only timeline invalidation trigger. Deploy with the assertion false.
-Upgrade every serving instance to the secret-safe reader before asserting true; do not
-overlap financial sending with old timeline readers during a rolling deployment.
-Once intents exist, retain this version's timeline body-withholding policy during rollback:
-older binaries do not know that provider bodies contain payment credentials. Disabling
-sending alone does not make an old timeline reader safe.
+Conversation readers intentionally include payment links for authorized staff. Maintain
+the existing conversation-read permission checks and exclude response bodies from logging,
+tracing and analytics on every serving instance, including rollback versions. No new
+permission, migration, provider contract or payment authentication is required by this correction.
 
 ## Preview
 
@@ -203,41 +207,34 @@ MESSAGE adds a static `textVisibility` classification:
 
 | Value | Body handling |
 |---|---|
-| `READABLE` | Ordinary provider text, unchanged. Applies with no financial commands or only definitive first-dispatch rejections. |
-| `FINANCIAL_EMAIL_PROTECTED` | ID matches a financial command, including UNKNOWN. Original body is withheld; safe `financialEmail` metadata remains. |
-| `PAYMENT_CONTENT_UNVERIFIED` | Other raw correspondence when any financial command may have sent payment content. Quoted/pasted credentials cannot be excluded. |
-| `PROVIDER_CONTENT_UNAVAILABLE` | Provider supplied no text. This is distinct from a withheld body or an empty message. |
+| `READABLE` | Complete non-null provider text, including an empty string, financial originals, replies, payment links and quoted/forwarded history. |
+| `PROVIDER_CONTENT_UNAVAILABLE` | Provider supplied no text (null/omitted). Show unavailable content rather than an empty customer message. |
 
-The two protected states have `text:null` (omitted under CommerceJson) and
-`textOmittedForPaymentSecurity:true`. Provider HTML is always excluded. Only a command in
-REJECTED with exactly one dispatch proves no send; an UNKNOWN intent without message identity
-also enforces protection. Unavailable text has the omission flag false unless its ID is a
-known financial send. Classification does not depend on direction, timestamps or acceptance
-alone. Message IDs, chronological ordering, send/delivery state, safe purpose metadata,
-conversation availability and financial milestones remain unchanged.
+`textOmittedForPaymentSecurity` is deprecated and always false (clients must tolerate it
+being omitted as a default). The two protected/unverified enum states are removed. Provider
+HTML is still excluded; display `text` as text, never raw HTML. No quote parser/redactor or
+separate original-message operation is needed. Financial command existence or outcome,
+including UNKNOWN, never suppresses provider content. The post-provider command-history
+read remains for correlation with newly committed sends, not content authorization.
 
-**Readability remains incomplete with the current provider contract.** Its
-[Message schema at the verified revision](https://github.com/castab/resend-conversation-service/blob/a5a77f378d34178efb8534eaf40009f4c3c9ade3/public/openapi.json)
-exposes only raw nullable `text` and `html`; there is no trusted credential-free reply field.
-Even a simple customer question after a Quote or Invoice and an ordinary outbound staff
-reply therefore remain PAYMENT_CONTENT_UNVERIFIED. A body cannot be declared safe merely
-because it lacks `/pay/` or resembles ordinary prose. Credentials may be pasted, forwarded,
-encoded as entities/percent escapes, or fragmented by wrapping. A Gmail/Outlook quote splitter
-cannot establish confidentiality, so no best-effort extraction is presented as secure.
+The existing timeline requires `fionas.inquiries.read` and `commerce.financial-document.read`;
+provider content additionally requires `fionas.communications.read`. A caller lacking that
+permission receives FORBIDDEN and no MESSAGE items, while commerce history and financial-email
+command metadata remain available. No additional grant or payment-access permission is needed
+to read correspondence. Preview/send retain all five existing permissions.
 
-The security boundary is denial of unverified raw content at the server read boundary,
-using durable financial command provenance read **after provider I/O**. This preserves the
-snapshot-before-send race protection, including newly committed UNKNOWN intents. A stronger
-upstream content/provenance contract establishing credential exclusion is required to restore
-those bodies. No new raw-message endpoint, permission bypass or secret/body persistence is
-introduced. Existing payment-access authority does not implicitly grant original-message access.
+Payment URLs may intentionally appear in authorized staff messages and forwarded customer
+mail. Possession grants only the existing limited payment view/initiation capability. Public
+summary and Checkout still require the bearer; revocation and current-term validation are
+unchanged. Public responses contain no customer/contact names, email, phone, addresses,
+private notes, conversation text or detailed service descriptions, and never echo the bearer.
+Keep all bodies, URLs and tokens out of logs, traces, analytics, errors and diagnostics.
 
-Frontend changes are needed to label the new reasons: render readable text normally, a
-financial summary for FINANCIAL_EMAIL_PROTECTED, an explicit security placeholder for
-PAYMENT_CONTENT_UNVERIFIED, and an unavailable placeholder for PROVIDER_CONTENT_UNAVAILABLE.
-Older clients may continue using the omission flag, but must not treat withheld content as
-an empty customer message. Keep the normal reply operation and acknowledgement watermarks;
-do not offer “View exact original.” No frontend implementation is included here.
+Frontend clients should display complete provider text for READABLE, including financial
+emails and customer replies after sending. Use an unavailable placeholder only for
+PROVIDER_CONTENT_UNAVAILABLE. Keep financialEmail metadata, message IDs, ordering,
+send/delivery states, current/historical document relationships, normal reply composition
+and acknowledgement watermarks. EMPTY, READY, MISSING, UNAVAILABLE and FORBIDDEN remain distinct.
 
 Quote/Invoice publication/amendment history remains independent. Accepted sends append one
 STAFF_EMAIL_SENT with authenticated USER and a zero clearing boundary, so no customer mail
@@ -248,6 +245,22 @@ rendered emails and payment URLs from tracing, logs and analytics.
 
 Before production enablement, exercise both multipart alternatives in desktop/mobile mail,
 verify the fragment survives without tracking redirects, reply to the same thread, confirm
-body withholding, and open an old email after payment/amendment/revocation to verify the
+authorized full-text visibility and unauthorized denial, and open an old email after payment/amendment/revocation to verify the
 authoritative payment-page state. Normal tests use a local deterministic provider and real
 throwaway PostgreSQL, with no live provider credentials.
+
+## Subsequent fionas-web changes
+
+This backend PR changes no fionas-web files. In a separate frontend PR:
+
+- In `apps/public/src/lib/payments/view.ts` and
+  `apps/public/src/lib/components/payments/payment-overview.svelte`, replace `Quote vN`
+  with `Quote` and `Invoice vN` with `Invoice`; remove the `Booked from Quote vN` caption.
+- Retain ledger version, business revision, deposit revision and accepted-Quote references
+  internally. Continue sending exact expected versions/business revisions for payment and
+  Checkout concurrency; hiding a display label never relaxes stale-term rejection.
+- Display full authorized staff timeline text. Handle only READABLE and
+  PROVIDER_CONTENT_UNAVAILABLE; retire the old protected/unverified placeholders.
+- Preserve the minimal public payment page. Do not add customer identity, contact details,
+  addresses, private notes, full service descriptions or conversation text. Keep bearer-only
+  access, no-store/no-referrer, fragment handling and observability exclusions unchanged.

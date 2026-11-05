@@ -98,9 +98,13 @@ class OpenApiDocumentSpec :
                 listOf("textOmittedForPaymentSecurity", "financialEmail", "textVisibility")
             schema("TimelineItemResponse_MESSAGE").strings("required") shouldContainAll listOf("textVisibility")
             schema("TimelineItemResponse_MESSAGE").strings("properties", "textVisibility", "enum") shouldContainExactly
-                listOf("READABLE", "FINANCIAL_EMAIL_PROTECTED", "PAYMENT_CONTENT_UNVERIFIED", "PROVIDER_CONTENT_UNAVAILABLE")
+                listOf("READABLE", "PROVIDER_CONTENT_UNAVAILABLE")
             schema("TimelineItemResponse_MESSAGE").text("properties", "textVisibility", "description") shouldContain
-                "A withheld body is not an empty reply"
+                "Financial command outcomes do not restrict content"
+            schema("TimelineItemResponse_MESSAGE").text("properties", "textOmittedForPaymentSecurity", "description") shouldContain
+                "always false"
+            document.text("paths", "/staff/requests/{inquiryId}/timeline", "get", "description") shouldContain
+                "including financial emails, payment links and quoted correspondence"
             send.text("description") shouldContain "Acceptance never means delivery"
             send.text("responses", "409", "description") shouldContain "financial_email_reconciliation_required"
         }

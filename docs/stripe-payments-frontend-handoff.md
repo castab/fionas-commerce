@@ -114,8 +114,9 @@ amounts funding unrelated inquiries are never exposed. Outstanding unapplied pro
 and records a full refund or deliberately allocates it through existing ledger operations,
 that derived block clears; the historical attempt outcome remains visible to staff.
 
-Show “Quote v{businessRevision}” or “Invoice v{businessRevision}”. `document.version`
-is the immutable ledger version used for concurrency, never the customer-facing label.
+Show “Quote” or “Invoice” without numeric revisions; remove the “Booked from Quote vN”
+caption. Retain `businessRevision`, `document.version` and `acceptedQuoteRevision` internally
+for concurrency and accepted-publication identity. `document.version` remains the immutable ledger version.
 After booking the latest Invoice defines obligations; `document.acceptedQuoteRevision`
 identifies the unchanged accepted Quote evidence. The same public link works through
 amendments, SERVED and CLOSED. CLOSED is read-only; payment never closes an inquiry.

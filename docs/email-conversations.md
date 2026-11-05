@@ -237,23 +237,22 @@ reclassify a receipt, and nothing is recomputed or rounded.
 `conversation.state` is `READY`, `EMPTY`, `MISSING`, `UNAVAILABLE` (also when reads are
 disabled) or `FORBIDDEN` (the caller lacks `fionas.communications.read`, or the provider refused
 Fiona). Commerce milestones are present in every state; message content only for `READY`.
-Messages normally carry plain `text` only, with whitespace preserved; provider HTML, routing
-tokens and diagnostic text never cross the boundary. Each MESSAGE now has `textVisibility`:
-READABLE, FINANCIAL_EMAIL_PROTECTED, PAYMENT_CONTENT_UNVERIFIED or PROVIDER_CONTENT_UNAVAILABLE.
-Matched financial message IDs remain protected even when the command is UNKNOWN. Other raw
-text is unverified when any financial command may have sent payment content. Only definitively
-REJECTED first dispatches establish no send and allow the ordinary conversation behavior.
-Missing provider text is explicitly unavailable rather than an empty reply.
+Authorized readers receive complete provider plain `text`, with whitespace preserved,
+including financial emails, customer replies and quoted/forwarded payment links. Provider
+HTML, routing tokens and provider diagnostic text remain excluded. Payment-link visibility
+is intentional under the [accepted capability policy](../ARCHITECTURE.md#email-conversations).
+Financial command existence, acceptance, rejection and UNKNOWN do not restrict message text.
 
-The provider supplies no trusted safe reply field. Simple customer and ordinary staff replies
-after accepted/UNKNOWN financial sends still cannot be safely displayed; this remains an
-unresolved usability limitation. Quoting heuristics cannot establish absence of encoded,
-fragmented or pasted credentials, even in outbound staff text. Both protected states omit
-`text` and set `textOmittedForPaymentSecurity:true`, retaining message identity, ordering,
-purpose, send/delivery states, attention and reply composition. Show an explicit withheld
-placeholder using the reason; never an empty message or an original-body link. The post-provider
-database safety read remains mandatory, including newly committed UNKNOWN commands.
-See [the exact policy and provider gap](financial-emails-frontend-handoff.md#activity-and-secrets).
+MESSAGE `textVisibility` is READABLE for non-null text (including the empty string), or
+PROVIDER_CONTENT_UNAVAILABLE when text is null/omitted. The old protected/unverified states
+are removed. `textOmittedForPaymentSecurity` remains as an always-false compatibility field.
+Render provider text as text, not HTML; quote folding is optional presentation only. Keep
+identities, ordering, purpose, send/delivery states, attention and reply composition. The
+post-provider command-history read correlates newly committed sends, including UNKNOWN.
+Without `fionas.communications.read`, the timeline returns FORBIDDEN and no MESSAGE items;
+financial/commerce reads do not grant email-content access. Do not log, trace or analyze
+these authorized response bodies: they can contain bearer URLs and private correspondence.
+See [the exact timeline policy](financial-emails-frontend-handoff.md#activity-and-secrets).
 
 ## Staff replies
 
@@ -447,4 +446,4 @@ authoritative eligibility, exact-command recovery, tracking control and safe tim
 Financial sends are independent of publication/amendment. They append one accepted staff email
 fact with zero clearing boundary, acknowledging no inbound mail. Confirmed conversation identities on financial commands establish
 the thread with intake disabled, including indeterminate provider results. V12 intent/outcome changes invalidate the existing SSE.
-Retain the new body-withholding reader on rollback after any financial-email command.
+Retain conversation permission enforcement and body/credential observability exclusions on rollback.

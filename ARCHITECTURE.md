@@ -536,9 +536,11 @@ and payment facts, recipient and payment-access generation. Sending is independe
 publication and amendment; it never changes financial meaning or grants payment authority.
 Recovery must reproduce the original provider request, and uncertainty never authorizes a
 replacement email. The provider alone retains actual HTML/text and delivery state.
-Payment credentials in email also make quoted inbound history sensitive: ordinary staff
-reads must withhold original content when they cannot prove it safe, while retaining safe
-purpose metadata and actual provider identities. Concrete mechanics belong in
+Authorized staff conversation access includes complete provider plain text, including
+financial emails and quoted or forwarded customer payment links. Link possession and
+forwarding are intentional capabilities, not grounds for hiding correspondence. Conversation
+authority remains separate from public payment access and financial administration; bodies
+and credentials must remain excluded from observability and diagnostics. Concrete mechanics belong in
 [AGENTS.md](AGENTS.md#financial-emails).
 
 The staff timeline is a derived read: commerce milestones from immutable history in one
@@ -775,6 +777,9 @@ UI requirements can reveal missing shared capabilities, but they do not establis
 # 18. Presentation Language Is Application-Owned
 
 Fiona may translate shared domain/runtime concepts into language appropriate for customers and staff.
+Application-generated customer financial emails and public payment-page labels omit numeric
+document/business revisions. Immutable versions remain internal authority, concurrency and
+history inputs. Staff-authored free text is preserved, including deliberate version references.
 
 Presentation-specific concepts may include:
 
@@ -903,6 +908,11 @@ authorizations. A revocable capability authorizes a limited customer-safe read a
 deliberate payment against reviewed canonical terms. It is independent of customer email,
 staff identity, financial snapshot version and the derived inquiry lifecycle. Possessing
 it grants no authority to change commercial terms or fulfillment.
+Public payment reads remain minimally informative: no customer/contact identity, addresses,
+private notes, conversation bodies or detailed service descriptions. The capability authorizes
+only the limited payment view and initiation, never staff actions, refunds, withdrawals or
+Stripe administration. Customer forwarding and authorized staff visibility do not expand
+that authority. Current authoritative financial state governs every payment.
 
 Provider attempts record independent integration facts: authorized terms, provider
 identities, ambiguous outcomes and their ledger receipt relationship. Their authorized

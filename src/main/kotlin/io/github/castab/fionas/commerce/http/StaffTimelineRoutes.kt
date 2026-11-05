@@ -135,16 +135,14 @@ sealed class TimelineItemResponse {
         val deliveryState: String?,
         @ApiProperty(
             description =
-                "True when this body is withheld for payment confidentiality. See textVisibility for the reason. " +
-                    "Message identity, delivery state and financial metadata remain available.",
+                "Deprecated compatibility field; always false. Authorized conversation text includes payment links and quoted history.",
         )
         val textOmittedForPaymentSecurity: Boolean = false,
         val financialEmail: FinancialEmailHistoryResponse? = null,
         @ApiProperty(
             description =
-                "READABLE: ordinary provider text; FINANCIAL_EMAIL_PROTECTED: matched financial send, including UNKNOWN; " +
-                    "PAYMENT_CONTENT_UNVERIFIED: raw correspondence may contain payment credentials and no trusted safe " +
-                    "projection exists; PROVIDER_CONTENT_UNAVAILABLE: provider supplied no text. A withheld body is not an empty reply.",
+                "READABLE: provider supplied text, including empty text, financial emails and quoted payment links; " +
+                    "PROVIDER_CONTENT_UNAVAILABLE: provider supplied no text. Financial command outcomes do not restrict content.",
         )
         val textVisibility: MessageTextVisibility,
     ) : TimelineItemResponse()
@@ -345,7 +343,7 @@ internal fun StaffTimeline.toResponse(): StaffTimelineResponse =
                             it.text,
                             it.state,
                             it.deliveryState,
-                            it.textOmittedForPaymentSecurity,
+                            false,
                             financialEmails.singleOrNull { email -> email.messageId == it.id }?.historyResponse(this),
                             it.textVisibility,
                         )
@@ -443,9 +441,10 @@ internal fun staffTimelineRoute(
             "READY means messages loaded; EMPTY means topic lookup returned 404 with no local establishment evidence; " +
             "MISSING means 404 despite local establishment evidence; UNAVAILABLE means disabled, failed or incomplete read; " +
             "FORBIDDEN means caller or provider denied message access. Commerce history remains present for each state. " +
-            "Plain text only; missing text means absent provider text or explicit payment-security withholding. " +
-            "Once any financial-email intent exists all provider bodies, including quoted inbound trails, are withheld " +
-            "with textOmittedForPaymentSecurity=true. financialEmails and matching MESSAGE metadata retain safe purpose, " +
+            "Complete provider plain text, including financial emails, payment links and quoted correspondence, is available " +
+            "to authorized conversation readers regardless of financial command outcome. Missing text means absent provider text; " +
+            "empty text remains readable. textOmittedForPaymentSecurity is deprecated and always false. " +
+            "financialEmails and matching MESSAGE metadata retain purpose, " +
             "current-version, command and provider send/delivery identities, including UNKNOWN recovery needs. " +
             "Acceptance is never delivery. No-store."
         tags += Tag("Staff requests", "Coherent inquiry and canonical financial detail for staff request review.")

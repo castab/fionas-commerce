@@ -27,10 +27,10 @@ data class ConversationMessage(
     val recipient: String,
     val text: String?,
     val createdAt: Instant,
-    val textOmittedForPaymentSecurity: Boolean = false,
-    val textVisibility: MessageTextVisibility =
-        if (text == null) MessageTextVisibility.PROVIDER_CONTENT_UNAVAILABLE else MessageTextVisibility.READABLE,
-)
+) {
+    val textVisibility: MessageTextVisibility
+        get() = if (text == null) MessageTextVisibility.PROVIDER_CONTENT_UNAVAILABLE else MessageTextVisibility.READABLE
+}
 
 data class EmailConversation(
     val id: UUID,
