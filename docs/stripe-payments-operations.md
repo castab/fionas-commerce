@@ -297,3 +297,13 @@ test-mode exercise above. No frontend, payment emails, automatic refund/dispute 
 periodic recovery scheduler, exception-resolution UI, customer accounts or saved methods
 are included. Ambiguous absence after the replay window fails closed and may require
 operator/provider support. No additional commerce-runtime capability is required.
+
+## Manual financial emails and payment capabilities
+
+[Financial emails](financial-emails-frontend-handoff.md) reuse this capability without
+rotating active links or changing Checkout. Initial access issuance and durable email intent
+commit together; revocation requires deliberate separate reactivation. Verify sender-domain
+click tracking and downstream URL rewriting are disabled before asserting
+FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED=true. Check delivered HTML and text preserve the URL
+fragment. New staff email/timeline responses contain no bearer. Retain the body-withholding
+reader on rollback, since original and quoted provider bodies contain payment credentials.

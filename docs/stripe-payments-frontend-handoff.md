@@ -28,6 +28,12 @@ permits retrieval of an existing active link and revocation, but no new or rotat
 Reissuing an already active CLOSED link just returns it without mutation. REQUESTED and
 DECLINED cannot acquire access. No automatic email is sent.
 
+Staff can separately [preview/send a financial email](financial-emails-frontend-handoff.md).
+That operation resolves the stable link on the server, reuses active access and issues only
+missing access atomically with send intent. Revoked access still needs deliberate authorized
+reactivation. Preview/send responses and ordinary timelines never return its bearer; the
+explicit link-management endpoints retain their permission boundary and behavior.
+
 Example staff response (the fragment below is illustrative):
 
 ```json

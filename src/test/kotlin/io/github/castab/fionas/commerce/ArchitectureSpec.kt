@@ -176,6 +176,7 @@ class ArchitectureSpec :
                 .shouldContainExactlyInAnyOrder(
                     "events/RecordConversationEvent.kt: inTransaction",
                     "conversation/ReadStaffTimeline.kt: inTransaction",
+                    "financialemail/FinancialEmails.kt: inTransaction",
                     "conversation/ReadInquiryTimelineRevisions.kt: inTransaction",
                     "conversation/SendStaffReply.kt: inTransaction",
                     "payments/CustomerPayments.kt: inTransaction",
@@ -309,6 +310,8 @@ class ArchitectureSpec :
             val routes =
                 fionaApiRoutes(
                     FionaOperations(
+                        previewFinancialEmail = { _, _ -> error("not called") },
+                        sendFinancialEmail = { error("not called") },
                         prepareStaffTimelineUpdates = { error("not called") },
                         sendStaffReply = { error("not called while rendering") },
                         readStaffTimeline = { _, _ -> error("not called while rendering") },

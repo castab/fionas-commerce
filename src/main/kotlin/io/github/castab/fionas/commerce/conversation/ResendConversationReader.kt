@@ -27,6 +27,7 @@ data class ConversationMessage(
     val recipient: String,
     val text: String?,
     val createdAt: Instant,
+    val textOmittedForPaymentSecurity: Boolean = false,
 )
 
 data class EmailConversation(

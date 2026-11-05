@@ -13,6 +13,8 @@ import io.github.castab.fionas.commerce.financial.DocumentSnapshot
 import io.github.castab.fionas.commerce.financial.InquiryInvoiceAmendment
 import io.github.castab.fionas.commerce.financial.InquiryProposal
 import io.github.castab.fionas.commerce.financial.InvoiceAmendmentKind
+import io.github.castab.fionas.commerce.financialemail.FinancialEmailRecord
+import io.github.castab.fionas.commerce.financialemail.JdbiFinancialEmailRepository
 import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.staff.ReadStaffRequest
@@ -95,6 +97,7 @@ data class StaffTimeline(
     val request: StaffRequest,
     val conversation: ConversationRead,
     val items: List<TimelineItem>,
+    val financialEmails: List<FinancialEmailRecord> = emptyList(),
 )
 
 /** Database history is one coherent snapshot. The subsequent remote read is explicitly not cross-system atomic. */
@@ -104,6 +107,7 @@ class ReadStaffTimeline(
     private val ledger: FinancialLedger,
     private val establishment: ConversationEstablishment,
     private val reader: ConversationReader,
+    private val emails: JdbiFinancialEmailRepository = JdbiFinancialEmailRepository(),
 ) {
     operator fun invoke(
         inquiry: InquiryId,
@@ -187,12 +191,29 @@ class ReadStaffTimeline(
         ) {
             conversation = ConversationRead(ConversationAvailability.MISSING)
         }
+        // Read AFTER provider I/O. A pre-send database snapshot could otherwise precede the command's commit
+        // while the subsequent provider read already contains its secret-bearing message.
+        val financialEmails = transactor.inTransaction { emails.history(it, inquiry) }
+        if (financialEmails.isNotEmpty()) {
+            conversation =
+                conversation.copy(
+                    conversation =
+                        conversation.conversation?.let { thread ->
+                            thread.copy(messages = thread.messages.map { it.copy(text = null, textOmittedForPaymentSecurity = true) })
+                        },
+                )
+        }
         val all =
             items +
                 conversation.conversation
                     ?.messages
                     .orEmpty()
                     .map(TimelineItem::Message)
-        return StaffTimeline(request, conversation, all.sortedWith(compareBy<TimelineItem> { it.occurredAt }.thenBy { it.id }))
+        return StaffTimeline(
+            request,
+            conversation,
+            all.sortedWith(compareBy<TimelineItem> { it.occurredAt }.thenBy { it.id }),
+            financialEmails,
+        )
     }
 }

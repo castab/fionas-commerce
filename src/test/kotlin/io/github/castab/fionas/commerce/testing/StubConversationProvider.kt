@@ -32,11 +32,13 @@ class StubConversationProvider : AutoCloseable {
         val state: String,
         val text: String,
         val createdAt: Instant,
+        val html: String? = null,
     )
 
     class Conversation(
         val id: UUID,
         val messages: MutableList<Message> = mutableListOf(),
+        val subject: String = "Your inquiry",
     )
 
     private data class Stored(
@@ -54,8 +56,12 @@ class StubConversationProvider : AutoCloseable {
 
     @Volatile var lookupStatus: Int? = null
 
+    @Volatile var onLookup: (() -> Unit)? = null
+
     /** Delays same-key replays, so a scripted timeout can also defeat the client's single reconciliation attempt. */
     @Volatile var replayDelayMillis = 0L
+
+    @Volatile var replayStatus: Int? = null
 
     /** Runs inside the first (non-replayed) send, before the provider persists it: a hook for concurrent Fiona writes. */
     @Volatile var onSend: (() -> Unit)? = null
@@ -81,7 +87,10 @@ class StubConversationProvider : AutoCloseable {
             ),
         )
 
-    fun sendConfiguration(allowList: String = "*"): ConversationSendConfiguration =
+    fun sendConfiguration(
+        allowList: String = "*",
+        linksUntracked: Boolean = true,
+    ): ConversationSendConfiguration =
         checkNotNull(
             ConversationSendConfiguration.fromEnvironment(
                 mapOf(
@@ -92,6 +101,7 @@ class StubConversationProvider : AutoCloseable {
                     "FIONAS_CONVERSATION_REPLY_TO_ADDRESS" to "replies@mail.fionas.test",
                     "FIONAS_CONVERSATION_RECIPIENT_ALLOWLIST" to allowList,
                     "FIONAS_CONVERSATION_SEND_TIMEOUT_MS" to "1000",
+                    "FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED" to linksUntracked.toString(),
                 ),
             ),
         )
@@ -112,6 +122,7 @@ class StubConversationProvider : AutoCloseable {
         check(exchange.requestHeaders.getFirst("Authorization") == "Bearer $STUB_KEY")
         val path = exchange.requestURI.path
         if (exchange.requestMethod == "GET") {
+            onLookup?.invoke()
             lookupStatus?.let { return exchange.respond(it, """{"error":"Unavailable"}""") }
             val inquiry = path.removePrefix("/api/conversations/v2/topics/booking/")
             val conversation = conversations[inquiry] ?: return exchange.respond(404, """{"error":"Not found"}""")
@@ -124,10 +135,21 @@ class StubConversationProvider : AutoCloseable {
             return exchange.respond(200, conversation(inquiry, conversation, messages))
         }
         val key = checkNotNull(exchange.requestHeaders.getFirst("Idempotency-Key"))
+        synchronized(keyLocks.computeIfAbsent(key) { Any() }) { send(exchange, path, key) }
+    }
+
+    private val keyLocks = ConcurrentHashMap<String, Any>()
+
+    private fun send(
+        exchange: HttpExchange,
+        path: String,
+        key: String,
+    ) {
         val text = exchange.requestBody.readAllBytes().decodeToString()
         sendAttempts.incrementAndGet()
         stored[key]?.let { previous ->
             Thread.sleep(replayDelayMillis)
+            replayStatus?.let { return exchange.respond(it, """{"error":"Replay refused"}""") }
             return if (previous.request == text) {
                 exchange.respond(if (previous.status == 201) 200 else previous.status, previous.response)
             } else {
@@ -149,7 +171,10 @@ class StubConversationProvider : AutoCloseable {
                         .getValue("externalId")
                         .jsonPrimitive.content
                 if (conversations.containsKey(inquiry)) return exchange.respond(409, """{"error":"Topic conflict"}""")
-                Conversation(UUID.randomUUID()).also { conversations[inquiry] = it }
+                Conversation(
+                    UUID.randomUUID(),
+                    subject = body.getValue("subject").jsonPrimitive.content,
+                ).also { conversations[inquiry] = it }
             } else {
                 val id = UUID.fromString(path.removePrefix("/api/conversations/v2/").substringBefore('/'))
                 conversations.values.singleOrNull { it.id == id } ?: return exchange.respond(404, """{"error":"Not found"}""")
@@ -161,7 +186,15 @@ class StubConversationProvider : AutoCloseable {
                 else -> "accepted"
             }
         val content = if (opening) body.getValue("message").jsonObject else body
-        val message = Message(UUID.randomUUID(), "outbound", state, content.getValue("text").jsonPrimitive.content, Instant.now())
+        val message =
+            Message(
+                UUID.randomUUID(),
+                "outbound",
+                state,
+                content.getValue("text").jsonPrimitive.content,
+                Instant.now(),
+                content["html"]?.jsonPrimitive?.content,
+            )
         synchronized(conversation) { conversation.messages += message }
         if (state == "accepted") created.incrementAndGet()
         val result = """{"conversationId":"${conversation.id}","message":${message(message)}}"""
@@ -181,7 +214,11 @@ class StubConversationProvider : AutoCloseable {
         inquiry: String,
         conversation: Conversation,
         messages: List<Message>,
-    ) = """{"id":"${conversation.id}","topic":{"type":"booking","externalId":"$inquiry"},"subject":"Your inquiry",
+    ) = """{"id":"${conversation.id}","topic":{"type":"booking","externalId":"$inquiry"},"subject":${Json.encodeToString(
+        String.serializer(),
+        conversation.subject,
+    )},
+        "participant":{"address":"customer@example.com","name":"Customer"},
         "state":"awaiting_us","messages":[${messages.joinToString(",") { message(it) }}],
         "page":{"hasMoreBefore":false,"before":null}}"""
 

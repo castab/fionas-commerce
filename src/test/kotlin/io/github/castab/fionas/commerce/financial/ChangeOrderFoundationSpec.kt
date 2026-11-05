@@ -59,7 +59,18 @@ class ChangeOrderFoundationSpec :
 
         test("signed flat credit round trips exactly and appends an immutable database-timestamped successor") {
             val ledger = app.context.financialLedger
-            val before = Instant.now()
+
+            // Compare against the authoritative database clock: Docker and the Windows host can differ.
+            fun databaseTime(): Instant =
+                app.database.connect { connection ->
+                    connection.createStatement().use { statement ->
+                        statement.executeQuery("SELECT clock_timestamp()").use { rows ->
+                            check(rows.next())
+                            rows.getTimestamp(1).toInstant()
+                        }
+                    }
+                }
+            val before = databaseTime()
             val original = invoice()
             val originalVersion = ledger.version(original.reference)
             val credit = line("-40.00", "Desired flavor unavailable — service credit")
@@ -87,7 +98,7 @@ class ChangeOrderFoundationSpec :
             ledger.get(original.reference) shouldBe original
             ledger.versionHistory(original.id).map { it.document } shouldBe listOf(original, revised)
             (persisted.createdAt >= originalVersion.createdAt) shouldBe true
-            (originalVersion.createdAt >= before && persisted.createdAt <= Instant.now()) shouldBe true
+            (originalVersion.createdAt >= before && persisted.createdAt <= databaseTime()) shouldBe true
             (persisted.createdAt != STORED_INSTANT) shouldBe true
         }
 

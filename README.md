@@ -113,6 +113,8 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md) and
 | `GET /staff/requests/{inquiryId}` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read` | Coherent inquiry detail and current canonical financial lineage for staff review, with the published proposal's optional `servicePlan`, `effectiveServicePlan`, `acceptedServicePlan` (after booking), `servicePlanHistory`, `proposalHistory` and the `communication` attention summary. `400` for malformed UUID, `404` for unknown inquiry; successful responses are no-store. |
 | `GET /staff/requests/{inquiryId}/timeline` | **Both** `fionas.inquiries.read` and `commerce.financial-document.read`; message content also needs `fionas.communications.read` | Provider email messages (plain text) and historical commerce milestones in one deterministic list, with conversation state `READY`/`EMPTY`/`MISSING`/`UNAVAILABLE`/`FORBIDDEN`. Commerce history is always present. See [Email conversations](#email-conversations). |
 | `POST /staff/requests/{inquiryId}/conversation/replies` | `fionas.communications.send`, **staff USER only** | Requires `Idempotency-Key`. Send a plain-text reply to the inquiry's customer in its topic conversation, opening it on the first reply. `201` new, `200` replay, `202` `UNKNOWN` (retry with the same key); `409 conversation_changed`/`IDEMPOTENCY_KEY_REUSED`/`conversation_missing`, `422`, `502 email_send_rejected`, `503`. |
+| `POST /staff/requests/{inquiryId}/financial-emails/preview` | Staff USER + inquiry/financial/communications read, communications send and payment-access manage | Write-free authoritative Quote/Invoice HTML/text review with inert payment action and concurrency token. |
+| `POST /staff/requests/{inquiryId}/financial-emails` | Same five permissions and staff USER | Manual reviewed financial send in the existing conversation; Idempotency-Key, 201 accepted / 200 replay / 202 UNKNOWN. See [the frontend handoff](docs/financial-emails-frontend-handoff.md). |
 | `POST /staff/requests/{inquiryId}/quote-preview` | `commerce.financial-document.create`, `commerce.deposit-requirement.manage`, `fionas.financial-terms.manage`, **staff USER only** | Write-free preview of the initial Quote from staff-committed final lines: resolved lines, domain totals, deposit, service plan and `reviewToken`. See [Quote builder](#quote-builder). |
 | `POST /staff/requests/{inquiryId}/proposals` | Same as preview | Atomic initial Quote publication with approved deposit terms; optionally the reviewed `lines`, `servicePlan` and `reviewToken`. See [Atomic canonical proposal publication](#atomic-canonical-proposal-publication). |
 | `POST /staff/requests/{inquiryId}/quote-revision-preview` | Same as preview | Write-free preview of a canonical Quote revision (financial, deposit and/or service changes) with its `reviewToken`. See [Quote and Invoice revisions](#quote-and-invoice-revisions). |
@@ -664,7 +666,7 @@ publication per inquiry is unique. Since V4 a `(documentVersion, depositRequirem
 pair is no longer unique: a service-only revision republishes the same financial/deposit pair
 with a new approval, and its own UUID still supersedes every earlier publication. Durable
 identity ordering follows the association lock, independent of Clock timestamps. Re-sending a
-publication is a future communication action, not another proposal. No amounts, terms, totals, stages,
+publication is a separate manual financial-email action, not another proposal. No amounts, terms, totals, stages,
 mutable current/superseded flags, event bus or dispatcher are persisted in Fiona.
 
 `recorded_order` orders proposal history within an inquiry. Sequence allocation does not
@@ -702,7 +704,7 @@ query never authorizes acceptance.
 
 The durable proposal row is the business event for future at-least-once integrations.
 It commits with the financial facts, has a stable id, and never implies STAFF_EMAIL_SENT.
-Actual delivery alone may append communication activity. A future generic durable dispatch
+Only accepted staff email appends communication activity; acceptance is never delivery. A future generic durable dispatch
 capability belongs upstream when needed; no after-commit crash-window publisher exists here.
 
 POST `/staff/requests/{inquiryId}/proposals` (`issueInquiryProposal`), its `/quote-revisions`
@@ -2168,3 +2170,17 @@ and keeps all classification server-owned, at O(population) memory and O(populat
 population) sorting cost. Only the requested page reaches clients. Future optimization must
 preserve canonical runtime reads and complete integrity checks; no local financial replica
 or direct runtime-table SQL is implied.
+
+## Manual financial-document emails
+
+Staff can independently preview and send the current published Quote or a balance-due
+SERVED Invoice using the existing conversation and stable payment page. Configure the
+existing conversation sender and customer payments, explicitly grant the five permissions,
+and verify that sender-domain tracking is disabled before setting
+`FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED=true` (default false). Migrate V12 before enabling.
+Preview is write-free; acceptance is not delivery; recovery retains the original key and
+command. Timeline bodies on financial-email inquiries are withheld, including quoted
+payment credentials, while safe send/delivery metadata remains. Keep this secret-safe
+reader on rollback after any send attempt. See the [complete frontend and operations
+handoff](docs/financial-emails-frontend-handoff.md). No frontend, automatic reminders,
+attachments or Stripe Checkout changes are included.

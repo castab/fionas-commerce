@@ -52,6 +52,54 @@ class OpenApiDocumentSpec :
 
         fun schema(name: String) = document.at("components", "schemas", name).jsonObject
 
+        test("financial email contracts require current identities and reviewed intent, with safe response and Activity metadata") {
+            val preview = document.at("paths", "/staff/requests/{inquiryId}/financial-emails/preview", "post")
+            val send = document.at("paths", "/staff/requests/{inquiryId}/financial-emails", "post")
+            preview.text("operationId") shouldBe "previewInquiryFinancialEmail"
+            send.text("operationId") shouldBe "sendInquiryFinancialEmail"
+            listOf(
+                "fionas.inquiries.read",
+                "commerce.financial-document.read",
+                "fionas.communications.read",
+                "fionas.communications.send",
+                "fionas.payment-access.manage",
+            ).forEach { permission ->
+                preview.text("description") shouldContain permission
+                send.text("description") shouldContain permission
+            }
+            schema("PreviewFinancialEmailRequest").strings("required") shouldContainExactly
+                listOf(
+                    "kind",
+                    "documentId",
+                    "expectedDocumentVersion",
+                    "expectedBusinessRevision",
+                )
+            schema("SendFinancialEmailRequest").strings("required") shouldContainExactly listOf("email", "reviewToken")
+            schema("PreviewFinancialEmailRequest").text("properties", "message", "maxLength") shouldBe "2000"
+            schema("FinancialEmailSendResponse").at("properties").jsonObject.keys shouldBe
+                setOf(
+                    "sendId",
+                    "outcome",
+                    "replayed",
+                    "conversationId",
+                    "messageId",
+                    "sendState",
+                )
+            listOf("requiredPayment", "paidAmount", "balance", "balanceAfterDeposit").forEach {
+                schema("FinancialEmailPreviewResponse").text("properties", it, "type") shouldBe "string"
+                schema("FinancialEmailPreviewResponse").text("properties", it, "pattern") shouldBe SIGNED_DECIMAL
+            }
+            schema("FinancialEmailPreviewResponse").text("properties", "html", "description") shouldContain "inert"
+            schema(
+                "FinancialEmailHistoryResponse",
+            ).at("properties").jsonObject.keys.intersect(setOf("text", "html", "url", "balance")) shouldBe
+                emptySet()
+            schema("TimelineItemResponse_MESSAGE").at("properties").jsonObject.keys shouldContainAll
+                listOf("textOmittedForPaymentSecurity", "financialEmail")
+            send.text("description") shouldContain "Acceptance never means delivery"
+            send.text("responses", "409", "description") shouldContain "financial_email_reconciliation_required"
+        }
+
         test("customer checkout documents explicit bounded recovery and a side-effect-free local summary hint") {
             val checkout = document.at("paths", "/public/payments/{publicId}/checkout-sessions", "post")
             listOf(
@@ -378,6 +426,10 @@ class OpenApiDocumentSpec :
                     listOf("200", "400", "401", "403", "404", "500"),
                 Triple("/staff/requests/{inquiryId}/conversation/replies", "post", "sendStaffConversationReply") to
                     listOf("200", "201", "202", "400", "401", "403", "404", "409", "422", "500", "502", "503"),
+                Triple("/staff/requests/{inquiryId}/financial-emails/preview", "post", "previewInquiryFinancialEmail") to
+                    listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
+                Triple("/staff/requests/{inquiryId}/financial-emails", "post", "sendInquiryFinancialEmail") to
+                    listOf("200", "201", "202", "400", "401", "403", "404", "409", "422", "500", "502", "503"),
                 Triple("/staff/requests", "get", "listStaffRequests") to listOf("200", "400", "401", "403", "500"),
                 Triple("/staff/dashboard", "get", "readStaffDashboard") to listOf("200", "401", "403", "500"),
                 Triple("/staff/requests/{inquiryId}", "get", "readStaffRequest") to listOf("200", "400", "401", "403", "404", "500"),
@@ -477,6 +529,8 @@ class OpenApiDocumentSpec :
                 "reviseInquiryProposalDeposit" to "Staff proposals",
                 "acknowledgeInquiryCommunication" to "Inquiries",
                 "sendStaffConversationReply" to "Inquiries",
+                "previewInquiryFinancialEmail" to "Inquiries",
+                "sendInquiryFinancialEmail" to "Inquiries",
                 "createInquiry" to "Inquiries",
                 "listInquiries" to "Inquiries",
                 "getInquiry" to "Inquiries",
@@ -564,6 +618,11 @@ class OpenApiDocumentSpec :
                 "CommunicationSummaryResponse",
                 "CommunicationAcknowledgementResponse",
                 "StaffTimelineResponse",
+                "FinancialEmailHistoryResponse",
+                "PreviewFinancialEmailRequest",
+                "SendFinancialEmailRequest",
+                "FinancialEmailPreviewResponse",
+                "FinancialEmailSendResponse",
                 "TimelineConversationResponse",
                 "TimelineActorResponse",
                 "TimelinePaymentAllocationResponse",
@@ -761,6 +820,8 @@ class OpenApiDocumentSpec :
                 "declineInquiry",
                 // Customer email is signed by and attributed to the sending staff USER.
                 "sendStaffConversationReply",
+                "previewInquiryFinancialEmail",
+                "sendInquiryFinancialEmail",
                 "getInquiryPaymentAccess",
                 "issueInquiryPaymentAccess",
                 "rotateInquiryPaymentAccess",
@@ -929,6 +990,7 @@ class OpenApiDocumentSpec :
         }
 
         val reply = "/staff/requests/{inquiryId}/conversation/replies"
+        val financialEmail = "/staff/requests/{inquiryId}/financial-emails"
         val fionaLocalCodes =
             mapOf(
                 "stripe_disabled" to
@@ -950,9 +1012,16 @@ class OpenApiDocumentSpec :
                         .toSet(),
                 "conversation_changed" to
                     setOf(Triple(reply, "post", "409"), Triple("/inquiries/{inquiryId}/communications/acknowledge", "post", "409")),
-                "email_send_rejected" to setOf(Triple(reply, "post", "502")),
+                "email_send_rejected" to setOf(Triple(reply, "post", "502"), Triple(financialEmail, "post", "502")),
                 "timeline_updates_unavailable" to setOf(Triple("/staff/requests/{inquiryId}/updates", "get", "503")),
-                "email_provider_unavailable" to setOf(Triple(reply, "post", "503")),
+                "email_provider_unavailable" to
+                    setOf(
+                        Triple(reply, "post", "503"),
+                        Triple(financialEmail, "post", "503"),
+                        Triple("$financialEmail/preview", "post", "503"),
+                    ),
+                "financial_email_review_stale" to
+                    setOf(Triple(financialEmail, "post", "409"), Triple("$financialEmail/preview", "post", "409")),
             )
 
         test("documents every error with commerce-runtime's one reusable error body and its code") {
@@ -1135,7 +1204,12 @@ class OpenApiDocumentSpec :
             operations.keys
                 .filter { (path, method) ->
                     (path to method) !in
-                        setOf("/inquiries" to "post", reply to "post", "/public/payments/{publicId}/checkout-sessions" to "post")
+                        setOf(
+                            "/inquiries" to "post",
+                            reply to "post",
+                            "/public/payments/{publicId}/checkout-sessions" to "post",
+                            "/staff/requests/{inquiryId}/financial-emails" to "post",
+                        )
                 }.forEach { (path, method) ->
                     operation(path, method)
                         .jsonObject["parameters"]

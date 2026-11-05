@@ -45,6 +45,10 @@ import io.github.castab.fionas.commerce.financial.ReviseInquiryQuoteProposal
 import io.github.castab.fionas.commerce.financial.RevisedInquiryInvoice
 import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
+import io.github.castab.fionas.commerce.financialemail.FinancialEmailIntent
+import io.github.castab.fionas.commerce.financialemail.FinancialEmailPreview
+import io.github.castab.fionas.commerce.financialemail.FinancialEmailResult
+import io.github.castab.fionas.commerce.financialemail.SendFinancialEmail
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.DeclineInquiry
 import io.github.castab.fionas.commerce.inquiry.Inquiry
@@ -87,6 +91,8 @@ const val API_DOCS_PATH = "/docs"
  */
 class FionaOperations(
     val payments: PaymentOperations? = null,
+    val previewFinancialEmail: (FinancialEmailIntent, UserId) -> FinancialEmailPreview,
+    val sendFinancialEmail: (SendFinancialEmail) -> FinancialEmailResult,
     val prepareStaffTimelineUpdates: (InquiryId) -> Boolean,
     val sendStaffReply: (SendStaffReply.Command) -> SendStaffReply.Result,
     val readStaffTimeline: (InquiryId, PrincipalId) -> StaffTimeline,
@@ -155,6 +161,8 @@ fun fionaApiRoutes(
         staffTimelineUpdatesRoute(operations.prepareStaffTimelineUpdates, auth.access),
         staffTimelineRoute(operations.readStaffTimeline, auth.access),
         sendStaffReplyRoute(operations.sendStaffReply, auth.access),
+        previewFinancialEmailRoute(operations.previewFinancialEmail, auth.access),
+        sendFinancialEmailRoute(operations.sendFinancialEmail, auth.access),
         previewInquiryQuoteRevisionRoute(operations.previewInquiryQuoteRevision, auth.access),
         previewInquiryInvoiceRevisionRoute(operations.previewInquiryInvoiceRevision, auth.access),
         reviseInquiryInvoiceRoute(operations.reviseInquiryInvoice, auth.access),

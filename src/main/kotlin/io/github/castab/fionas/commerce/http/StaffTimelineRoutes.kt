@@ -14,6 +14,8 @@ import io.github.castab.fionas.commerce.conversation.MilestoneKind
 import io.github.castab.fionas.commerce.conversation.PaymentClassification
 import io.github.castab.fionas.commerce.conversation.StaffTimeline
 import io.github.castab.fionas.commerce.conversation.TimelineItem
+import io.github.castab.fionas.commerce.financialemail.FinancialEmailKind
+import io.github.castab.fionas.commerce.financialemail.FinancialEmailRecord
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -80,6 +82,34 @@ data class StaffTimelineResponse(
     val conversation: TimelineConversationResponse,
     val attention: CommunicationSummaryResponse,
     val items: List<TimelineItemResponse>,
+    @ApiProperty(
+        description =
+            "Safe financial-email command history, including UNKNOWN commands. Empty means never " +
+                "requested. Current compares business and ledger identities; acceptance and delivery " +
+                "are independent.",
+    )
+    val financialEmails: List<FinancialEmailHistoryResponse> = emptyList(),
+)
+
+@Serializable
+data class FinancialEmailHistoryResponse(
+    @ApiProperty(format = "uuid") val sendId: String,
+    val kind: FinancialEmailKindResponse,
+    @ApiProperty(format = "uuid") val documentId: String,
+    val documentVersion: Int,
+    val businessRevision: Int,
+    @ApiProperty(format = "uuid") val proposalId: String? = null,
+    val current: Boolean,
+    val outcome: String,
+    @ApiProperty(format = "date-time") val requestedAt: String,
+    @ApiProperty(format = "date-time") val acceptedAt: String? = null,
+    val actor: TimelineActorResponse,
+    @ApiProperty(format = "uuid") val conversationId: String? = null,
+    @ApiProperty(format = "uuid") val messageId: String? = null,
+    val sendState: String? = null,
+    @ApiProperty(
+        description = "Current provider state when that message is available. Absence means unavailable, never delivered.",
+    ) val deliveryState: String? = null,
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -102,6 +132,13 @@ sealed class TimelineItemResponse {
         val text: String?,
         val sendState: String,
         val deliveryState: String?,
+        @ApiProperty(
+            description =
+                "Bodies of all messages in a financial-email conversation are withheld, including " +
+                    "quoted inbound trails and unknown sends.",
+        )
+        val textOmittedForPaymentSecurity: Boolean = false,
+        val financialEmail: FinancialEmailHistoryResponse? = null,
     ) : TimelineItemResponse()
 
     @Serializable
@@ -300,6 +337,8 @@ internal fun StaffTimeline.toResponse(): StaffTimelineResponse =
                             it.text,
                             it.state,
                             it.deliveryState,
+                            it.textOmittedForPaymentSecurity,
+                            financialEmails.singleOrNull { email -> email.messageId == it.id }?.historyResponse(this),
                         )
                     }
                 is TimelineItem.Quote ->
@@ -341,7 +380,45 @@ internal fun StaffTimeline.toResponse(): StaffTimelineResponse =
                     }
             }
         },
+        financialEmails.map { it.historyResponse(this) },
     )
+
+private fun FinancialEmailRecord.historyResponse(timeline: StaffTimeline): FinancialEmailHistoryResponse {
+    val document = timeline.request.financial.latest.document
+    val current =
+        document.id == documentId &&
+            document.version.number == documentVersion &&
+            when (kind) {
+                FinancialEmailKind.QUOTE ->
+                    document is FinancialDocument.Quote &&
+                        timeline.request.proposal?.id == proposalId &&
+                        timeline.request.currentQuoteRevision == businessRevision
+                FinancialEmailKind.INVOICE ->
+                    document is FinancialDocument.Invoice &&
+                        timeline.request.currentInvoiceRevision == businessRevision
+            }
+    val message =
+        timeline.conversation.conversation
+            ?.messages
+            ?.singleOrNull { it.id == messageId }
+    return FinancialEmailHistoryResponse(
+        id.value.toString(),
+        FinancialEmailKindResponse.valueOf(kind.name),
+        documentId.toString(),
+        documentVersion,
+        businessRevision,
+        proposalId?.value?.toString(),
+        current,
+        outcome.name,
+        requestedAt.toString(),
+        acceptedAt?.toString(),
+        sentBy.timelineActor(),
+        conversationId?.toString(),
+        messageId?.toString(),
+        message?.state ?: sendState,
+        message?.deliveryState,
+    )
+}
 
 internal fun staffTimelineRoute(
     read: (InquiryId, PrincipalId) -> StaffTimeline,
@@ -355,9 +432,13 @@ internal fun staffTimelineRoute(
             "Items sort by occurrence timestamp then stable lexical id; this is presentation order, not cross-system causal order. " +
             "Commerce history uses one database snapshot, followed by a bounded nontransactional provider read. " +
             "READY means messages loaded; EMPTY means topic lookup returned 404 with no local establishment evidence; " +
-            "MISSING means 404 despite ingested establishment evidence; UNAVAILABLE means disabled, failed or incomplete read; " +
+            "MISSING means 404 despite local establishment evidence; UNAVAILABLE means disabled, failed or incomplete read; " +
             "FORBIDDEN means caller or provider denied message access. Commerce history remains present for each state. " +
-            "Plain text only; null text means the provider has no plain-text body. Acceptance is never delivery. No-store."
+            "Plain text only; missing text means absent provider text or explicit payment-security withholding. " +
+            "Once any financial-email intent exists all provider bodies, including quoted inbound trails, are withheld " +
+            "with textOmittedForPaymentSecurity=true. financialEmails and matching MESSAGE metadata retain safe purpose, " +
+            "current-version, command and provider send/delivery identities, including UNKNOWN recovery needs. " +
+            "Acceptance is never delivery. No-store."
         tags += Tag("Staff requests", "Coherent inquiry and canonical financial detail for staff request review.")
         principalAuthentication()
         returning(

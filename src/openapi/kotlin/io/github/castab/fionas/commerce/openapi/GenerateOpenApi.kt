@@ -54,6 +54,8 @@ import java.time.Duration
 private val notInvoked =
     FionaOperations(
         payments = null, // Disabled routes still publish the complete executable payment contract.
+        previewFinancialEmail = { _, _ -> error("Rendering only") },
+        sendFinancialEmail = { error("Rendering only") },
         prepareStaffTimelineUpdates = { error("Rendering only") },
         sendStaffReply = { error("not called while rendering") },
         readStaffTimeline = { _, _ -> error("not called while rendering") },

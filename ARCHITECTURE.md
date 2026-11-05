@@ -530,6 +530,17 @@ reconciles uncertain outcomes only by replaying the identical provider request u
 provider idempotency key. An unknown outcome is reported as unknown, never as a failure that
 invites a second email. Acceptance is not delivery.
 
+Manual financial-document communication is Fiona presentation and policy over authoritative
+shared financial state. Its reviewed content binds the current business decision, financial
+and payment facts, recipient and payment-access generation. Sending is independent of
+publication and amendment; it never changes financial meaning or grants payment authority.
+Recovery must reproduce the original provider request, and uncertainty never authorizes a
+replacement email. The provider alone retains actual HTML/text and delivery state.
+Payment credentials in email also make quoted inbound history sensitive: ordinary staff
+reads must withhold original content when they cannot prove it safe, while retaining safe
+purpose metadata and actual provider identities. Concrete mechanics belong in
+[AGENTS.md](AGENTS.md#financial-emails).
+
 The staff timeline is a derived read: commerce milestones from immutable history in one
 database snapshot, then a separate provider read that is explicitly not atomic with it.
 Fiona may persist an inquiry-scoped invalidation revision alongside its communication,

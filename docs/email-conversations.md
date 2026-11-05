@@ -23,7 +23,9 @@ Fiona uses exactly:
 | NATS `conversation.events.v1` schema version 1 | Inbound customer email facts and establishment evidence |
 
 Fiona never calls the state, assignment, delete, outbox or drain routes, never sets a provider
-conversation `concluded` or `terminated`, and never sends HTML or attachments.
+conversation `concluded` or `terminated`, and never sends attachments. Staff replies stay
+plain text. Manual financial emails send both HTML and equivalent text through these same
+synchronous endpoints; no provider outbox integration is added.
 
 ## Conversation identity
 
@@ -39,9 +41,13 @@ read and send. It records only:
   `CUSTOMER_EMAIL_RECEIVED` communication fact it produced.
 - `fionas.inquiry_staff_replies`: one staff reply command per `Idempotency-Key`; accepted rows
   are establishment evidence too.
+- `fionas.inquiry_financial_emails`: reviewed commands, document purpose, staff provenance,
+  request digests, dispatch counter and provider result identities. A confirmed conversation
+  identity is establishment evidence even without accepted sending.
 
-Sending and the timeline apply one rule (`ConversationEstablishment`): an ingested event **or**
-an accepted reply is evidence. Accepted replies count even when the event consumer is disabled,
+Sending and the timeline apply one rule (`ConversationEstablishment`): an ingested event,
+accepted reply or confirmed financial-command conversation identity is evidence. These
+count even when intake is disabled,
 so a deployment without intake still reports a vanished topic as `MISSING`, never `EMPTY`, and
 never opens a replacement.
 
@@ -231,8 +237,11 @@ reclassify a receipt, and nothing is recomputed or rounded.
 `conversation.state` is `READY`, `EMPTY`, `MISSING`, `UNAVAILABLE` (also when reads are
 disabled) or `FORBIDDEN` (the caller lacks `fionas.communications.read`, or the provider refused
 Fiona). Commerce milestones are present in every state; message content only for `READY`.
-Messages carry plain `text` only, with whitespace preserved; provider HTML, routing tokens and
-diagnostic text never cross the boundary.
+Messages normally carry plain `text` only, with whitespace preserved; provider HTML, routing
+tokens and diagnostic text never cross the boundary. Once a financial-email intent exists,
+all provider bodies for that inquiry are withheld, including quoted inbound trails. The
+timeline carries safe purpose/send/delivery metadata and `textOmittedForPaymentSecurity`
+instead. See [financial emails](financial-emails-frontend-handoff.md#activity-and-secrets).
 
 ## Staff replies
 
@@ -333,6 +342,7 @@ evidence (only `ACCEPTED` rows are).
 | `FIONAS_CONVERSATION_FROM_NAME` | Sender and Reply-To display name | `Fiona's Ice Cream` |
 | `FIONAS_CONVERSATION_REPLY_TO_ADDRESS` | Untagged Reply-To base; needs a `REPLY_TO` row; fixed per conversation by the provider | required for sending |
 | `FIONAS_CONVERSATION_RECIPIENT_ALLOWLIST` | Comma-separated exact customer addresses, or `*` for any (production only) | required for sending |
+| `FIONAS_FINANCIAL_EMAIL_LINKS_UNTRACKED` | Operator assertion of disabled click tracking/downstream rewriting and verified delivered HTML/text fragment links; required for manual financial preview/send | `false` |
 
 Both reading and sending use the same provider origin validation:
 
@@ -414,6 +424,15 @@ content-free refresh hints, never authority. See [operations and the frontend ha
   exposed as a timeline head or ETag. No revision query calls the provider.
   `communication.throughRecordedOrder` remains a communication-fact watermark only, with its
   original acknowledgement/reply meaning; it is not the new invalidation revision.
-- Automatic acknowledgement, Quote or Invoice emails; attachments; HTML; provider state
+- Automatic acknowledgement, Quote or Invoice emails; attachments; arbitrary staff HTML; provider state
   changes from Fiona; unassigned-conversation assignment; historical backfill.
 - Native streaming consumes the released runtime capability; no provider change is needed.
+
+## Manual financial emails
+
+The [financial-email handoff](financial-emails-frontend-handoff.md) defines the staff POSTs,
+authoritative eligibility, exact-command recovery, tracking control and safe timeline additions.
+Financial sends are independent of publication/amendment. They append one accepted staff email
+fact with zero clearing boundary, acknowledging no inbound mail. Confirmed conversation identities on financial commands establish
+the thread with intake disabled, including indeterminate provider results. V12 intent/outcome changes invalidate the existing SSE.
+Retain the new body-withholding reader on rollback after any financial-email command.
