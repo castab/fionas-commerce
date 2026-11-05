@@ -31,8 +31,9 @@ DECLINED cannot acquire access. No automatic email is sent.
 Staff can separately [preview/send a financial email](financial-emails-frontend-handoff.md).
 That operation resolves the stable link on the server, reuses active access and issues only
 missing access atomically with send intent. Revoked access still needs deliberate authorized
-reactivation. Preview/send responses and ordinary timelines never return its bearer; the
-explicit link-management endpoints retain their permission boundary and behavior.
+reactivation. Preview/send command responses never return its bearer. Authorized conversation
+readers can see it in original or quoted provider text; exclude those bodies from observability.
+The explicit link-management endpoints retain their permission boundary and behavior.
 
 Example staff response (the fragment below is illustrative):
 
