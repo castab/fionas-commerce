@@ -70,7 +70,8 @@ endpoint.
 Every response is `Cache-Control: no-store`. Serve the page and BFF with the same policy,
 `Referrer-Policy: no-referrer`, and `X-Robots-Tag: noindex, nofollow`; include a robots
 meta tag. Do not prefetch these routes, cache them in a service worker, or load unrelated
-scripts on the payment page; use official Stripe.js for Embedded Checkout. Backend URLs contain only nonsecret public IDs.
+scripts on the payment page. Use official Stripe.js for Embedded Checkout and Checkout
+Elements. Backend URLs contain only nonsecret public IDs.
 
 ## Current summary
 
@@ -181,10 +182,24 @@ For an open embedded Session:
 }
 ```
 
-When OPEN, branch on `uiMode`: HOSTED navigates the same tab to `url`; EMBEDDED initializes
-official Stripe.js Embedded Checkout with `clientSecret`. The Stripe publishable key belongs
-in frontend configuration for the same merchant/environment. The customer bearer still
-authenticates every BFF-to-commerce request. Existing links and fragment/sessionStorage
+For an open Elements Session:
+
+```json
+{
+  "attemptId": "8cf42464-739b-43ca-b684-d0f802245c55",
+  "uiMode": "ELEMENTS",
+  "clientSecret": "<Checkout Session client secret>",
+  "state": "OPEN",
+  "outcome": "PENDING"
+}
+```
+
+When OPEN, dispatch on the response's `uiMode`. HOSTED navigates the same tab to `url`.
+EMBEDDED initializes official Stripe.js Embedded Checkout with `clientSecret`. ELEMENTS
+mounts the custom form described below. Treat unknown modes or invalid credential shapes
+as a checkout error and retain the original key/body for recovery. Configure the frontend
+with the Stripe publishable key for the same merchant and environment. The customer bearer
+still authenticates every BFF-to-commerce request. Existing links and fragment/sessionStorage
 bearer handling remain unchanged; client secrets never replace the payment bearer.
 
 Only OPEN customer responses carry launch credentials, exactly one of `url` or `clientSecret`;
@@ -212,10 +227,44 @@ callbacks cannot mark Invoices paid or Quotes BOOKED: verified reconciliation an
 ledger establish received money. Staff still control SERVED/CLOSED. Required authentication
 redirects return to the trusted payment page with no bearer or client secret in the URL.
 
-Deploy backend support with `FIONAS_STRIPE_CHECKOUT_MODE=hosted` (default), then frontend
-handling for both variants. Only then select `embedded` and verify a new attempt. Rollback
-to `hosted` affects future attempts; existing embedded attempts still need frontend support.
-No database reset or link replacement is required.
+### Implementing the Elements form
+
+1. In the ELEMENTS branch, use Stripe.js for Checkout Sessions with the in-memory
+   Session secret. With the JavaScript SDK, call
+   `stripe.initCheckoutElementsSdk({ clientSecret, elementsOptions: { appearance } })`
+   and load the Checkout actions. In React, import `CheckoutElementsProvider`,
+   `useCheckoutElements`, `PaymentElement`, and `ContactDetailsElement` from
+   `@stripe/react-stripe-js/checkout`. Pass `clientSecret` and `elementsOptions.appearance`
+   in the provider options. Mount the form per attempt and release it when the attempt
+   changes or leaves OPEN. See [Stripe's Checkout Elements integration](https://docs.stripe.com/payments/accept-a-payment?payment-ui=elements&api-integration=checkout).
+2. Own the page layout, custom Pay button, and Elements Appearance API configuration in
+   fionas-web. Match Fiona's Poppins typography, cream `#F6F1E4` and olive `#5F5B40`.
+   Load Poppins through `elementsOptions.fonts` so it can render inside
+   Elements. Apply page typography and controls outside Elements in the site itself.
+   Commerce pins the Elements branding profile to NONE. See the
+   [Appearance API](https://docs.stripe.com/elements/appearance-api).
+3. Collect a valid email for Stripe Session confirmation. Mount Contact Details Element
+   alongside Payment Element, or validate a customer-entered email and pass it with the
+   Checkout SDK's `updateEmail` or `confirm`. The commerce summary carries no customer
+   contact data. Checkout email collection does not update the Fiona customer record.
+4. Enable the custom Pay button when Checkout is ready and `canConfirm` is true.
+   Prevent repeated clicks while confirmation is pending. Use Checkout's
+   `actions.confirm({ redirect: "if_required" })` in JavaScript or the equivalent
+   `checkout.confirm` from `useCheckoutElements` in React. Use the Session's configured
+   return URL. Handle loading and recoverable confirmation errors in the form and keep
+   sensitive request/response data out of telemetry. See
+   [Checkout confirmation options](https://docs.stripe.com/js/custom_checkout/confirm).
+5. On a successful confirmation or return from authentication, show pending settlement and
+   refresh the bearer-authenticated commerce summary with bounded polling. Only commerce
+   reconciliation establishes received money. If mounting fails, recover with the same
+   key and request body. On EXPIRED or FAILED, refresh the summary before presenting a new
+   deliberate payment action.
+
+Deploy the backend with the existing `embedded` or `hosted` setting. Deploy frontend
+handling for all three variants, then select `elements` in test mode and exercise a fresh
+authorization before production activation. Switching back to the previous mode applies
+to future authorizations. Keep all three frontend branches available for existing Sessions.
+See the [rollout and test-mode checklist](stripe-payments-operations.md#verify-elements-in-test-mode).
 
 ## Returns, pending work and errors
 

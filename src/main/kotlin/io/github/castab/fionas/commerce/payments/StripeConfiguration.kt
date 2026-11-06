@@ -68,7 +68,8 @@ class StripeConfiguration(
                 when (environment["FIONAS_STRIPE_CHECKOUT_MODE"] ?: "hosted") {
                     "hosted" -> CheckoutMode.HOSTED
                     "embedded" -> CheckoutMode.EMBEDDED
-                    else -> error("FIONAS_STRIPE_CHECKOUT_MODE must be hosted or embedded")
+                    "elements" -> CheckoutMode.ELEMENTS
+                    else -> error("FIONAS_STRIPE_CHECKOUT_MODE must be hosted, embedded, or elements")
                 },
             )
         }

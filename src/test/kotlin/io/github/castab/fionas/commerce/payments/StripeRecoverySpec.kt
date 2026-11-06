@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.payments
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.fionas.commerce.http.CheckoutModeResponse
 import io.github.castab.fionas.commerce.http.CheckoutResponse
 import io.github.castab.fionas.commerce.http.CustomerPaymentResponse
 import io.github.castab.fionas.commerce.http.PaymentAccessResponse
@@ -29,6 +30,8 @@ import java.util.concurrent.atomic.AtomicInteger
 class StripeRecoverySpec : FunSpec(stripeRecoveryTests(CheckoutMode.HOSTED))
 
 class StripeEmbeddedRecoverySpec : FunSpec(stripeRecoveryTests(CheckoutMode.EMBEDDED))
+
+class StripeElementsRecoverySpec : FunSpec(stripeRecoveryTests(CheckoutMode.ELEMENTS))
 
 private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
     {
@@ -104,8 +107,8 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             response.status shouldBe Status.OK
             return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer()).also {
                 if (it.state == "OPEN") {
-                    (it.url != null) shouldBe (it.uiMode == "HOSTED")
-                    (it.clientSecret != null) shouldBe (it.uiMode == "EMBEDDED")
+                    (it.url != null) shouldBe (it.uiMode == CheckoutModeResponse.HOSTED)
+                    (it.clientSecret != null) shouldBe (it.uiMode != CheckoutModeResponse.HOSTED)
                 } else {
                     it.url shouldBe null
                     it.clientSecret shouldBe null
@@ -155,7 +158,8 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             try {
                 // Provision all inquiries before restarting: the harness's web SERVICE is created lazily per instance.
                 val cases = listOf(false, true).flatMap { lost -> listOf(false, true).map { Triple(lost, it, scenario()) } }
-                val other = if (mode == CheckoutMode.HOSTED) CheckoutMode.EMBEDDED else CheckoutMode.HOSTED
+                val other = if (mode == CheckoutMode.ELEMENTS) CheckoutMode.EMBEDDED else CheckoutMode.ELEMENTS
+                val brand = if (mode == CheckoutMode.ELEMENTS) CheckoutBrandingProfile.NONE else CheckoutBrandingProfile.FIONAS_V1
                 for ((lost, discovery, s) in cases) {
                     restart(config)
                     val snapshot = summary(s)
@@ -164,22 +168,22 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
                     val first = checkout(s, key, snapshot = snapshot)
                     first.status shouldBe if (lost) Status.INTERNAL_SERVER_ERROR else Status.OK
                     val original = attempts(s).single()
-                    fake.authorizations.getValue(UUID.fromString(original.id)).brandingProfile shouldBe CheckoutBrandingProfile.FIONAS_V1
+                    fake.authorizations.getValue(UUID.fromString(original.id)).brandingProfile shouldBe brand
                     restart(testStripeConfiguration(other))
                     if (discovery) clock.instant = clock.instant.plusSeconds(1501)
                     val recovered = redirect(checkout(s, key, snapshot = snapshot))
                     recovered.attemptId shouldBe original.id
-                    recovered.uiMode shouldBe mode.name
+                    recovered.uiMode.name shouldBe mode.name
                     (recovered.url != null) shouldBe (mode == CheckoutMode.HOSTED)
-                    (recovered.clientSecret != null) shouldBe (mode == CheckoutMode.EMBEDDED)
+                    (recovered.clientSecret != null) shouldBe (mode != CheckoutMode.HOSTED)
                     app.database.strings(
                         "SELECT checkout_mode || ' ' || checkout_branding_profile FROM fionas.stripe_payment_attempts WHERE id = '${original.id}'",
-                    ) shouldBe listOf("${mode.name} FIONAS_V1")
+                    ) shouldBe listOf("${mode.name} ${brand.name}")
                     code(checkout(s, snapshot = snapshot)) shouldBe "checkout_in_progress"
                     attempts(s).size shouldBe 1
                     fake.sessions.values.count { it.attemptId.toString() == original.id } shouldBe 1
                     fake.expire(session(recovered).id)
-                    redirect(checkout(s, snapshot = snapshot)).uiMode shouldBe other.name
+                    redirect(checkout(s, snapshot = snapshot)).uiMode.name shouldBe other.name
                 }
             } finally {
                 app.close()
@@ -201,7 +205,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
 
             val recovered = redirect(checkout(s, key, snapshot = snapshot))
             recovered.attemptId shouldBe original.id
-            recovered.uiMode shouldBe mode.name
+            recovered.uiMode.name shouldBe mode.name
             val authorization = fake.authorizations.getValue(UUID.fromString(original.id))
             authorization.brandingProfile shouldBe CheckoutBrandingProfile.NONE
             authorization.providerKey shouldBe "fionas-checkout:${original.id}"

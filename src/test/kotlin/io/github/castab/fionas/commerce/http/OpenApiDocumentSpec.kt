@@ -127,6 +127,9 @@ class OpenApiDocumentSpec :
         test("Checkout launch fields are customer-only and mode is required") {
             schema("CheckoutResponse").strings("required") shouldContainAll listOf("attemptId", "uiMode", "state", "outcome")
             schema("CheckoutResponse").at("properties").jsonObject.keys shouldContainAll listOf("url", "clientSecret")
+            listOf("CheckoutResponse", "CheckoutStatusResponse").forEach {
+                schema(it).strings("properties", "uiMode", "enum") shouldContainExactly listOf("HOSTED", "EMBEDDED", "ELEMENTS")
+            }
             schema("CheckoutStatusResponse").at("properties").jsonObject.keys shouldBe setOf("attemptId", "uiMode", "state", "outcome")
             val staff = document.at("paths", "/staff/requests/{inquiryId}/payment-attempts/{attemptId}/reconcile", "post")
             staff.text("responses", "200", "content", "application/json", "schema", "${'$'}ref") shouldBe

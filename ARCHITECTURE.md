@@ -914,6 +914,11 @@ only the limited payment view and initiation, never staff actions, refunds, with
 Stripe administration. Customer forwarding and authorized staff visibility do not expand
 that authority. Current authoritative financial state governs every payment.
 
+Checkout presentation is part of the durable provider authorization so configuration
+changes preserve request identity on retry. Fiona's frontend owns the styling of custom
+payment forms. All presentations use the same payment authority and settlement path.
+See [the Checkout implementation contract](AGENTS.md#customer-payments-and-stripe).
+
 Provider attempts record independent integration facts: authorized terms, provider
 identities, ambiguous outcomes and their ledger receipt relationship. Their authorized
 amounts and processing/reconciliation outcomes are not a second ledger, stored balance,

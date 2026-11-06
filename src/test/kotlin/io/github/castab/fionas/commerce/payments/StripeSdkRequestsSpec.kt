@@ -172,7 +172,55 @@ class StripeSdkRequestsSpec :
                 .size shouldBe 1
             result.toString() shouldBe "StripeCheckout([redacted])"
         }
-        CheckoutMode.entries.forEach { mode ->
+        test("Elements uses card Checkout with the immutable authorization and only the trusted return URL") {
+            val transport = Transport().apply { uiMode = "elements" }
+            val gateway = gateway(transport)
+            val elements = attempt.copy(checkoutMode = CheckoutMode.ELEMENTS)
+            val open = gateway.create(elements)
+            open.uiMode shouldBe CheckoutMode.ELEMENTS
+            open.clientSecret shouldBe "cs_secret_test"
+            open.url shouldBe null
+            open.toString() shouldBe "StripeCheckout([redacted])"
+            val creation = transport.requests.last()
+            creation.headers().firstValue("Idempotency-Key").orElseThrow() shouldBe attempt.providerKey
+            creation.headers().firstValue("Stripe-Version").orElseThrow() shouldBe "2026-10-28.endive"
+            val hosted = Transport()
+            gateway(hosted).create(attempt)
+            creation.params() shouldBe
+                hosted.requests.last().params() - setOf("success_url", "cancel_url") +
+                mapOf("ui_mode" to "elements", "return_url" to "${config.publicOrigin}/pay/${attempt.publicId}?checkout=returned")
+            creation.params()["allowed_payment_method_types"] shouldBe listOf("card")
+            creation.params()["mode"] shouldBe "payment"
+            creation.params()["expires_at"].toString() shouldBe attempt.expiresAt.epochSecond.toString()
+            creation.params()["client_reference_id"] shouldBe attemptId.toString()
+            creation.params()["metadata"] shouldBe mapOf("fionas_authorization" to config.authorizationProof(attempt))
+            creation.params()["line_items"] shouldBe
+                listOf(
+                    mapOf(
+                        "quantity" to 1L,
+                        "price_data" to
+                            mapOf(
+                                "currency" to "usd",
+                                "unit_amount" to attempt.authorizedMinor,
+                                "product_data" to mapOf("name" to "Fiona's catering deposit"),
+                            ),
+                    ),
+                )
+            gateway(transport, testStripeConfiguration(CheckoutMode.EMBEDDED)).create(elements)
+            transport.requests.last().params() shouldBe creation.params()
+            transport.requests
+                .last()
+                .headers()
+                .firstValue("Idempotency-Key")
+                .orElseThrow() shouldBe attempt.providerKey
+            gateway.discover(elements)?.clientSecret shouldBe "cs_secret_test"
+            gateway.expire(open.id).clientSecret shouldBe null
+            transport.paid = true
+            val paid = gateway.retrieve(open.id)
+            paid.clientSecret shouldBe null
+            paid.paidAt shouldBe at
+        }
+        listOf(CheckoutMode.HOSTED, CheckoutMode.EMBEDDED).forEach { mode ->
             test("$mode Checkout adds only the pinned brand and preserves it on retry") {
                 val transport = Transport().apply { uiMode = if (mode == CheckoutMode.HOSTED) "hosted_page" else "embedded_page" }
                 val legacy = attempt.copy(checkoutMode = mode)
@@ -207,8 +255,7 @@ class StripeSdkRequestsSpec :
                 launch.toString() shouldBe "StripeCheckout([redacted])"
 
                 val restarted = Transport().apply { uiMode = transport.uiMode }
-                val otherMode = if (mode == CheckoutMode.HOSTED) CheckoutMode.EMBEDDED else CheckoutMode.HOSTED
-                val restartedGateway = gateway(restarted, testStripeConfiguration(otherMode))
+                val restartedGateway = gateway(restarted, testStripeConfiguration(CheckoutMode.ELEMENTS))
                 restartedGateway.create(legacy)
                 restartedGateway.create(branded)
                 val replays = restarted.requests.filter { it.method().name == "POST" }
@@ -228,10 +275,21 @@ class StripeSdkRequestsSpec :
             error.cause shouldBe null
         }
         test("missing or unknown provider UI modes are rejected without echoing provider values") {
-            listOf("", "elements", "secret_unknown").forEach { mode ->
+            listOf("", "form", "secret_unknown").forEach { mode ->
                 val error = shouldThrow<IllegalStateException> { gateway(Transport().apply { uiMode = mode }).create(attempt) }
                 error.message shouldBe "Unexpected Stripe Checkout UI mode"
             }
+        }
+        test("creation and discovery reject Elements mode mismatches without echoing launch credentials") {
+            val elements = attempt.copy(checkoutMode = CheckoutMode.ELEMENTS)
+            val hosted = gateway(Transport())
+            val create = shouldThrow<IllegalStateException> { hosted.create(elements) }
+            val discover = shouldThrow<IllegalStateException> { hosted.discover(elements) }
+            listOf(create, discover).forEach {
+                it.message shouldBe "Stripe Checkout UI mode disagrees with authorization"
+            }
+            val elementsGateway = gateway(Transport().apply { uiMode = "elements" })
+            shouldThrow<IllegalStateException> { elementsGateway.create(attempt) }
         }
         test("the secret key must own the configured merchant before any Checkout request") {
             val transport = Transport().apply { merchant = "acct_unexpected" }
