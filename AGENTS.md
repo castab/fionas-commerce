@@ -2390,6 +2390,10 @@ identical in plain text. Full names remain unchanged in customer records and eve
 Generated greetings/section headings say `your quote`, `your updated quote`, or `your invoice`,
 without `vN` labels. Preserve deliberate staff version references in custom text. This is
 presentation only; reviewed ledger/business/deposit revisions remain required and unchanged.
+The branded layout (`FinancialEmailRenderer`) is tables plus inline styles with one narrow-screen
+media query for Gmail/Outlook/mobile; lines show sub-description and exact quantity × rate with
+exact line totals, and the staff signature stays in both alternatives. A template change alters
+review digests, so UNKNOWN commands from before it reconcile only by failing closed; see the handoff.
 
 Review binds customer/recipient, inquiry/document/business/service/deposit references,
 rendered content/signature, payment identities, access public ID/hash and provider configuration.

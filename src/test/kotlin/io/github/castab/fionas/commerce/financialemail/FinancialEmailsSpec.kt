@@ -204,11 +204,24 @@ class FinancialEmailsSpec :
             val input = intent(id, "Hello <script>alert('x')</script> & friends\n\nSecond paragraph 🍦")
             val review = preview(id, input)
             review.subject shouldBe "Your quote from Fiona's Ice Cream"
-            review.text.substringBefore('\n') shouldBe "Hi Jane, here's your quote"
+            review.text.substringBefore('\n') shouldBe "Hi Jane, here's your quote."
             review.html shouldContain "Hi Jane, here&#39;s your quote</h1>"
-            review.text shouldContain "Customer: Jane Doe"
-            review.text shouldContain "Your quote\n"
+            review.text shouldContain "Your event\nDate: "
+            review.text shouldContain "\nGuests: "
+            review.text shouldNotContain "Customer: "
+            review.text shouldContain "Your quote (final price)\n"
             review.html shouldContain ">Your quote</h2>"
+            review.html shouldContain ">Final price</span>"
+            review.html shouldContain ">Accept this quote</a>"
+            review.text shouldContain "Deposit to hold your date: $136.25\nBalance after deposit: $545.00"
+            review.html shouldContain "Your quote for "
+            review.text shouldContain "Sent from Test Administrator @ Fiona's Ice Cream"
+            review.html shouldContain "Sent from Test Administrator @ Fiona&#39;s Ice Cream</p>"
+            (review.text + review.html) shouldNotContain "Subtotal"
+            (review.text + review.html) shouldNotContain "; tax"
+            review.text.split(PREVIEW_PAYMENT_URL).size shouldBe 2
+            review.text shouldContain "\n$PREVIEW_PAYMENT_URL\n"
+            review.html shouldContain "<a href=\"$PREVIEW_PAYMENT_URL\""
             Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(review.text + review.html + review.subject) shouldBe null
             review.financial.version shouldBe input.expectedDocumentVersion
             review.businessRevision shouldBe input.expectedBusinessRevision
@@ -336,13 +349,13 @@ class FinancialEmailsSpec :
                 ->
                 val id = initial(email = "greeting-$index@example.com", name = name)
                 val quote = preview(id, intent(id))
-                quote.text.substringBefore('\n') shouldBe "Hi $first, here's your quote"
+                quote.text.substringBefore('\n') shouldBe "Hi $first, here's your quote."
                 quote.html shouldContain "${escapeEmailHtml("Hi $first, here's your quote")}</h1>"
                 served(id)
                 val invoice = preview(id, intent(id))
-                invoice.text.substringBefore('\n') shouldBe "Thank you, $first — here's your invoice"
+                invoice.text.substringBefore('\n') shouldBe "Thank you, $first — here's your invoice."
                 invoice.html shouldContain "${escapeEmailHtml("Thank you, $first — here's your invoice")}</h1>"
-                invoice.text shouldContain "Customer: ${name.trim()}"
+                invoice.text shouldNotContain "Customer: "
             }
         }
 
@@ -503,7 +516,7 @@ class FinancialEmailsSpec :
                 email.financial.version shouldBe input.expectedDocumentVersion
                 email.businessRevision shouldBe input.expectedBusinessRevision
                 email.text.substringBefore('\n') shouldBe
-                    if (invoice) "Thank you, Jane — here's your invoice" else "Hi Jane, here's your quote"
+                    if (invoice) "Thank you, Jane — here's your invoice." else "Hi Jane, here's your quote."
                 detail(id) shouldBe before
             }
         }
@@ -681,7 +694,7 @@ class FinancialEmailsSpec :
             review.text shouldContain "Your invoice\n"
             review.html shouldContain ">Your invoice</h2>"
             Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(review.text + review.html + review.subject) shouldBe null
-            review.text shouldContain "Recorded payments (net applied): $181.25"
+            review.text shouldContain "Paid so far: $181.25"
             review.text shouldContain "Remaining balance: $500.00"
             review.html shouldContain "Pay remaining balance"
             review.balanceAfterDeposit shouldBe null
@@ -851,7 +864,7 @@ class FinancialEmailsSpec :
                 "financial_email_review_stale"
             val current = intent(id)
             val email = preview(id, current)
-            email.text.substringBefore('\n') shouldBe "Hi Jane, here's your updated quote"
+            email.text.substringBefore('\n') shouldBe "Hi Jane, here's your updated quote."
             email.html shouldContain "Hi Jane, here&#39;s your updated quote</h1>"
             Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(email.text + email.html + email.subject) shouldBe null
             email.financial.version shouldBe current.expectedDocumentVersion
