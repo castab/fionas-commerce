@@ -375,9 +375,13 @@ internal fun paymentRoutes(
     routes += "/staff/requests" / inquiryPath / "payment-attempts" / stripeAttemptPath / "reconcile" meta {
         paymentMetadata(
             "reconcileInquiryPaymentAttempt",
-            "Recover an ambiguous provider result without creating another authorization",
+            "Reconcile the existing provider authorization and release an open Checkout for obsolete terms",
             true,
         )
+        description +=
+            " Retrieves or recovers the original Stripe session in either checkout mode. Requests expiry only for open " +
+            "sessions with obsolete terms or revoked access. A provider-confirmed terminal outcome releases the reservation. " +
+            "Processing or uncertain outcomes require reconciliation. This operation authorizes no replacement."
         returning(Status.OK, statusBody to CheckoutStatusResponse(exampleCheckout.attemptId, "HOSTED", "OPEN", "PENDING"))
     } bindContract Method.POST to { id: String, _: String, attempt: String, _: String ->
         noPaymentCache.then(access.paymentStaff()).then(paymentUsable(operations)).then { _: Request ->

@@ -75,7 +75,7 @@ data class SendFinancialEmailRequest(
     val email: PreviewFinancialEmailRequest,
     @ApiProperty(
         description =
-            "Exact preview token; binds content, recipient, financial/payment/access state and " +
+            "Exact preview token; binds content, recipient, ledger payment and payment-access state, and " +
                 "template. Changed message requires a new preview.",
         pattern = "^[a-f0-9]{64}$",
     ) val reviewToken: String,
@@ -173,9 +173,9 @@ internal fun previewFinancialEmailRoute(
         summary = "Review a current Quote or balance-due Invoice email"
         description =
             "Write-free authoritative review. QUOTE requires QUOTED and the current published " +
-            "proposal/deposit; INVOICE requires SERVED, a current Invoice, positive reconciled " +
-            "balance and permitted collection. " +
-            "USD only. Pending/unresolved payments, revoked access, missing established " +
+            "proposal/deposit; INVOICE requires SERVED, a current Invoice and a positive collectible ledger balance. " +
+            "Active or unresolved Checkout does not block email review. The email links to current terms and payment status. " +
+            "USD only. Revoked access, missing established " +
             "conversation and disabled/unavailable provider refuse review. " +
             "Returns existing conversation subject or a defined opening subject. All payment " +
             "links are inert. Requires staff USER and trusted cookie Origin. " +
@@ -250,7 +250,7 @@ internal fun sendFinancialEmailRoute(
             "together. Revoked access needs deliberate separate reactivation and a new preview. " +
             "New sends recheck review and conversation; recovery uses the identical command and " +
             "original expectation. An unresolved send reserves the inquiry. " +
-            "A changed template, customer, document, financial/payment state or access generation fails recovery closed. " +
+            "Recovery requires an exact match for reviewed terms, ledger payments, content, customer and access generation. " +
             "201 ACCEPTED, 200 accepted replay, 202 UNKNOWN. Acceptance never means delivery. No " +
             "body, HTML, amounts or bearer URL is stored in communication tables or returned. " +
             "Financial sends do not acknowledge inbound mail. No-store."
@@ -389,9 +389,9 @@ private fun FinancialEmailPreview.response() =
     )
 
 private const val EMAIL_CONFLICTS =
-    "`financial_email_review_stale`: refresh preview after any state/message change. " +
-        "financial_email_ineligible: wrong lifecycle or collection blocked (including no " +
-        "balance/pending payment). payment_access_revoked: deliberately reactivate then " +
+    "`financial_email_review_stale`: refresh preview after changes to reviewed facts or content. " +
+        "financial_email_ineligible: wrong lifecycle or terms ineligible for online payment. " +
+        "payment_access_revoked: deliberately reactivate then " +
         "preview. conversation_changed: review latest thread. conversation_missing: " +
         "established thread disappeared; never recreate. financial_email_recipient_mismatch: " +
         "reconcile provider participant."

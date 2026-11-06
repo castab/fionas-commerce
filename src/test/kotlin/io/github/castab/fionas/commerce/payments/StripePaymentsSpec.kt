@@ -66,6 +66,7 @@ internal class FakeStripe(
     var onCreate: (() -> Unit)? = null
     var onRetrieve: ((StripeCheckout) -> Unit)? = null
     var onDiscover: (() -> Unit)? = null
+    var onExpire: (() -> Unit)? = null
     val retrieves = AtomicInteger()
     val discoveries = AtomicInteger()
 
@@ -122,7 +123,10 @@ internal class FakeStripe(
         return sessions.values.singleOrNull { it.attemptId == attempt.id }
     }
 
-    override fun expire(sessionId: String): StripeCheckout = change(sessionId, "expired", "unpaid")
+    override fun expire(sessionId: String): StripeCheckout {
+        onExpire?.invoke()
+        return change(sessionId, "expired", "unpaid")
+    }
 
     fun change(
         sessionId: String,
@@ -649,6 +653,69 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
             webhook(session, "checkout.session.expired").status shouldBe Status.NO_CONTENT
             summary(link).history.size shouldBe 1
             summary(link).lifecycle shouldBe "BOOKED"
+        }
+        test("staff can retry obsolete Checkout release and only confirmed expiry permits replacement") {
+            val id = initial()
+            val link = link(id)
+            val original = redirect(checkout(link))
+            val reconcilePath = "/staff/requests/$id/payment-attempts/${original.attemptId}/reconcile"
+            fake.onExpire = { error("Simulated expiry failure") }
+            try {
+                app.adminPost(reconcilePath).status shouldBe Status.OK
+                attempts(id).items.single().state shouldBe "OPEN"
+                reviseDeposit(id)
+                summary(link).canPay shouldBe false
+                app.adminPost(reconcilePath).status shouldBe Status.INTERNAL_SERVER_ERROR
+                checkout(link).status shouldBe Status.INTERNAL_SERVER_ERROR
+                attempts(id).items.single().state shouldBe "OPEN"
+                summary(link).paymentInProgress shouldBe true
+            } finally {
+                fake.onExpire = null
+            }
+            app.adminPost(reconcilePath).status shouldBe Status.OK
+            attempts(id).items.single().state shouldBe "EXPIRED"
+            app.adminPost(reconcilePath).status shouldBe Status.OK
+            attempts(id).items.size shouldBe 1
+            val revised = summary(link)
+            revised.canPay shouldBe true
+            redirect(checkout(link)).attemptId shouldNotBe original.attemptId
+            attempts(id).items.single { it.state == "OPEN" }.authorizedMinor shouldBe
+                revised.requiredAmount
+                    .toBigDecimal()
+                    .movePointRight(2)
+                    .longValueExact()
+        }
+        test("capture racing obsolete Checkout release is recorded once as unapplied") {
+            val id = initial()
+            val link = link(id)
+            val original = redirect(checkout(link))
+            val sessionId = session(original).id
+            val reconcilePath = "/staff/requests/$id/payment-attempts/${original.attemptId}/reconcile"
+            reviseDeposit(id)
+            fake.onExpire = {
+                fake.change(sessionId)
+                error("Session completed before Stripe could expire it")
+            }
+            try {
+                app.adminPost(reconcilePath).status shouldBe Status.INTERNAL_SERVER_ERROR
+                summary(link).canPay shouldBe false
+            } finally {
+                fake.onExpire = null
+            }
+            app.adminPost(reconcilePath).status shouldBe Status.OK
+            val event = "evt_${UUID.randomUUID()}"
+            webhook(sessionId, "checkout.session.completed", event).status shouldBe Status.NO_CONTENT
+            webhook(sessionId, "checkout.session.completed", event).status shouldBe Status.NO_CONTENT
+            webhook(sessionId, "checkout.session.expired").status shouldBe Status.NO_CONTENT
+            val saved = attempts(id).items.single()
+            saved.state shouldBe "SUCCEEDED"
+            saved.outcome shouldBe "RECONCILIATION_REQUIRED"
+            saved.ledgerPaymentId shouldNotBe null
+            summary(link).lifecycle shouldBe "QUOTED"
+            summary(link).reconciliationPending shouldBe true
+            summary(link).canPay shouldBe false
+            app.adminPost(reconcilePath).status shouldBe Status.OK
+            attempts(id).items.single().ledgerPaymentId shouldBe saved.ledgerPaymentId
         }
         test("expiry is confirmed by provider before a new session can be authorized") {
             val id = initial()
