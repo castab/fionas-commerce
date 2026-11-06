@@ -92,13 +92,16 @@ data class CreateCheckoutRequest(
 )
 
 @Serializable
+enum class CheckoutModeResponse { HOSTED, EMBEDDED, ELEMENTS }
+
+@Serializable
 data class CheckoutResponse(
     val attemptId: String,
     val url: String? = null,
     val state: String,
     val outcome: String,
     @ApiProperty(description = "Immutable Checkout presentation selected when the attempt was authorized.")
-    val uiMode: CheckoutMode,
+    val uiMode: CheckoutModeResponse,
     @ApiProperty(description = "Customer-only Checkout Session credential for OPEN EMBEDDED and ELEMENTS attempts; never log or persist.")
     val clientSecret: String? = null,
 ) {
@@ -108,7 +111,7 @@ data class CheckoutResponse(
 @Serializable
 data class CheckoutStatusResponse(
     val attemptId: String,
-    val uiMode: CheckoutMode,
+    val uiMode: CheckoutModeResponse,
     val state: String,
     val outcome: String,
 )
@@ -154,7 +157,7 @@ private val exampleCheckout =
         "https://checkout.stripe.com/c/pay/example",
         "OPEN",
         "PENDING",
-        CheckoutMode.HOSTED,
+        CheckoutModeResponse.HOSTED,
     )
 private val exampleSummary =
     CustomerPaymentResponse(
@@ -389,13 +392,13 @@ internal fun paymentRoutes(
             " Retrieves or recovers the original Stripe session in its stored checkout mode. Requests expiry only for open " +
             "sessions with obsolete terms or revoked access. A provider-confirmed terminal outcome releases the reservation. " +
             "Processing or uncertain outcomes require reconciliation. This operation authorizes no replacement."
-        returning(Status.OK, statusBody to CheckoutStatusResponse(exampleCheckout.attemptId, CheckoutMode.HOSTED, "OPEN", "PENDING"))
+        returning(Status.OK, statusBody to CheckoutStatusResponse(exampleCheckout.attemptId, exampleCheckout.uiMode, "OPEN", "PENDING"))
     } bindContract Method.POST to { id: String, _: String, attempt: String, _: String ->
         noPaymentCache.then(access.paymentStaff()).then(paymentUsable(operations)).then { _: Request ->
             val result = checkNotNull(operations).recover(inquiryId(id), paymentUuid(attempt))
             Response(Status.OK).with(
                 statusBody of
-                    CheckoutStatusResponse(result.attemptId.toString(), result.uiMode, result.state.name, result.outcome.name),
+                    CheckoutStatusResponse(result.attemptId.toString(), result.uiMode.response(), result.state.name, result.outcome.name),
             )
         }
     }
@@ -454,7 +457,15 @@ private fun paymentBearer(request: Request) = PaymentBearer(oneHeader(request, "
 
 private fun StaffPaymentAccess.response() = PaymentAccessResponse(publicId?.toString(), revoked, url)
 
-private fun CheckoutRedirect.response() = CheckoutResponse(attemptId.toString(), url, state.name, outcome.name, uiMode, clientSecret)
+private fun CheckoutMode.response() =
+    when (this) {
+        CheckoutMode.HOSTED -> CheckoutModeResponse.HOSTED
+        CheckoutMode.EMBEDDED -> CheckoutModeResponse.EMBEDDED
+        CheckoutMode.ELEMENTS -> CheckoutModeResponse.ELEMENTS
+    }
+
+private fun CheckoutRedirect.response() =
+    CheckoutResponse(attemptId.toString(), url, state.name, outcome.name, uiMode.response(), clientSecret)
 
 private fun CustomerPaymentSummary.response() =
     CustomerPaymentResponse(

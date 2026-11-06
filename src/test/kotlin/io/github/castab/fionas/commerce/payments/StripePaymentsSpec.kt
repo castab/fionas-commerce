@@ -3,6 +3,7 @@ package io.github.castab.fionas.commerce.payments
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.staff.CommerceRoles
+import io.github.castab.fionas.commerce.http.CheckoutModeResponse
 import io.github.castab.fionas.commerce.http.CheckoutResponse
 import io.github.castab.fionas.commerce.http.CustomerPaymentResponse
 import io.github.castab.fionas.commerce.http.PaymentAccessResponse
@@ -255,8 +256,8 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
             response.status shouldBe Status.OK
             return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer()).also {
                 if (it.state == "OPEN") {
-                    (it.url != null) shouldBe (it.uiMode == CheckoutMode.HOSTED)
-                    (it.clientSecret != null) shouldBe (it.uiMode != CheckoutMode.HOSTED)
+                    (it.url != null) shouldBe (it.uiMode == CheckoutModeResponse.HOSTED)
+                    (it.clientSecret != null) shouldBe (it.uiMode != CheckoutModeResponse.HOSTED)
                 } else {
                     it.url shouldBe null
                     it.clientSecret shouldBe null
@@ -306,7 +307,7 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
             val response = checkout(link, key, snapshot = snapshot)
             response.header("Cache-Control") shouldBe "no-store"
             val opened = redirect(response)
-            opened.uiMode shouldBe mode
+            opened.uiMode.name shouldBe mode.name
             (opened.url != null) shouldBe (mode == CheckoutMode.HOSTED)
             (opened.clientSecret != null) shouldBe (mode != CheckoutMode.HOSTED)
             val credential = checkNotNull(opened.clientSecret ?: opened.url)
