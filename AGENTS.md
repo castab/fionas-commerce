@@ -1962,20 +1962,24 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   409 codes are `checkout_in_progress`, `payment_processing`, `payment_state_changed`,
   `checkout_recovery_conflict`, `checkout_reconciliation_required`.
 - **Checkout presentation.** V11 adds immutable constrained `checkout_mode` (HOSTED/EMBEDDED),
-  preserving V10 attempts as HOSTED. `FIONAS_STRIPE_CHECKOUT_MODE` accepts `hosted` (default)
-  or `embedded` for new attempts only. Replay/discovery uses stored mode. Hosted keeps
+  preserving V10 attempts as HOSTED. V14 extends the constraint to ELEMENTS.
+  `FIONAS_STRIPE_CHECKOUT_MODE` accepts `hosted` (default), `embedded`, or `elements` for new
+  attempts only. Replay/discovery uses stored mode. Hosted keeps
   its implicit UI mode and success/cancel URLs. Embedded sends
   `ui_mode=embedded_page`, `redirect_on_completion=if_required`, and the trusted public-ID-only
-  return URL without success/cancel URLs. Provider mode must match before synchronization
+  return URL without success/cancel URLs. Elements sends `ui_mode=elements` and the same
+  return URL and omits `redirect_on_completion`, success/cancel URLs and `branding_settings`.
+  Provider mode must match before synchronization
   or reconciliation. The HMAC proof remains byte-compatible. OPEN customer responses carry
-  `uiMode` and either hosted `url` or embedded `clientSecret`; other states carry neither.
+  `uiMode` and either Hosted `url` or Embedded/Elements `clientSecret`; other states omit both.
   Missing credentials fail with a recovery conflict and reserve the attempt. Wrappers redact
   stringification; no launch credential enters persistence, logs, summaries, events or staff
   diagnostics. Staff reconciliation uses a separate status-only DTO, without requiring or
-  returning launch credentials. Both modes share financial/recovery paths. Frontend support
-  for both variants must precede enabling embedded.
+  returning launch credentials. All modes share financial/recovery paths. Deploy frontend
+  support for all three variants before enabling Elements.
   V13 adds immutable `checkout_branding_profile`. Historical `NONE` attempts omit
-  `branding_settings`. New authorizations in both modes pin `FIONAS_V1` before Stripe I/O.
+  `branding_settings`. New Hosted/Embedded attempts pin `FIONAS_V1` before Stripe I/O;
+  new Elements attempts pin `NONE` and fionas-web owns their styling.
   Creation and replay use the stored profile, outside the HMAC proof. Add a new profile
   for any request change and retain the old mapping. See [rollout and branding](docs/stripe-payments-operations.md#checkout-branding).
 - **Provider boundary.** Official stripe-java 34.1.0 / snapshot 2026-10-28.endive, USD,

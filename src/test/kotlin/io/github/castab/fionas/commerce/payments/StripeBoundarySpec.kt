@@ -98,10 +98,11 @@ class StripeBoundarySpec :
                     "FIONAS_STRIPE_ACCOUNT_ID" to configuration.accountId,
                 )
             StripeConfiguration.fromEnvironment(env)!!.checkoutMode shouldBe CheckoutMode.HOSTED
-            mapOf("hosted" to CheckoutMode.HOSTED, "embedded" to CheckoutMode.EMBEDDED).forEach { (value, mode) ->
+            CheckoutMode.entries.forEach { mode ->
+                val value = mode.name.lowercase()
                 StripeConfiguration.fromEnvironment(env + ("FIONAS_STRIPE_CHECKOUT_MODE" to value))!!.checkoutMode shouldBe mode
             }
-            listOf("", "EMBEDDED", " embedded", "elements").forEach {
+            listOf("", "EMBEDDED", " embedded", "custom").forEach {
                 shouldThrow<IllegalStateException> { StripeConfiguration.fromEnvironment(env + ("FIONAS_STRIPE_CHECKOUT_MODE" to it)) }
             }
             StripeConfiguration.fromEnvironment(env)!!.publicOrigin shouldBe "https://payments.test"

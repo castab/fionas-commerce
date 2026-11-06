@@ -100,7 +100,7 @@ internal class FakeStripe(
                     null,
                     configuration.authorizationProof(attempt),
                     attempt.checkoutMode,
-                    "${it}_secret_test".takeIf { attempt.checkoutMode == CheckoutMode.EMBEDDED },
+                    "${it}_secret_test".takeIf { attempt.checkoutMode != CheckoutMode.HOSTED },
                 )
             }
         if (timeoutNext) {
@@ -166,6 +166,8 @@ internal class FakeStripe(
 class StripePaymentsSpec : FunSpec(stripePaymentsTests(CheckoutMode.HOSTED))
 
 class StripeEmbeddedPaymentsSpec : FunSpec(stripePaymentsTests(CheckoutMode.EMBEDDED))
+
+class StripeElementsPaymentsSpec : FunSpec(stripePaymentsTests(CheckoutMode.ELEMENTS))
 
 private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
     {
@@ -253,8 +255,8 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
             response.status shouldBe Status.OK
             return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer()).also {
                 if (it.state == "OPEN") {
-                    (it.url != null) shouldBe (it.uiMode == "HOSTED")
-                    (it.clientSecret != null) shouldBe (it.uiMode == "EMBEDDED")
+                    (it.url != null) shouldBe (it.uiMode == CheckoutMode.HOSTED)
+                    (it.clientSecret != null) shouldBe (it.uiMode != CheckoutMode.HOSTED)
                 } else {
                     it.url shouldBe null
                     it.clientSecret shouldBe null
@@ -304,9 +306,9 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
             val response = checkout(link, key, snapshot = snapshot)
             response.header("Cache-Control") shouldBe "no-store"
             val opened = redirect(response)
-            opened.uiMode shouldBe mode.name
+            opened.uiMode shouldBe mode
             (opened.url != null) shouldBe (mode == CheckoutMode.HOSTED)
-            (opened.clientSecret != null) shouldBe (mode == CheckoutMode.EMBEDDED)
+            (opened.clientSecret != null) shouldBe (mode != CheckoutMode.HOSTED)
             val credential = checkNotNull(opened.clientSecret ?: opened.url)
             opened.toString() shouldNotContain credential
             session(opened).toString() shouldNotContain credential
@@ -325,6 +327,19 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
                     "SELECT row_to_json(a)::text FROM fionas.stripe_payment_attempts a WHERE id = '${opened.attemptId}'",
                 ).single() shouldNotContain
                 credential
+            val unauthorized =
+                app.http(
+                    Request(Method.POST, "/public/payments/${link.publicId}/checkout-sessions")
+                        .header("X-Fionas-Payment-Token", secret(link(initial())))
+                        .header("Idempotency-Key", key)
+                        .header("Content-Type", "application/json")
+                        .body(
+                            """{"expectedDocumentVersion":${snapshot.document.version},"expectedBusinessRevision":${snapshot.document.businessRevision}}""",
+                        ),
+                )
+            unauthorized.status shouldBe Status.NOT_FOUND
+            unauthorized.bodyString() shouldNotContain credential
+            unauthorized.bodyString() shouldNotContain "clientSecret"
             fake.change(session(opened).id)
             val completed = redirect(checkout(link, key, snapshot = snapshot))
             completed.state shouldBe "SUCCEEDED"
@@ -455,6 +470,42 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
                     }
                 } finally {
                     connection.rollback()
+                }
+            }
+        }
+        if (mode != CheckoutMode.ELEMENTS) {
+            test("V14 preserves the complete historical attempt while extending the mode constraint") {
+                val opened = redirect(checkout(link(initial())))
+                val migration = checkNotNull(javaClass.getResource("/db/fionas/V14__stripe_checkout_elements.sql")).readText()
+                app.database.connect { connection ->
+                    connection.autoCommit = false
+                    try {
+                        connection.createStatement().use { statement ->
+                            statement.execute(
+                                """
+                                ALTER TABLE fionas.stripe_payment_attempts
+                                    DROP CONSTRAINT stripe_payment_attempts_checkout_mode_check,
+                                    ADD CONSTRAINT stripe_payment_attempts_checkout_mode_check
+                                        CHECK (checkout_mode IN ('HOSTED', 'EMBEDDED'))
+                                """.trimIndent(),
+                            )
+
+                            fun row() =
+                                statement
+                                    .executeQuery(
+                                        "SELECT row_to_json(a)::text FROM fionas.stripe_payment_attempts a WHERE id = '${opened.attemptId}'",
+                                    ).use {
+                                        check(it.next())
+                                        it.getString(1)
+                                    }
+
+                            val before = row()
+                            statement.execute(migration)
+                            row() shouldBe before
+                        }
+                    } finally {
+                        connection.rollback()
+                    }
                 }
             }
         }

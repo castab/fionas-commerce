@@ -1,10 +1,12 @@
 package io.github.castab.fionas.commerce.payments
 
 import io.github.castab.fionas.commerce.inquiry.InquiryId
+import kotlinx.serialization.Serializable
 import java.time.Instant
 import java.util.UUID
 
-enum class CheckoutMode { HOSTED, EMBEDDED }
+@Serializable
+enum class CheckoutMode { HOSTED, EMBEDDED, ELEMENTS }
 
 enum class CheckoutBrandingProfile { NONE, FIONAS_V1 }
 

@@ -107,9 +107,8 @@ class StripeJavaGateway internal constructor(
                     .putMetadata("fionas_authorization", configuration.authorizationProof(attempt))
                     .setExpiresAt(attempt.expiresAt.epochSecond)
                     .apply {
-                        when (attempt.brandingProfile) {
-                            CheckoutBrandingProfile.NONE -> Unit
-                            CheckoutBrandingProfile.FIONAS_V1 -> setBrandingSettings(fionasBrandingV1)
+                        if (attempt.checkoutMode != CheckoutMode.ELEMENTS && attempt.brandingProfile == CheckoutBrandingProfile.FIONAS_V1) {
+                            setBrandingSettings(fionasBrandingV1)
                         }
                         when (attempt.checkoutMode) {
                             // Leave ui_mode implicit: historical hosted idempotency keys must replay identical parameters.
@@ -122,6 +121,10 @@ class StripeJavaGateway internal constructor(
                                 setRedirectOnCompletion(SessionCreateParams.RedirectOnCompletion.IF_REQUIRED)
                                 setReturnUrl("$returnUrl?checkout=returned")
                             }
+                            CheckoutMode.ELEMENTS -> {
+                                setUiMode(SessionCreateParams.UiMode.ELEMENTS)
+                                setReturnUrl("$returnUrl?checkout=returned")
+                            }
                         }
                     }.build()
             describe(
@@ -130,6 +133,7 @@ class StripeJavaGateway internal constructor(
                     .checkout()
                     .sessions()
                     .create(params, options(attempt.providerKey)),
+                attempt.checkoutMode,
             )
         }
 
@@ -186,7 +190,7 @@ class StripeJavaGateway internal constructor(
                     .filter {
                         it.clientReferenceId == attempt.id.toString() &&
                             it.metadata["fionas_authorization"] == configuration.authorizationProof(attempt)
-                    }.forEach { found += describe(it) }
+                    }.forEach { found += describe(it, attempt.checkoutMode) }
                 if (!page.hasMore) {
                     check(found.size <= 1) { "Multiple Stripe sessions for one durable authorization" }
                     return@call found.singleOrNull()
@@ -252,9 +256,21 @@ class StripeJavaGateway internal constructor(
         }
     }
 
-    private fun describe(session: Session): StripeCheckout {
+    private fun describe(
+        session: Session,
+        expectedMode: CheckoutMode? = null,
+    ): StripeCheckout {
         check(session.livemode == configuration.liveMode) { "Stripe Checkout environment disagrees with deployment" }
         check(session.mode == "payment" && session.paymentMethodTypes == listOf("card")) { "Unexpected Stripe checkout configuration" }
+        val uiMode =
+            when (session.uiMode) {
+                "hosted_page" -> CheckoutMode.HOSTED
+                "embedded_page" -> CheckoutMode.EMBEDDED
+                "elements" -> CheckoutMode.ELEMENTS
+                else -> error("Unexpected Stripe Checkout UI mode")
+            }
+        check(expectedMode == null || uiMode == expectedMode) { "Stripe Checkout UI mode disagrees with authorization" }
+        val open = session.status == "open"
         val intent =
             if (session.paymentStatus == "paid") {
                 val id = checkNotNull(session.paymentIntent) { "Paid Stripe session has no PaymentIntent" }
@@ -296,15 +312,11 @@ class StripeJavaGateway internal constructor(
             session.paymentStatus,
             session.paymentIntent,
             Instant.ofEpochSecond(session.expiresAt),
-            session.url,
+            session.url?.takeIf { open && uiMode == CheckoutMode.HOSTED },
             charge?.let { Instant.ofEpochSecond(it.created) },
             session.metadata["fionas_authorization"] ?: "",
-            when (session.uiMode) {
-                "hosted_page" -> CheckoutMode.HOSTED
-                "embedded_page" -> CheckoutMode.EMBEDDED
-                else -> error("Unexpected Stripe Checkout UI mode")
-            },
-            session.clientSecret,
+            uiMode,
+            session.clientSecret?.takeIf { open && uiMode != CheckoutMode.HOSTED },
         )
     }
 

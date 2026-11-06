@@ -18,23 +18,35 @@ FIONAS_PUBLIC_BASE_URL=https://<fionas-web-public-origin>
 FIONAS_PAYMENT_ACCESS_KEY=<base64 of 32 cryptographically random bytes>
 ```
 
-`FIONAS_STRIPE_CHECKOUT_MODE` accepts exactly `hosted` (default) or `embedded`;
+`FIONAS_STRIPE_CHECKOUT_MODE` accepts exactly `hosted` (default), `embedded`, or `elements`;
 invalid enabled configuration fails at startup. V11 adds constrained, non-null
-`checkout_mode` to attempts and preserves all V10 rows as HOSTED. The mode is inserted
-once and never updated. Client secrets are never persisted.
+`checkout_mode` and preserves all V10 rows as HOSTED. V14 extends the constraint to
+allow ELEMENTS and preserves existing rows. Each authorization pins its mode.
 
-Deploy this backend in hosted mode, deploy frontend handling for both response variants,
-then enable embedded and verify a newly authorized attempt. Rollback to hosted affects
-future attempts only. Retain frontend embedded support for existing attempts. No database
-reset, attempt rewrite or link replacement is needed.
+1. Deploy the V14-capable backend with the existing `embedded` or `hosted` setting.
+2. Deploy fionas-web with support for all three response variants and the matching
+   Stripe publishable key. See the [frontend handoff](stripe-payments-frontend-handoff.md).
+3. Run the Elements acceptance exercise below in Stripe test mode with a fresh authorization.
+4. Enable `FIONAS_STRIPE_CHECKOUT_MODE=elements` on all commerce replicas only after
+   the updated frontend is serving traffic and the test-mode exercise passes.
+
+To roll back presentation, set commerce back to `embedded` (or `hosted` if previously used).
+The setting applies to new authorizations. Keep a V14-capable backend once any ELEMENTS
+rows exist, and retain all three frontend branches while existing Sessions can be resumed.
+Existing Sessions and same-key retries retain their original mode.
 
 Retries and discovery use the durable mode across restarts and configuration changes.
 Hosted keeps its implicit UI mode and success/cancel URLs. Embedded sends
 `ui_mode=embedded_page`, `redirect_on_completion=if_required`, and the trusted
-`/pay/{publicId}?checkout=returned` return URL without success/cancel URLs. See the
+`/pay/{publicId}?checkout=returned` return URL. Elements sends `ui_mode=elements` and
+the same trusted return URL. Elements requests omit `success_url`, `cancel_url`,
+`redirect_on_completion`, and `branding_settings`. All modes use the same payment-mode
+Checkout Session, card eligibility filter, USD cents, authorization metadata, expiration,
+and provider idempotency key. See the
 [Stripe API reference](https://docs.stripe.com/api/checkout/sessions/create) and
 [pinned SDK parameters](https://github.com/stripe/stripe-java/blob/v34.1.0/src/main/java/com/stripe/param/checkout/SessionCreateParams.java).
-No SDK/API upgrade is required.
+The pinned SDK supports Elements requests and the Session's `ui_mode` and `client_secret`
+response fields. The SDK and signed webhook snapshot versions stay pinned.
 
 Provider mode must match the durable authorization before reconciliation. Missing open
 launch credentials fail with a recovery conflict and leave the authorization reserved.
@@ -44,7 +56,7 @@ checked against durable authorization. Unknown results never permit replacement.
 
 Exclude customer Checkout response bodies from logging, tracing, monitoring and persistence.
 Client secrets never enter attempts, webhook records or events. Staff reconciliation returns
-status only. The [frontend handoff](stripe-payments-frontend-handoff.md) documents both
+status only. The [frontend handoff](stripe-payments-frontend-handoff.md) documents all three
 variants, publishable-key setup and authoritative completion refresh. Browser mounting is
 verified in the subsequent fionas-web work; CI needs no live Stripe calls.
 
@@ -129,8 +141,9 @@ uses Checkout's own controls. The Stripe Elements Appearance API applies to Elem
 See [Checkout appearance](https://docs.stripe.com/payments/checkout/customization/appearance).
 
 V13 records `checkout_branding_profile` on the attempt. Rows from before V13 retain
-`NONE`, which omits `branding_settings` when retrying the original Stripe key. Both modes
-use `FIONAS_V1` for new authorizations. Retries replay the stored profile after a restart
+`NONE`, which omits `branding_settings` when retrying the original Stripe key. New Hosted and
+Embedded attempts pin `FIONAS_V1`. Elements attempts pin `NONE` and fionas-web owns their
+styling through the Appearance API. Retries use the stored mode and profile after a restart
 or mode change. A profile change applies only to newly authorized attempts. Existing
 Sessions keep their original request and follow the usual recovery and expiration paths.
 For future changes, add a profile and keep the older request mapping intact.
@@ -154,6 +167,27 @@ window has elapsed. Keep V13's attempt data for recovery.
 4. Complete the payment with a [Stripe test card](https://docs.stripe.com/testing) and
    confirm the normal portal refresh and a single receipt. Keep Checkout URLs and client
    secrets out of logs and test evidence.
+
+### Verify Elements in test mode
+
+1. Use a test merchant and matching frontend publishable key. Set
+   `FIONAS_STRIPE_LIVE_MODE=false` and `FIONAS_STRIPE_CHECKOUT_MODE=elements` in the test deployment.
+   Confirm the Stripe snapshot destination uses `2026-10-28.endive`.
+2. Open a fresh Quote's payment link. Start Checkout and verify an OPEN ELEMENTS response
+   with the Session client secret. Check the Payment Element and email collection on mobile
+   and desktop, including Poppins, cream, olive, and readable validation errors. Keep
+   Checkout credentials out of logs, screenshots, and test evidence.
+3. Confirm the full deposit with a Stripe test card, including a run with required card
+   authentication. Check that the portal refreshes commerce after confirmation or return.
+   Verify one ledger receipt and a BOOKED inquiry with the issued Invoice. Redeliver the
+   signed completion and verify that the receipt count stays the same.
+4. Use the same link to pay a supported partial Invoice amount and then the remaining
+   balance. Verify the authorized cents and one receipt per payment. Confirm staff still
+   control SERVED and CLOSED.
+5. Leave an Elements Session open, switch the test backend to the previous mode, and retry
+   with the same key and body. Verify the same attempt still mounts in Elements. Authorize
+   a fresh payment on a different inquiry and verify it uses the configured mode. Also
+   exercise obsolete-session expiration through staff reconciliation.
 
 ## Local Stripe CLI exercise
 
@@ -251,7 +285,7 @@ handoff for stable 409 recovery codes; the frontend must not hide recovery solel
 `canPay` is false.
 
 After publishing a revised Quote or Invoice, staff can email the current document while
-the previous Checkout remains reserved. To release an obsolete hosted or embedded session,
+the previous Checkout remains reserved. To release an obsolete Checkout Session,
 use `POST /staff/requests/{id}/payment-attempts/{attemptId}/reconcile`. This also works
 after revocation, a restart, an ambiguous response or a missed webhook. It retrieves or
 recovers the original provider session, checks its reviewed terms against current facts,

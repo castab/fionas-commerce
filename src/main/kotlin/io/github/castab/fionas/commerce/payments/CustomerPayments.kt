@@ -240,7 +240,11 @@ class CustomerPayments(
                     at,
                     at.plusSeconds(3600),
                     checkoutMode = configuration.checkoutMode,
-                    brandingProfile = CheckoutBrandingProfile.FIONAS_V1,
+                    brandingProfile =
+                        when (configuration.checkoutMode) {
+                            CheckoutMode.HOSTED, CheckoutMode.EMBEDDED -> CheckoutBrandingProfile.FIONAS_V1
+                            CheckoutMode.ELEMENTS -> CheckoutBrandingProfile.NONE
+                        },
                 ).also { attempts.insert(transaction, it) }
             CheckoutSelection(attempt, false)
         }
@@ -310,7 +314,7 @@ class CustomerPayments(
         val saved = reconcile(session)
         val launch = customerLaunch && saved.state == StripeAttemptState.OPEN
         val url = session.url?.takeIf { launch && saved.checkoutMode == CheckoutMode.HOSTED }
-        val secret = session.clientSecret?.takeIf { launch && saved.checkoutMode == CheckoutMode.EMBEDDED }
+        val secret = session.clientSecret?.takeIf { launch && saved.checkoutMode != CheckoutMode.HOSTED }
         if (launch && (if (saved.checkoutMode == CheckoutMode.HOSTED) url else secret).isNullOrBlank()) {
             // Keep the reconciled Session identity reserved; missing browser credentials never permit replacement.
             throw CheckoutRecoveryProblem.UNKNOWN.conflict()
