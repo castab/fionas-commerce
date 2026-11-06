@@ -6,6 +6,8 @@ import java.util.UUID
 
 enum class CheckoutMode { HOSTED, EMBEDDED }
 
+enum class CheckoutBrandingProfile { NONE, FIONAS_V1 }
+
 enum class PaymentPurpose { DEPOSIT, INVOICE }
 
 enum class StripeAttemptState { CREATING, OPEN, PROCESSING, EXPIRED, FAILED, SUCCEEDED }
@@ -38,6 +40,7 @@ data class StripeAttempt(
     val ledgerPaymentId: UUID? = null,
     val diagnostic: String? = null,
     val checkoutMode: CheckoutMode = CheckoutMode.HOSTED,
+    val brandingProfile: CheckoutBrandingProfile = CheckoutBrandingProfile.NONE,
 )
 
 /** The URL and client secret are short-lived bearer credentials; never log this object. */

@@ -147,7 +147,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             app = TestApplication.create(clock = clock, stripe = configuration, stripeGateway = fake, database = database)
         }
 
-        test("restart and rollout preserve both ambiguous and attached attempt modes") {
+        test("restart and rollout preserve modes and branding on ambiguous and attached attempts") {
             val originalApp = app
             app = TestApplication.create(clock = clock, stripe = config, stripeGateway = fake)
             val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
@@ -164,6 +164,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
                     val first = checkout(s, key, snapshot = snapshot)
                     first.status shouldBe if (lost) Status.INTERNAL_SERVER_ERROR else Status.OK
                     val original = attempts(s).single()
+                    fake.authorizations.getValue(UUID.fromString(original.id)).brandingProfile shouldBe CheckoutBrandingProfile.FIONAS_V1
                     restart(testStripeConfiguration(other))
                     if (discovery) clock.instant = clock.instant.plusSeconds(1501)
                     val recovered = redirect(checkout(s, key, snapshot = snapshot))
@@ -171,8 +172,9 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
                     recovered.uiMode shouldBe mode.name
                     (recovered.url != null) shouldBe (mode == CheckoutMode.HOSTED)
                     (recovered.clientSecret != null) shouldBe (mode == CheckoutMode.EMBEDDED)
-                    app.database.strings("SELECT checkout_mode FROM fionas.stripe_payment_attempts WHERE id = '${original.id}'") shouldBe
-                        listOf(mode.name)
+                    app.database.strings(
+                        "SELECT checkout_mode || ' ' || checkout_branding_profile FROM fionas.stripe_payment_attempts WHERE id = '${original.id}'",
+                    ) shouldBe listOf("${mode.name} FIONAS_V1")
                     code(checkout(s, snapshot = snapshot)) shouldBe "checkout_in_progress"
                     attempts(s).size shouldBe 1
                     fake.sessions.values.count { it.attemptId.toString() == original.id } shouldBe 1
@@ -183,6 +185,27 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
                 app.close()
                 app = originalApp
             }
+        }
+        test("a historical unbranded attempt keeps its provider key and profile on creation replay") {
+            val s = scenario()
+            val key = UUID.randomUUID().toString()
+            val snapshot = summary(s)
+            // Leave an authorized attempt without a provider response, as on an interrupted pre-V13 creation.
+            fake.onCreate = { error("Simulated interruption before Stripe creation") }
+            checkout(s, key, snapshot = snapshot).status shouldBe Status.INTERNAL_SERVER_ERROR
+            fake.onCreate = null
+            val original = attempts(s).single()
+            app.database.execute(
+                "UPDATE fionas.stripe_payment_attempts SET checkout_branding_profile = 'NONE' WHERE id = '${original.id}'",
+            )
+
+            val recovered = redirect(checkout(s, key, snapshot = snapshot))
+            recovered.attemptId shouldBe original.id
+            recovered.uiMode shouldBe mode.name
+            val authorization = fake.authorizations.getValue(UUID.fromString(original.id))
+            authorization.brandingProfile shouldBe CheckoutBrandingProfile.NONE
+            authorization.providerKey shouldBe "fionas-checkout:${original.id}"
+            attempts(s).size shouldBe 1
         }
         test("a new browser key recovers confirmed expiration without a webhook and old keys remain pinned") {
             val s = scenario()

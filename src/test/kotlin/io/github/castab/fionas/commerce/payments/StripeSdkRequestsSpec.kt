@@ -52,6 +52,7 @@ class StripeSdkRequestsSpec :
             var expired = false
             var currency = "usd"
             var uiMode = "hosted_page"
+            var creationError: String? = null
 
             fun session() =
                 """
@@ -71,6 +72,12 @@ class StripeSdkRequestsSpec :
 
             override fun request(request: StripeRequest): StripeResponse {
                 requests += request
+                val headers = HttpHeaders.of(mapOf("Request-Id" to listOf("req_test")))
+                if (request.url().path == "/v1/checkout/sessions" && request.method().name == "POST") {
+                    creationError?.let {
+                        return StripeResponse(400, headers, """{"error":{"type":"invalid_request_error","message":"$it"}}""")
+                    }
+                }
                 val json =
                     when (request.url().path) {
                         "/v1/account" -> """{"id":"$merchant","object":"account"}"""
@@ -97,19 +104,21 @@ class StripeSdkRequestsSpec :
                             """.trimIndent()
                         else -> error("Unexpected SDK operation")
                     }
-                return StripeResponse(200, HttpHeaders.of(mapOf("Request-Id" to listOf("req_test"))), json)
+                return StripeResponse(200, headers, json)
             }
         }
 
-        fun gateway(transport: Transport) =
-            StripeJavaGateway(
-                config,
-                StripeClient
-                    .builder()
-                    .setApiKey(config.secretKey)
-                    .setHttpClient(transport)
-                    .build(),
-            )
+        fun gateway(
+            transport: Transport,
+            configuration: StripeConfiguration = config,
+        ) = StripeJavaGateway(
+            configuration,
+            StripeClient
+                .builder()
+                .setApiKey(configuration.secretKey)
+                .setHttpClient(transport)
+                .build(),
+        )
 
         test("every merchant operation uses the configured key and pinned version without Connect context") {
             val transport = Transport()
@@ -162,6 +171,61 @@ class StripeSdkRequestsSpec :
                 .distinct()
                 .size shouldBe 1
             result.toString() shouldBe "StripeCheckout([redacted])"
+        }
+        CheckoutMode.entries.forEach { mode ->
+            test("$mode Checkout adds only the pinned brand and preserves it on retry") {
+                val transport = Transport().apply { uiMode = if (mode == CheckoutMode.HOSTED) "hosted_page" else "embedded_page" }
+                val legacy = attempt.copy(checkoutMode = mode)
+                val brandedId = UUID.randomUUID()
+                val branded =
+                    legacy.copy(
+                        id = brandedId,
+                        providerKey = "fionas-checkout:$brandedId",
+                        brandingProfile = CheckoutBrandingProfile.FIONAS_V1,
+                    )
+
+                gateway(transport).create(legacy)
+                val originalLegacy = transport.requests.last().params()
+                originalLegacy.containsKey("branding_settings") shouldBe false
+
+                val launch = gateway(transport).create(branded)
+                val originalBrand = transport.requests.last().params()
+                originalBrand["branding_settings"] shouldBe
+                    mapOf(
+                        "background_color" to "#F6F1E4",
+                        "button_color" to "#5F5B40",
+                        "border_style" to "rounded",
+                        "font_family" to "montserrat",
+                        "display_name" to "Fiona's Ice Cream",
+                    )
+                val brandedIdentity =
+                    mapOf(
+                        "client_reference_id" to brandedId.toString(),
+                        "metadata" to mapOf("fionas_authorization" to config.authorizationProof(branded)),
+                    )
+                originalBrand - "branding_settings" shouldBe originalLegacy + brandedIdentity
+                launch.toString() shouldBe "StripeCheckout([redacted])"
+
+                val restarted = Transport().apply { uiMode = transport.uiMode }
+                val otherMode = if (mode == CheckoutMode.HOSTED) CheckoutMode.EMBEDDED else CheckoutMode.HOSTED
+                val restartedGateway = gateway(restarted, testStripeConfiguration(otherMode))
+                restartedGateway.create(legacy)
+                restartedGateway.create(branded)
+                val replays = restarted.requests.filter { it.method().name == "POST" }
+                replays.map { it.params() } shouldBe listOf(originalLegacy, originalBrand)
+                replays.map { it.headers().firstValue("Idempotency-Key").orElseThrow() } shouldBe
+                    listOf(legacy.providerKey, branded.providerKey)
+            }
+        }
+        test("branded Checkout provider errors expose only a static diagnostic") {
+            val transport =
+                Transport().apply {
+                    creationError = "${config.secretKey} https://checkout.stripe.com/c/pay/test cs_secret_test"
+                }
+            val branded = attempt.copy(brandingProfile = CheckoutBrandingProfile.FIONAS_V1)
+            val error = shouldThrow<IllegalStateException> { gateway(transport).create(branded) }
+            error.message shouldBe "Stripe request failed; retry the same durable operation"
+            error.cause shouldBe null
         }
         test("missing or unknown provider UI modes are rejected without echoing provider values") {
             listOf("", "elements", "secret_unknown").forEach { mode ->

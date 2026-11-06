@@ -240,6 +240,7 @@ class CustomerPayments(
                     at,
                     at.plusSeconds(3600),
                     checkoutMode = configuration.checkoutMode,
+                    brandingProfile = CheckoutBrandingProfile.FIONAS_V1,
                 ).also { attempts.insert(transaction, it) }
             CheckoutSelection(attempt, false)
         }
