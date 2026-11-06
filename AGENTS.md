@@ -2377,10 +2377,13 @@ only inert payment actions. Send takes an inquiry-scoped Idempotency-Key, exact 
 email/token and original EMPTY/latest-message expectation. Browser prices, addresses, HTML,
 sender and payment URLs are never authority; publishing or amending never emails automatically.
 
-`FinancialEmails` composes `ReadStaffRequest` and the existing transaction-taking collection
-summary. QUOTE requires current QUOTED publication, business/ledger/deposit identities and
-positive approved online deposit. INVOICE requires SERVED/current Invoice, positive runtime
-balance and permitted collection without active/unresolved provider payment. USD only.
+`FinancialEmails` composes `ReadStaffRequest` and validates the existing online terms using
+ledger facts independently of Stripe attempts. QUOTE requires current QUOTED publication,
+business/ledger/deposit identities and positive approved online deposit. INVOICE requires
+SERVED/current Invoice and positive collectible runtime balance. USD only. Active, processing
+and unresolved attempts still constrain collection. Staff may check or release obsolete open
+sessions through the existing payment-attempt reconcile route. Financial emails use a neutral
+review link to current terms and payment status in all checkout states.
 Render ordered exact ledger lines and approved service; keep business revisions in command/metadata DTOs. Quote balance
 after deposit is total less the runtime-resolved required deposit. No catalog, due date,
 refund/expiry promise or zero-deposit booking is introduced.
@@ -2393,10 +2396,13 @@ presentation only; reviewed ledger/business/deposit revisions remain required an
 The branded layout (`FinancialEmailRenderer`) is tables plus inline styles with one narrow-screen
 media query for Gmail/Outlook/mobile; lines show sub-description and exact quantity × rate with
 exact line totals, and the staff signature stays in both alternatives. A template change alters
-review digests, so UNKNOWN commands from before it reconcile only by failing closed; see the handoff.
+review digests. UNKNOWN commands with the preceding payment-oriented wording retain exact
+reconstruction subject to the original collection gate and both saved digests. Other content
+changes fail closed.
 
 Review binds customer/recipient, inquiry/document/business/service/deposit references,
-rendered content/signature, payment identities, access public ID/hash and provider configuration.
+rendered content/signature, ledger payment identities, access public ID/hash and provider configuration.
+Checkout state alone does not invalidate a neutral email review or UNKNOWN recovery.
 New send rechecks under the canonical association and runtime payment locks, then issues
 missing access through transaction-taking `CustomerPayments.manageAccess` and records intent
 atomically. Active links never rotate. Revoked links need separate deliberate reactivation

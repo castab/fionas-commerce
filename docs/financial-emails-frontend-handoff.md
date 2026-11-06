@@ -21,12 +21,16 @@ for a minimum) and ZIP code; it no longer repeats the customer's full name. Each
 description, its sub-description and/or exact `quantity × unit rate`, and its exact line total;
 totals, required deposit, balance after deposit, net paid and remaining balance are unchanged
 authoritative values. Quote emails say `Deposit to hold your date` / `Balance after deposit`
-and `Accept this quote`; Invoice emails say `Paid so far` / `Remaining balance` and
-`Pay remaining balance`. Both end with `Sent from <staff display name> @ Fiona's Ice Cream`.
+and link with `Review your quote` or `Review your updated quote`. Invoice emails say
+`Paid so far` / `Remaining balance` and link with `Review your invoice`. The stable link
+shows current terms and payment status. Both alternatives keep neutral payment wording
+so the reviewed email remains accurate if checkout state changes before send or delivery.
+Both end with `Sent from <staff display name> @ Fiona's Ice Cream`.
 Layout is table-based with inline styles and one narrow-screen media query, so Gmail, Outlook
-and phone clients render it; the HTML carries a hidden inbox preheader. Any template change
-alters the review digest: deploy one only when no financial-email command is UNKNOWN, since
-reconciling such a command afterwards fails closed with `financial_email_reconciliation_required`.
+and phone clients render it. The HTML carries a hidden inbox preheader. The neutral wording
+changes review tokens for unsent previews. UNKNOWN commands with the previous payment-oriented
+wording can still recover when the original collection gate passes and both stored digests match.
+For future template changes, resolve UNKNOWN sends first or retain exact reconstruction support.
 
 ## Authorization and deployment
 
@@ -100,18 +104,19 @@ nothing, including no payment link or command reservation. Render this HTML in a
 preview; block navigation to its inert destination and remote content as appropriate.
 
 QUOTE requires QUOTED, the current published proposal and exact active deposit revision,
-USD, no historical allocation and permitted online deposit collection. Fiona currently
+USD, no historical allocation and valid online deposit terms. Fiona currently
 publishes only positive approved deposits; a payment-oriented zero/no-deposit Quote is
-ineligible, and this feature does not introduce zero-deposit booking. The email shows the
-customer-facing Quote revision, event facts, requested guests, approved service when
+ineligible. The email shows the current Quote's event facts, requested guests, approved service when
 present, ordered exact ledger lines/tax/totals, required deposit and total less that deposit.
 
 INVOICE requires SERVED, the current canonical Invoice/business revision, USD and a strictly
-positive authoritative reconciled balance. BOOKED, CLOSED, DECLINED, fully paid, overpaid,
-active Checkout and outstanding reconciliation-required money refuse collection email.
-The email shows the current Invoice revision, itemized charges, total, net applied payments
-and remaining balance. No due date, overdue status, penalties, refund/expiry promises or
-event-day balance deadline is introduced. Reconciliation errors fail closed.
+positive authoritative balance eligible for online payment. BOOKED, CLOSED, DECLINED, fully paid
+and overpaid Invoices remain ineligible. The email shows itemized charges, total, net applied
+payments and remaining balance. Pending or unapplied Stripe money is not counted as payment
+against the document. Review and send are available during open or processing Checkout, uncertain
+provider outcomes and outstanding unapplied money. The email describes the ledger terms and
+directs the customer to the payment page for current status. Checkout and reconciliation retain
+their own rules. Revoked access and ledger read errors fail closed.
 
 ## Send and exact-command recovery
 
@@ -165,9 +170,10 @@ asserting acceptance or appending communication. A refused later/competing retry
 refute an earlier dispatch; it remains UNKNOWN. The counter distinguishes a sole first
 dispatch from an already attempted command, including a crash before its response. The exact
 provider request is reconstructed and its saved digest checked on UNKNOWN recovery. Document,
-service, payment, customer, access generation, template or provider-configuration changes
-can make reconstruction impossible. Recovery then fails closed; it never renders a new
-replacement under an uncertain key. An unresolved intent reserves further financial sends
+service, ledger payments, customer, access generation, template or provider-configuration changes
+can make reconstruction impossible. Checkout state alone does not affect current neutral emails.
+When exact reconstruction is unavailable, recovery fails closed and preserves the original key.
+An unresolved intent reserves further financial sends
 for that inquiry. No background retry, sweep, TTL, force-send or admin “mark failed” exists.
 
 ## Refusals
@@ -266,7 +272,22 @@ throwaway PostgreSQL, with no live provider credentials.
 
 ## Subsequent fionas-web changes
 
-This backend PR changes no fionas-web files. In a separate frontend PR:
+In a separate `fionas-web` PR:
+
+- Use financial-email preview success to establish email readiness. Keep current Quote or
+  SERVED Invoice controls available while checkout is `OPEN`, `CREATING` or `PROCESSING`,
+  subject to the existing permissions and review. Keep payment collection status separate.
+- In the staff attempt list, compare `purpose`, `documentVersion` and `businessRevision` to
+  current terms. For an `OPEN` attempt with superseded terms, offer **Release previous checkout**
+  through `POST /staff/requests/{id}/payment-attempts/{attemptId}/reconcile`. Refresh detail and
+  attempts after the response. A matching `OPEN` attempt can offer **Check payment status**.
+- Show `EXPIRED` as confirmed release, `PROCESSING` as awaiting payment confirmation, and a
+  failed reconcile request or unresolved `CREATING` as requiring another check or staff
+  investigation. Route `RECONCILIATION_REQUIRED` to unapplied-payment review. Keep confirmed
+  payment and financial-email delivery statuses distinct. See the
+  [Stripe operations guide](stripe-payments-operations.md#transaction-and-recovery-contract).
+- Use the supplied preview HTML/text and its neutral review wording. Keep using public `canPay`,
+  `paymentInProgress`, `reconciliationPending` and the existing recovery flow for payment UI.
 
 - In `apps/public/src/lib/payments/view.ts` and
   `apps/public/src/lib/components/payments/payment-overview.svelte`, replace `Quote vN`

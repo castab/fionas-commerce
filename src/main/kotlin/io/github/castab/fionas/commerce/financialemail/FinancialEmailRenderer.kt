@@ -144,8 +144,9 @@ internal fun renderFinancialEmail(
     message: FinancialEmailMessage?,
     signature: String,
     paymentUrl: String,
-    subject: String = financialEmailSubject(kind),
+    legacyPaymentCopy: Boolean = false,
 ): RenderedFinancialEmail {
+    val subject = financialEmailSubject(kind)
     val inquiry = request.inquiry.inquiry
     val customer = request.inquiry.customer
     val document = request.financial.latest.document
@@ -214,16 +215,23 @@ internal fun renderFinancialEmail(
     val preheader =
         if (quote) {
             "${if (revised) "Your updated quote" else "Your quote"} for $eventDay — $total total, ${usd(summary.required)} deposit. " +
-                "Accept online to hold your date."
+                if (legacyPaymentCopy) "Accept online to hold your date." else "Review your current quote online."
         } else {
             "Your invoice for $eventDay — ${usd(summary.balance)} remaining balance."
         }
-    val action = if (quote) "Accept this quote" else "Pay remaining balance"
+    val action =
+        when {
+            legacyPaymentCopy -> if (quote) "Accept this quote" else "Pay remaining balance"
+            revised -> "Review your updated quote"
+            quote -> "Review your quote"
+            else -> "Review your invoice"
+        }
     val actionNote =
-        if (quote) {
-            "Accept online and pay your deposit — your date is held the moment it lands."
-        } else {
-            "Your payment page always shows the current balance and payment status."
+        when {
+            legacyPaymentCopy && quote -> "Accept online and pay your deposit — your date is held the moment it lands."
+            legacyPaymentCopy -> "Your payment page always shows the current balance and payment status."
+            quote -> "Your payment page shows the current terms and payment status."
+            else -> "This balance reflects payments applied to your invoice. Your payment page shows the latest balance and status."
         }
     val invitation =
         if (quote) {

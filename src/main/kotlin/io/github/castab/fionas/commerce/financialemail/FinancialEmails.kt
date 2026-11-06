@@ -25,6 +25,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryStage
 import io.github.castab.fionas.commerce.payments.CustomerPayments
 import io.github.castab.fionas.commerce.payments.JdbiPaymentAccessRepository
 import io.github.castab.fionas.commerce.payments.PaymentAccessAction
+import io.github.castab.fionas.commerce.payments.customerPaymentSummary
 import io.github.castab.fionas.commerce.staff.ReadStaffRequest
 import java.time.Clock
 import java.time.temporal.ChronoUnit
@@ -206,7 +207,16 @@ class FinancialEmails(
                         FinancialEmailOutcome.ACCEPTED, FinancialEmailOutcome.REJECTED -> return@inTransaction current to null
                         FinancialEmailOutcome.UNKNOWN -> Unit
                     }
-                    val preview = compose(transaction, command.intent, record.signature)
+                    val currentPreview = compose(transaction, command.intent, record.signature)
+                    // Older commands used payment-oriented copy. Recover only its exact reviewed content,
+                    // and apply the original collection gate before dispatching that wording again.
+                    val legacyPaymentCopy = currentPreview.reviewToken != record.recoveryDigest
+                    val preview =
+                        if (legacyPaymentCopy) {
+                            compose(transaction, command.intent, record.signature, legacyPaymentCopy = true)
+                        } else {
+                            currentPreview
+                        }
                     if (!provider.configuration.permits(preview.request.inquiry.customer.email)) recoveryRequired()
                     if (preview.reviewToken != record.recoveryDigest) recoveryRequired()
                     val capability = access.forInquiry(transaction, record.inquiryId) ?: recoveryRequired()
@@ -226,6 +236,7 @@ class FinancialEmails(
                             if (record.opening) null else record.conversationId,
                             url,
                             record.id,
+                            legacyPaymentCopy,
                         )
                     if (exact.digest != record.providerRequest) recoveryRequired()
                     current to exact
@@ -324,6 +335,7 @@ class FinancialEmails(
         transaction: Transaction,
         intent: FinancialEmailIntent,
         signature: String,
+        legacyPaymentCopy: Boolean = false,
     ): FinancialEmailPreview {
         val request = requests.read(transaction, intent.inquiryId)
         val document = request.financial.latest.document
@@ -350,21 +362,20 @@ class FinancialEmails(
                 if (request.currentInvoiceRevision != intent.expectedBusinessRevision) stale()
             }
         }
-        val summary =
-            (
-                payments ?: emailRefused(
-                    "stripe_disabled",
-                    "Customer payments are not configured",
-                )
-            ).collectionSummary(transaction, request)
+        val customerPayments = payments ?: emailRefused("stripe_disabled", "Customer payments are not configured")
+        // The document and ledger determine whether these terms can be communicated. Provider attempts
+        // reserve collection separately and do not change the document or its reviewed email content.
+        val summary = customerPaymentSummary(request, emptyList())
         if (!summary.canPay) emailRefused("financial_email_ineligible", "Collection is unavailable: ${summary.unavailableReason}")
+        if (legacyPaymentCopy && !customerPayments.collectionSummary(transaction, request).canPay) recoveryRequired()
         val capability = access.forInquiry(transaction, intent.inquiryId)
         if (capability?.revoked ==
             true
         ) {
             emailRefused("payment_access_revoked", "Reactivate payment access deliberately before reviewing this email")
         }
-        val email = renderFinancialEmail(intent.kind, request, summary, intent.message, signature, PREVIEW_PAYMENT_URL)
+        val email =
+            renderFinancialEmail(intent.kind, request, summary, intent.message, signature, PREVIEW_PAYMENT_URL, legacyPaymentCopy)
         val connection = provider().configuration
         val facts =
             request.payments
@@ -416,8 +427,18 @@ class FinancialEmails(
         conversation: UUID?,
         url: String,
         id: FinancialEmailId,
+        legacyPaymentCopy: Boolean = false,
     ): ProviderSendRequest {
-        val email = renderFinancialEmail(command.intent.kind, preview.request, preview.summary, command.intent.message, signature, url)
+        val email =
+            renderFinancialEmail(
+                command.intent.kind,
+                preview.request,
+                preview.summary,
+                command.intent.message,
+                signature,
+                url,
+                legacyPaymentCopy,
+            )
         val customer = preview.request.inquiry.customer
         return conversationSendRequest(
             provider.configuration,

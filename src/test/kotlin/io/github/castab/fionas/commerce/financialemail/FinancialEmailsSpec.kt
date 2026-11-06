@@ -8,6 +8,8 @@ import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.fionas.commerce.conversation.MessageTextVisibility
+import io.github.castab.fionas.commerce.http.CheckoutResponse
+import io.github.castab.fionas.commerce.http.CustomerPaymentResponse
 import io.github.castab.fionas.commerce.http.DepositTermsRequest
 import io.github.castab.fionas.commerce.http.FinancialEmailKindResponse
 import io.github.castab.fionas.commerce.http.FinancialEmailPreviewResponse
@@ -66,6 +68,7 @@ class FinancialEmailsSpec :
         lateinit var app: TestApplication
         lateinit var provider: StubConversationProvider
         val config = testStripeConfiguration()
+        val stripe = FakeStripe(config)
         beforeSpec {
             provider = StubConversationProvider()
             app =
@@ -73,7 +76,7 @@ class FinancialEmailsSpec :
                     conversationReads = provider.readConfiguration(),
                     conversationSends = provider.sendConfiguration(),
                     stripe = config,
-                    stripeGateway = FakeStripe(config),
+                    stripeGateway = stripe,
                 )
             val grants = checkNotNull(app.authorization.getRole(CommerceRoles.Administrator)).permissions
             app.authorization.replaceRolePermissions(CommerceRoles.Administrator, grants + FionaPermissions.PaymentAccessManage)
@@ -168,6 +171,34 @@ class FinancialEmailsSpec :
         fun access(id: String) =
             CommerceJson.asA(app.adminGet(path(id) + "/payment-access").bodyString(), PaymentAccessResponse.serializer())
 
+        fun paymentSummary(link: PaymentAccessResponse): CustomerPaymentResponse {
+            val response =
+                app.http(
+                    Request(Method.GET, "/public/payments/${link.publicId}")
+                        .header("X-Fionas-Payment-Token", checkNotNull(link.url).substringAfter('#')),
+                )
+            response.status shouldBe Status.OK
+            return CommerceJson.asA(response.bodyString(), CustomerPaymentResponse.serializer())
+        }
+
+        fun openCheckout(
+            link: PaymentAccessResponse,
+            input: PreviewFinancialEmailRequest,
+        ): CheckoutResponse {
+            val response =
+                app.http(
+                    Request(Method.POST, "/public/payments/${link.publicId}/checkout-sessions")
+                        .header("X-Fionas-Payment-Token", checkNotNull(link.url).substringAfter('#'))
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .header("Content-Type", "application/json")
+                        .body(
+                            """{"expectedDocumentVersion":${input.expectedDocumentVersion},"expectedBusinessRevision":${input.expectedBusinessRevision}}""",
+                        ),
+                )
+            response.status shouldBe Status.OK
+            return CommerceJson.asA(response.bodyString(), CheckoutResponse.serializer()).also { it.state shouldBe "OPEN" }
+        }
+
         fun timeline(id: String) = CommerceJson.asA(app.adminGet(path(id) + "/timeline").bodyString(), StaffTimelineResponse.serializer())
 
         fun book(id: String) {
@@ -212,7 +243,7 @@ class FinancialEmailsSpec :
             review.text shouldContain "Your quote (final price)\n"
             review.html shouldContain ">Your quote</h2>"
             review.html shouldContain ">Final price</span>"
-            review.html shouldContain ">Accept this quote</a>"
+            review.html shouldContain ">Review your quote</a>"
             review.text shouldContain "Deposit to hold your date: $136.25\nBalance after deposit: $545.00"
             review.html shouldContain "Your quote for "
             review.text shouldContain "Sent from Test Administrator @ Fiona's Ice Cream"
@@ -696,7 +727,7 @@ class FinancialEmailsSpec :
             Regex("\\b(?:Quote|Invoice) v\\d+", RegexOption.IGNORE_CASE).find(review.text + review.html + review.subject) shouldBe null
             review.text shouldContain "Paid so far: $181.25"
             review.text shouldContain "Remaining balance: $500.00"
-            review.html shouldContain "Pay remaining balance"
+            review.html shouldContain "Review your invoice"
             review.balanceAfterDeposit shouldBe null
             send(id, input, review.reviewToken).status shouldBe Status.CREATED
             val current = intent(id)
@@ -932,6 +963,72 @@ class FinancialEmailsSpec :
             java.io.File("build/reports/financial-email/invoice.html").writeText(email.html)
         }
 
+        test("a revised Quote with a changed line and deposit can be emailed while its previous Checkout is open") {
+            val id = initial()
+            val old = intent(id)
+            val original = send(id, old, preview(id, old).reviewToken)
+            original.status shouldBe Status.CREATED
+            val link = access(id)
+            val opened = openCheckout(link, old)
+            val before = preview(id, old)
+            val lines =
+                retainedLines(id) +
+                    ProposedLineRequest(
+                        key = "topping",
+                        description = "Extra topping",
+                        unitPrice = "20.00",
+                        taxAmount = "0.00",
+                        currency = "USD",
+                    )
+            val revision =
+                QuoteRevisionPreviewRequest(
+                    old.expectedDocumentVersion,
+                    checkNotNull(old.expectedDepositRequirementRevision),
+                    lines,
+                    DepositTermsRequest.Fixed("200.00", "USD"),
+                )
+            val reviewed = app.adminPost(path(id) + "/quote-revision-preview", CommerceJson.asFormatString(revision))
+            reviewed.status shouldBe Status.OK
+            val reviewToken = CommerceJson.asA(reviewed.bodyString(), QuoteRevisionPreviewResponse.serializer()).quote.reviewToken
+            app
+                .adminPost(
+                    path(id) + "/proposals/quote-revisions",
+                    CommerceJson.asFormatString(
+                        ReviseInquiryQuoteProposalRequest(
+                            revision.expectedDocumentVersion,
+                            revision.expectedDepositRequirementRevision,
+                            lines,
+                            revision.terms,
+                            reviewToken = reviewToken,
+                        ),
+                    ),
+                ).status shouldBe Status.OK
+            val latest = checkNotNull(original.result().messageId)
+            send(id, old, before.reviewToken, latest = latest).code() shouldBe "financial_email_review_stale"
+            val current = intent(id)
+            current.expectedDocumentVersion shouldNotBe old.expectedDocumentVersion
+            val email = preview(id, current)
+            email.requiredPayment shouldBe "200.00"
+            email.text shouldContain "Extra topping: $20.00"
+            email.html shouldContain "Review your updated quote"
+            email.html shouldNotContain "Accept online"
+            send(id, current, email.reviewToken, latest = latest).status shouldBe Status.CREATED
+            access(id) shouldBe link
+            provider.conversations
+                .getValue(id)
+                .messages
+                .last()
+                .text shouldContain checkNotNull(link.url)
+            val payment = paymentSummary(link)
+            payment.document.version shouldBe current.expectedDocumentVersion
+            payment.requiredAmount shouldBe "200.00"
+            payment.canPay shouldBe false
+            payment.paymentInProgress shouldBe true
+            stripe.sessions.values
+                .single { it.attemptId.toString() == opened.attemptId }
+                .state shouldBe "open"
+        }
+
         test("payment after an UNKNOWN Invoice attempt forbids reconstructing a replacement under its key") {
             val id = initial()
             served(id)
@@ -946,28 +1043,56 @@ class FinancialEmailsSpec :
             provider.sendAttempts.get() shouldBe attempts
         }
 
-        test("a pending Checkout blocks an unreliable balance-due email") {
+        test("a revised served Invoice email can recover the exact UNKNOWN request after Checkout enters processing") {
             val id = initial()
             served(id)
             app.adminPost(path(id) + "/payment-access").status shouldBe Status.OK
             val link = access(id)
-            val state = detail(id)
-            val checkout =
-                app.http(
-                    Request(Method.POST, "/public/payments/${link.publicId}/checkout-sessions")
-                        .header("X-Fionas-Payment-Token", link.url!!.substringAfter('#'))
-                        .header("Idempotency-Key", UUID.randomUUID().toString())
-                        .header(
-                            "Content-Type",
-                            "application/json",
-                        ).body(
-                            """{"expectedDocumentVersion":${state.financial.version},"expectedBusinessRevision":${state.currentInvoiceRevision}}""",
-                        ),
+            val old = intent(id)
+            val opened = openCheckout(link, old)
+            val additional =
+                ProposedLineRequest(
+                    key = "service",
+                    description = "Additional service",
+                    unitPrice = "25.00",
+                    taxAmount = "0.00",
+                    currency = "USD",
                 )
-            checkout.status shouldBe Status.OK
-            val response = previewResponse(id, intent(id))
-            response.code() shouldBe "financial_email_ineligible"
-            response.bodyString() shouldContain "PAYMENT_IN_PROGRESS"
+            val amendment = InvoiceRevisionPreviewRequest(old.expectedDocumentVersion, retainedLines(id) + additional)
+            val reviewed = app.adminPost(path(id) + "/invoice-revision-preview", CommerceJson.asFormatString(amendment))
+            reviewed.status shouldBe Status.OK
+            val reviewToken = CommerceJson.asA(reviewed.bodyString(), InvoiceRevisionPreviewResponse.serializer()).reviewToken
+            app
+                .adminPost(
+                    path(id) + "/invoice-revisions",
+                    CommerceJson.asFormatString(InvoiceRevisionRequest(amendment.expectedDocumentVersion, amendment.lines, reviewToken)),
+                ).status shouldBe Status.OK
+            val current = intent(id)
+            val email = preview(id, current)
+            email.text shouldContain "Remaining balance: $570.00"
+            email.html shouldContain "Review your invoice"
+            val key = UUID.randomUUID().toString()
+            provider.script += StubConversationProvider.Behavior.ERROR_AFTER_PERSIST
+            provider.replayStatus = 500
+            send(id, current, email.reviewToken, key).status shouldBe Status.ACCEPTED
+            provider.replayStatus = null
+
+            val session = stripe.sessions.values.single { it.attemptId.toString() == opened.attemptId }
+            stripe.change(session.id, paid = "unpaid")
+            val reconcile = app.adminPost(path(id) + "/payment-attempts/${opened.attemptId}/reconcile")
+            reconcile.status shouldBe Status.OK
+            reconcile.bodyString() shouldContain "PROCESSING"
+            val payment = paymentSummary(link)
+            payment.canPay shouldBe false
+            payment.paymentInProgress shouldBe true
+            preview(id, current).reviewToken shouldBe email.reviewToken
+            send(id, current, email.reviewToken, key).status shouldBe Status.OK
+            provider.conversations
+                .getValue(id)
+                .messages
+                .single()
+                .text shouldContain checkNotNull(link.url)
+            access(id) shouldBe link
         }
 
         test("a payment racing the pre-send provider lookup is rechecked before durable intent") {

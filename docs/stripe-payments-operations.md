@@ -201,13 +201,26 @@ and exposes `checkoutRecoveryAvailable` as a local hint for the explicit POST ac
 handoff for stable 409 recovery codes; the frontend must not hide recovery solely because
 `canPay` is false.
 
-Use `POST /staff/requests/{id}/payment-attempts/{attemptId}/reconcile` after a restart,
-ambiguous response, or missed webhook; it works after access revocation. It retrieves or
-discovers the original session, and expires an open session whose reviewed terms are now
-obsolete where possible. Expiration does not prove that a capture race is impossible;
-any later confirmed capture remains reconcilable. No automatic periodic provider sweep
-or inbox worker is added. Operators must monitor pending attempts and Stripe delivery
-failures and invoke recovery or redelivery before provider event retention expires.
+After publishing a revised Quote or Invoice, staff can email the current document while
+the previous Checkout remains reserved. To release an obsolete hosted or embedded session,
+use `POST /staff/requests/{id}/payment-attempts/{attemptId}/reconcile`. This also works
+after revocation, a restart, an ambiguous response or a missed webhook. It retrieves or
+recovers the original provider session, checks its reviewed terms against current facts,
+and asks Stripe to expire it only if it is open and the terms are obsolete or access revoked.
+Provider calls run outside database transactions. The response contains status and outcome.
+
+- `OPEN` means the session remains reserved. An open session for current terms stays open.
+- `EXPIRED` or `FAILED` reflects a provider-confirmed release. A subsequent checkout command
+  can authorize current terms if they remain eligible. Staff reconciliation itself makes no replacement.
+- `PROCESSING` or a provider error leaves collection reserved. Retry reconciliation on the same
+  attempt or investigate an uncertain outcome. The next request retrieves the provider state
+  again, including when an earlier expiry succeeded but its response was lost.
+- If payment wins the race with expiry, reconcile the capture. A capture for obsolete terms
+  is recorded once as unapplied money and surfaced as `RECONCILIATION_REQUIRED`. Confirmed
+  captures stay recorded when older expiry notifications arrive.
+
+Operators must monitor pending attempts and Stripe delivery failures and invoke recovery
+or redelivery before provider event retention expires.
 
 ## Exceptions, refunds and disputes
 
