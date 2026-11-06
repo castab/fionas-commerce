@@ -8,10 +8,25 @@ Quote, revised Quote and Invoice greetings use the authoritative customer's firs
 with Unicode whitespace handling and a blank fallback of `there`. HTML escapes that name;
 plain text uses the same name. Full names in customer records and event facts are unchanged.
 Generated customer copy says `Hi Maria, here's your quote`, `Hi Maria, here's your updated
-quote`, or `Thank you, Maria — here's your invoice`; section headings are `Your quote` or
-`Your invoice`. No application-generated `vN` labels are included in HTML, text or subjects.
-Staff-authored custom text remains exact, including deliberate version references. Internal
-ledger/business/deposit revisions remain in commands, previews, fingerprints and Activity metadata.
+quote`, or `Thank you, Maria — here's your invoice`. The HTML heading is styled lowercase
+(`text-transform`, so its text and screen readers keep that casing); plain text ends it with a
+period. Section headings are `Your event`, `Your menu` (only with an approved service plan) and
+`Your quote` (with a `Final price` chip) or `Your invoice`. No application-generated `vN` labels
+are included in HTML, text or subjects. Staff-authored custom text remains exact, including
+deliberate version references. Internal ledger/business/deposit revisions remain in commands,
+previews, fingerprints and Activity metadata.
+
+The event block shows date, event type, guests (approved count, else requested, `At least N`
+for a minimum) and ZIP code; it no longer repeats the customer's full name. Each line shows its
+description, its sub-description and/or exact `quantity × unit rate`, and its exact line total;
+totals, required deposit, balance after deposit, net paid and remaining balance are unchanged
+authoritative values. Quote emails say `Deposit to hold your date` / `Balance after deposit`
+and `Accept this quote`; Invoice emails say `Paid so far` / `Remaining balance` and
+`Pay remaining balance`. Both end with `Sent from <staff display name> @ Fiona's Ice Cream`.
+Layout is table-based with inline styles and one narrow-screen media query, so Gmail, Outlook
+and phone clients render it; the HTML carries a hidden inbox preheader. Any template change
+alters the review digest: deploy one only when no financial-email command is UNKNOWN, since
+reconciling such a command afterwards fails closed with `financial_email_reconciliation_required`.
 
 ## Authorization and deployment
 
