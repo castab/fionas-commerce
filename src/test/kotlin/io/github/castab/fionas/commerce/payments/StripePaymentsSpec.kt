@@ -82,6 +82,7 @@ internal class FakeStripe(
         onCreate?.invoke()
         val previous = authorizations.putIfAbsent(attempt.id, attempt)
         check(previous == null || previous.checkoutMode == attempt.checkoutMode) { "Changed idempotent Checkout mode" }
+        check(previous == null || previous.brandingProfile == attempt.brandingProfile) { "Changed idempotent Checkout branding" }
         val session =
             sessions.computeIfAbsent("cs_test_${attempt.id}") {
                 created.incrementAndGet()
@@ -427,6 +428,35 @@ private fun stripePaymentsTests(mode: CheckoutMode): FunSpec.() -> Unit =
                 }
             }
             attempts(id).items.single().id shouldBe opened.attemptId
+        }
+        test("V13 preserves existing attempts with an unbranded profile") {
+            val link = link(initial())
+            val opened = redirect(checkout(link))
+            val migration = checkNotNull(javaClass.getResource("/db/fionas/V13__stripe_checkout_branding_profile.sql")).readText()
+            app.database.connect { connection ->
+                connection.autoCommit = false
+                try {
+                    connection.createStatement().use { statement ->
+                        statement.execute("ALTER TABLE fionas.stripe_payment_attempts DROP COLUMN checkout_branding_profile")
+                        statement.execute(migration)
+                        statement
+                            .executeQuery(
+                                """
+                                SELECT checkout_branding_profile, checkout_mode, provider_key, provider_state
+                                FROM fionas.stripe_payment_attempts WHERE id = '${opened.attemptId}'
+                                """.trimIndent(),
+                            ).use { row ->
+                                row.next() shouldBe true
+                                row.getString("checkout_branding_profile") shouldBe "NONE"
+                                row.getString("checkout_mode") shouldBe mode.name
+                                row.getString("provider_key") shouldBe "fionas-checkout:${opened.attemptId}"
+                                row.getString("provider_state") shouldBe "OPEN"
+                            }
+                    }
+                } finally {
+                    connection.rollback()
+                }
+            }
         }
         test("stable retrieval stores only a hash and inquiry-specific capabilities separate returning customers") {
             val email = "same-${UUID.randomUUID()}@example.com"

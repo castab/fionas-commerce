@@ -77,9 +77,11 @@ class JdbiStripeAttemptRepository {
                 INSERT INTO fionas.stripe_payment_attempts
                     (id, inquiry_id, public_id, request_key, request_fingerprint, document_id, document_version,
                      purpose, business_revision, proposal_id, deposit_revision, authorized_minor, currency,
-                     stripe_account, live_mode, provider_key, created_at, expires_at, provider_state, outcome, checkout_mode)
+                     stripe_account, live_mode, provider_key, created_at, expires_at, provider_state, outcome, checkout_mode,
+                     checkout_branding_profile)
                 VALUES (:id, :inquiry, :public, :key, :fingerprint, :document, :version, :purpose, :business,
-                        :proposal, :deposit, :amount, :currency, :account, :live, :providerKey, :created, :expires, 'CREATING', 'PENDING', :checkoutMode)
+                        :proposal, :deposit, :amount, :currency, :account, :live, :providerKey, :created, :expires,
+                        'CREATING', 'PENDING', :checkoutMode, :brandingProfile)
                 """.trimIndent(),
             ).bind("id", attempt.id)
             .bind("inquiry", attempt.inquiryId.value)
@@ -100,6 +102,7 @@ class JdbiStripeAttemptRepository {
             .bind("created", attempt.createdAt)
             .bind("expires", attempt.expiresAt)
             .bind("checkoutMode", attempt.checkoutMode.name)
+            .bind("brandingProfile", attempt.brandingProfile.name)
             .execute()
     }
 
@@ -189,5 +192,6 @@ class JdbiStripeAttemptRepository {
             row.getObject("ledger_payment_id", UUID::class.java),
             row.getString("diagnostic"),
             CheckoutMode.valueOf(row.getString("checkout_mode")),
+            CheckoutBrandingProfile.valueOf(row.getString("checkout_branding_profile")),
         )
 }

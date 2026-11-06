@@ -8,6 +8,7 @@ import com.stripe.model.checkout.Session
 import com.stripe.net.RequestOptions
 import com.stripe.net.Webhook
 import com.stripe.param.checkout.SessionCreateParams
+import com.stripe.param.checkout.SessionCreateParams.BrandingSettings
 import com.stripe.param.checkout.SessionListParams
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import kotlinx.serialization.json.Json
@@ -18,6 +19,17 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.time.Instant
 import java.util.UUID
+
+// Provider idempotency binds these values to every FIONAS_V1 attempt. Add a profile to change them.
+private val fionasBrandingV1 =
+    BrandingSettings
+        .builder()
+        .setBackgroundColor("#F6F1E4")
+        .setButtonColor("#5F5B40")
+        .setBorderStyle(BrandingSettings.BorderStyle.ROUNDED)
+        .setFontFamily(BrandingSettings.FontFamily.MONTSERRAT)
+        .setDisplayName("Fiona's Ice Cream")
+        .build()
 
 /** Official SDK adapter. Its JSON implementation is confined here and never replaces CommerceJson. */
 class StripeJavaGateway internal constructor(
@@ -95,6 +107,10 @@ class StripeJavaGateway internal constructor(
                     .putMetadata("fionas_authorization", configuration.authorizationProof(attempt))
                     .setExpiresAt(attempt.expiresAt.epochSecond)
                     .apply {
+                        when (attempt.brandingProfile) {
+                            CheckoutBrandingProfile.NONE -> Unit
+                            CheckoutBrandingProfile.FIONAS_V1 -> setBrandingSettings(fionasBrandingV1)
+                        }
                         when (attempt.checkoutMode) {
                             // Leave ui_mode implicit: historical hosted idempotency keys must replay identical parameters.
                             CheckoutMode.HOSTED -> {

@@ -29,7 +29,7 @@ future attempts only. Retain frontend embedded support for existing attempts. No
 reset, attempt rewrite or link replacement is needed.
 
 Retries and discovery use the durable mode across restarts and configuration changes.
-Hosted parameters remain unchanged, including implicit UI mode. Embedded sends
+Hosted keeps its implicit UI mode and success/cancel URLs. Embedded sends
 `ui_mode=embedded_page`, `redirect_on_completion=if_required`, and the trusted
 `/pay/{publicId}?checkout=returned` return URL without success/cancel URLs. See the
 [Stripe API reference](https://docs.stripe.com/api/checkout/sessions/create) and
@@ -105,6 +105,55 @@ Railway checklist:
    verify the actual owning-account context, card/wallet eligibility and currency minimum,
    and separately provision live credentials/destination. Do not reuse test attempts or
    test data in a live deployment. A backend build is not a live payment acceptance test.
+
+## Checkout branding
+
+Commerce sends the same `branding_settings` on new hosted and embedded authorizations.
+
+| Stripe parameter | Fiona's profile |
+| --- | --- |
+| `background_color` | Warm cream `#F6F1E4` |
+| `button_color` | Olive `#5F5B40` |
+| `border_style` | `rounded` |
+| `font_family` | `montserrat`, a supported substitute for the site's Poppins |
+| `display_name` | `Fiona's Ice Cream` |
+
+Keep Fiona's logo and icon in the owning merchant's [Stripe Dashboard Branding settings](https://dashboard.stripe.com/settings/branding).
+Commerce omits the logo and icon fields so Checkout can use the account assets where its
+layout displays them. Keep the account's business name accurate for receipts and other
+Stripe surfaces. The Session display name applies to the Checkout page header.
+
+Stripe controls the embedded iframe, including the layout, which surfaces display the
+logo or name, wallet styling, and font fallback for unsupported locales. Session branding
+uses Checkout's own controls. The Stripe Elements Appearance API applies to Elements.
+See [Checkout appearance](https://docs.stripe.com/payments/checkout/customization/appearance).
+
+V13 records `checkout_branding_profile` on the attempt. Rows from before V13 retain
+`NONE`, which omits `branding_settings` when retrying the original Stripe key. Both modes
+use `FIONAS_V1` for new authorizations. Retries replay the stored profile after a restart
+or mode change. A profile change applies only to newly authorized attempts. Existing
+Sessions keep their original request and follow the usual recovery and expiration paths.
+For future changes, add a profile and keep the older request mapping intact.
+
+Drain pre-V13 instances from Checkout traffic, including in-flight creation requests,
+before serving Checkout from the new release. An older instance cannot reproduce the
+branded request during the 25-minute creation replay window. If reverting to a pre-V13
+binary, keep customer Checkout POSTs paused until every branded authorization's replay
+window has elapsed. Keep V13's attempt data for recovery.
+
+### Verify a real embedded Session in test mode
+
+1. Check the account logo and icon in the test merchant's Dashboard. Set
+   `FIONAS_STRIPE_LIVE_MODE=false` and `FIONAS_STRIPE_CHECKOUT_MODE=embedded` on commerce.
+   Use the matching test publishable key on the existing payment portal.
+2. Use a fresh test inquiry with a published Quote and payment link. Start Checkout in
+   the portal to authorize and mount a new Embedded Checkout Session.
+3. In the Stripe frame, check the cream background, olive card payment button, rounded
+   controls and Montserrat in an English locale. Check the merchant name and account logo
+   wherever Stripe displays them. Inspect on desktop and mobile.
+4. Complete the payment with a [Stripe test card](https://docs.stripe.com/testing) and
+   confirm the normal portal refresh and a single receipt. Keep Checkout URLs and client
+   secrets out of logs and test evidence.
 
 ## Local Stripe CLI exercise
 
