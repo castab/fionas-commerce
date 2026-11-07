@@ -284,6 +284,32 @@ and exposes `checkoutRecoveryAvailable` as a local hint for the explicit POST ac
 handoff for stable 409 recovery codes; the frontend must not hide recovery solely because
 `canPay` is false.
 
+For deliberate customer restart, the summary's `checkoutRestartToken` identifies one
+attempt and the financial state the customer reviewed. The customer submits it as
+`restartToken` with a fresh key and current payment amount. Commerce validates the
+capability, target, financial review and amount under the same canonical association
+lock before provider I/O, again before requesting expiration, and before reserving
+the replacement. An intervening authorization invalidates the token even if it has
+already settled. Replays of a committed key still address its own attempt.
+
+Commerce recovers or retrieves the target using its existing durable identity and
+verifies its authorization proof. Only an OPEN unpaid Session is eligible for the
+Stripe expiration call. An error or timeout triggers one retrieval of that same
+Session. Only verified EXPIRED/unpaid releases the reservation for explicit restart.
+A completed paid Session follows existing exactly-once receipt reconciliation and
+requires a new customer review. Processing and uncertain outcomes block replacement.
+See [Stripe's expiration API](https://docs.stripe.com/api/checkout/sessions/expire)
+and [Session status contract](https://docs.stripe.com/api/checkout/sessions/object).
+
+If provider expiration succeeds and Commerce stops before replacement authorization,
+retry the same key and body. The historical target can still be verified as expired,
+provided the reviewed financial state, access and attempt inventory remain current.
+Once the replacement is reserved, its provider creation recovers with the normal
+provider key and discovery rules. If terms or access changed during expiration, the
+old Session may be expired even though Commerce refused the replacement. Keep the
+original attempt and reconcile any late Stripe events through the usual webhook path.
+Roll out the Commerce contract before enabling the restart action in fionas-web.
+
 After publishing a revised Quote or Invoice, staff can email the current document while
 the previous Checkout remains reserved. To release an obsolete Checkout Session,
 use `POST /staff/requests/{id}/payment-attempts/{attemptId}/reconcile`. This also works

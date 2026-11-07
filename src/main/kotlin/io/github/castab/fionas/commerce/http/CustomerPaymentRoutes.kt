@@ -82,6 +82,10 @@ data class CustomerPaymentResponse(
     val history: List<CustomerPaymentReceiptResponse>,
     @ApiProperty(description = "An active attempt can be checked by POST checkout-sessions with a fresh key; GET performs no provider I/O.")
     val checkoutRecoveryAvailable: Boolean = false,
+    @ApiProperty(
+        description = "Opaque target for a deliberate restart POST. Availability is a local hint; GET does not contact Stripe.",
+    )
+    val checkoutRestartToken: String? = null,
 )
 
 @Serializable
@@ -89,6 +93,10 @@ data class CreateCheckoutRequest(
     val expectedDocumentVersion: Int,
     val expectedBusinessRevision: Int,
     val amountMinor: Long? = null,
+    @ApiProperty(
+        description = "Supply the summary's checkoutRestartToken only after the customer deliberately chooses to restart Checkout.",
+    )
+    val restartToken: String? = null,
 )
 
 @Serializable
@@ -104,6 +112,8 @@ data class CheckoutResponse(
     val uiMode: CheckoutModeResponse,
     @ApiProperty(description = "Customer-only Checkout Session credential for OPEN EMBEDDED and ELEMENTS attempts; never log or persist.")
     val clientSecret: String? = null,
+    @ApiProperty(description = "The expired attempt this authorization replaced. Omitted for ordinary Checkout.")
+    val replacedAttemptId: String? = null,
 ) {
     override fun toString() = "CheckoutResponse([redacted])"
 }
@@ -144,6 +154,7 @@ private val unavailableStripe = ErrorResponse("stripe_disabled", "Online payment
 private val paymentTag = Tag("Customer payments", "Inquiry-scoped customer access and Stripe Checkout.")
 private val paymentSecret = Header.required("X-Fionas-Payment-Token")
 private val checkoutKey = Header.required("Idempotency-Key")
+private val restartTokenShape = Regex("[0-9a-f-]{36}\\.[A-Za-z0-9_-]{43}\\.[A-Za-z0-9_-]{43}")
 private val stripeSignature = Header.required("Stripe-Signature")
 private val exampleAccess =
     PaymentAccessResponse(
@@ -327,8 +338,12 @@ internal fun paymentRoutes(
             "The configured mode applies only to new attempts. Never log or persist launch credentials. "
         description += " A new key checks at most one existing active attempt outside PostgreSQL, reconciles it, then " +
             "rechecks current eligibility under the canonical lock. Only confirmed expiration/failure permits a new authorization. " +
-            "Recovery-only conflicts claim no new key: checkout_in_progress, payment_processing, payment_state_changed, " +
-            "checkout_recovery_conflict, checkout_reconciliation_required. Refresh the summary and require a deliberate action."
+            "A deliberate restart supplies restartToken from the authorized summary and a fresh key. Stripe must confirm the " +
+            "targeted session expired unpaid before replacement. A normal POST never expires a current open session. " +
+            "Use the same key and body after an ambiguous response. Restart and recovery conflicts include checkout_in_progress, " +
+            "payment_processing, payment_state_changed, payment_terms_changed, checkout_recovery_conflict and " +
+            "checkout_reconciliation_required. Changed input under a committed restart key returns checkout_key_reused. " +
+            "No new key is claimed before authorization."
         headers += paymentSecret
         headers += checkoutKey
         receiving(checkoutBody to CreateCheckoutRequest(2, 2))
@@ -341,6 +356,7 @@ internal fun paymentRoutes(
             val command =
                 validating {
                     require(input.expectedDocumentVersion > 0 && input.expectedBusinessRevision > 0)
+                    require(input.restartToken == null || input.restartToken.matches(restartTokenShape))
                     CheckoutCommand(
                         paymentUuid(id),
                         paymentBearer(request),
@@ -348,6 +364,7 @@ internal fun paymentRoutes(
                         input.expectedDocumentVersion,
                         input.expectedBusinessRevision,
                         input.amountMinor,
+                        input.restartToken,
                     )
                 }
             Response(Status.OK).with(redirectBody of checkNotNull(operations).checkout(command).response())
@@ -465,7 +482,7 @@ private fun CheckoutMode.response() =
     }
 
 private fun CheckoutRedirect.response() =
-    CheckoutResponse(attemptId.toString(), url, state.name, outcome.name, uiMode.response(), clientSecret)
+    CheckoutResponse(attemptId.toString(), url, state.name, outcome.name, uiMode.response(), clientSecret, replacedAttemptId?.toString())
 
 private fun CustomerPaymentSummary.response() =
     CustomerPaymentResponse(
@@ -491,4 +508,5 @@ private fun CustomerPaymentSummary.response() =
         reconciliationPending,
         history.map { CustomerPaymentReceiptResponse(it.amount.toPlainString(), it.refunded.toPlainString(), it.receivedAt) },
         checkoutRecoveryAvailable,
+        checkoutRestartToken,
     )

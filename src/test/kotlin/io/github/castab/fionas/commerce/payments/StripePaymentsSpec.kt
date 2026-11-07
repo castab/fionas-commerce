@@ -127,32 +127,36 @@ internal class FakeStripe(
 
     override fun expire(sessionId: String): StripeCheckout {
         onExpire?.invoke()
-        return change(sessionId, "expired", "unpaid")
+        return synchronized(sessions) {
+            check(sessions.getValue(sessionId).state == "open") { "Stripe cannot expire a non-open Checkout Session" }
+            change(sessionId, "expired", "unpaid")
+        }
     }
 
     fun change(
         sessionId: String,
         state: String = "complete",
         paid: String = "paid",
-    ): StripeCheckout {
-        val original = checkNotNull(sessions[sessionId])
-        return StripeCheckout(
-            original.id,
-            original.attemptId,
-            original.amountMinor,
-            original.currency,
-            original.liveMode,
-            state,
-            paid,
-            if (state == "complete") "pi_${original.attemptId}" else original.paymentIntentId,
-            original.expiresAt,
-            if (state == "open") original.url else null,
-            TEST_INSTANT,
-            original.authorizationProof,
-            original.uiMode,
-            original.clientSecret,
-        ).also { sessions[sessionId] = it }
-    }
+    ): StripeCheckout =
+        synchronized(sessions) {
+            val original = checkNotNull(sessions[sessionId])
+            StripeCheckout(
+                original.id,
+                original.attemptId,
+                original.amountMinor,
+                original.currency,
+                original.liveMode,
+                state,
+                paid,
+                if (state == "complete") "pi_${original.attemptId}" else original.paymentIntentId,
+                original.expiresAt,
+                if (state == "open") original.url else null,
+                TEST_INSTANT,
+                original.authorizationProof,
+                original.uiMode,
+                original.clientSecret,
+            ).also { sessions[sessionId] = it }
+        }
 
     override fun verify(
         rawBody: String,

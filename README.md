@@ -2033,11 +2033,12 @@ generate these contracts in OpenAPI.
 The official Java SDK is pinned to 34.1.0 / snapshot API 2026-10-28.endive.
 Requests authenticate as Fiona's direct merchant: no `Stripe-Account`/Connect context;
 the key's own merchant identity is checked once per adapter, before any checkout attempt is
-recorded; a mismatch answers 503 `stripe_disabled` and leaves no attempt. An explicit checkout POST can
-recover an abandoned Session without the original browser key: only confirmed provider
-expiration/failure permits replacement, while open, processing and unknown outcomes stay
-protected. Summary GET is side-effect-free and exposes `checkoutRecoveryAvailable` for
-the frontend's deliberate recovery action.
+recorded; a mismatch answers 503 `stripe_disabled` and leaves no attempt. A customer can
+deliberately restart an abandoned Checkout from the same payment link without its
+original browser key. The checkout POST can take a `restartToken` from the side-effect-free
+summary. Stripe must confirm the old Session expired unpaid before Commerce can
+authorize the newly reviewed amount. Processing and uncertain outcomes keep collection
+reserved. The separate `checkoutRecoveryAvailable` hint supports ordinary recovery.
 Staff must explicitly receive the new `fionas.payment-access.manage` permission;
 no role grants are silently changed. Existing manual payment APIs retain their behavior.
 

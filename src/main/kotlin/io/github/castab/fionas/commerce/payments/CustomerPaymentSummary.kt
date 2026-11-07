@@ -36,6 +36,7 @@ data class CustomerPaymentSummary(
     val reconciliationPending: Boolean,
     val history: List<CustomerPaymentHistory>,
     val checkoutRecoveryAvailable: Boolean = false,
+    val checkoutRestartToken: String? = null,
 )
 
 internal fun customerPaymentSummary(

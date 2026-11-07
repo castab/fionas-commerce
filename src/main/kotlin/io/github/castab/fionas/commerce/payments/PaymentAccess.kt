@@ -44,12 +44,24 @@ internal class PaymentAccessSecrets(
     fun bearer(
         publicId: UUID,
         generation: String,
-    ): String {
+    ): String = sign("fionas.payment-access.v1:$publicId:$generation")
+
+    // Attempts are append-only. The count fences the target even after its reservation is released.
+    fun restartTarget(
+        access: PaymentAccess,
+        attemptId: UUID,
+        attemptCount: Int,
+    ): String = "$attemptId." + sign("fionas.checkout-restart.v1:${access.publicId}:${access.generation}:$attemptId:$attemptCount")
+
+    fun restartReview(
+        target: String,
+        terms: String,
+    ): String = sign("fionas.checkout-restart-review.v1:$target:$terms")
+
+    private fun sign(value: String): String {
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(configuration.accessKey, "HmacSHA256"))
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(
-            mac.doFinal("fionas.payment-access.v1:$publicId:$generation".toByteArray(UTF_8)),
-        )
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal(value.toByteArray(UTF_8)))
     }
 
     fun hash(value: String): String =

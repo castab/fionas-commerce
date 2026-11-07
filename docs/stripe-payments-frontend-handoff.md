@@ -282,15 +282,48 @@ solely because `canPay:false` / `PAYMENT_IN_PROGRESS`: when recovery is availabl
 “Check previous payment and continue”. Keep the ordinary Pay button disabled.
 
 If the original key/body are available, retry them to recover exactly that authorization.
-If the customer returned in another browser or lost sessionStorage, their stable link is
-sufficient: fetch the current summary, show its terms, then submit the existing checkout
-endpoint with a fresh UUID key and reviewed versions on a deliberate click. The server
-checks at most one observed active attempt outside PostgreSQL and reconciles it before
-deciding whether to authorize anything new. Confirmed expired/failed Sessions permit a
-replacement against current terms. A still-open Session never gets a replacement; the
-customer can resume the original checkout if available or wait for confirmed expiration.
-PROCESSING never becomes failure merely because time passed. A paid Session is reconciled,
-then the API requires a fresh summary/decision rather than immediately charging an Invoice.
+A new key without restart intent can check one previous Session and proceed after
+confirmed expiration or failure. An open Session keeps its reservation under this flow.
+
+### Restart Checkout
+
+When the summary includes `checkoutRestartToken`, offer **Restart checkout**, even
+with `canPay:false` / `PAYMENT_IN_PROGRESS`. Show the current deposit or let the
+customer select a permitted Invoice amount. Explain that restarting closes the old
+unpaid Checkout. On a deliberate click, send a fresh UUID key and the reviewed body
+to the same POST, with the opaque token copied as `restartToken`:
+
+```json
+{
+  "expectedDocumentVersion": 6,
+  "expectedBusinessRevision": 8,
+  "amountMinor": 25000,
+  "restartToken": "<checkoutRestartToken from the summary>"
+}
+```
+
+Omit `amountMinor` for a full deposit. The token targets the reviewed attempt and
+financial state. Keep the same key and exact body, including the token, for retries
+after an ambiguous response. The old browser key is unnecessary. Page load, summary
+polling, mounting failures and normal retries should never trigger a restart.
+
+```json
+{
+  "attemptId": "8cf42464-739b-43ca-b684-d0f802245c55",
+  "replacedAttemptId": "99ba495c-4747-4dc4-87ed-69357de3cba9",
+  "uiMode": "ELEMENTS",
+  "clientSecret": "<fresh Checkout Session client secret>",
+  "state": "OPEN",
+  "outcome": "PENDING"
+}
+```
+
+`replacedAttemptId` identifies the expired attempt. For an OPEN response, mount
+against the new attempt ID and launch credential using the existing mode handling.
+If the summary no longer offers restart and shows `canPay:true`, let the customer
+review current terms and start ordinary Checkout. Use the pending state when the old
+payment is processing. If payment already succeeded, fetch the summary before offering
+any further payment.
 
 Recovery conflicts below create no new authorization and claim no new key. They must not
 start a fresh-key retry loop. Poll the summary with bounded backoff while visible; another
@@ -321,12 +354,14 @@ All errors use runtime `ErrorResponse` (or its validation response): `code`, `me
 | 400 `malformed_request` | Fix body/header shape; do not automatically invent a new key |
 | 404 `not_found` | Link unavailable; ask staff for a current link |
 | 409 `conflict`, message `PAYMENT_TERMS_CHANGED` | Refresh; require review before a new key/payment |
+| 409 `payment_terms_changed` | Restart review is stale. Fetch the summary and require a fresh deliberate decision |
 | 409 `conflict`, message `CHECKOUT_KEY_REUSED` | Programming error: changed input reused a durable key |
-| 409 `checkout_in_progress` | Original Session is still open. Resume its saved URL/key if available or await expiration; never automatically create another key |
+| 409 `checkout_key_reused` | A restart and another command used the same key with different input. Preserve the original body for replay |
+| 409 `checkout_in_progress` | Original Session is still open. Offer deliberate restart if the refreshed summary provides a token |
 | 409 `payment_processing` | Provider payment is unsettled. Show pending and suppress new collection |
 | 409 `payment_state_changed` | Recovery recorded a payment. Fetch summary and require a fresh decision before any further payment |
 | 409 `checkout_recovery_conflict` | A competing command changed attempts. Refresh; do not follow it in an automatic recovery loop |
-| 409 `checkout_reconciliation_required` | Provider identity/outcome remains uncertain. Preserve context and contact staff |
+| 409 `checkout_reconciliation_required` | Provider identity/outcome remains uncertain. Retry the same key/body with bounded backoff, then offer support |
 | 409 `conflict`, message `RECONCILIATION_PENDING` | Stop collection and contact staff |
 | 422 `validation_failed` | Show safe validation; never reduce a deposit to a partial payment |
 | 503 `stripe_disabled` | Online payment unavailable (disabled, or a deployment merchant mismatch; no attempt was authorized); preserve all other staff/manual workflows |
