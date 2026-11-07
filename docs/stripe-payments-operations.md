@@ -288,7 +288,7 @@ For deliberate customer restart, the summary's `checkoutRestartToken` identifies
 attempt and the financial state the customer reviewed. The customer submits it as
 `restartToken` with a fresh key and current payment amount. Commerce validates the
 capability, target, financial review and amount under the same canonical association
-lock before provider I/O, again before requesting expiration, and before reserving
+lock before provider recovery, again before requesting expiration, and before reserving
 the replacement. An intervening authorization invalidates the token even if it has
 already settled. Replays of a committed key still address its own attempt.
 

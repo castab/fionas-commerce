@@ -131,7 +131,7 @@ class CustomerPayments(
             val request = requests.read(transaction, capability.inquiryId)
             val summary = customerPaymentSummary(request, collectionAttempts(transaction, history))
             val target = history.singleOrNull { it.state == StripeAttemptState.OPEN || it.state == StripeAttemptState.CREATING }
-            if (summary.checkoutRecoveryAvailable && target != null) {
+            if (summary.unavailableReason == "PAYMENT_IN_PROGRESS" && target != null) {
                 val fence = secrets.restartTarget(capability, target.id, history.size)
                 val review = secrets.restartReview(fence, checkoutTerms(request, summary).review())
                 summary.copy(checkoutRestartToken = "$fence.$review")
@@ -144,9 +144,8 @@ class CustomerPayments(
         val ordinaryFingerprint = "v1:${command.documentVersion}:${command.businessRevision}:${command.amountMinor ?: "BALANCE"}"
         val fingerprint = command.restartToken?.let { "restart:$it:$ordinaryFingerprint" } ?: ordinaryFingerprint
         // Outside PostgreSQL and before any authorization: a merchant mismatch must not leave an active attempt.
-        if (command.restartToken == null) verifyMerchant()
+        if (command.restartToken == null) verifyMerchant() else observeStripe { verifyMerchant() }
         val selected = selectCheckout(command, fingerprint)
-        if (command.restartToken != null) observeStripe { verifyMerchant() }
         val attempt =
             if (selected.recoverActive) {
                 // One observed attempt per command. A competing replacement is never followed in a retry loop.

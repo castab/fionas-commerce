@@ -52,6 +52,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             fake.onDiscover = null
             fake.onExpire = null
             fake.timeoutNext = false
+            fake.merchantMismatch = false
         }
 
         data class Scenario(
@@ -200,12 +201,108 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             val s = scenario()
             val old = redirect(checkout(s))
             val review = summary(s)
+            review.unavailableReason shouldBe "PAYMENT_IN_PROGRESS"
+            review.checkoutRestartToken shouldNotBe null
             restartCheckout(s, review, 12499).status shouldBe Status.UNPROCESSABLE_ENTITY
             session(old).state shouldBe "open"
             val replacement = redirect(restartCheckout(s, review, 12500))
             replacement.replacedAttemptId shouldBe old.attemptId
             session(old).state shouldBe "expired"
             session(replacement).amountMinor shouldBe 12500
+        }
+
+        test("restart of an already reconciled expiry verifies the merchant before selecting or claiming a key") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            val key = UUID.randomUUID().toString()
+            val created = fake.created.get()
+            val receipts = app.database.count("commerce.payment_records")
+            fake.expire(session(old).id)
+            webhook(session(old).id, "checkout.session.expired").status shouldBe Status.NO_CONTENT
+            attempts(s).single().state shouldBe "EXPIRED"
+            summary(s).checkoutRestartToken shouldBe null
+
+            fake.merchantMismatch = true
+            val stale = review.copy(document = review.document.copy(version = review.document.version + 1))
+            // Even a request that selection would reject must encounter the merchant check first.
+            listOf(restartCheckout(s, review, key = key), restartCheckout(s, stale)).forEach { refused ->
+                refused.status shouldBe Status.SERVICE_UNAVAILABLE
+                refused.header("Cache-Control") shouldBe "no-store"
+                CommerceJson.asA(refused.bodyString(), ErrorResponse.serializer()).code shouldBe "stripe_disabled"
+            }
+            attempts(s).single().id shouldBe old.attemptId
+            attempts(s).single().state shouldBe "EXPIRED"
+            fake.created.get() shouldBe created
+            app.database.count("commerce.payment_records") shouldBe receipts
+            app.database.strings("SELECT request_key FROM fionas.stripe_payment_attempts WHERE request_key = '$key'") shouldBe emptyList()
+
+            fake.merchantMismatch = false
+            val replacement = redirect(restartCheckout(s, review, key = key))
+            replacement.replacedAttemptId shouldBe old.attemptId
+            replacement.state shouldBe "OPEN"
+            attempts(s).size shouldBe 2
+            fake.created.get() shouldBe created + 1
+        }
+
+        test("a locally open Invoice attempt cannot hide an ineligible balance or a closed booking") {
+            val s = scenario()
+            book(s)
+            val old = redirect(checkout(s, amount = 40000))
+            val review = summary(s)
+            review.unavailableReason shouldBe "PAYMENT_IN_PROGRESS"
+            review.checkoutRestartToken shouldNotBe null
+
+            fun recordManual(amount: String) {
+                app
+                    .adminPost(
+                        "/financial-documents/${review.document.id}/payments",
+                        """{"documentVersion":${review.document.version},"amount":"$amount","method":"CASH"}""",
+                    ).status shouldBe Status.CREATED
+            }
+
+            fun assertBlocked(reason: String) {
+                val current = summary(s)
+                current.canPay shouldBe false
+                current.paymentInProgress shouldBe true
+                current.checkoutRecoveryAvailable shouldBe true
+                current.unavailableReason shouldBe reason
+                current.checkoutRestartToken shouldBe null
+            }
+
+            val retrieves = fake.retrieves.get()
+            recordManual("499.75")
+            assertBlocked("BELOW_STRIPE_MINIMUM")
+            recordManual("0.25")
+            assertBlocked("NO_PAYMENT_DUE")
+            app.adminPost("/inquiries/${s.id}/served").status shouldBe Status.OK
+            app.adminPost("/inquiries/${s.id}/close").status shouldBe Status.OK
+            assertBlocked("CLOSED")
+            fake.retrieves.get() shouldBe retrieves
+            code(restartCheckout(s, review, 25000)) shouldBe "payment_terms_changed"
+            session(old).state shouldBe "open"
+        }
+
+        test("an unapplied receipt suppresses restart while a later Invoice Checkout is open") {
+            val s = scenario()
+            val oldDeposit = redirect(checkout(s))
+            fake.expire(session(oldDeposit).id)
+            webhook(session(oldDeposit).id, "checkout.session.expired").status shouldBe Status.NO_CONTENT
+            book(s)
+            val invoice = redirect(checkout(s, amount = 40000))
+            val review = summary(s)
+            review.checkoutRestartToken shouldNotBe null
+
+            // A late capture on the earlier deposit can no longer be allocated to its approved terms.
+            fake.change(session(oldDeposit).id)
+            webhook(session(oldDeposit).id).status shouldBe Status.NO_CONTENT
+            val blocked = summary(s)
+            blocked.paymentInProgress shouldBe true
+            blocked.reconciliationPending shouldBe true
+            blocked.unavailableReason shouldBe "RECONCILIATION_PENDING"
+            blocked.checkoutRestartToken shouldBe null
+            code(restartCheckout(s, review, 25000)) shouldBe "checkout_reconciliation_required"
+            session(invoice).state shouldBe "open"
         }
 
         test("restart cannot expire a processing payment and captures a completed payment exactly once") {
@@ -389,6 +486,16 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
                 code(restartCheckout(s, review, 25000)) shouldBe "payment_terms_changed"
                 session(old).state shouldBe if (duringExpiry) "expired" else "open"
                 attempts(s).size shouldBe 2
+                val current = summary(s)
+                if (duringExpiry) {
+                    current.checkoutRestartToken shouldBe null
+                } else {
+                    current.checkoutRestartToken shouldNotBe null
+                    current.checkoutRestartToken shouldNotBe review.checkoutRestartToken
+                    code(checkout(s, amount = 25000, snapshot = current, restartToken = review.checkoutRestartToken)) shouldBe
+                        "payment_terms_changed"
+                    redirect(restartCheckout(s, current, 25000)).replacedAttemptId shouldBe old.attemptId
+                }
             }
         }
 
@@ -561,6 +668,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             attempts(s).single().ledgerPaymentId shouldBe null
             webhook(session(old).id, "checkout.session.async_payment_failed").status shouldBe Status.NO_CONTENT
             attempts(s).single().state shouldBe "FAILED"
+            summary(s).checkoutRestartToken shouldBe null
             code(restartCheckout(s, review)) shouldBe "checkout_recovery_conflict"
             redirect(checkout(s)).attemptId shouldNotBe old.attemptId
         }
@@ -570,6 +678,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             checkout(s).status shouldBe Status.INTERNAL_SERVER_ERROR
             val old = attempts(s).single()
             old.state shouldBe "CREATING"
+            summary(s).checkoutRestartToken shouldNotBe null
             val count = fake.created.get()
             code(checkout(s)) shouldBe "checkout_in_progress"
             fake.created.get() shouldBe count

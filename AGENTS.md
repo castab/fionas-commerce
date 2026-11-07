@@ -1962,13 +1962,14 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   409 codes are `checkout_in_progress`, `payment_processing`, `payment_state_changed`,
   `checkout_recovery_conflict`, `checkout_reconciliation_required`.
 - **Deliberate customer restart.** GET may include an opaque `checkoutRestartToken` for
-  an OPEN or CREATING attempt with no pending reconciliation. Only a POST with
-  `restartToken` requests replacement. The signed target binds the inquiry capability
+  an OPEN or CREATING attempt when the active attempt is the only collection blocker.
+  Financial ineligibility takes precedence over `PAYMENT_IN_PROGRESS` in the summary.
+  Only a POST with `restartToken` requests replacement. The signed target binds the inquiry capability
   generation, attempt UUID and append-only attempt count. A separate signature binds
   the reviewed financial state including ledger receipts and deposit revision. A
   competing authorization invalidates the target even if the competitor already settled.
   Validate access, target, reviewed terms and requested amount under the association
-  lock before Stripe I/O, again before deliberate expiration, and before authorizing.
+  lock before provider recovery, again before deliberate expiration, and before authorizing.
   Reuse trusted retrieval/recovery, expiration and reconciliation. Only a verified
   OPEN unpaid Session can be explicitly expired, and only a verified EXPIRED unpaid
   Session releases it for restart. After an ambiguous expiration, retrieve the same

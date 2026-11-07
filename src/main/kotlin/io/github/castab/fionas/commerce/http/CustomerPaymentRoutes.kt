@@ -83,7 +83,7 @@ data class CustomerPaymentResponse(
     @ApiProperty(description = "An active attempt can be checked by POST checkout-sessions with a fresh key; GET performs no provider I/O.")
     val checkoutRecoveryAvailable: Boolean = false,
     @ApiProperty(
-        description = "Opaque target for a deliberate restart POST. Availability is a local hint; GET does not contact Stripe.",
+        description = "Opaque target for a deliberate restart POST when an OPEN or CREATING attempt is the only collection blocker.",
     )
     val checkoutRestartToken: String? = null,
 )

@@ -288,8 +288,10 @@ confirmed expiration or failure. An open Session keeps its reservation under thi
 ### Restart Checkout
 
 When the summary includes `checkoutRestartToken`, offer **Restart checkout**, even
-with `canPay:false` / `PAYMENT_IN_PROGRESS`. Show the current deposit or let the
-customer select a permitted Invoice amount. Explain that restarting closes the old
+with `canPay:false` / `PAYMENT_IN_PROGRESS`. The token appears only when an OPEN or
+CREATING attempt is the only collection blocker. If the booking is otherwise
+ineligible, show its `unavailableReason`. Show the current deposit or let the customer
+select a permitted Invoice amount. Explain that restarting closes the old
 unpaid Checkout. On a deliberate click, send a fresh UUID key and the reviewed body
 to the same POST, with the opaque token copied as `restartToken`:
 
