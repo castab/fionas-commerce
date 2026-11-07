@@ -11,6 +11,7 @@ import io.github.castab.fionas.commerce.http.StaffRequestResponse
 import io.github.castab.fionas.commerce.http.StripeAttemptsResponse
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.TestApplication
+import io.github.castab.fionas.commerce.testing.TestLine
 import io.github.castab.fionas.commerce.testing.createInquiry
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -49,7 +50,9 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             fake.onCreate = null
             fake.onRetrieve = null
             fake.onDiscover = null
+            fake.onExpire = null
             fake.timeoutNext = false
+            fake.merchantMismatch = false
         }
 
         data class Scenario(
@@ -58,7 +61,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
         )
 
         fun scenario(): Scenario {
-            val id = app.createInquiry()
+            val id = app.createInquiry(lines = listOf(TestLine("Catering", unitPrice = "625.00")))
             app
                 .adminPost(
                     "/staff/requests/$id/proposals",
@@ -87,8 +90,10 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             amount: Long? = null,
             snapshot: CustomerPaymentResponse = summary(s),
             instance: TestApplication = app,
+            restartToken: String? = null,
         ): Response {
             val amountJson = amount?.let { ",\"amountMinor\":$it" } ?: ""
+            val restartJson = restartToken?.let { ",\"restartToken\":\"$it\"" } ?: ""
             return instance.http(
                 Request(Method.POST, "/public/payments/${s.link.publicId}/checkout-sessions")
                     .header("X-Fionas-Payment-Token", token(s))
@@ -97,7 +102,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
                     .body(
                         """
                         {"expectedDocumentVersion":${snapshot.document.version},
-                        "expectedBusinessRevision":${snapshot.document.businessRevision}$amountJson}
+                        "expectedBusinessRevision":${snapshot.document.businessRevision}$amountJson$restartJson}
                         """.trimIndent(),
                     ),
             )
@@ -148,6 +153,385 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             val database = app.database
             app.runtime.close()
             app = TestApplication.create(clock = clock, stripe = configuration, stripeGateway = fake, database = database)
+        }
+
+        fun restartCheckout(
+            s: Scenario,
+            snapshot: CustomerPaymentResponse,
+            amount: Long? = null,
+            key: String = UUID.randomUUID().toString(),
+            instance: TestApplication = app,
+        ) = checkout(s, key, amount, snapshot, instance, checkNotNull(snapshot.checkoutRestartToken))
+
+        test("customer restarts a 400 dollar Invoice Checkout for 250 dollars and old keys remain pinned") {
+            val s = scenario()
+            book(s)
+            summary(s).balance.toBigDecimal().compareTo(BigDecimal("500")) shouldBe 0
+            val original = summary(s)
+            val oldKey = UUID.randomUUID().toString()
+            val old = redirect(checkout(s, oldKey, amount = 40000, snapshot = original))
+            old.replacedAttemptId shouldBe null
+            val review = summary(s)
+            review.canPay shouldBe false
+            review.checkoutRestartToken shouldNotBe null
+            session(old).state shouldBe "open"
+            code(checkout(s, amount = 25000, snapshot = review)) shouldBe "checkout_in_progress"
+            session(old).state shouldBe "open"
+
+            val key = UUID.randomUUID().toString()
+            val replacement = redirect(restartCheckout(s, review, 25000, key))
+            replacement.replacedAttemptId shouldBe old.attemptId
+            session(replacement).amountMinor shouldBe 25000
+            session(old).state shouldBe "expired"
+            session(replacement).state shouldBe "open"
+            redirect(restartCheckout(s, review, 25000, key)).attemptId shouldBe replacement.attemptId
+            code(restartCheckout(s, review, 30000, key)) shouldBe "checkout_key_reused"
+            code(checkout(s, key, amount = 25000, snapshot = review)) shouldBe "checkout_key_reused"
+            code(restartCheckout(s, review, 25000)) shouldBe "checkout_recovery_conflict"
+            redirect(checkout(s, oldKey, amount = 40000, snapshot = original)).state shouldBe "EXPIRED"
+            webhook(session(old).id, "checkout.session.expired").status shouldBe Status.NO_CONTENT
+            fake.change(session(replacement).id)
+            repeat(2) { webhook(session(replacement).id).status shouldBe Status.NO_CONTENT }
+            attempts(s).size shouldBe 3
+            summary(s).history.size shouldBe 2
+            summary(s).balance.toBigDecimal().compareTo(BigDecimal("250")) shouldBe 0
+        }
+
+        test("restart preserves the full approved deposit and permits the same amount immediately") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            review.unavailableReason shouldBe "PAYMENT_IN_PROGRESS"
+            review.checkoutRestartToken shouldNotBe null
+            restartCheckout(s, review, 12499).status shouldBe Status.UNPROCESSABLE_ENTITY
+            session(old).state shouldBe "open"
+            val replacement = redirect(restartCheckout(s, review, 12500))
+            replacement.replacedAttemptId shouldBe old.attemptId
+            session(old).state shouldBe "expired"
+            session(replacement).amountMinor shouldBe 12500
+        }
+
+        test("restart of an already reconciled expiry verifies the merchant before selecting or claiming a key") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            val key = UUID.randomUUID().toString()
+            val created = fake.created.get()
+            val receipts = app.database.count("commerce.payment_records")
+            fake.expire(session(old).id)
+            webhook(session(old).id, "checkout.session.expired").status shouldBe Status.NO_CONTENT
+            attempts(s).single().state shouldBe "EXPIRED"
+            summary(s).checkoutRestartToken shouldBe null
+
+            fake.merchantMismatch = true
+            val stale = review.copy(document = review.document.copy(version = review.document.version + 1))
+            // Even a request that selection would reject must encounter the merchant check first.
+            listOf(restartCheckout(s, review, key = key), restartCheckout(s, stale)).forEach { refused ->
+                refused.status shouldBe Status.SERVICE_UNAVAILABLE
+                refused.header("Cache-Control") shouldBe "no-store"
+                CommerceJson.asA(refused.bodyString(), ErrorResponse.serializer()).code shouldBe "stripe_disabled"
+            }
+            attempts(s).single().id shouldBe old.attemptId
+            attempts(s).single().state shouldBe "EXPIRED"
+            fake.created.get() shouldBe created
+            app.database.count("commerce.payment_records") shouldBe receipts
+            app.database.strings("SELECT request_key FROM fionas.stripe_payment_attempts WHERE request_key = '$key'") shouldBe emptyList()
+
+            fake.merchantMismatch = false
+            val replacement = redirect(restartCheckout(s, review, key = key))
+            replacement.replacedAttemptId shouldBe old.attemptId
+            replacement.state shouldBe "OPEN"
+            attempts(s).size shouldBe 2
+            fake.created.get() shouldBe created + 1
+        }
+
+        test("a locally open Invoice attempt cannot hide an ineligible balance or a closed booking") {
+            val s = scenario()
+            book(s)
+            val old = redirect(checkout(s, amount = 40000))
+            val review = summary(s)
+            review.unavailableReason shouldBe "PAYMENT_IN_PROGRESS"
+            review.checkoutRestartToken shouldNotBe null
+
+            fun recordManual(amount: String) {
+                app
+                    .adminPost(
+                        "/financial-documents/${review.document.id}/payments",
+                        """{"documentVersion":${review.document.version},"amount":"$amount","method":"CASH"}""",
+                    ).status shouldBe Status.CREATED
+            }
+
+            fun assertBlocked(reason: String) {
+                val current = summary(s)
+                current.canPay shouldBe false
+                current.paymentInProgress shouldBe true
+                current.checkoutRecoveryAvailable shouldBe true
+                current.unavailableReason shouldBe reason
+                current.checkoutRestartToken shouldBe null
+            }
+
+            val retrieves = fake.retrieves.get()
+            recordManual("499.75")
+            assertBlocked("BELOW_STRIPE_MINIMUM")
+            recordManual("0.25")
+            assertBlocked("NO_PAYMENT_DUE")
+            app.adminPost("/inquiries/${s.id}/served").status shouldBe Status.OK
+            app.adminPost("/inquiries/${s.id}/close").status shouldBe Status.OK
+            assertBlocked("CLOSED")
+            fake.retrieves.get() shouldBe retrieves
+            code(restartCheckout(s, review, 25000)) shouldBe "payment_terms_changed"
+            session(old).state shouldBe "open"
+        }
+
+        test("an unapplied receipt suppresses restart while a later Invoice Checkout is open") {
+            val s = scenario()
+            val oldDeposit = redirect(checkout(s))
+            fake.expire(session(oldDeposit).id)
+            webhook(session(oldDeposit).id, "checkout.session.expired").status shouldBe Status.NO_CONTENT
+            book(s)
+            val invoice = redirect(checkout(s, amount = 40000))
+            val review = summary(s)
+            review.checkoutRestartToken shouldNotBe null
+
+            // A late capture on the earlier deposit can no longer be allocated to its approved terms.
+            fake.change(session(oldDeposit).id)
+            webhook(session(oldDeposit).id).status shouldBe Status.NO_CONTENT
+            val blocked = summary(s)
+            blocked.paymentInProgress shouldBe true
+            blocked.reconciliationPending shouldBe true
+            blocked.unavailableReason shouldBe "RECONCILIATION_PENDING"
+            blocked.checkoutRestartToken shouldBe null
+            code(restartCheckout(s, review, 25000)) shouldBe "checkout_reconciliation_required"
+            session(invoice).state shouldBe "open"
+        }
+
+        test("restart cannot expire a processing payment and captures a completed payment exactly once") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            fake.change(session(old).id, paid = "unpaid")
+            var expirations = 0
+            fake.onExpire = { expirations++ }
+            code(restartCheckout(s, review)) shouldBe "payment_processing"
+            summary(s).checkoutRestartToken shouldBe null
+            fake.change(session(old).id)
+            code(restartCheckout(s, review)) shouldBe "payment_state_changed"
+            webhook(session(old).id, "checkout.session.expired").status shouldBe Status.NO_CONTENT
+            webhook(session(old).id).status shouldBe Status.NO_CONTENT
+            attempts(s).single().state shouldBe "SUCCEEDED"
+            summary(s).history.size shouldBe 1
+            expirations shouldBe 0
+        }
+
+        test("completion and a webhook during the expiry request win over customer restart") {
+            listOf(false, true).forEach { deliverWebhook ->
+                val s = scenario()
+                val old = redirect(checkout(s))
+                val review = summary(s)
+                fake.onExpire = {
+                    fake.change(session(old).id)
+                    if (deliverWebhook) webhook(session(old).id).status shouldBe Status.NO_CONTENT
+                }
+                code(restartCheckout(s, review)) shouldBe "payment_state_changed"
+                attempts(s).single().state shouldBe "SUCCEEDED"
+                webhook(session(old).id).status shouldBe Status.NO_CONTENT
+                summary(s).history.size shouldBe 1
+            }
+        }
+
+        test("unconfirmed expiration and provider retrieval failures keep the reservation") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            val key = UUID.randomUUID().toString()
+            fake.onRetrieve = { error("Simulated provider retrieval failure") }
+            code(restartCheckout(s, review, key = key)) shouldBe "checkout_reconciliation_required"
+            fake.onRetrieve = null
+            fake.onExpire = { error("Simulated expiry timeout without provider mutation") }
+            code(restartCheckout(s, review, key = key)) shouldBe "checkout_reconciliation_required"
+            session(old).state shouldBe "open"
+            attempts(s).single().state shouldBe "OPEN"
+            fake.onExpire = null
+            redirect(restartCheckout(s, review, key = key)).replacedAttemptId shouldBe old.attemptId
+        }
+
+        test("a lost expiry response and process restart recover the same target, then creation retries retain their key") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            val key = UUID.randomUUID().toString()
+            fake.onExpire = {
+                fake.change(session(old).id, "expired", "unpaid")
+                fake.onRetrieve = { error("Provider unavailable after expiry") }
+                error("Simulated lost expiry response")
+            }
+            code(restartCheckout(s, review, key = key)) shouldBe "checkout_reconciliation_required"
+            attempts(s).single().state shouldBe "OPEN"
+            fake.onExpire = null
+            fake.onRetrieve = null
+            val restarted = TestApplication.create(clock = clock, stripe = config, stripeGateway = fake, database = app.database)
+            try {
+                fake.timeoutNext = true
+                restartCheckout(s, review, key = key, instance = restarted).status shouldBe Status.INTERNAL_SERVER_ERROR
+                val pending = attempts(s).single { it.id != old.attemptId }
+                pending.state shouldBe "CREATING"
+                val recovered = redirect(restartCheckout(s, review, key = key, instance = restarted))
+                recovered.attemptId shouldBe pending.id
+                recovered.replacedAttemptId shouldBe old.attemptId
+                attempts(s).size shouldBe 2
+            } finally {
+                restarted.runtime.close()
+            }
+        }
+
+        test("an unverified provider Session cannot be expired or replaced") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val provider = session(old)
+            val review = summary(s)
+            fake.sessions[provider.id] =
+                StripeCheckout(
+                    provider.id,
+                    provider.attemptId,
+                    provider.amountMinor,
+                    provider.currency,
+                    provider.liveMode,
+                    "open",
+                    "unpaid",
+                    null,
+                    provider.expiresAt,
+                    null,
+                    null,
+                    "invalid-proof",
+                    provider.uiMode,
+                )
+            var expirations = 0
+            fake.onExpire = { expirations++ }
+            code(restartCheckout(s, review)) shouldBe "checkout_reconciliation_required"
+            attempts(s).single().state shouldBe "OPEN"
+            expirations shouldBe 0
+        }
+
+        test("distinct keys and same-key replicas converge on one replacement of the reviewed target") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            val entered = CountDownLatch(3)
+            val release = CountDownLatch(1)
+            fake.onExpire = {
+                entered.countDown()
+                check(release.await(15, TimeUnit.SECONDS))
+            }
+            val other = TestApplication.create(clock = clock, stripe = config, stripeGateway = fake, database = app.database)
+            val shared = UUID.randomUUID().toString()
+            val competing = UUID.randomUUID().toString()
+            try {
+                val calls =
+                    listOf(shared to app, shared to other, competing to other).map { (key, instance) ->
+                        CompletableFuture.supplyAsync { restartCheckout(s, review, key = key, instance = instance) }
+                    }
+                entered.await(10, TimeUnit.SECONDS) shouldBe true
+                release.countDown()
+                val responses = calls.map { it.get(20, TimeUnit.SECONDS) }
+                val successful = responses.filter { it.status == Status.OK }.map(::redirect)
+                successful.map { it.attemptId }.distinct().size shouldBe 1
+                successful.all { it.replacedAttemptId == old.attemptId } shouldBe true
+                responses.filter { it.status != Status.OK }.map(::code).distinct() shouldBe listOf("checkout_recovery_conflict")
+                responses[0].status shouldBe responses[1].status
+                attempts(s).size shouldBe 2
+                session(old).state shouldBe "expired"
+            } finally {
+                release.countDown()
+                other.runtime.close()
+            }
+        }
+
+        test("manual payment during expiration requires renewed review even when the selected partial remains affordable") {
+            val s = scenario()
+            book(s)
+            val old = redirect(checkout(s, amount = 40000))
+            val review = summary(s)
+            fake.onExpire = {
+                app
+                    .adminPost(
+                        "/financial-documents/${review.document.id}/payments",
+                        """{"documentVersion":${review.document.version},"amount":"10.00","method":"CASH"}""",
+                    ).status shouldBe Status.CREATED
+            }
+            code(restartCheckout(s, review, 25000)) shouldBe "payment_terms_changed"
+            session(old).state shouldBe "expired"
+            attempts(s).size shouldBe 2
+            code(restartCheckout(s, review, 25000)) shouldBe "payment_terms_changed"
+            checkout(s, amount = 50000).status shouldBe Status.UNPROCESSABLE_ENTITY
+            summary(s).history.size shouldBe 2
+        }
+
+        test("Invoice amendment invalidates the reviewed restart before or during expiration") {
+            listOf(false, true).forEach { duringExpiry ->
+                val s = scenario()
+                book(s)
+                val old = redirect(checkout(s, amount = 40000))
+                val review = summary(s)
+                val amend: () -> Unit = {
+                    app
+                        .adminPost(
+                            "/financial-documents/${review.document.id}/change-orders",
+                            """
+                            {"expectedVersion":${review.document.version},"expectedInvoiceRevision":${review.document.businessRevision},
+                            "lines":[${TestLine("Amended catering", unitPrice = "600.00").new("amended")}]}
+                            """.trimIndent(),
+                        ).status shouldBe Status.OK
+                }
+                if (duringExpiry) fake.onExpire = amend else amend()
+                code(restartCheckout(s, review, 25000)) shouldBe "payment_terms_changed"
+                session(old).state shouldBe if (duringExpiry) "expired" else "open"
+                attempts(s).size shouldBe 2
+                val current = summary(s)
+                if (duringExpiry) {
+                    current.checkoutRestartToken shouldBe null
+                } else {
+                    current.checkoutRestartToken shouldNotBe null
+                    current.checkoutRestartToken shouldNotBe review.checkoutRestartToken
+                    code(checkout(s, amount = 25000, snapshot = current, restartToken = review.checkoutRestartToken)) shouldBe
+                        "payment_terms_changed"
+                    redirect(restartCheckout(s, current, 25000)).replacedAttemptId shouldBe old.attemptId
+                }
+            }
+        }
+
+        test("a deposit revision during expiration requires review and a newly approved full deposit") {
+            val s = scenario()
+            val old = redirect(checkout(s))
+            val review = summary(s)
+            fake.onExpire = {
+                app
+                    .adminPost(
+                        "/staff/requests/${s.id}/proposals/deposit-revisions",
+                        """
+                        {"expectedDocumentVersion":${review.document.version},"expectedDepositRequirementRevision":1,
+                        "expectedQuoteRevision":${review.document.businessRevision},"terms":{"type":"PERCENTAGE","percentage":"25"}}
+                        """.trimIndent(),
+                    ).status shouldBe Status.OK
+            }
+            code(restartCheckout(s, review)) shouldBe "payment_terms_changed"
+            session(old).state shouldBe "expired"
+            attempts(s).size shouldBe 1
+            checkout(s, amount = 12500).status shouldBe Status.UNPROCESSABLE_ENTITY
+            session(redirect(checkout(s))).amountMinor shouldBe 15625
+        }
+
+        test("rotated or revoked payment access during expiration prevents replacement") {
+            listOf("rotate", "revoke").forEach { action ->
+                val s = scenario()
+                val old = redirect(checkout(s))
+                val review = summary(s)
+                fake.onExpire = {
+                    app.adminPost("/staff/requests/${s.id}/payment-access/$action").status shouldBe Status.OK
+                }
+                restartCheckout(s, review).status shouldBe Status.NOT_FOUND
+                session(old).state shouldBe "expired"
+                attempts(s).size shouldBe 1
+            }
         }
 
         test("restart and rollout preserve modes and branding on ambiguous and attached attempts") {
@@ -276,6 +660,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
         test("unsettled processing remains protected after elapsed time and signed failure must commit before replacement") {
             val s = scenario()
             val old = redirect(checkout(s))
+            val review = summary(s)
             fake.change(session(old).id, paid = "unpaid")
             clock.instant = clock.instant.plusSeconds(259200)
             code(checkout(s)) shouldBe "payment_processing"
@@ -283,6 +668,8 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             attempts(s).single().ledgerPaymentId shouldBe null
             webhook(session(old).id, "checkout.session.async_payment_failed").status shouldBe Status.NO_CONTENT
             attempts(s).single().state shouldBe "FAILED"
+            summary(s).checkoutRestartToken shouldBe null
+            code(restartCheckout(s, review)) shouldBe "checkout_recovery_conflict"
             redirect(checkout(s)).attemptId shouldNotBe old.attemptId
         }
         test("a lost creation response reuses the original provider key inside its safe window") {
@@ -291,6 +678,7 @@ private fun stripeRecoveryTests(mode: CheckoutMode): FunSpec.() -> Unit =
             checkout(s).status shouldBe Status.INTERNAL_SERVER_ERROR
             val old = attempts(s).single()
             old.state shouldBe "CREATING"
+            summary(s).checkoutRestartToken shouldNotBe null
             val count = fake.created.get()
             code(checkout(s)) shouldBe "checkout_in_progress"
             fake.created.get() shouldBe count

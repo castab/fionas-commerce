@@ -115,6 +115,8 @@ class OpenApiDocumentSpec :
                 "checkout_in_progress",
                 "payment_processing",
                 "payment_state_changed",
+                "payment_terms_changed",
+                "checkout_key_reused",
                 "checkout_recovery_conflict",
                 "checkout_reconciliation_required",
             ).forEach { checkout.text("description") shouldContain it }
@@ -123,6 +125,14 @@ class OpenApiDocumentSpec :
             hint.text("type") shouldBe "boolean"
             hint.text("description") shouldContain "no provider I/O"
             schema("CustomerPaymentResponse").strings("required").contains("checkoutRecoveryAvailable") shouldBe false
+            listOf(
+                "CustomerPaymentResponse" to "checkoutRestartToken",
+                "CreateCheckoutRequest" to "restartToken",
+                "CheckoutResponse" to "replacedAttemptId",
+            ).forEach { (name, property) ->
+                schema(name).at("properties", property).text("type") shouldBe "string"
+                schema(name).strings("required").contains(property) shouldBe false
+            }
         }
         test("Checkout launch fields are customer-only and mode is required") {
             schema("CheckoutResponse").strings("required") shouldContainAll listOf("attemptId", "uiMode", "state", "outcome")

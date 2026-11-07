@@ -1961,6 +1961,26 @@ local financial replica or upstream change is needed. `commerce-runtime` remains
   and offers explicit POST recovery even when `canPay` is false. Stable runtime-envelope
   409 codes are `checkout_in_progress`, `payment_processing`, `payment_state_changed`,
   `checkout_recovery_conflict`, `checkout_reconciliation_required`.
+- **Deliberate customer restart.** GET may include an opaque `checkoutRestartToken` for
+  an OPEN or CREATING attempt when the active attempt is the only collection blocker.
+  Financial ineligibility takes precedence over `PAYMENT_IN_PROGRESS` in the summary.
+  Only a POST with `restartToken` requests replacement. The signed target binds the inquiry capability
+  generation, attempt UUID and append-only attempt count. A separate signature binds
+  the reviewed financial state including ledger receipts and deposit revision. A
+  competing authorization invalidates the target even if the competitor already settled.
+  Validate access, target, reviewed terms and requested amount under the association
+  lock before provider recovery, again before deliberate expiration, and before authorizing.
+  Reuse trusted retrieval/recovery, expiration and reconciliation. Only a verified
+  OPEN unpaid Session can be explicitly expired, and only a verified EXPIRED unpaid
+  Session releases it for restart. After an ambiguous expiration, retrieve the same
+  Session once. Paid results use the existing receipt transaction, PROCESSING waits,
+  and unknown outcomes keep the reservation. Changed terms yield `payment_terms_changed`
+  and require a new review even on an uncommitted retry. No transaction spans Stripe I/O.
+  The existing attempt insert claims the key and fingerprints the restart target/review
+  as well as the ordinary input. Once claimed, replay stays pinned to the replacement
+  attempt and returns the same `replacedAttemptId`. Until authorization, the same
+  key/body can recover from a crash after provider expiration. Existing keys and ordinary
+  POST recovery semantics remain compatible.
 - **Checkout presentation.** V11 adds immutable constrained `checkout_mode` (HOSTED/EMBEDDED),
   preserving V10 attempts as HOSTED. V14 extends the constraint to ELEMENTS.
   `FIONAS_STRIPE_CHECKOUT_MODE` accepts `hosted` (default), `embedded`, or `elements` for new

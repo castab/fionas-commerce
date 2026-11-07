@@ -36,6 +36,7 @@ data class CustomerPaymentSummary(
     val reconciliationPending: Boolean,
     val history: List<CustomerPaymentHistory>,
     val checkoutRecoveryAvailable: Boolean = false,
+    val checkoutRestartToken: String? = null,
 )
 
 internal fun customerPaymentSummary(
@@ -61,10 +62,10 @@ internal fun customerPaymentSummary(
             document is FinancialDocument.Estimate -> "NOT_PUBLISHED"
             document.currency.currencyCode != "USD" -> "UNSUPPORTED_CURRENCY"
             pending -> "RECONCILIATION_PENDING"
-            inProgress -> "PAYMENT_IN_PROGRESS"
             required.signum() <= 0 -> "NO_PAYMENT_DUE"
             required.movePointRight(2) < BigDecimal(50) -> "BELOW_STRIPE_MINIMUM"
             purpose == PaymentPurpose.DEPOSIT && required.movePointRight(2) > BigDecimal(99_999_999) -> "ABOVE_STRIPE_MAXIMUM"
+            inProgress -> "PAYMENT_IN_PROGRESS"
             else -> null
         }
     return CustomerPaymentSummary(
