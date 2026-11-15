@@ -2280,7 +2280,10 @@ relying on any other provider behavior, and never guess an endpoint.
 - **Provider connection.** Read and send configuration share `providerConnection`: an HTTPS
   origin, or HTTP only for loopback / a nonempty valid DNS hostname preceding the complete
   `.railway.internal` suffix (case-insensitive, total host length <=253, each label 1–63
-  ASCII letters/digits or interior hyphens). Optional ports and trailing-slash normalization
+  ASCII letters/digits or interior hyphens), or an exact case-insensitive match of an
+  operator-listed `FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` entry (empty by default; each entry one
+  DNS label, not all digits, so no dots, wildcards, ports, schemes or IP literals; validated only
+  when a feature is enabled; blank is unset). Optional ports and trailing-slash normalization
   remain supported; credentials, paths, queries and fragments are rejected. Credentials remain
   required for either enabled feature; neither client follows redirects. No generic HTTP override.
 - **Identity.** An inquiry's conversation is the provider topic (`booking`, the inquiry's

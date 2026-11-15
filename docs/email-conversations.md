@@ -345,7 +345,8 @@ evidence (only `ACCEPTED` rows are).
 |---|---|---|
 | `FIONAS_CONVERSATION_READ_ENABLED` | Enables timeline message reads | `false` |
 | `FIONAS_CONVERSATION_SEND_ENABLED` | Enables staff replies | `false` |
-| `FIONAS_CONVERSATION_BASE_URL` | Provider origin; HTTPS, or HTTP for loopback / Railway private DNS; no path, credentials, query or fragment | required when either is enabled |
+| `FIONAS_CONVERSATION_BASE_URL` | Provider origin; HTTPS, or HTTP for loopback / Railway private DNS / an allowlisted private hostname; no path, credentials, query or fragment | required when either is enabled |
+| `FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` | Opt-in, comma-separated exact single-label private hostnames (for example `rcs-dev`) that may use plain HTTP | empty (none) |
 | `FIONAS_CONVERSATION_API_KEY` | Provider `EMAIL_v2_API_KEY` | required when either is enabled |
 | `FIONAS_CONVERSATION_READ_TIMEOUT_MS` | Total timeline read budget (100–10000) | `5000` |
 | `FIONAS_CONVERSATION_SEND_TIMEOUT_MS` | Per provider request (1000–30000) | `10000` |
@@ -362,6 +363,7 @@ Both reading and sending use the same provider origin validation:
 | Public HTTPS | Yes |
 | Loopback HTTP | Yes |
 | Railway private HTTP (`*.railway.internal`) | Yes, with a nonempty service hostname of valid DNS labels |
+| Private container HTTP (exact `FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` entry) | Only when the operator lists that hostname; never by default |
 | Arbitrary private/public HTTP | No |
 | Origin with credentials, API path, query or fragment | No |
 
@@ -381,8 +383,28 @@ Both services must be able to communicate within the appropriate Railway private
 Syntactic acceptance does not guarantee DNS resolution or service connectivity. Hostname matching
 is case-insensitive and requires the complete `.railway.internal` suffix with valid DNS labels;
 the bare `railway.internal` and misleading suffixes are rejected. This exception is specific to
-Railway private service DNS, with no generic HTTP override. The base URL is an origin only;
-a trailing `/` is normalized, and application code appends the provider API paths automatically.
+Railway private service DNS. The base URL is an origin only; a trailing `/` is normalized, and
+application code appends the provider API paths automatically.
+
+Outside Railway, for example when Fiona and the provider are sibling Docker Compose services on a
+shared private network, the provider is reachable only by its container hostname over plain HTTP.
+Opt in by listing that exact hostname:
+
+```dotenv
+FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS=rcs-dev
+FIONAS_CONVERSATION_BASE_URL=http://rcs-dev:3000
+```
+
+`FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` is empty by default, so Railway and production keep the
+rules above unchanged. Each comma-separated entry must be one DNS label (letters, digits and
+interior hyphens, 1–63 characters, not all digits): dotted names, wildcards, ports, schemes and IP
+literals are rejected at startup, so an entry can only match a single-label name exactly and
+never a public DNS name or a suffix. Matching is exact and case-insensitive (`rcs-dev` does not
+permit `rcs-devx` or `rcs-dev.example.com`), and the base URL is still rejected if it carries
+credentials, a path, a query or a fragment. A blank value is treated as unset; the list is only
+validated when reading or sending is enabled. Use it only for a network where the provider
+hostname is not reachable from outside (such as a Docker user-defined bridge network), since the
+API key travels unencrypted on it. There is no generic HTTP override.
 
 Reads and sends are independent: with sending disabled, staff still read conversations. Never
 log the API key, bodies, HTML, payloads or routing addresses; Fiona's logs carry only event

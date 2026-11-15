@@ -86,14 +86,18 @@ internal fun providerConnection(env: Map<String, String>): Pair<URI, String> {
         } catch (_: Exception) {
             error("Invalid FIONAS_CONVERSATION_BASE_URL")
         }
+    val privateHttpHosts = privateHttpHosts(env)
     require(
         base.host != null &&
             base.userInfo == null &&
             base.query == null &&
             base.fragment == null &&
             base.path.isNullOrEmpty() &&
-            (base.scheme == "https" || (base.scheme == "http" && permitsProviderHttp(base.host))),
-    ) { "FIONAS_CONVERSATION_BASE_URL requires HTTPS (HTTP only for loopback or Railway private DNS) and an origin without credentials" }
+            (base.scheme == "https" || (base.scheme == "http" && permitsProviderHttp(base.host, privateHttpHosts))),
+    ) {
+        "FIONAS_CONVERSATION_BASE_URL requires HTTPS (HTTP only for loopback, Railway private DNS or a " +
+            "FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS entry) and an origin without credentials"
+    }
     val credential = env["FIONAS_CONVERSATION_API_KEY"]
     require(!credential.isNullOrBlank() && credential.none { it.isISOControl() }) { "FIONAS_CONVERSATION_API_KEY is required" }
     return base to credential
@@ -101,8 +105,26 @@ internal fun providerConnection(env: Map<String, String>): Pair<URI, String> {
 
 private val dnsLabel = Regex("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", RegexOption.IGNORE_CASE)
 
-private fun permitsProviderHttp(host: String): Boolean {
+/**
+ * The operator's explicit opt-in for plain HTTP to private container hostnames (for example a sibling
+ * Docker Compose service), absent or blank by default. Entries are exact single DNS labels: no dots,
+ * wildcards, ports, schemes or IP literals, so a listed name never matches a dotted public DNS name or a suffix.
+ */
+private fun privateHttpHosts(env: Map<String, String>): Set<String> {
+    val configured = env["FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS"]?.takeIf { it.isNotBlank() } ?: return emptySet()
+    return configured.split(',').map { it.trim().lowercase() }.toSet().also { hosts ->
+        require(hosts.all { dnsLabel.matches(it) && !it.all(Char::isDigit) }) {
+            "FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS must be comma-separated single-label hostnames"
+        }
+    }
+}
+
+private fun permitsProviderHttp(
+    host: String,
+    privateHttpHosts: Set<String>,
+): Boolean {
     if (host.lowercase() in setOf("localhost", "127.0.0.1", "::1", "[::1]")) return true
+    if (host.lowercase() in privateHttpHosts) return true
     // Adjacent Railway services use HTTP over private networking; only their complete private DNS names qualify.
     val suffix = ".railway.internal"
     if (host.length > 253 || !host.endsWith(suffix, ignoreCase = true)) return false
