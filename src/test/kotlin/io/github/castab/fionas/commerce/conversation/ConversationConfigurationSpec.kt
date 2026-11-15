@@ -8,10 +8,12 @@ import java.net.URI
 
 class ConversationConfigurationSpec :
     FunSpec({
+        val container = "http://rcs-dev:3000"
         val railway = "http://resend-conversation-service.railway.internal:3000"
         val settings =
             mapOf(
-                "FIONAS_CONVERSATION_BASE_URL" to railway,
+                "FIONAS_CONVERSATION_BASE_URL" to container,
+                "FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to "rcs-dev, Resend-Conversation-Service.railway.internal",
                 "FIONAS_CONVERSATION_API_KEY" to "test-secret",
                 "FIONAS_CONVERSATION_FROM_ADDRESS" to "bookings@fionas.test",
                 "FIONAS_CONVERSATION_REPLY_TO_ADDRESS" to "replies@fionas.test",
@@ -22,83 +24,42 @@ class ConversationConfigurationSpec :
                 "READ" to { ConversationReadConfiguration.fromEnvironment(it)?.base },
                 "SEND" to { ConversationSendConfiguration.fromEnvironment(it)?.base },
             )
-        val accepted =
+        val acceptedByDefault =
             listOf(
                 "https://resend.example.com",
                 "https://resend.example.com:8443",
+                "https://service.railway.internal",
+                "https://rcs-dev:3000",
                 "http://localhost:3000",
                 "http://127.0.0.1:3000",
                 "http://[::1]:3000",
-                railway,
-                "http://resend.railway.internal:3000",
-                "http://my-service.railway.internal",
-                "https://service.railway.internal",
-                "http://My-Service.Railway.Internal:3000",
-                "http://a.railway.internal",
-                "http://${"a".repeat(63)}.railway.internal",
             )
-        val rejected =
+        val rejectedByDefault =
             listOf(
                 "http://resend.example.com",
                 "http://api.internal:3000",
                 "http://10.0.0.5:3000",
-                "http://rcs-dev:3000",
-                "http://resend.railway.internal.evil.com",
-                "http://evilrailway.internal",
-                "http://railway.internal",
-                "http://.railway.internal",
-                "http://service..railway.internal",
-                "http://-service.railway.internal",
-                "http://service-.railway.internal",
-                "http://service_name.railway.internal",
-                "http://${"a".repeat(64)}.railway.internal",
-                "http://${List(4) { "a".repeat(63) }.joinToString(".")}.railway.internal",
-                "http://service.railway.internal.",
-                "http://user:password@service.railway.internal:3000",
-                "$railway/api",
-                "$railway?debug=true",
-                "$railway#fragment",
+                container,
+                railway,
+                "http://resend.railway.internal:3000",
+                "http://a.railway.internal",
                 "https://user:password@resend.example.com",
                 "https://resend.example.com/api",
                 "https://resend.example.com?debug=true",
                 "https://resend.example.com#fragment",
                 "http:///missing-host",
-                "ftp://service.railway.internal",
+                "ftp://resend.example.com",
             )
-
-        configurations.forEach { (feature, configure) ->
-            val enabled = settings + ("FIONAS_CONVERSATION_${feature}_ENABLED" to "true")
-            accepted.forEach { origin ->
-                test("$feature accepts provider origin $origin") {
-                    configure(enabled + ("FIONAS_CONVERSATION_BASE_URL" to origin)) shouldBe URI(origin)
-                }
-            }
-            rejected.forEach { origin ->
-                test("$feature rejects provider origin $origin") {
-                    shouldThrowAny {
-                        configure(enabled + ("FIONAS_CONVERSATION_BASE_URL" to origin))
-                    }
-                }
-            }
-            test("$feature normalizes a trailing slash on a Railway origin") {
-                configure(enabled + ("FIONAS_CONVERSATION_BASE_URL" to "$railway/")) shouldBe URI(railway)
-            }
-            val container = "http://rcs-dev:3000"
-            val privateHttp = enabled + ("FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to "rcs-dev, other-provider")
+        val acceptedWithAllowlist =
             listOf(
                 container,
                 "http://rcs-dev",
                 "http://RCS-Dev:3000",
-                "https://rcs-dev:3000",
-                "http://other-provider:8080",
-            ).forEach { origin ->
-                test("$feature accepts allowlisted private HTTP origin $origin") {
-                    configure(privateHttp + ("FIONAS_CONVERSATION_BASE_URL" to origin)) shouldBe URI(origin)
-                }
-            }
-            test("$feature normalizes a trailing slash on an allowlisted private HTTP origin") {
-                configure(privateHttp + ("FIONAS_CONVERSATION_BASE_URL" to "$container/")) shouldBe URI(container)
-            }
+                railway,
+                "http://resend-conversation-service.railway.internal",
+                "http://Resend-Conversation-Service.Railway.Internal:3000",
+            )
+        val rejectedWithAllowlist =
             listOf(
                 "http://rcs-prod:3000",
                 "http://rcs-devx:3000",
@@ -106,61 +67,116 @@ class ConversationConfigurationSpec :
                 "http://rcs-dev.example.com:3000",
                 "http://evil.rcs-dev:3000",
                 "http://rcs_dev:3000",
+                "http://other-service.railway.internal:3000",
+                "http://conversation-service.railway.internal:3000",
+                "http://railway.internal:3000",
+                "http://resend-conversation-service.railway.internal.evil.com",
+                "http://resend-conversation-service.railway.internal.",
                 "http://resend.example.com",
                 "http://10.0.0.5:3000",
                 "http://user:password@rcs-dev:3000",
                 "http://token@rcs-dev:3000",
+                "http://user:password@resend-conversation-service.railway.internal:3000",
                 "$container/api",
                 "$container?debug=true",
                 "$container#fragment",
+                "$railway/api",
                 "ftp://rcs-dev:3000",
-            ).forEach { origin ->
-                test("$feature rejects $origin despite the private HTTP allowlist") {
-                    shouldThrowAny { configure(privateHttp + ("FIONAS_CONVERSATION_BASE_URL" to origin)) }
-                }
-            }
-            test("$feature treats a blank private HTTP allowlist as absent") {
-                listOf("", "  ").forEach { hosts ->
-                    val blank = enabled + ("FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to hosts)
-                    configure(blank) shouldBe URI(railway)
-                    shouldThrowAny { configure(blank + ("FIONAS_CONVERSATION_BASE_URL" to container)) }
-                }
-            }
+            )
+        val validHostLists =
+            listOf(
+                "a",
+                "a".repeat(63),
+                "resend.lan",
+                "my-service.railway.internal",
+                "${List(3) { "a".repeat(63) }.joinToString(".")}.${"a".repeat(61)}",
+                "rcs-dev,rcs-dev",
+            )
+        val invalidHostLists =
             listOf(
                 "rcs-dev,",
                 "rcs-dev,,other",
                 "*",
-                "*.internal",
+                "*.railway.internal",
+                ".railway.internal",
                 "rcs-*",
-                "rcs-dev.example.com",
                 "rcs-dev.",
+                ".rcs-dev",
+                "rcs..dev",
                 "rcs-dev:3000",
                 "http://rcs-dev",
+                "rcs-dev/api",
+                "rcs dev",
                 "rcs_dev",
                 "-rcs-dev",
                 "rcs-dev-",
+                "service-.railway.internal",
                 "a".repeat(64),
+                "${"a".repeat(64)}.railway.internal",
+                List(4) { "a".repeat(63) }.joinToString("."),
                 "10.0.0.5",
                 "127",
+                "service.123",
                 "[::1]",
+                "::1",
                 "user@rcs-dev",
-            ).forEach { hosts ->
-                test("$feature rejects private HTTP allowlist ${hosts.ifEmpty { "<empty>" }}") {
+            )
+
+        configurations.forEach { (feature, configure) ->
+            val enabled = settings + ("FIONAS_CONVERSATION_${feature}_ENABLED" to "true")
+            val defaults = enabled - "FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS"
+            acceptedByDefault.forEach { origin ->
+                test("$feature accepts provider origin $origin without a private HTTP allowlist") {
+                    configure(defaults + ("FIONAS_CONVERSATION_BASE_URL" to origin)) shouldBe URI(origin)
+                }
+            }
+            rejectedByDefault.forEach { origin ->
+                test("$feature rejects provider origin $origin without a private HTTP allowlist") {
+                    shouldThrowAny { configure(defaults + ("FIONAS_CONVERSATION_BASE_URL" to origin)) }
+                }
+            }
+            acceptedWithAllowlist.forEach { origin ->
+                test("$feature accepts allowlisted private HTTP origin $origin") {
+                    configure(enabled + ("FIONAS_CONVERSATION_BASE_URL" to origin)) shouldBe URI(origin)
+                }
+            }
+            rejectedWithAllowlist.forEach { origin ->
+                test("$feature rejects $origin despite the private HTTP allowlist") {
+                    shouldThrowAny { configure(enabled + ("FIONAS_CONVERSATION_BASE_URL" to origin)) }
+                }
+            }
+            listOf(container, railway).forEach { origin ->
+                test("$feature normalizes a trailing slash on private HTTP origin $origin") {
+                    configure(enabled + ("FIONAS_CONVERSATION_BASE_URL" to "$origin/")) shouldBe URI(origin)
+                }
+            }
+            validHostLists.forEach { hosts ->
+                test("$feature accepts private HTTP allowlist $hosts") {
+                    val host = hosts.substringBefore(',')
+                    configure(
+                        enabled + ("FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to hosts) +
+                            ("FIONAS_CONVERSATION_BASE_URL" to "http://$host:3000"),
+                    ) shouldBe URI("http://$host:3000")
+                }
+            }
+            invalidHostLists.forEach { hosts ->
+                test("$feature rejects private HTTP allowlist $hosts") {
                     shouldThrowAny {
                         configure(
-                            privateHttp + ("FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to hosts) +
+                            enabled + ("FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to hosts) +
                                 ("FIONAS_CONVERSATION_BASE_URL" to "https://resend.example.com"),
                         )
                     }
                 }
             }
-            test("$feature ignores the private HTTP allowlist while disabled") {
-                configure(
-                    mapOf(
-                        "FIONAS_CONVERSATION_${feature}_ENABLED" to "false",
-                        "FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to "*",
-                    ),
-                ) shouldBe null
+            test("$feature treats a blank private HTTP allowlist as absent") {
+                listOf("", "  ").forEach { hosts ->
+                    val blank = enabled + ("FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to hosts)
+                    configure(blank + ("FIONAS_CONVERSATION_BASE_URL" to "https://resend.example.com")) shouldBe
+                        URI("https://resend.example.com")
+                    shouldThrowAny { configure(blank) }
+                    shouldThrowAny { configure(blank + ("FIONAS_CONVERSATION_BASE_URL" to railway)) }
+                }
             }
             test("$feature remains disabled without provider or sender settings") {
                 configure(emptyMap()) shouldBe null
@@ -169,10 +185,11 @@ class ConversationConfigurationSpec :
                     mapOf(
                         "FIONAS_CONVERSATION_${feature}_ENABLED" to "false",
                         "FIONAS_CONVERSATION_BASE_URL" to "invalid",
+                        "FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to "*",
                     ),
                 ) shouldBe null
             }
-            test("$feature still requires a provider origin and valid credential on Railway") {
+            test("$feature still requires a provider origin and valid credential over private HTTP") {
                 shouldThrowAny { configure(enabled - "FIONAS_CONVERSATION_BASE_URL") }
                 shouldThrowAny { configure(enabled - "FIONAS_CONVERSATION_API_KEY") }
                 listOf("", " ", "secret\n", "secret\u0000").forEach { credential ->
@@ -182,29 +199,15 @@ class ConversationConfigurationSpec :
         }
 
         val sending = settings + ("FIONAS_CONVERSATION_SEND_ENABLED" to "true")
-        test("Railway sending preserves sender, Reply-To and exact recipient policy") {
+        test("private HTTP sending preserves sender, Reply-To and exact recipient policy") {
             val config = checkNotNull(ConversationSendConfiguration.fromEnvironment(sending))
+            config.base shouldBe URI(container)
             config.fromAddress shouldBe "bookings@fionas.test"
             config.replyToAddress shouldBe "replies@fionas.test"
             config.permits(Email.of("customer@example.com")) shouldBe true
             config.permits(Email.of("other@example.com")) shouldBe false
         }
-        test("private HTTP sending preserves sender, Reply-To and exact recipient policy") {
-            val config =
-                checkNotNull(
-                    ConversationSendConfiguration.fromEnvironment(
-                        sending +
-                            mapOf(
-                                "FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS" to "rcs-dev",
-                                "FIONAS_CONVERSATION_BASE_URL" to "http://rcs-dev:3000",
-                            ),
-                    ),
-                )
-            config.base shouldBe URI("http://rcs-dev:3000")
-            config.permits(Email.of("customer@example.com")) shouldBe true
-            config.permits(Email.of("other@example.com")) shouldBe false
-        }
-        test("Railway sending still requires valid sender, Reply-To and recipient allowlist") {
+        test("private HTTP sending still requires valid sender, Reply-To and recipient allowlist") {
             listOf(
                 "FIONAS_CONVERSATION_FROM_ADDRESS",
                 "FIONAS_CONVERSATION_REPLY_TO_ADDRESS",

@@ -1593,13 +1593,12 @@ contract (0.7.2-rc.2), consumer grants, configuration, failure modes, cutover an
 [docs/email-conversations.md](docs/email-conversations.md).
 
 Reads and sends share `FIONAS_CONVERSATION_BASE_URL` origin validation: HTTPS, or HTTP for
-loopback and valid service hostnames ending in `.railway.internal` (case-insensitive, optional
-port). Public HTTP and origins with credentials, paths, queries or fragments are rejected.
-See the guide's Railway configuration example for private service DNS and listening-port setup.
-Outside Railway (for example sibling Docker Compose containers), plain HTTP to a private
-container hostname is an explicit opt-in: `FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` lists exact,
-single-label hostnames (for example `rcs-dev` for `http://rcs-dev:3000`); it is empty by default,
-and the guide documents its validation.
+loopback. Plain HTTP to any other host is an explicit opt-in: `FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS`
+lists exact private hostnames (for example `resend-conversation-service.railway.internal` on
+Railway, or `rcs-dev` for a sibling Docker Compose container); it is empty by default, and no
+hostname, including `*.railway.internal`, is trusted implicitly. Public HTTP and origins with
+credentials, paths, queries or fragments are rejected. See the guide for Railway and Docker
+Compose examples and the exact validation.
 
 ## Configuration
 
