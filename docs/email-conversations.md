@@ -345,7 +345,8 @@ evidence (only `ACCEPTED` rows are).
 |---|---|---|
 | `FIONAS_CONVERSATION_READ_ENABLED` | Enables timeline message reads | `false` |
 | `FIONAS_CONVERSATION_SEND_ENABLED` | Enables staff replies | `false` |
-| `FIONAS_CONVERSATION_BASE_URL` | Provider origin; HTTPS, or HTTP for loopback / Railway private DNS; no path, credentials, query or fragment | required when either is enabled |
+| `FIONAS_CONVERSATION_BASE_URL` | Provider origin; HTTPS, or HTTP for loopback / an allowlisted private hostname; no path, credentials, query or fragment | required when either is enabled |
+| `FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` | Opt-in, comma-separated exact private hostnames (for example `rcs-dev` or `resend-conversation-service.railway.internal`) that may use plain HTTP | empty (none) |
 | `FIONAS_CONVERSATION_API_KEY` | Provider `EMAIL_v2_API_KEY` | required when either is enabled |
 | `FIONAS_CONVERSATION_READ_TIMEOUT_MS` | Total timeline read budget (100–10000) | `5000` |
 | `FIONAS_CONVERSATION_SEND_TIMEOUT_MS` | Per provider request (1000–30000) | `10000` |
@@ -361,28 +362,48 @@ Both reading and sending use the same provider origin validation:
 |---|---|
 | Public HTTPS | Yes |
 | Loopback HTTP | Yes |
-| Railway private HTTP (`*.railway.internal`) | Yes, with a nonempty service hostname of valid DNS labels |
+| Private HTTP (exact `FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` entry) | Only when the operator lists that exact hostname; never by default |
 | Arbitrary private/public HTTP | No |
 | Origin with credentials, API path, query or fragment | No |
 
-For adjacent services in Railway, for example:
+An adjacent provider on a private network is usually reachable only over plain HTTP: a Railway
+service by its private DNS name, or a sibling Docker Compose container by its service hostname on
+a shared network. Opt in by listing that exact hostname. In Railway, for example:
 
 ```dotenv
 FIONAS_CONVERSATION_READ_ENABLED=true
 FIONAS_CONVERSATION_SEND_ENABLED=true
 
+FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS=resend-conversation-service.railway.internal
 FIONAS_CONVERSATION_BASE_URL=http://resend-conversation-service.railway.internal:3000
 FIONAS_CONVERSATION_API_KEY=<provider EMAIL_v2_API_KEY>
 ```
 
-Sending also requires the From, Reply-To and recipient allowlist settings above. Use the actual
-Railway service's private DNS name and its listening port (an explicit port is optional).
-Both services must be able to communicate within the appropriate Railway private environment.
-Syntactic acceptance does not guarantee DNS resolution or service connectivity. Hostname matching
-is case-insensitive and requires the complete `.railway.internal` suffix with valid DNS labels;
-the bare `railway.internal` and misleading suffixes are rejected. This exception is specific to
-Railway private service DNS, with no generic HTTP override. The base URL is an origin only;
-a trailing `/` is normalized, and application code appends the provider API paths automatically.
+With Docker Compose, where the provider container is `rcs-dev` on a shared user-defined network:
+
+```dotenv
+FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS=rcs-dev
+FIONAS_CONVERSATION_BASE_URL=http://rcs-dev:3000
+```
+
+Sending also requires the From, Reply-To and recipient allowlist settings above. Use the
+provider's actual private hostname and listening port (an explicit port is optional). Both
+services must be able to reach each other on that private network; syntactic acceptance does not
+guarantee DNS resolution or service connectivity.
+
+`FIONAS_CONVERSATION_PRIVATE_HTTP_HOSTS` is empty by default, so plain HTTP is accepted only for
+loopback until the operator opts in; no hostname, including `*.railway.internal`, is trusted
+implicitly. Each comma-separated entry must be an exact DNS hostname: labels of 1–63 letters,
+digits or interior hyphens, total length at most 253, and a final label that is not all digits.
+Wildcards, suffix patterns, ports, schemes, trailing dots and IP literals are rejected at startup.
+Matching is exact and case-insensitive (`rcs-dev` does not permit `rcs-devx` or
+`rcs-dev.example.com`; `resend-conversation-service.railway.internal` does not permit another
+Railway service), and the base URL is still rejected if it carries credentials, a path, a query or
+a fragment. A blank value is treated as unset; the list is only validated when reading or sending
+is enabled. List only hostnames that resolve on a private network not reachable from outside,
+since the API key travels unencrypted. The base URL is an origin only; a trailing `/` is
+normalized, and application code appends the provider API paths automatically. There is no
+generic HTTP override.
 
 Reads and sends are independent: with sending disabled, staff still read conversations. Never
 log the API key, bodies, HTML, payloads or routing addresses; Fiona's logs carry only event
