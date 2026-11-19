@@ -122,6 +122,12 @@ The rules behind this structure are in [`AGENTS.md`](AGENTS.md) and
 | `POST /staff/requests/{inquiryId}/proposals/deposit-revisions` | Same as preview | Republish the canonical Quote with new deposit terms only. |
 | `POST /staff/requests/{inquiryId}/invoice-revision-preview` | `commerce.financial-document.create`, `fionas.financial-terms.manage`, **staff USER only** | Write-free preview of a BOOKED/SERVED canonical Invoice amendment: lines, totals, derived balance and `reviewToken`. |
 | `POST /staff/requests/{inquiryId}/invoice-revisions` | Same as Invoice preview | Atomically commit the reviewed Invoice line and/or service-approval amendment. |
+| `GET /staff/notifications/config` | Any active **staff USER** | Whether staff Web Push is enabled and its VAPID public key. See [Staff push notifications](#staff-push-notifications). |
+| `POST /staff/notifications/subscriptions` | Any active **staff USER** | Enroll this browser's `PushSubscription` (`201`; same endpoint `200` keeps its id; another account's endpoint `409 push_endpoint_in_use`). |
+| `GET /staff/notifications/subscriptions` | Any active **staff USER** | The caller's devices (`ACTIVE`/`EXPIRED`), never endpoints or keys. |
+| `DELETE /staff/notifications/subscriptions/{subscriptionId}` | Any active **staff USER** | Revoke one of the caller's devices; repeated removal is `204`. |
+| `POST /staff/notifications/test` | Any active **staff USER** | Requires `Idempotency-Key`. Queue a test push to one of the caller's devices; `202 {notificationId, status}`. |
+| `GET /staff/notifications/{notificationId}` | Any active **staff USER** | The caller's test status: `queued`/`retrying`/`push_accepted`/`push_failed`/`skipped` with reason. |
 
 **Who may author money.** Fiona trusts exactly two pricing authorities and nothing else:
 
@@ -1662,6 +1668,7 @@ environment variables.
 | `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` | First administrator's nonblank display name; required with username and password | none |
 | `FIONAS_BOOTSTRAP_ADMIN_FIRST_NAME`, `FIONAS_BOOTSTRAP_ADMIN_LAST_NAME` | Optional profile fields | none |
 | `FIONAS_CONVERSATION_INTAKE_ENABLED`, `FIONAS_CONVERSATION_READ_ENABLED`, `FIONAS_CONVERSATION_SEND_ENABLED` | Provider conversation consumer, timeline message reads, staff replies; each with its settings in [docs/email-conversations.md](docs/email-conversations.md) | `false` |
+| `FIONAS_PUSH_ENABLED`, `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED`, `FIONAS_NOTIFICATION_EVENTS_ENABLED` | Staff Web Push (routes, test sends, dispatcher), the automatic new-inquiry trigger, and JetStream publication of notification events; each with its settings in [docs/staff-push-notifications.md](docs/staff-push-notifications.md) | `false` |
 | `LOG_LEVEL` | Level of the application's and runtime's own logs | `INFO` |
 
 Logging is Logback ([`logback.xml`](src/main/resources/logback.xml)): `key=value` lines
@@ -2013,6 +2020,21 @@ replaces it with identical content; the GitHub Release is created if it does not
 otherwise only its two assets are replaced. The tag is never created, moved, or rewritten by the
 workflow. So if the image was pushed but the GitHub Release step failed (for example, a
 transient API error), rerun the failed workflow run from the Actions tab.
+
+## Staff push notifications
+
+Opt-in staff Web Push (`FIONAS_PUSH_ENABLED=true` with `FIONAS_PUSH_VAPID_PUBLIC_KEY`,
+`FIONAS_PUSH_VAPID_PRIVATE_KEY` and `FIONAS_PUSH_VAPID_SUBJECT`). A staff member enrolls a
+browser or installed PWA, sends a test, and tracks it from the HTTP `202` through
+`fionas.staff_notification_deliveries` to the JetStream events
+`fionas.events.notification.{queued,push_accepted,push_failed}.v1`, correlated by
+`notificationId`. Delivery work runs through the runtime outbox (producer
+`fionas-commerce.webpush`) with fenced attempts, Retry-After, bounded windows and restart
+recovery. `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED=true` separately turns on a minimal
+"New catering inquiry" push to enrolled staff holding `fionas.inquiries.read`, one job per
+accepted inquiry. NATS `tls://` connections use the JVM truststore/keystore with hostname
+verification. See [docs/staff-push-notifications.md](docs/staff-push-notifications.md) for
+configuration, NATS grants, the `fionas-admin` contract and the smoke checklist.
 
 ## Customer payments (Stripe Checkout)
 

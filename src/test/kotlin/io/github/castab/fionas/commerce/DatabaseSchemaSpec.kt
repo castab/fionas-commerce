@@ -66,6 +66,9 @@ class DatabaseSchemaSpec :
                     "stripe_payment_attempts",
                     "stripe_webhook_events",
                     "inquiry_financial_emails",
+                    "staff_push_subscriptions",
+                    "staff_notifications",
+                    "staff_notification_deliveries",
                 )
         }
 
@@ -145,6 +148,39 @@ class DatabaseSchemaSpec :
                 WHERE con.contype = 'f' AND con.conrelid = 'fionas.$table'::regclass
                 """.trimIndent(),
             )
+
+        test("staff push storage references only the runtime user and Fiona's own rows, one delivery per device") {
+            application.database.foreignKeys("staff_push_subscriptions") shouldContainExactly
+                listOf("user_id → commerce.users(principal_id)")
+            application.database.foreignKeys("staff_notifications") shouldContainExactlyInAnyOrder
+                listOf(
+                    "requested_by → commerce.users(principal_id)",
+                    "target_subscription_id → fionas.staff_push_subscriptions(id)",
+                    "inquiry_id → fionas.inquiries(id)",
+                )
+            application.database.foreignKeys("staff_notification_deliveries") shouldContainExactlyInAnyOrder
+                listOf(
+                    "notification_id → fionas.staff_notifications(id)",
+                    "subscription_id → fionas.staff_push_subscriptions(id)",
+                )
+            application.database
+                .strings(
+                    """
+                    SELECT indexdef FROM pg_indexes WHERE schemaname = 'fionas'
+                      AND tablename IN ('staff_push_subscriptions', 'staff_notifications', 'staff_notification_deliveries')
+                      AND indexdef LIKE 'CREATE UNIQUE INDEX%' ORDER BY indexname
+                    """.trimIndent(),
+                ).map { it.substringAfter(" USING btree ") } shouldContainExactlyInAnyOrder
+                listOf(
+                    "(notification_id, subscription_id)",
+                    "(id)",
+                    "(id)",
+                    "(id)",
+                    "(inquiry_id)",
+                    "(requested_by, idempotency_key)",
+                    "(endpoint_sha256) WHERE (retired_at IS NULL)",
+                )
+        }
 
         test(
             "proposal publication stores only exact identities and provenance with distinct publication identities and Fiona association integrity",

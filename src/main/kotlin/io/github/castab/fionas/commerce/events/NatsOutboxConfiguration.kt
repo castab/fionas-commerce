@@ -4,7 +4,7 @@ import io.nats.client.Options
 
 /** Independent outbox credentials, with no generated secret-bearing toString. */
 class NatsOutboxConfiguration private constructor(
-    private val connection: NatsConnectionConfiguration,
+    internal val connection: NatsConnectionConfiguration,
 ) {
     val url get() = connection.url
     val credentialsFile get() = connection.credentialsFile

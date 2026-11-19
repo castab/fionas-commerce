@@ -555,6 +555,27 @@ Provider unavailability degrades the conversation, never booking management or c
 history. The concrete contract is in [`AGENTS.md`](AGENTS.md#email-conversations) and the
 operational guide in [docs/email-conversations.md](docs/email-conversations.md).
 
+## Staff notifications
+
+Staff push notifications are Fiona operational policy: which staff member owns a device, which
+business moments notify whom, and what a notification may reveal. Browsers and push services own
+delivery and display; Fiona records only what its own policy and support need: device
+registrations, notification jobs and per-device provider outcomes.
+
+Delivery is durable work scheduled through the shared runtime's transactional outbox under its
+own producer. Fiona does not build a second work queue, lease or retry mechanism beside the
+runtime's. Network calls never hold a database transaction. Every attempt is recorded before the
+provider call and resolved after it, and stale or overlapping attempts cannot overwrite a newer
+outcome. Provider acceptance is not display, and an uncertain result is reported as uncertain:
+a retry may duplicate a notification, never silently lose its identity.
+
+A notification is minimal by design. Its payload and events carry only Fiona identities, server
+copy and safe outcome codes, never customer identity, contact details or inquiry contents, and
+never push endpoints or keys. Recipients are resolved from live runtime authorization at fan-out
+and again before every dispatch. Business triggers join the business transaction only as a
+durable job; fan-out and provider I/O follow in the background. The concrete contract is in
+[AGENTS.md](AGENTS.md#staff-web-push-notifications).
+
 ---
 
 # 13. Authentication Is Fiona-Owned; Authorization Infrastructure Is Shared

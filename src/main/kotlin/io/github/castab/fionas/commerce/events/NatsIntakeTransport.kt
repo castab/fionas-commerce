@@ -81,7 +81,7 @@ class NatsIntakeTransport(
     private val options =
         Options
             .builder()
-            .server(configuration.connection.url)
+            .also(configuration.connection::servers)
             .connectionName("fionas-commerce-intake")
             .connectionTimeout(Duration.ofSeconds(1))
             .maxReconnects(-1)

@@ -27,9 +27,13 @@ import io.github.castab.fionas.commerce.conversation.ResendConversationSender
 import io.github.castab.fionas.commerce.conversation.SendStaffReply
 import io.github.castab.fionas.commerce.customer.JdbiCustomerRepository
 import io.github.castab.fionas.commerce.events.ConversationIntakeConfiguration
+import io.github.castab.fionas.commerce.events.EventTransports
 import io.github.castab.fionas.commerce.events.InquiryOutboxPublisher
 import io.github.castab.fionas.commerce.events.NatsIntakeConfiguration
 import io.github.castab.fionas.commerce.events.NatsOutboxConfiguration
+import io.github.castab.fionas.commerce.events.NotificationEventPublisher
+import io.github.castab.fionas.commerce.events.NotificationEventsConfiguration
+import io.github.castab.fionas.commerce.events.StaffNotificationEventLog
 import io.github.castab.fionas.commerce.events.conversationIntake
 import io.github.castab.fionas.commerce.events.inquiryIntake
 import io.github.castab.fionas.commerce.events.requireIntakeDatabaseBounds
@@ -90,6 +94,16 @@ import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryLifecycle
 import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
+import io.github.castab.fionas.commerce.notification.JdbiStaffPushRepository
+import io.github.castab.fionas.commerce.notification.JdkWebPushSender
+import io.github.castab.fionas.commerce.notification.StaffInquiryNotifications
+import io.github.castab.fionas.commerce.notification.StaffNotificationOperations
+import io.github.castab.fionas.commerce.notification.StaffPushDevices
+import io.github.castab.fionas.commerce.notification.StaffPushDispatcher
+import io.github.castab.fionas.commerce.notification.StaffTestNotifications
+import io.github.castab.fionas.commerce.notification.WebPushConfiguration
+import io.github.castab.fionas.commerce.notification.WebPushSender
+import io.github.castab.fionas.commerce.notification.webPushDeliveryTransport
 import io.github.castab.fionas.commerce.payments.CustomerPayments
 import io.github.castab.fionas.commerce.payments.PaymentOperations
 import io.github.castab.fionas.commerce.payments.StripeConfiguration
@@ -179,7 +193,12 @@ fun fionaApplication(
         StripeConfiguration
             .fromEnvironment(),
     stripeGateway: StripeGateway? = null,
+    webPush: WebPushConfiguration? = WebPushConfiguration.fromEnvironment(),
+    webPushSender: WebPushSender? = null,
+    notificationEvents: NotificationEventsConfiguration = NotificationEventsConfiguration.fromEnvironment(),
 ): ApplicationContributions {
+    val eventTransports = EventTransports(outboxPublisher, notificationEvents)
+    val inquiryNotifications = webPush?.inquiryNotifications == true
     var updates: StaffTimelineUpdates? = null
     var nativeUpdates: RoutingSseHandler? = null
     return ApplicationContributions(
@@ -192,8 +211,25 @@ fun fionaApplication(
         backgroundServices =
             buildList {
                 if (timelineUpdatesEnabled) add { checkNotNull(updates) }
-                outboxPublisher?.let { configuration -> add { context -> InquiryOutboxPublisher(context, configuration) } }
-                intake?.let { configuration -> add { context -> inquiryIntake(context, configuration, clock) } }
+                eventTransports.inquiryTransport?.let { transport -> add { context -> InquiryOutboxPublisher(context, transport) } }
+                eventTransports.notificationTransport?.let { transport ->
+                    add { context -> NotificationEventPublisher(context, transport) }
+                }
+                webPush?.let { configuration ->
+                    add { context ->
+                        StaffPushDispatcher(
+                            context,
+                            webPushDeliveryTransport(
+                                context,
+                                configuration,
+                                StaffNotificationEventLog(context.outbox, notificationEvents.subjects),
+                                webPushSender ?: JdkWebPushSender(configuration),
+                                clock,
+                            ),
+                        )
+                    }
+                }
+                intake?.let { configuration -> add { context -> inquiryIntake(context, configuration, clock, inquiryNotifications) } }
                 conversations?.let { configuration -> add { context -> conversationIntake(context, configuration) } }
             },
         routes = { context ->
@@ -309,8 +345,30 @@ fun fionaApplication(
                     conversationReads?.let(::ResendConversationReader)
                         ?: ConversationReader { ConversationRead(ConversationAvailability.UNAVAILABLE) },
                 )
+            val notifications =
+                webPush?.let { configuration ->
+                    val pushRepository = JdbiStaffPushRepository()
+                    val devices = StaffPushDevices(context.transactor, pushRepository, configuration.allowedHosts, clock)
+                    val tests =
+                        StaffTestNotifications(
+                            context.transactor,
+                            pushRepository,
+                            context.outbox,
+                            StaffNotificationEventLog(context.outbox, notificationEvents.subjects),
+                            clock,
+                        )
+                    StaffNotificationOperations(
+                        configuration.applicationServerKey,
+                        devices::enroll,
+                        devices::list,
+                        devices::revoke,
+                        tests::send,
+                        tests::read,
+                    )
+                }
             val operations =
                 FionaOperations(
+                    notifications = notifications,
                     previewFinancialEmail = financialEmails::preview,
                     sendFinancialEmail = financialEmails::send,
                     payments =
@@ -378,7 +436,7 @@ fun fionaApplication(
                         communications,
                         eventCalendarZone,
                     )::invoke,
-                    createInquiry = createInquiryOperation(context, clock)::invoke,
+                    createInquiry = createInquiryOperation(context, clock, inquiryNotifications)::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
                     getInquiry = getInquiry::invoke,
                     acknowledgeInquiryCommunication = RecordInquiryCommunication(
@@ -493,12 +551,19 @@ fun fionaVersion(): String {
     return version
 }
 
-/** Common composition seam for HTTP, managed intake and the operator recovery command. */
+/**
+ * Common composition seam for HTTP, managed intake and the operator recovery command. With
+ * [inquiryNotifications] every accepted inquiry also records its staff push job in its own
+ * transaction; devices are resolved and pushed later by the Web Push dispatcher.
+ */
 internal fun createInquiryOperation(
     context: CommerceRuntimeContext,
     clock: Clock,
-): CreateInquiry =
-    CreateInquiry(
+    inquiryNotifications: Boolean = false,
+): CreateInquiry {
+    val notifications =
+        if (inquiryNotifications) StaffInquiryNotifications(JdbiStaffPushRepository(), context.outbox)::enqueue else null
+    return CreateInquiry(
         context.transactor,
         JdbiCustomerRepository(),
         JdbiInquiryRepository(),
@@ -510,4 +575,6 @@ internal fun createInquiryOperation(
             JdbiFinancialDocumentAuthorshipRepository(),
         ),
         context.outbox,
+        notifyStaff = notifications ?: { _, _ -> },
     )
+}

@@ -11,6 +11,7 @@ import io.github.castab.fionas.commerce.testing.metadataAuth
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldBeIn
 import io.kotest.matchers.collections.shouldBeUnique
 import io.kotest.matchers.collections.shouldContainAll
 import io.kotest.matchers.collections.shouldContainExactly
@@ -422,6 +423,17 @@ class OpenApiDocumentSpec :
         // Every operation and its expected statuses, as the implementation answers them.
         val operations =
             mapOf(
+                Triple("/staff/notifications/config", "get", "getStaffNotificationConfig") to listOf("200", "401", "403", "500"),
+                Triple("/staff/notifications/subscriptions", "post", "enrollStaffPushSubscription") to
+                    listOf("200", "201", "400", "401", "403", "409", "422", "500", "503"),
+                Triple("/staff/notifications/subscriptions", "get", "listStaffPushSubscriptions") to
+                    listOf("200", "401", "403", "500", "503"),
+                Triple("/staff/notifications/subscriptions/{subscriptionId}", "delete", "revokeStaffPushSubscription") to
+                    listOf("204", "400", "401", "403", "404", "500", "503"),
+                Triple("/staff/notifications/test", "post", "sendStaffTestNotification") to
+                    listOf("202", "400", "401", "403", "404", "409", "500", "503"),
+                Triple("/staff/notifications/{notificationId}", "get", "getStaffTestNotification") to
+                    listOf("200", "400", "401", "403", "404", "500", "503"),
                 Triple("/staff/requests/{inquiryId}/payment-access", "get", "getInquiryPaymentAccess") to
                     listOf("200", "400", "401", "403", "404", "409", "422", "500", "503"),
                 Triple("/staff/requests/{inquiryId}/payment-access", "post", "issueInquiryPaymentAccess") to
@@ -528,6 +540,12 @@ class OpenApiDocumentSpec :
         // Each Fiona operation's tag.
         val tags =
             mapOf(
+                "getStaffNotificationConfig" to "Staff notifications",
+                "enrollStaffPushSubscription" to "Staff notifications",
+                "listStaffPushSubscriptions" to "Staff notifications",
+                "revokeStaffPushSubscription" to "Staff notifications",
+                "sendStaffTestNotification" to "Staff notifications",
+                "getStaffTestNotification" to "Staff notifications",
                 "getInquiryPaymentAccess" to "Customer payments",
                 "issueInquiryPaymentAccess" to "Customer payments",
                 "rotateInquiryPaymentAccess" to "Customer payments",
@@ -625,6 +643,15 @@ class OpenApiDocumentSpec :
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
+                "StaffNotificationConfigResponse",
+                "EnrollPushSubscriptionRequest",
+                "PushSubscriptionRequest",
+                "PushSubscriptionKeysRequest",
+                "PushDeviceResponse",
+                "PushDeviceListResponse",
+                "SendTestNotificationRequest",
+                "TestNotificationQueuedResponse",
+                "TestNotificationResponse",
                 "PaymentAccessResponse",
                 "CustomerPaymentDocumentResponse",
                 "CustomerPaymentReceiptResponse",
@@ -793,6 +820,7 @@ class OpenApiDocumentSpec :
             document.at("tags").jsonArray.map { it.text("name") } shouldContainExactlyInAnyOrder
                 listOf(
                     "Customer payments",
+                    "Staff notifications",
                     "Staff dashboard",
                     "Staff requests",
                     "Staff proposals",
@@ -850,6 +878,13 @@ class OpenApiDocumentSpec :
                 "revokeInquiryPaymentAccess",
                 "listInquiryPaymentAttempts",
                 "reconcileInquiryPaymentAttempt",
+                // Push devices belong to one staff USER.
+                "getStaffNotificationConfig",
+                "enrollStaffPushSubscription",
+                "listStaffPushSubscriptions",
+                "revokeStaffPushSubscription",
+                "sendStaffTestNotification",
+                "getStaffTestNotification",
             )
 
         test("line amounts document precise unit rates with settlement-exact subtotals and minor-unit tax") {
@@ -1044,6 +1079,12 @@ class OpenApiDocumentSpec :
                     ),
                 "financial_email_review_stale" to
                     setOf(Triple(financialEmail, "post", "409"), Triple("$financialEmail/preview", "post", "409")),
+                "push_notifications_disabled" to
+                    operations.keys
+                        .filter { it.first.startsWith("/staff/notifications") && it.third != "getStaffNotificationConfig" }
+                        .map { Triple(it.first, it.second, "503") }
+                        .toSet(),
+                "push_endpoint_in_use" to setOf(Triple("/staff/notifications/subscriptions", "post", "409")),
             )
 
         test("documents every error with commerce-runtime's one reusable error body and its code") {
@@ -1057,7 +1098,7 @@ class OpenApiDocumentSpec :
                         (path to method) shouldBe ("/auth/login" to "post")
                         status shouldBe "429"
                     } else if (code == "IDEMPOTENCY_KEY_REUSED") {
-                        (path to method) shouldBe ("/inquiries" to "post")
+                        (path to method) shouldBeIn setOf("/inquiries" to "post", "/staff/notifications/test" to "post")
                         status shouldBe "409"
                     } else if (code in fionaLocalCodes) {
                         // Fiona-local codes in the runtime envelope, which has no category for them.
@@ -1231,6 +1272,7 @@ class OpenApiDocumentSpec :
                             reply to "post",
                             "/public/payments/{publicId}/checkout-sessions" to "post",
                             "/staff/requests/{inquiryId}/financial-emails" to "post",
+                            "/staff/notifications/test" to "post",
                         )
                 }.forEach { (path, method) ->
                     operation(path, method)

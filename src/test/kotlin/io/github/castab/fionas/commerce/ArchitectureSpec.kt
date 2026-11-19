@@ -215,6 +215,8 @@ class ArchitectureSpec :
                     "financial/GetFinancialDocumentHistory.kt: inTransaction",
                     "financial/ListInquiryFinancialDocuments.kt: inTransaction",
                     "financial/ListFinancialDocumentPaymentHistories.kt: inTransaction",
+                    "notification/StaffPushOperations.kt: inTransaction",
+                    "notification/WebPushDelivery.kt: inTransaction",
                 )
             sources().containing(transactionInfrastructure - "inTransaction" - "Handle").shouldBeEmpty()
         }
@@ -235,6 +237,8 @@ class ArchitectureSpec :
                     setOf(
                         "InquiryPersisted.kt",
                         "InquiryDeclined.kt",
+                        "StaffNotificationEvents.kt",
+                        "WebPushPayloads.kt",
                         "InquirySubmitted.kt",
                         "IntakeDelivery.kt",
                         "ConversationEvent.kt",
@@ -251,6 +255,8 @@ class ArchitectureSpec :
                     setOf(
                         "InquiryPersisted.kt",
                         "InquiryDeclined.kt",
+                        "StaffNotificationEvents.kt",
+                        "WebPushPayloads.kt",
                         "InquirySubmitted.kt",
                         "IntakeDelivery.kt",
                         "ConversationEvent.kt",

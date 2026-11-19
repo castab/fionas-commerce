@@ -59,6 +59,7 @@ import io.github.castab.fionas.commerce.inquiry.InquiryPage
 import io.github.castab.fionas.commerce.inquiry.ListInquiries
 import io.github.castab.fionas.commerce.inquiry.ManageInquiryFulfillment
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
+import io.github.castab.fionas.commerce.notification.StaffNotificationOperations
 import io.github.castab.fionas.commerce.payments.PaymentOperations
 import io.github.castab.fionas.commerce.staff.ListStaffRequests
 import io.github.castab.fionas.commerce.staff.SecretPassword
@@ -91,6 +92,8 @@ const val API_DOCS_PATH = "/docs"
  */
 class FionaOperations(
     val payments: PaymentOperations? = null,
+    /** Staff Web Push; null when the feature is disabled. */
+    val notifications: StaffNotificationOperations? = null,
     val previewFinancialEmail: (FinancialEmailIntent, UserId) -> FinancialEmailPreview,
     val sendFinancialEmail: (SendFinancialEmail) -> FinancialEmailResult,
     val prepareStaffTimelineUpdates: (InquiryId) -> Boolean,
@@ -200,7 +203,7 @@ fun fionaApiRoutes(
         logoutRoute(auth.sessions, auth.cookie, auth.access, auth.origin),
         currentUserRoute(operations.currentUser, operations.currentPermissions, auth.access),
         setStaffPasswordRoute(operations.setStaffPassword, auth.access),
-    ) + paymentRoutes(operations.payments, auth.access)
+    ) + paymentRoutes(operations.payments, auth.access) + staffNotificationRoutes(operations.notifications, auth.access)
 
 /**
  * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of the

@@ -123,6 +123,8 @@ Fiona owns, and persists in its own tables:
 - manual financial-email eligibility, rendering, reviewed command identities, stable payment-link
   orchestration and safe communication-purpose metadata (see [Financial emails](#financial-emails));
 - event and service details, and service locations (future);
+- staff Web Push device registrations, notification jobs, per-device delivery outcomes and the
+  new-inquiry trigger (see [Staff Web Push notifications](#staff-web-push-notifications));
 - further relationships between these records and generic commerce facts (future), for
   example which lineage a booking produced.
 
@@ -389,7 +391,9 @@ USER kind and id, internal `reason`), canonical customer, requested service and 
 declined canonical Estimate with persisted line ids and exact decimal strings. The same
 dispatcher and transport publish it unchanged; publisher grants must include its subject.
 
-No other lifecycle events are emitted. [Operations and cutover](docs/inquiry-outbox.md)
+No other inquiry lifecycle events are emitted. Staff notification events (`notification.queued`,
+`notification.push_accepted`, `notification.push_failed` v1) are a separate producer described
+under [Staff Web Push notifications](#staff-web-push-notifications). [Operations and cutover](docs/inquiry-outbox.md)
 cover least privilege, settings, diagnostics, PII/retention and event-worker PR #3.
 No public administration endpoint or row purger is added.
 
@@ -537,7 +541,8 @@ Routes translate transport. Operations orchestrate. Repositories persist.
   serialization annotations on application types, and never let DTOs leak into
   operations or repositories. The other `@Serializable` types are the private persistence
   DTOs of [Persisted JSON](#persisted-json) and the dedicated application event DTOs in
-  `events/InquiryPersisted.kt` and `events/InquiryDeclined.kt`. The incoming `events/InquirySubmitted.kt` and transport
+  `events/InquiryPersisted.kt`, `events/InquiryDeclined.kt` and `events/StaffNotificationEvents.kt` (plus the
+  plain kotlinx JSON of `notification/WebPushPayloads.kt`). The incoming `events/InquirySubmitted.kt` and transport
   diagnostic `events/IntakeDelivery.kt` separately own their kotlinx Json wire boundaries.
   Event DTOs remain separate from application/domain models
   and HTTP DTOs; event construction uses kotlinx `Json`, never HTTP `CommerceJson`.
@@ -889,6 +894,13 @@ after runtime-owned migrations.
   recorded before V6). No runtime references or runtime DDL changes.
 - **History is immutable.** Never edit a migration that has run outside a disposable
   database; correct it with a new migration.
+- **`V15__staff_push_notifications`** (additive) adds `staff_push_subscriptions` (endpoint,
+  keys and SHA-256 with a partial unique index on the active endpoint hash, cleared on
+  retirement), `staff_notifications` (TEST jobs unique per `(requested_by, idempotency_key)`,
+  NEW_INQUIRY jobs unique per `inquiry_id`) and `staff_notification_deliveries` (unique
+  `(notification_id, subscription_id)`, `state`/`outcome_reason`, attempt token). Two USER FKs
+  (`user_id`, `requested_by` → `commerce.users`) bring the published-runtime FK total to
+  eighteen. No runtime DDL; the work queue is the runtime outbox.
 - **V12 financial email commands** adds `inquiry_financial_emails`, its command/history
   indexes and a Fiona-only timeline trigger. USER and exact runtime snapshot FKs bring the
   current published-runtime FK total to sixteen. No amount, body, address, delivery state
@@ -1755,7 +1767,7 @@ kind lists kept explicit and verified against the pure projection.
 `RecordInquiryCommunication` supports inbound/outbound recording for future adapters; the
 conversation consumer and `SendStaffReply` are the production writers (see
 [Email conversations](#email-conversations)). No provider/public webhook, email bodies,
-attachments, delivery tracking, notifications, mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
+attachments, delivery tracking, customer notifications, mailboxes or generic conversation framework exists. Source facts are Fiona-owned;
 attention membership and resolution reasons remain pure Fiona policy, never persisted.
 
 `POST /inquiries/{inquiryId}/communications/acknowledge` (`acknowledgeInquiryCommunication`)
@@ -1896,6 +1908,7 @@ Organize by cohesive feature, not by layer. Current packages:
 | `...financialemail` | Manual Quote/Invoice email review, eligibility, exact command recovery, branded HTML/text rendering and command-purpose repository; uses the existing conversation sender and payment capability |
 | `...inquiry` | `Inquiry` and its values/repositories; descriptive `RequestedService` and its persisted JSON; submission key, canonical fingerprint and transaction-bound submission repository; lifecycle projection, fulfillment repository and explicit service/closeout; `InquiryDecline`, its repository and `DeclineInquiry`; append-only communication activity/repository and `RecordInquiryCommunication`; `CreateInquiry`, `GetInquiry`, `ListInquiries` |
 | `...financial` | Fiona's context for the runtime's financial ledger: the trusted line boundary (`PricedLine`, `LineProposal`, `resolveAgainst`, `validateChangeOrder`), the inquiry association and line-authorship repositories, the read models, the transaction-taking `MaterializeInquiryFinancialDocument` core, and the `CreateInquiryFinancialDocument`, `CreateChangeOrder`, `IssueQuote`, `IssueInvoice`, `RecordPayment`, `AllocatePayment`, `RecordDocumentPayment`, `RecordRefund`, the deposit operations and `QueryFinancialLineages`, `GetFinancialDocument`, `GetFinancialDocumentHistory`, `ListInquiryFinancialDocuments`, and `ListFinancialDocumentPaymentHistories` operations; proposals (`InquiryProposals` and its three operations), the pure `QuoteComposer`, `PreviewInquiryQuote`, and the immutable `InquiryServicePlan` with its repository |
+| `...notification` | Staff Web Push: values (`PushEndpoint`, `PushKeys`, allow-list), `WebPushConfiguration`, the `WebPushSender` seam and `JdkWebPushSender`, `JdbiStaffPushRepository`, `WebPushPayloads` (the only notification-package JSON: work items and the browser payload), `StaffPushDevices`, `StaffTestNotifications`, the `StaffInquiryNotifications` trigger, `WebPushDeliveryTransport` and `StaffPushDispatcher` |
 | `...staff` | Fiona's credential persistence, password verification, permission definitions, first-admin bootstrap, `ReadStaffRequest` / canonical request projection, and `ReadStaffDashboard` / pure dashboard attention policy and projection |
 | `...http` | The API contract (`FionaApi.kt`: `fionaApiRoutes`, `fionaApi`, `apiDocs`), its OpenAPI renderer and schemas (`OpenApi.kt`), browser origin policy, the line DTOs and principal-kind guards (`FinancialLines.kt`), and feature contract routes and transport DTOs (`InquiryRoutes.kt`, `FinancialDocumentRoutes.kt`, `InquiryProposalRoutes.kt`, `QuoteBuilderRoutes.kt`, `StaffRequestRoutes.kt`, `AuthRoutes.kt`, …) |
 | `...openapi` (source set `src/openapi`) | The `generateOpenApi` entry point; not in the deployable jar |
@@ -2058,7 +2071,8 @@ real repetition or a real requirement appears.
 
 Not in scope until a dedicated slice decides otherwise: allocation reversals,
 providers beyond the dedicated Stripe Checkout slice, caller/actor delegation, OAuth/OIDC,
-refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1,
+refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1
+(staff notification events are their own producer), notification kinds beyond test and new-inquiry pushes, customer push,
 persisted financial projections, CQRS, separate Booking aggregates,
 Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments, arbitrary staff HTML, provider conversation state changes, provider event backfill and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),
@@ -2259,6 +2273,14 @@ unchanged http4k version; it never supplies its own server or framed HTTP stream
   grants, identity/bytes/sequence headers, duplicate/invalid PubAck, denied publication,
   broker outage/reconnect, pending-publication shutdown, failed confirmation and application
   restart recovery. Test infrastructure uses Docker CLI, never production streams/secrets.
+- Keep `StaffPushNotificationsSpec`, `StaffInquiryNotificationsSpec`, `WebPushConfigurationSpec`,
+  `StaffNotificationEventsIntegrationSpec` and `NatsTlsSpec`: staff isolation and concurrent
+  endpoint ownership, enrollment/test replay and revocation, every provider outcome including
+  Retry-After, give-up and uncertain results, the in-flight registration race, fenced stale
+  attempts, restart recovery, inquiry trigger deduplication/eligibility/rollback, AsyncAPI parity,
+  a broker outage after acceptance (same `Nats-Msg-Id`, one provider call), stream mismatch,
+  shared and dedicated connections, and forked-JVM TLS hostname verification. A fake
+  `WebPushSender` stands in for push services; never require a live provider.
 - Node.js 20 or newer must be on PATH for `PaymentSmokeScriptSpec`, which runs the actual
   payment script against a started test runtime and throwaway PostgreSQL. CI provisions
   Node.js 24 without npm packages or caching.
@@ -2366,6 +2388,69 @@ relying on any other provider behavior, and never guess an endpoint.
   `onopen`, placeholders or heartbeats. Forward the real staff credential; the BFF is not
   another authorization authority. See [the exact operational/frontend contract](docs/staff-timeline-updates.md).
 - **Deferred.** No timeline head/ETag, provider backfill, automatic emails or provider state writes.
+
+## Staff Web Push notifications
+
+Operations, configuration, the `fionas-admin` contract and the smoke checklist are in
+[docs/staff-push-notifications.md](docs/staff-push-notifications.md); the principle is in
+[ARCHITECTURE.md](ARCHITECTURE.md#staff-notifications).
+
+- **Ownership.** Devices belong to the authenticated staff USER (`staffUser(request)`); every
+  route applies `access.authenticated().then(requireStaffNotifier)` (a SERVICE is `403`, unsafe
+  cookie methods need a trusted Origin) and needs no Fiona permission. Unknown and foreign
+  device/notification ids are the same `404`. An active endpoint has one owner, enforced by the
+  partial unique index and `INSERT … ON CONFLICT DO NOTHING` then re-read; re-enrolling the same
+  active endpoint keeps its id (`200`), another owner's is `409 push_endpoint_in_use` without
+  disclosure. Revocation clears endpoint and keys and is idempotent for the owner.
+- **Validation.** `PushEndpoint` requires https, no credentials/fragment/non-default port, at most
+  2048 characters and a host on `FIONAS_PUSH_ALLOWED_HOSTS` (default FCM, Mozilla, WNS, Apple).
+  `PushKeys` requires a 65-byte uncompressed P-256 key and a 16-byte auth secret. Endpoints, keys
+  and payloads never enter responses, events or logs; `toString` is redacted.
+- **Delivery is the runtime outbox.** Work items are runtime outbox records of producer
+  `fionas-commerce.webpush` (fan-out per NEW_INQUIRY job, one per delivery), carrying only Fiona
+  ids. `StaffPushDispatcher` runs a runtime `OutboxDispatcher` (batch 1, poll 1s, publish timeout
+  15s, lease 60s, retry 5s–5m) over `WebPushDeliveryTransport`; Fiona adds no claim, lease,
+  scheduler or retry loop. Transaction A locks the delivery, share-locks the subscription,
+  rechecks it and the owner's eligibility (directory reads happen before, outside the
+  transaction), honors `not_before`/`give_up_at`, and records an attempt token. The provider call
+  runs outside any transaction with redirects disabled. Transaction B, fenced by the token,
+  records the outcome and its event together. A token older than the send timeout plus 10s is a
+  crashed attempt: the next claim marks the delivery uncertain and retries.
+- **Outcomes.** 2xx `PUSH_ACCEPTED`; 404/410 retires only the registration version used and is
+  `PUSH_FAILED subscription_expired`; other 4xx/3xx `provider_rejected`; 429/5xx/connect failure
+  `RETRYING` (Retry-After stored as `not_before`); timeout/lost response `RETRYING
+  provider_outcome_unknown` with `ever_uncertain`. At `give_up_at` (10 min test, 1 h inquiry) the
+  delivery fails with `provider_outcome_unknown` if any attempt was uncertain, otherwise the last
+  reason or `delivery_expired`. Revoked/expired devices and ineligible owners are `SKIPPED` with no
+  event. Acceptance is never display; an uncertain retry may duplicate, under one notification id
+  and push `Topic`.
+- **Tests.** `POST /staff/notifications/test` requires an `Idempotency-Key` (`TestNotificationKey`)
+  scoped to the caller; the same key and device return the original notification even after
+  revocation, another device is `409 IDEMPOTENCY_KEY_REUSED`, and a new key for an inactive device
+  is `404`. The job, its single delivery, its work item and `notification.queued` commit together;
+  the route answers `202` after commit.
+- **New inquiries.** `createInquiryOperation(context, clock, inquiryNotifications)` gives
+  `CreateInquiry` a `notifyStaff` hook called after the InquiryPersisted append in the same
+  transaction; it inserts one NEW_INQUIRY job (`ON CONFLICT (inquiry_id) DO NOTHING`) and a fan-out
+  work item. Replays return before it. HTTP, intake and the recovery CLI share it
+  (`FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED`, which requires `FIONAS_PUSH_ENABLED`). Fan-out targets
+  active devices of ACTIVE users holding `fionas.inquiries.read`, appends `notification.queued`
+  with `deliveryCount` (possibly 0, which completes the job) and is idempotent through
+  `fanned_out_at`. Payloads carry only `version`, `notificationId`, `kind`, server copy and a
+  relative `url` (`FIONAS_PUSH_INQUIRY_PATH`); never customer data.
+- **Events.** `StaffNotificationEventLog` appends v1 events with producer
+  `fionas-commerce.notifications`, aggregate `staff_notification` = notification id, to
+  `<FIONAS_NOTIFICATION_EVENTS_SUBJECT_PREFIX>.notification.{queued,push_accepted,push_failed}.v1`
+  in the state change's transaction. `NotificationEventPublisher` (`FIONAS_NOTIFICATION_EVENTS_ENABLED`)
+  runs its own dispatcher with `NatsOutboxTransport(connection, expectedStream)`;
+  `EventTransports` shares one ref-counted `SharedNatsConnection` with the inquiry publisher when
+  servers and credentials match (or no dedicated `FIONAS_NOTIFICATION_NATS_*` is configured) and
+  opens a dedicated one otherwise. A broker outage or stream mismatch leaves events pending and
+  logged; it never re-sends a push. [AsyncAPI](asyncapi.json) owns these schemas.
+- **NATS TLS.** Every `*_NATS_URL` accepts a same-scheme server list. `tls://` uses the JVM
+  default `SSLContext` (`javax.net.ssl.*`) through `HostnameVerifyingTls`, which enables `HTTPS`
+  endpoint identification that jnats 2.26 omits; this applies to the outbox, intake,
+  conversation and recovery connections too. No Fiona TLS file settings exist.
 
 ## Staff request discovery
 
