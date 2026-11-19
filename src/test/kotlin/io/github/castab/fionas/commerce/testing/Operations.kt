@@ -1,6 +1,7 @@
 package io.github.castab.fionas.commerce.testing
 
 import io.github.castab.commerce.runtime.operation.OperationOrigin
+import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.fionas.commerce.customer.CustomerId
 import io.github.castab.fionas.commerce.customer.CustomerName
 import io.github.castab.fionas.commerce.customer.CustomerRepository
@@ -14,6 +15,7 @@ import io.github.castab.fionas.commerce.financial.MaterializeInquiryFinancialDoc
 import io.github.castab.fionas.commerce.inquiry.CreateInquiry
 import io.github.castab.fionas.commerce.inquiry.EventDate
 import io.github.castab.fionas.commerce.inquiry.EventType
+import io.github.castab.fionas.commerce.inquiry.Inquiry
 import io.github.castab.fionas.commerce.inquiry.InquiryId
 import io.github.castab.fionas.commerce.inquiry.InquiryMessage
 import io.github.castab.fionas.commerce.inquiry.InquiryRepository
@@ -42,6 +44,7 @@ fun TestApplication.createInquiryOperation(
     newCustomerId: () -> CustomerId = { CustomerId(UUID.randomUUID()) },
     newInquiryId: () -> InquiryId = { InquiryId(UUID.randomUUID()) },
     newEventId: () -> UUID = UUID::randomUUID,
+    notifyStaff: (Transaction, Inquiry) -> Unit = { _, _ -> },
 ) = CreateInquiry(
     transactor,
     customers,
@@ -53,6 +56,7 @@ fun TestApplication.createInquiryOperation(
     newCustomerId,
     newInquiryId,
     newEventId,
+    notifyStaff,
 )
 
 /** A public inquiry command submitted by the web server's SERVICE principal with [lines] it priced. */

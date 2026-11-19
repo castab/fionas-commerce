@@ -8,12 +8,17 @@ import java.time.Duration
 import java.util.UUID
 
 /** Owns the adapter; the runtime stops this service before closing its shared database pool. */
-class InquiryOutboxPublisher(
+class InquiryOutboxPublisher internal constructor(
     context: CommerceRuntimeContext,
-    configuration: NatsOutboxConfiguration,
+    private val transport: NatsOutboxTransport,
     instanceId: String = UUID.randomUUID().toString(),
 ) : ManagedBackgroundService {
-    private val transport = NatsOutboxTransport(configuration)
+    constructor(
+        context: CommerceRuntimeContext,
+        configuration: NatsOutboxConfiguration,
+        instanceId: String = UUID.randomUUID().toString(),
+    ) : this(context, NatsOutboxTransport(configuration), instanceId)
+
     private val dispatcher =
         OutboxDispatcher(
             context.outbox.publisher(FIONA_EVENT_PRODUCER, instanceId),

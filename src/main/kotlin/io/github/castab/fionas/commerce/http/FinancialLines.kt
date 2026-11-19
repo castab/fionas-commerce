@@ -376,6 +376,9 @@ internal val requireStaffTimelineReader: Filter = staffUserOnly("Timeline update
 
 internal val requireStaffPaymentManager: Filter = staffUserOnly("Managing customer payment access requires an authenticated staff USER")
 
+/** Push devices and test notifications belong to one staff USER; a SERVICE never owns or sends to a device. */
+internal val requireStaffNotifier: Filter = staffUserOnly(STAFF_NOTIFIER_REQUIRED)
+
 private fun staffUserOnly(message: String): Filter =
     Filter { next ->
         { request: Request ->

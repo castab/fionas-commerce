@@ -22,6 +22,9 @@ kotlin-logging = "8.0.4"
 argon2 = "2.12"
 jnats = "2.26.4"
 stripe = "34.1.0"
+# Web Push VAPID signing and RFC 8291 payload encryption with JDK crypto only (no Bouncy
+# Castle); Fiona sends the prepared request with its own redirect-free java.net.http client.
+zerodep-web-push = "2.1.5"
 
 [libraries]
 commerce-runtime = { module = "io.github.castab:commerce-runtime", version.ref = "commerce" }
@@ -32,6 +35,7 @@ kotlin-logging-jvm = { module = "io.github.oshai:kotlin-logging-jvm", version.re
 argon2-jvm = { module = "de.mkammerer:argon2-jvm", version.ref = "argon2" }
 jnats = { module = "io.nats:jnats", version.ref = "jnats" }
 stripe-java = { module = "com.stripe:stripe-java", version.ref = "stripe" }
+zerodep-web-push = { module = "com.zerodeplibs:zerodep-web-push-java", version.ref = "zerodep-web-push" }
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
 

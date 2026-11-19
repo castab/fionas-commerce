@@ -4,6 +4,7 @@ import io.github.castab.fionas.commerce.events.FIONA_EVENTS_STREAM
 import io.github.castab.fionas.commerce.events.INQUIRY_DECLINED_SUBJECT
 import io.github.castab.fionas.commerce.events.INQUIRY_PERSISTED_SUBJECT
 import io.github.castab.fionas.commerce.events.NatsOutboxConfiguration
+import io.github.castab.fionas.commerce.events.NotificationEventsConfiguration
 import io.nats.client.Connection
 import io.nats.client.Nats
 import io.nats.client.Options
@@ -95,6 +96,9 @@ class TestNats(
                   "${'$'}JS.API.CONSUMER.MSG.NEXT.RESEND_CONVERSATIONS.fionas-commerce-conversations",
                   "${'$'}JS.ACK.RESEND_CONVERSATIONS.fionas-commerce-conversations.>"], subscribe: ["_INBOX.>"]
             } },
+            { user: "notifications", password: "test-notifications", permissions: {
+                publish: ["fionas.events.notification.>"], subscribe: ["_INBOX.>"]
+            } },
             { user: "denied", password: "test-denied", permissions: {
                 publish: ["unrelated.subject"], subscribe: ["_INBOX.>"]
             } }
@@ -115,6 +119,19 @@ class TestNats(
 
     fun publisherConfiguration(user: String = "commerce") =
         configurationWith("FIONAS_NATS_USER" to user, "FIONAS_NATS_PASSWORD" to "test-$user")
+
+    /** A dedicated notification event destination authenticated as [user]. */
+    fun notificationConfiguration(
+        user: String = "notifications",
+        stream: String = FIONA_EVENTS_STREAM,
+    ) = NotificationEventsConfiguration.dedicated(
+        mapOf(
+            "FIONAS_NOTIFICATION_NATS_URL" to url,
+            "FIONAS_NOTIFICATION_NATS_USER" to user,
+            "FIONAS_NOTIFICATION_NATS_PASSWORD" to "test-$user",
+        ),
+        stream = stream,
+    )
 
     fun tokenPublisherConfiguration(token: String) = configurationWith("FIONAS_NATS_TOKEN" to token)
 

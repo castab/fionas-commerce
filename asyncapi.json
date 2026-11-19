@@ -2,8 +2,8 @@
   "asyncapi": "3.0.0",
   "info": {
     "title": "Fiona commerce events",
-    "version": "3.2.0",
-    "description": "Commerce owns InquiryPersisted v3: an independently meaningful initial inquiry, canonical customer, requested service and Estimate snapshot. HTTP 201 commits all business facts and the event atomically. Commerce also owns InquiryDeclined v1: a staff user's terminal decline of a REQUESTED inquiry, committed atomically with the decline fact on the same inquiry aggregate. JSONB preserves structured content, not producer whitespace or key order; publication sends the stored PostgreSQL JSONB text as UTF-8. Delivery is at least once: consumers durably deduplicate event IDs and tolerate delays, missing predecessors and out-of-order processing. Payloads contain personal and commercial data: restrict consumers and establish separate broker and PostgreSQL retention policies. Optional managed intake consumes producer-owned InquirySubmitted v1 directly. Transport diagnostics InquiryProcessingFailed v2 are independently confirmed before TERM and never assert whether business effects committed."
+    "version": "3.3.0",
+    "description": "Commerce owns InquiryPersisted v3: an independently meaningful initial inquiry, canonical customer, requested service and Estimate snapshot. HTTP 201 commits all business facts and the event atomically. Commerce also owns InquiryDeclined v1: a staff user's terminal decline of a REQUESTED inquiry, committed atomically with the decline fact on the same inquiry aggregate. JSONB preserves structured content, not producer whitespace or key order; publication sends the stored PostgreSQL JSONB text as UTF-8. Delivery is at least once: consumers durably deduplicate event IDs and tolerate delays, missing predecessors and out-of-order processing. Payloads contain personal and commercial data: restrict consumers and establish separate broker and PostgreSQL retention policies. Optional managed intake consumes producer-owned InquirySubmitted v1 directly. Transport diagnostics InquiryProcessingFailed v2 are independently confirmed before TERM and never assert whether business effects committed. Commerce also owns staff notification events (v1): notification.queued once per staff push notification and notification.push_accepted / notification.push_failed once per device delivery that reaches a provider outcome. They carry only Fiona identities and safe outcome codes, never push endpoints, keys, staff identities or customer data, and use their own outbox producer and dispatcher so they never delay inquiry events or re-send a push."
   },
   "defaultContentType": "application/json",
   "channels": {
@@ -66,6 +66,36 @@
           "$ref": "#/components/messages/InquirySubmittedV1"
         }
       }
+    },
+    "staffNotificationQueuedV1": {
+      "address": "fionas.events.notification.queued.v1",
+      "description": "Default FIONAS_EVENTS stream, subjects fionas.events.>; the subject prefix (FIONAS_NOTIFICATION_EVENTS_SUBJECT_PREFIX, default fionas.events) and expected stream (FIONAS_NOTIFICATION_EVENTS_STREAM) are deployment configuration. The stream must capture <prefix>.notification.>. Commerce never administers streams.",
+      "x-jetstream-stream": "FIONAS_EVENTS",
+      "messages": {
+        "staffNotificationQueuedV1": {
+          "$ref": "#/components/messages/StaffNotificationQueuedV1"
+        }
+      }
+    },
+    "staffNotificationPushAcceptedV1": {
+      "address": "fionas.events.notification.push_accepted.v1",
+      "description": "Default FIONAS_EVENTS stream, subjects fionas.events.>; the subject prefix (FIONAS_NOTIFICATION_EVENTS_SUBJECT_PREFIX, default fionas.events) and expected stream (FIONAS_NOTIFICATION_EVENTS_STREAM) are deployment configuration. The stream must capture <prefix>.notification.>. Commerce never administers streams.",
+      "x-jetstream-stream": "FIONAS_EVENTS",
+      "messages": {
+        "staffNotificationPushAcceptedV1": {
+          "$ref": "#/components/messages/StaffNotificationPushAcceptedV1"
+        }
+      }
+    },
+    "staffNotificationPushFailedV1": {
+      "address": "fionas.events.notification.push_failed.v1",
+      "description": "Default FIONAS_EVENTS stream, subjects fionas.events.>; the subject prefix (FIONAS_NOTIFICATION_EVENTS_SUBJECT_PREFIX, default fionas.events) and expected stream (FIONAS_NOTIFICATION_EVENTS_STREAM) are deployment configuration. The stream must capture <prefix>.notification.>. Commerce never administers streams.",
+      "x-jetstream-stream": "FIONAS_EVENTS",
+      "messages": {
+        "staffNotificationPushFailedV1": {
+          "$ref": "#/components/messages/StaffNotificationPushFailedV1"
+        }
+      }
     }
   },
   "operations": {
@@ -103,6 +133,27 @@
         "$ref": "#/channels/inquirySubmittedV1"
       },
       "description": "Bind existing inquiry-to-commerce durable without mutation; validate, invoke the shared CreateInquiry operation under configured active authorized SERVICE, then confirm input ACK after commit. Outbox success delivery proceeds independently."
+    },
+    "publishStaffNotificationQueued": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/staffNotificationQueuedV1"
+      },
+      "description": "Published by the dedicated fionas-commerce.notifications outbox dispatcher: immutable record.payloadJson UTF-8 bytes, the event UUID as Nats-Msg-Id on every retry, and only a PubAck naming the configured stream with a positive sequence confirms. Appended in the same transaction as the delivery state it reports. A broker outage or stream mismatch leaves the event pending (logged as event=nats_outbox_publish_unconfirmed name=notifications) and never causes another Web Push request. Consumers deduplicate by event id."
+    },
+    "publishStaffNotificationPushAccepted": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/staffNotificationPushAcceptedV1"
+      },
+      "description": "Published by the dedicated fionas-commerce.notifications outbox dispatcher: immutable record.payloadJson UTF-8 bytes, the event UUID as Nats-Msg-Id on every retry, and only a PubAck naming the configured stream with a positive sequence confirms. Appended in the same transaction as the delivery state it reports. A broker outage or stream mismatch leaves the event pending (logged as event=nats_outbox_publish_unconfirmed name=notifications) and never causes another Web Push request. Consumers deduplicate by event id."
+    },
+    "publishStaffNotificationPushFailed": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/staffNotificationPushFailedV1"
+      },
+      "description": "Published by the dedicated fionas-commerce.notifications outbox dispatcher: immutable record.payloadJson UTF-8 bytes, the event UUID as Nats-Msg-Id on every retry, and only a PubAck naming the configured stream with a positive sequence confirms. Appended in the same transaction as the delivery state it reports. A broker outage or stream mismatch leaves the event pending (logged as event=nats_outbox_publish_unconfirmed name=notifications) and never causes another Web Push request. Consumers deduplicate by event id."
     }
   },
   "components": {
@@ -541,6 +592,231 @@
         "payload": {
           "$ref": "https://raw.githubusercontent.com/castab/fionas-web/main/asyncapi.yaml#/components/schemas/InquirySubmittedV1"
         }
+      },
+      "StaffNotificationQueuedV1": {
+        "name": "StaffNotificationQueuedV1",
+        "title": "A staff push notification's deliveries are queued",
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Msg-Id",
+            "Nats-Expected-Stream",
+            "Fionas-Producer-Id",
+            "Fionas-Aggregate-Type",
+            "Fionas-Aggregate-Id",
+            "Fionas-Aggregate-Sequence"
+          ],
+          "properties": {
+            "Nats-Msg-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload id and the runtime outbox UUID, unchanged on every retry."
+            },
+            "Nats-Expected-Stream": {
+              "type": "string",
+              "description": "The configured notification stream (default FIONAS_EVENTS)."
+            },
+            "Fionas-Producer-Id": {
+              "type": "string",
+              "enum": [
+                "fionas-commerce.notifications"
+              ]
+            },
+            "Fionas-Aggregate-Type": {
+              "type": "string",
+              "enum": [
+                "staff_notification"
+              ]
+            },
+            "Fionas-Aggregate-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload.aggregate.id and payload.data.notificationId."
+            },
+            "Fionas-Aggregate-Sequence": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Equals payload.aggregate.sequence."
+            }
+          }
+        },
+        "payload": {
+          "$ref": "#/components/schemas/StaffNotificationQueuedV1"
+        },
+        "description": "Once per notification, in the transaction that queues its device deliveries. deliveryCount is 0 for a new-inquiry job with no eligible enrolled device; such a job is complete and never retried.",
+        "examples": [
+          {
+            "payload": {
+              "schemaVersion": 1,
+              "type": "fionas.notification.queued",
+              "id": "3f6c2e1a-8b4d-4c1e-9a2f-5b7d8e9f0a12",
+              "occurredAt": "2026-11-18T17:03:00.010123Z",
+              "source": "fionas-commerce",
+              "aggregate": {
+                "type": "staff_notification",
+                "id": "1a5bd3fd-6a0a-4d2e-9a7c-3f8f0c2d9e41",
+                "sequence": 1
+              },
+              "data": {
+                "notificationId": "1a5bd3fd-6a0a-4d2e-9a7c-3f8f0c2d9e41",
+                "kind": "test",
+                "deliveryCount": 1
+              }
+            }
+          }
+        ]
+      },
+      "StaffNotificationPushAcceptedV1": {
+        "name": "StaffNotificationPushAcceptedV1",
+        "title": "A push service accepted one device delivery",
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Msg-Id",
+            "Nats-Expected-Stream",
+            "Fionas-Producer-Id",
+            "Fionas-Aggregate-Type",
+            "Fionas-Aggregate-Id",
+            "Fionas-Aggregate-Sequence"
+          ],
+          "properties": {
+            "Nats-Msg-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload id and the runtime outbox UUID, unchanged on every retry."
+            },
+            "Nats-Expected-Stream": {
+              "type": "string",
+              "description": "The configured notification stream (default FIONAS_EVENTS)."
+            },
+            "Fionas-Producer-Id": {
+              "type": "string",
+              "enum": [
+                "fionas-commerce.notifications"
+              ]
+            },
+            "Fionas-Aggregate-Type": {
+              "type": "string",
+              "enum": [
+                "staff_notification"
+              ]
+            },
+            "Fionas-Aggregate-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload.aggregate.id and payload.data.notificationId."
+            },
+            "Fionas-Aggregate-Sequence": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Equals payload.aggregate.sequence."
+            }
+          }
+        },
+        "payload": {
+          "$ref": "#/components/schemas/StaffNotificationPushAcceptedV1"
+        },
+        "description": "Once per delivery the push service accepted (2xx). Acceptance is not display: the device may be offline or suppress the notification. After an uncertain earlier attempt the device may show it twice; notificationId stays stable.",
+        "examples": [
+          {
+            "payload": {
+              "schemaVersion": 1,
+              "type": "fionas.notification.push_accepted",
+              "id": "9e1d4c7b-2a5f-4e8d-b3c6-1f0a2b3c4d5e",
+              "occurredAt": "2026-11-18T17:03:00.733456Z",
+              "source": "fionas-commerce",
+              "aggregate": {
+                "type": "staff_notification",
+                "id": "1a5bd3fd-6a0a-4d2e-9a7c-3f8f0c2d9e41",
+                "sequence": 2
+              },
+              "data": {
+                "notificationId": "1a5bd3fd-6a0a-4d2e-9a7c-3f8f0c2d9e41",
+                "deliveryId": "7c2a9a54-0b3c-4b8e-8f3e-2d5d9e6a1c07",
+                "kind": "test",
+                "attempts": 1,
+                "providerCode": 201,
+                "reason": null
+              }
+            }
+          }
+        ]
+      },
+      "StaffNotificationPushFailedV1": {
+        "name": "StaffNotificationPushFailedV1",
+        "title": "One device delivery failed terminally",
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Msg-Id",
+            "Nats-Expected-Stream",
+            "Fionas-Producer-Id",
+            "Fionas-Aggregate-Type",
+            "Fionas-Aggregate-Id",
+            "Fionas-Aggregate-Sequence"
+          ],
+          "properties": {
+            "Nats-Msg-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload id and the runtime outbox UUID, unchanged on every retry."
+            },
+            "Nats-Expected-Stream": {
+              "type": "string",
+              "description": "The configured notification stream (default FIONAS_EVENTS)."
+            },
+            "Fionas-Producer-Id": {
+              "type": "string",
+              "enum": [
+                "fionas-commerce.notifications"
+              ]
+            },
+            "Fionas-Aggregate-Type": {
+              "type": "string",
+              "enum": [
+                "staff_notification"
+              ]
+            },
+            "Fionas-Aggregate-Id": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Equals payload.aggregate.id and payload.data.notificationId."
+            },
+            "Fionas-Aggregate-Sequence": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Equals payload.aggregate.sequence."
+            }
+          }
+        },
+        "payload": {
+          "$ref": "#/components/schemas/StaffNotificationPushFailedV1"
+        },
+        "description": "Once per delivery that failed terminally. Skipped deliveries (device revoked or expired, or recipient no longer eligible, before dispatch) publish nothing; the staff status API reports them as skipped.",
+        "examples": [
+          {
+            "payload": {
+              "schemaVersion": 1,
+              "type": "fionas.notification.push_failed",
+              "id": "c4b3a291-7e6d-4f5c-8b9a-0d1e2f3a4b5c",
+              "occurredAt": "2026-11-18T18:03:00.000001Z",
+              "source": "fionas-commerce",
+              "aggregate": {
+                "type": "staff_notification",
+                "id": "5e8f1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+                "sequence": 3
+              },
+              "data": {
+                "notificationId": "5e8f1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+                "deliveryId": "6f9a2b3c-4d5e-4f6a-9b0c-1d2e3f4a5b6c",
+                "kind": "new_inquiry",
+                "attempts": 2,
+                "providerCode": 410,
+                "reason": "subscription_expired"
+              }
+            }
+          }
+        ]
       }
     },
     "schemas": {
@@ -1427,6 +1703,355 @@
               "errorCode": {
                 "type": "string",
                 "description": "Static failure code; no payload or exception details."
+              }
+            }
+          }
+        }
+      },
+      "StaffNotificationQueuedV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "type",
+          "id",
+          "occurredAt",
+          "source",
+          "aggregate",
+          "data"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "fionas.notification.queued"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The event id: equals Nats-Msg-Id and is stable across publication retries."
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the reported state was committed, UTC microseconds. Not broker time."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fionas-commerce"
+            ]
+          },
+          "aggregate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "sequence"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "staff_notification"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The notificationId."
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "format": "int64",
+                "description": "Runtime aggregate sequence of this notification: queued is 1, outcomes follow. Not a broker sequence."
+              }
+            }
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "notificationId",
+              "kind",
+              "deliveryCount"
+            ],
+            "properties": {
+              "notificationId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "test",
+                  "new_inquiry"
+                ]
+              },
+              "deliveryCount": {
+                "type": "integer",
+                "minimum": 0,
+                "format": "int32"
+              }
+            }
+          }
+        }
+      },
+      "StaffNotificationPushAcceptedV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "type",
+          "id",
+          "occurredAt",
+          "source",
+          "aggregate",
+          "data"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "fionas.notification.push_accepted"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The event id: equals Nats-Msg-Id and is stable across publication retries."
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the reported state was committed, UTC microseconds. Not broker time."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fionas-commerce"
+            ]
+          },
+          "aggregate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "sequence"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "staff_notification"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The notificationId."
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "format": "int64",
+                "description": "Runtime aggregate sequence of this notification: queued is 1, outcomes follow. Not a broker sequence."
+              }
+            }
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "notificationId",
+              "deliveryId",
+              "kind",
+              "attempts",
+              "providerCode",
+              "reason"
+            ],
+            "properties": {
+              "notificationId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "deliveryId": {
+                "type": "string",
+                "format": "uuid",
+                "description": "One device delivery of the notification."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "test",
+                  "new_inquiry"
+                ]
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0,
+                "format": "int32",
+                "description": "Provider attempts made."
+              },
+              "providerCode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599,
+                "format": "int32",
+                "description": "The push service's HTTP status of the deciding attempt; null when none was received."
+              },
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      },
+      "StaffNotificationPushFailedV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "type",
+          "id",
+          "occurredAt",
+          "source",
+          "aggregate",
+          "data"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "fionas.notification.push_failed"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The event id: equals Nats-Msg-Id and is stable across publication retries."
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the reported state was committed, UTC microseconds. Not broker time."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fionas-commerce"
+            ]
+          },
+          "aggregate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "sequence"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "staff_notification"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The notificationId."
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "format": "int64",
+                "description": "Runtime aggregate sequence of this notification: queued is 1, outcomes follow. Not a broker sequence."
+              }
+            }
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "notificationId",
+              "deliveryId",
+              "kind",
+              "attempts",
+              "providerCode",
+              "reason"
+            ],
+            "properties": {
+              "notificationId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "deliveryId": {
+                "type": "string",
+                "format": "uuid",
+                "description": "One device delivery of the notification."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "test",
+                  "new_inquiry"
+                ]
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0,
+                "format": "int32",
+                "description": "Provider attempts made."
+              },
+              "providerCode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599,
+                "format": "int32",
+                "description": "The push service's HTTP status of the deciding attempt; null when none was received."
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "subscription_expired",
+                  "provider_rejected",
+                  "provider_unavailable",
+                  "provider_throttled",
+                  "transport_failure",
+                  "endpoint_not_allowed",
+                  "provider_outcome_unknown",
+                  "delivery_expired"
+                ],
+                "description": "Stable machine-readable reason. provider_outcome_unknown: a timeout or lost response left acceptance unconfirmed after retries."
               }
             }
           }

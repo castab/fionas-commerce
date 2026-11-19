@@ -20,9 +20,12 @@ import io.github.castab.commerce.staff.ServiceIdentity
 import io.github.castab.fionas.commerce.FIONA_DEFAULT_EVENT_CALENDAR_ZONE
 import io.github.castab.fionas.commerce.conversation.ConversationReadConfiguration
 import io.github.castab.fionas.commerce.conversation.ConversationSendConfiguration
+import io.github.castab.fionas.commerce.events.NotificationEventsConfiguration
 import io.github.castab.fionas.commerce.fionaApplication
 import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.SERVICE_TOKEN_PATH
+import io.github.castab.fionas.commerce.notification.WebPushConfiguration
+import io.github.castab.fionas.commerce.notification.WebPushSender
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.SecretPassword
@@ -161,6 +164,9 @@ class TestApplication private constructor(
             timelineUpdatesEnabled: Boolean = false,
             stripe: io.github.castab.fionas.commerce.payments.StripeConfiguration? = null,
             stripeGateway: io.github.castab.fionas.commerce.payments.StripeGateway? = null,
+            webPush: WebPushConfiguration? = null,
+            webPushSender: WebPushSender? = null,
+            notificationEvents: NotificationEventsConfiguration = NotificationEventsConfiguration(),
             database: TestDatabase = TestDatabase.create(),
         ): TestApplication {
             try {
@@ -179,6 +185,9 @@ class TestApplication private constructor(
                         timelineUpdatesEnabled = timelineUpdatesEnabled,
                         stripe = stripe,
                         stripeGateway = stripeGateway,
+                        webPush = webPush,
+                        webPushSender = webPushSender,
+                        notificationEvents = notificationEvents,
                     )
                 var context: CommerceRuntimeContext? = null
                 val runtime =
