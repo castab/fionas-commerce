@@ -104,7 +104,10 @@ class NatsTlsSpec :
             return dir
         }
 
-        fun nats(dir: Path): String {
+        fun nats(
+            dir: Path,
+            host: String = "127.0.0.1",
+        ): String {
             val port = ServerSocket(0).use { it.localPort }
             val name = "fionas-test-nats-tls-${UUID.randomUUID()}"
             run(
@@ -123,7 +126,7 @@ class NatsTlsSpec :
             )
             containers += name
             Thread.sleep(1_500)
-            return "tls://127.0.0.1:$port"
+            return "tls://$host:$port"
         }
 
         fun probe(
@@ -149,6 +152,7 @@ class NatsTlsSpec :
         }
 
         lateinit var matching: String
+        lateinit var matchingDnsName: String
         lateinit var mismatched: String
         beforeSpec {
             keytool(
@@ -188,6 +192,8 @@ class NatsTlsSpec :
                 "-noprompt",
             )
             matching = nats(server("matching", "ip:127.0.0.1"))
+            // Only a DNS SAN, dialed by that name: the shape of a broker behind a hosted TCP proxy.
+            matchingDnsName = nats(server("matching-dns", "dns:localhost"), host = "localhost")
             mismatched = nats(server("mismatched", "dns:nats.elsewhere.test"))
         }
         afterSpec {
@@ -197,6 +203,12 @@ class NatsTlsSpec :
 
         test("a certificate chaining to the JVM trust store and naming the server host connects") {
             probe("fiona", matching) shouldBe 0
+        }
+
+        test("a hostname URL is verified against the hostname, not against the IP jnats would resolve it to") {
+            // jnats resolves hostnames to IPs by default and passes the IP to the TLS upgrade;
+            // verifying that IP against a DNS-only certificate refused every hostname broker.
+            probe("fiona", matchingDnsName) shouldBe 0
         }
 
         test("a trusted certificate for another host is rejected; plain jnats would have accepted it") {
