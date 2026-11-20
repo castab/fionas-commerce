@@ -26,10 +26,21 @@ internal class NatsConnectionConfiguration private constructor(
     /**
      * Applies the server list to a client options builder. `tls://` servers use the JVM default
      * TLS context with hostname verification switched on (see [HostnameVerifyingTls]).
+     *
+     * For `tls://` the hostname must reach the TLS upgrade unchanged. jnats' default
+     * (`ResolveToAll`) re-hosts each server URL to its IP addresses before connecting and then
+     * passes that IP to the upgrade as the peer host, so hostname verification would check the IP
+     * against a certificate that names only the DNS host and refuse it. `HappyEyeballs` resolves
+     * inside the connect step instead (racing the addresses) and keeps the configured host for
+     * the upgrade. `Unresolved` is not an option: it connects a plain socket to an unresolved
+     * address, which only works through a proxy.
      */
     internal fun servers(builder: Options.Builder): Options.Builder =
         builder.servers(servers.toTypedArray()).also {
-            if (servers.first().startsWith("tls://")) it.sslContext(HostnameVerifyingTls.context())
+            if (servers.first().startsWith("tls://")) {
+                it.sslContext(HostnameVerifyingTls.context())
+                it.hostnameResolveMode(Options.HostnameResolveMode.HappyEyeballs)
+            }
         }
 
     /** Same servers and the same authentication: one long-lived connection can serve both. */
