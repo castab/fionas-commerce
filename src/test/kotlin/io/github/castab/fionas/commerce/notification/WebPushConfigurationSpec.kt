@@ -16,6 +16,7 @@ import java.security.interfaces.ECPrivateKey
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.time.Duration
+import java.time.ZoneId
 import java.util.Base64
 
 class WebPushConfigurationSpec :
@@ -34,17 +35,17 @@ class WebPushConfigurationSpec :
             return encoder.encodeToString(private) to encoder.encodeToString(public)
         }
 
-        test("disabled by default; the inquiry trigger cannot be on without push") {
+        test("disabled by default; reminders cannot be on without push; the retired inquiry trigger is refused") {
             WebPushConfiguration.fromEnvironment(emptyMap()) shouldBe null
             WebPushConfiguration.fromEnvironment(mapOf("FIONAS_PUSH_ENABLED" to "false")) shouldBe null
+            WebPushConfiguration.fromEnvironment(mapOf("FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED" to "false")) shouldBe null
+            shouldThrow<IllegalArgumentException> {
+                WebPushConfiguration.fromEnvironment(mapOf("FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED" to "true"))
+            }
             shouldThrow<IllegalArgumentException> {
                 WebPushConfiguration.fromEnvironment(mapOf("FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED" to "true"))
-            }
+            }.message shouldContain "FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED"
             shouldThrow<IllegalStateException> { WebPushConfiguration.fromEnvironment(mapOf("FIONAS_PUSH_ENABLED" to "yes")) }
-            inquiryPushNotificationsEnabled(emptyMap()) shouldBe false
-            inquiryPushNotificationsEnabled(
-                mapOf("FIONAS_PUSH_ENABLED" to "true", "FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED" to "true"),
-            ) shouldBe true
         }
 
         test("raw base64url VAPID keys load, must form a pair, and never render") {
@@ -58,7 +59,7 @@ class WebPushConfigurationSpec :
                 )
             val configuration = checkNotNull(WebPushConfiguration.fromEnvironment(environment))
             configuration.applicationServerKey shouldBe public
-            configuration.inquiryNotifications shouldBe false
+            configuration.unansweredReminders shouldBe null
             configuration.toString() shouldNotContain private
             val (_, otherPublic) = keyPair()
             shouldThrow<IllegalArgumentException> {
@@ -73,23 +74,44 @@ class WebPushConfigurationSpec :
             shouldThrow<IllegalArgumentException> {
                 WebPushConfiguration.fromEnvironment(environment + ("FIONAS_PUSH_SEND_TIMEOUT_MS" to "60000"))
             }
+            val reminders = environment + ("FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED" to "true")
             shouldThrow<IllegalArgumentException> {
-                WebPushConfiguration.fromEnvironment(environment + ("FIONAS_PUSH_INQUIRY_PATH" to "https://evil.example/{inquiryId}"))
+                WebPushConfiguration.fromEnvironment(reminders + ("FIONAS_PUSH_UNANSWERED_REMINDER_PATH" to "https://evil.example/"))
             }
+            shouldThrow<IllegalArgumentException> {
+                WebPushConfiguration.fromEnvironment(reminders + ("FIONAS_PUSH_UNANSWERED_REMINDER_PATH" to "//evil.example/"))
+            }
+            shouldThrow<IllegalArgumentException> {
+                WebPushConfiguration.fromEnvironment(reminders + ("FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE" to ""))
+            }.message shouldContain "FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE"
+            shouldThrow<IllegalArgumentException> {
+                WebPushConfiguration.fromEnvironment(reminders + ("FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE" to "0 25 * * *"))
+            }
+            shouldThrow<IllegalArgumentException> {
+                WebPushConfiguration.fromEnvironment(reminders + ("FIONAS_PUSH_UNANSWERED_REMINDER_TIME_ZONE" to "Pacific"))
+            }.message shouldContain "FIONAS_PUSH_UNANSWERED_REMINDER_TIME_ZONE"
+            val defaults = checkNotNull(checkNotNull(WebPushConfiguration.fromEnvironment(reminders)).unansweredReminders)
+            defaults.schedule.expression shouldBe "0 10,14 * * MON-FRI"
+            defaults.schedule.zone shouldBe ZoneId.of("America/Los_Angeles")
+            defaults.path shouldBe "/"
             val custom =
                 checkNotNull(
                     WebPushConfiguration.fromEnvironment(
-                        environment +
+                        reminders +
                             mapOf(
                                 "FIONAS_PUSH_ALLOWED_HOSTS" to "*.push.example.com",
-                                "FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED" to "true",
-                                "FIONAS_PUSH_INQUIRY_PATH" to "/admin/requests/{inquiryId}",
+                                "FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE" to "30 9 * * *",
+                                "FIONAS_PUSH_UNANSWERED_REMINDER_TIME_ZONE" to "America/New_York",
+                                "FIONAS_PUSH_UNANSWERED_REMINDER_PATH" to "/requests",
                             ),
                     ),
                 )
             custom.allowedHosts.allows("eu.push.example.com") shouldBe true
             custom.allowedHosts.allows("push.example.com") shouldBe false
-            custom.inquiryNotifications shouldBe true
+            val settings = checkNotNull(custom.unansweredReminders)
+            settings.schedule.expression shouldBe "30 9 * * *"
+            settings.schedule.zone shouldBe ZoneId.of("America/New_York")
+            settings.path shouldBe "/requests"
         }
 
         test("endpoints must be https on an allowed push service; keys must be real subscription keys") {

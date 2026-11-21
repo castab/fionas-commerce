@@ -9,7 +9,6 @@ import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.UserId
 import io.github.castab.fionas.commerce.events.StaffNotificationEventLog
 import io.github.castab.fionas.commerce.inquiry.IdempotencyKeyReused
-import io.github.castab.fionas.commerce.inquiry.Inquiry
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -25,9 +24,9 @@ const val WEBPUSH_PRODUCER = "fionas-commerce.webpush"
 internal const val WEBPUSH_FANOUT = "fionas.webpush.fanout"
 internal const val WEBPUSH_DELIVERY = "fionas.webpush.delivery"
 
-/** How long a provider may keep trying: a test is interesting briefly, a new inquiry for an hour. */
+/** How long a provider may keep trying: a test is interesting briefly, a reminder for an hour. */
 val TEST_DELIVERY_WINDOW: Duration = Duration.ofMinutes(10)
-val INQUIRY_DELIVERY_WINDOW: Duration = Duration.ofHours(1)
+val REMINDER_DELIVERY_WINDOW: Duration = Duration.ofHours(1)
 
 /** The active endpoint already belongs to another staff member; the owner is never disclosed. */
 class PushEndpointInUse : RuntimeException()
@@ -189,7 +188,6 @@ class StaffTestNotifications(
                     owner,
                     key,
                     target,
-                    null,
                     now,
                     now + TEST_DELIVERY_WINDOW,
                     now,
@@ -232,36 +230,69 @@ class StaffTestNotifications(
     }
 }
 
+/** What one reminder slot did. */
+sealed interface ReminderOutcome {
+    /** A reminder job was recorded; fan-out to devices follows in the background. */
+    data class Queued(
+        val notification: StaffNotificationId,
+        val count: Int,
+    ) : ReminderOutcome
+
+    /** Another run (a restart, or another instance) already raised this slot's reminder. */
+    data class AlreadyQueued(
+        val notification: StaffNotificationId,
+    ) : ReminderOutcome
+
+    /** Nothing awaits an answer, so nobody is notified and nothing is recorded. */
+    data object NothingUnanswered : ReminderOutcome
+}
+
 /**
- * The automatic new-inquiry trigger. Inside the inquiry's own transaction it records one job per
- * inquiry (the inquiry id is the deduplication key) and its fan-out work item; staff
- * eligibility and devices are resolved later, in the background, outside that transaction.
+ * The scheduled "N inquiries need to be answered" reminder. For one schedule slot it counts the
+ * inquiries awaiting an answer and, when there are any, records one job for the slot plus its
+ * fan-out work item. The slot is the deduplication key, so restarts and overlapping instances
+ * raise each slot at most once. Recipients and devices are resolved later, by fan-out.
  */
-class StaffInquiryNotifications(
+class UnansweredInquiryReminders(
+    private val transactor: Transactor,
     private val repository: JdbiStaffPushRepository,
     outbox: Outbox,
+    private val countUnanswered: () -> Int,
+    private val clock: Clock,
     private val newNotificationId: () -> StaffNotificationId = { StaffNotificationId(UUID.randomUUID()) },
 ) {
     private val work = WebPushWork(outbox)
 
-    fun enqueue(
-        transaction: Transaction,
-        inquiry: Inquiry,
-    ) {
-        val at = inquiry.createdAt.truncatedTo(ChronoUnit.MICROS)
-        val notification =
-            StaffNotification(
-                newNotificationId(),
-                StaffNotificationKind.NEW_INQUIRY,
-                null,
-                null,
-                null,
-                inquiry.id,
-                at,
-                at + INQUIRY_DELIVERY_WINDOW,
-                null,
-            )
-        if (repository.insertNotification(transaction, notification)) work.fanOut(transaction, notification.id, at)
+    fun remind(slot: Instant): ReminderOutcome {
+        val scheduledFor = slot.truncatedTo(ChronoUnit.MICROS)
+        transactor.inTransaction { transaction -> repository.findReminder(transaction, scheduledFor) }?.let {
+            return ReminderOutcome.AlreadyQueued(it.id)
+        }
+        // Its own REPEATABLE_READ snapshot; the job insert below runs READ COMMITTED.
+        val count = countUnanswered()
+        if (count == 0) return ReminderOutcome.NothingUnanswered
+        val now = clock.instant().truncatedTo(ChronoUnit.MICROS)
+        return transactor.inTransaction { transaction ->
+            val notification =
+                StaffNotification(
+                    newNotificationId(),
+                    StaffNotificationKind.UNANSWERED_INQUIRIES,
+                    null,
+                    null,
+                    null,
+                    now,
+                    now + REMINDER_DELIVERY_WINDOW,
+                    null,
+                    scheduledFor,
+                    count,
+                )
+            if (repository.insertNotification(transaction, notification)) {
+                work.fanOut(transaction, notification.id, now)
+                ReminderOutcome.Queued(notification.id, count)
+            } else {
+                ReminderOutcome.AlreadyQueued(checkNotNull(repository.findReminder(transaction, scheduledFor)).id)
+            }
+        }
     }
 }
 

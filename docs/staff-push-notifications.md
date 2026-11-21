@@ -1,7 +1,8 @@
 # Staff Web Push notifications
 
 Staff members enroll a browser or installed PWA, send themselves a test notification, and
-(optionally) receive a push for every newly accepted catering inquiry. This document is the
+(optionally) receive a scheduled reminder of how many inquiries still need an answer
+("3 inquiries need to be answered!"). This document is the
 operations guide and the `fionas-admin` integration contract. The architectural contract is in
 [AGENTS.md](../AGENTS.md#staff-web-push-notifications).
 
@@ -20,12 +21,47 @@ StaffPushDispatcher ◄───────┘  runtime OutboxDispatcher: claim
 NotificationEventPublisher ──► JetStream <prefix>.notification.<event>.v1 (Nats-Msg-Id = event id)
 ```
 
-New inquiries: `CreateInquiry` (HTTP, NATS intake and the recovery CLI) records one
-`NEW_INQUIRY` job in the inquiry's own transaction, keyed by the inquiry id. A background
-fan-out resolves enrolled devices of ACTIVE staff currently holding `fionas.inquiries.read`
-(runtime authorization, read outside the business transaction), creates one delivery per
-device, and publishes `notification.queued` once. Every dispatch rechecks the device and the
-owner's eligibility first.
+Unanswered-inquiry reminders: at each slot of a cron schedule (default 10:00 and 14:00
+America/Los_Angeles, Monday to Friday) `UnansweredReminderScheduler` counts the inquiries
+awaiting an answer. When there are any, it records one `UNANSWERED_INQUIRIES` job keyed by the
+slot, with the count, plus a fan-out work item. A background fan-out resolves enrolled devices
+of ACTIVE staff currently holding `fionas.inquiries.read` (runtime authorization, read outside
+the business transaction), creates one delivery per device, and publishes `notification.queued`
+once. Every dispatch rechecks the device and the owner's eligibility first. A count of zero
+sends and records nothing.
+
+```text
+UnansweredReminderScheduler (one virtual thread; sleeps until the next slot)
+   │  REPEATABLE_READ: count inquiries awaiting an answer
+   │  count > 0: job (UNANSWERED_INQUIRIES, scheduled_for = slot, inquiry_count) + fan-out work item
+   ▼
+StaffPushDispatcher ── fan-out ── one delivery per eligible device ── provider calls as above
+```
+
+### What counts as awaiting an answer
+
+An inquiry counts when either holds:
+
+- **a customer email is waiting**: the dashboard's `needsReply` (inbound customer email
+  recorded after the latest staff reply or acknowledgement, on an inquiry that is not DECLINED);
+- **nobody has answered it yet**: it is still REQUESTED (no Quote issued, not declined) and no
+  staff email or acknowledgement was ever recorded for it.
+
+So a staff reply, an acknowledgement (`POST /inquiries/{id}/communications/acknowledge`, which
+also covers a phone call), issuing a Quote or declining answers an inquiry; a later customer
+email makes it count again. The count is taken at the slot, so the 2 PM reminder reflects
+everything answered since 10 AM. Reminders repeat each slot until nothing is waiting.
+
+### Schedule semantics
+
+- Standard five-field cron (`minute hour day-of-month month day-of-week`) with `*`, lists, ranges,
+  `/step` and English names, evaluated in `FIONAS_PUSH_UNANSWERED_REMINDER_TIME_ZONE`, so 10 AM
+  stays 10 AM across daylight saving. A time skipped by the spring-forward gap runs at the
+  shifted instant; a repeated fall-back time runs once.
+- Each slot is raised at most once: `scheduled_for` is unique, so a restart or a second instance
+  at the same slot finds the job already recorded.
+- A slot missed by up to 30 minutes (the app was restarting) is still raised when the app comes
+  back; older missed slots are skipped and logged, never replayed in a burst.
 
 ## Configuration
 
@@ -37,8 +73,11 @@ owner's eligibility first.
 | `FIONAS_PUSH_VAPID_SUBJECT` | — | Required. `mailto:` or `https:` contact sent to push services in the VAPID JWT. |
 | `FIONAS_PUSH_ALLOWED_HOSTS` | built-in list | Comma-separated exact hosts or `*.suffix` wildcards. Default: `fcm.googleapis.com`, `*.push.services.mozilla.com`, `updates.push.services.mozilla.com`, `*.notify.windows.com`, `web.push.apple.com`, `*.push.apple.com`. |
 | `FIONAS_PUSH_SEND_TIMEOUT_MS` | `8000` | Provider connect/request timeout, 1000–10000. |
-| `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED` | `false` | The automatic new-inquiry trigger. Requires `FIONAS_PUSH_ENABLED=true` (startup fails otherwise). |
-| `FIONAS_PUSH_INQUIRY_PATH` | `/requests/{inquiryId}` | Relative admin click destination for new-inquiry pushes. |
+| `FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED` | `false` | The scheduled unanswered-inquiry reminder. Requires `FIONAS_PUSH_ENABLED=true` (startup fails otherwise). |
+| `FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE` | `0 10,14 * * MON-FRI` | Five-field cron expression for reminder slots. Startup refuses a malformed or never-matching expression. |
+| `FIONAS_PUSH_UNANSWERED_REMINDER_TIME_ZONE` | `America/Los_Angeles` | IANA zone the schedule is read in. |
+| `FIONAS_PUSH_UNANSWERED_REMINDER_PATH` | `/` | Relative admin click destination (the dashboard, which lists Needs reply and Needs quote). |
+| `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED` | removed | The former per-inquiry trigger. `true` now fails startup with a pointer to the reminder; `false` or unset is accepted. |
 | `FIONAS_NOTIFICATION_EVENTS_ENABLED` | `false` | Publishes notification events to JetStream. Events are appended durably whenever push is enabled; this only composes the publisher. |
 | `FIONAS_NOTIFICATION_EVENTS_SUBJECT_PREFIX` | `fionas.events` | Subjects are `<prefix>.notification.{queued,push_accepted,push_failed}.v1`. |
 | `FIONAS_NOTIFICATION_EVENTS_STREAM` | `FIONAS_EVENTS` | Expected stream (`Nats-Expected-Stream`; only a PubAck from it confirms). |
@@ -97,14 +136,15 @@ The publishing identity needs `publish` on `<prefix>.notification.>` (default
 `fionas.events.notification.>`) and `subscribe` on `_INBOX.>`. When the notification events share
 the inquiry outbox identity, add that grant to it.
 
-### Rollout: test sends first, automatic notifications later
+### Rollout: test sends first, reminders later
 
 1. Deploy with `FIONAS_PUSH_ENABLED=true`, VAPID settings, and
-   `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED=false`. Optionally `FIONAS_NOTIFICATION_EVENTS_ENABLED=true`.
+   `FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED=false`. Optionally `FIONAS_NOTIFICATION_EVENTS_ENABLED=true`.
 2. Staff enroll devices in `fionas-admin` and send test notifications; verify display and the
    status/JetStream trace below.
-3. Set `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED=true` and redeploy. Only inquiries accepted
-   afterwards create jobs; nothing is backfilled.
+3. Set `FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED=true` (and the schedule, if not the default) and
+   redeploy. The startup log names the schedule; the next slot counts every inquiry already
+   waiting, including ones that arrived before the switch.
 
 Disabling push again stops the dispatcher; queued deliveries remain pending in the runtime
 outbox (producer `fionas-commerce.webpush`) and resume, or fail as `delivery_expired`, when
@@ -117,6 +157,12 @@ Logs never contain endpoints, keys, payloads or staff identities beyond ids:
 - `event=staff_push_attempt delivery=<id> attempt=<n> result=<Accepted|Gone|Rejected|Retryable|Unknown|EndpointNotAllowed>`
 - `event=staff_push_delivery_completed delivery=<id> state=<state> reason=<reason>`
 - `event=staff_push_fanned_out notification=<id> deliveries=<n>`
+- `event=unanswered_reminder_scheduler_started schedule="<cron>" zone=<zone>`
+- `event=unanswered_reminder_queued slot=<instant> notification=<id> count=<n>`,
+  `event=unanswered_reminder_not_needed slot=<instant> count=0`,
+  `event=unanswered_reminder_already_queued slot=<instant> notification=<id>`
+- `event=unanswered_reminder_skipped slot=<instant> reason=missed_by_more_than_grace`,
+  `event=unanswered_reminder_failed slot=<instant>` (with the exception; later slots still run)
 - `event=nats_outbox_publish_unconfirmed name=notifications code=<PUBLISH_FAILED|STREAM_MISMATCH>`
 - runtime backlog for producers `fionas-commerce.webpush` and `fionas-commerce.notifications`.
 
@@ -148,14 +194,15 @@ nats stream get FIONAS_EVENTS --last-for fionas.events.notification.push_accepte
 | `push_failed` | Terminal: `subscription_expired` (404/410; the registration is retired), `provider_rejected` (other 4xx, or a redirect, which is never followed), `endpoint_not_allowed`, a transient reason that outlasted the window, `provider_outcome_unknown` (an attempt timed out or lost its response and acceptance was never confirmed), or `delivery_expired` (the window passed with no provider answer). |
 | `skipped` | Not sent: `subscription_revoked` / `subscription_expired` (the device was removed or expired before dispatch) or `recipient_not_eligible` (owner disabled, or lost `fionas.inquiries.read`). No JetStream outcome event. |
 
-- Delivery windows: 10 minutes for tests, 1 hour for new-inquiry pushes. The push `TTL` is the
+- Delivery windows: 10 minutes for tests, 1 hour for reminders. The push `TTL` is the
   remaining window.
 - Retries follow the runtime outbox's bounded backoff (5 s up to 5 min between attempts);
   `Retry-After` is honored as a minimum, and one that ends past the window fails immediately.
 - **Duplicates:** a retry after an uncertain result can display the notification twice. Each
-  request carries a `Topic` derived from the notification id so a push service can collapse an
-  undelivered copy, and the payload's `notificationId` lets the service worker suppress a
-  repeat. The notification id never changes across attempts.
+  test request carries a `Topic` derived from the notification id so a push service can collapse
+  an undelivered copy, and the payload's `notificationId` lets the service worker suppress a
+  repeat. The notification id never changes across attempts. Every reminder uses the one
+  `Topic` `unanswered-inquiries`, so a device that was offline receives only the newest count.
 - Removing a device prevents later dispatches. A request already handed to the push service may
   still arrive.
 - A 404/410 retires only the registration version the attempt used; if the browser re-enrolled
@@ -238,9 +285,12 @@ Encrypted JSON, at most a few hundred bytes:
 ```
 
 ```json
-{"version": 1, "notificationId": "…", "kind": "new_inquiry", "title": "New catering inquiry",
- "body": "Open Fiona’s admin to review it.", "url": "/requests/0a6e8577-e811-487f-aa5d-3d30b74b25bd"}
+{"version": 1, "notificationId": "…", "kind": "unanswered_inquiries", "title": "3 inquiries need to be answered!",
+ "body": "Open Fiona’s admin to answer them.", "url": "/"}
 ```
+
+The reminder copy is singular for one inquiry ("1 inquiry needs to be answered!",
+"Open Fiona’s admin to answer it.").
 
 `url` is null or a path relative to the admin origin; never navigate to an absolute URL from a
 payload. Use `notificationId` as the notification `tag` so a duplicate replaces rather than

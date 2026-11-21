@@ -22,7 +22,7 @@ import java.util.UUID
 
 private val logger = KotlinLogging.logger {}
 
-/** Who may receive pushes: test sends need an active staff user, inquiry pushes also need to read inquiries. */
+/** Who may receive pushes: test sends need an active staff user, reminders also need to read inquiries. */
 class PushRecipients(
     private val activeUser: (UserId) -> Boolean,
     private val readsInquiries: (UserId) -> Boolean,
@@ -34,7 +34,7 @@ class PushRecipients(
         activeUser(user) &&
             when (kind) {
                 StaffNotificationKind.TEST -> true
-                StaffNotificationKind.NEW_INQUIRY -> readsInquiries(user)
+                StaffNotificationKind.UNANSWERED_INQUIRIES -> readsInquiries(user)
             }
 
     companion object {
@@ -48,7 +48,7 @@ class PushRecipients(
 }
 
 /**
- * The [WEBPUSH_PRODUCER] outbox transport. A fan-out record resolves a new-inquiry job's
+ * The [WEBPUSH_PRODUCER] outbox transport. A fan-out record resolves a reminder job's
  * eligible devices; a delivery record performs one fenced Web Push attempt. Network I/O never
  * runs inside a transaction: attempt intent commits first (A), then the provider call, then the
  * outcome and its notification event commit together (B), fenced by the attempt token so an
@@ -64,7 +64,7 @@ class WebPushDeliveryTransport internal constructor(
     private val events: StaffNotificationEventLog,
     private val sender: WebPushSender,
     private val recipients: PushRecipients,
-    private val inquiryPath: String,
+    private val reminderPath: String,
     private val clock: Clock,
     private val inFlightGrace: Duration,
     private val scheduler: WebPushWork,
@@ -208,12 +208,16 @@ class WebPushDeliveryTransport internal constructor(
             PushRequest(
                 checkNotNull(subscription.endpoint),
                 checkNotNull(subscription.keys),
-                WebPushPayloads.browser(notification, inquiryPath),
+                WebPushPayloads.browser(notification, reminderPath),
                 Duration.between(now, delivery.giveUpAt),
-                notification.kind == StaffNotificationKind.NEW_INQUIRY,
-                notification.id.value
-                    .toString()
-                    .replace("-", ""),
+                notification.kind == StaffNotificationKind.UNANSWERED_INQUIRIES,
+                if (notification.kind == StaffNotificationKind.UNANSWERED_INQUIRIES) {
+                    WebPushPayloads.REMINDER_TOPIC
+                } else {
+                    notification.id.value
+                        .toString()
+                        .replace("-", "")
+                },
             )
         return Decision.Send(token, request, subscription.registrationVersion, subscription.id)
     }
@@ -370,7 +374,7 @@ fun webPushDeliveryTransport(
         events,
         sender,
         recipients,
-        configuration.inquiryPath,
+        configuration.unansweredReminders?.path ?: UnansweredReminderSettings.DEFAULT_PATH,
         clock,
         configuration.sendTimeout + Duration.ofSeconds(10),
         WebPushWork(context.outbox),

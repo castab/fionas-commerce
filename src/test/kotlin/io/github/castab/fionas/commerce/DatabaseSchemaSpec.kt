@@ -178,6 +178,7 @@ class DatabaseSchemaSpec :
                     "(id)",
                     "(inquiry_id)",
                     "(requested_by, idempotency_key)",
+                    "(scheduled_for)",
                     "(endpoint_sha256) WHERE (retired_at IS NULL)",
                 )
         }

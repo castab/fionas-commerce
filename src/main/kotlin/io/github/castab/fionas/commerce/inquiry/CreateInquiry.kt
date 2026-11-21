@@ -3,7 +3,6 @@ package io.github.castab.fionas.commerce.inquiry
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.OperationOrigin
 import io.github.castab.commerce.runtime.outbox.Outbox
-import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.fionas.commerce.customer.Customer
 import io.github.castab.fionas.commerce.customer.CustomerId
@@ -58,11 +57,6 @@ class CreateInquiry(
     private val newCustomerId: () -> CustomerId = { CustomerId(UUID.randomUUID()) },
     private val newInquiryId: () -> InquiryId = { InquiryId(UUID.randomUUID()) },
     private val newEventId: () -> UUID = UUID::randomUUID,
-    /**
-     * Staff notification jobs for the new inquiry, in this same transaction (a no-op when the
-     * trigger is off). A replay returns before it, so one inquiry yields at most one job.
-     */
-    private val notifyStaff: (Transaction, Inquiry) -> Unit = { _, _ -> },
 ) {
     /** A validated request to record an inquiry, with the exact lines its pricing authority committed. */
     data class Command(
@@ -129,7 +123,6 @@ class CreateInquiry(
                     command.submissionKey,
                 )
             }
-            notifyStaff(transaction, inquiry)
             inquiry
         }
     }

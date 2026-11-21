@@ -572,8 +572,9 @@ a retry may duplicate a notification, never silently lose its identity.
 A notification is minimal by design. Its payload and events carry only Fiona identities, server
 copy and safe outcome codes, never customer identity, contact details or inquiry contents, and
 never push endpoints or keys. Recipients are resolved from live runtime authorization at fan-out
-and again before every dispatch. Business triggers join the business transaction only as a
-durable job; fan-out and provider I/O follow in the background. The concrete contract is in
+and again before every dispatch. Reminders are scheduled operational policy, not business
+events: at each configured slot Fiona counts what still awaits a staff answer and records at
+most one durable job for that slot; fan-out and provider I/O follow in the background. The concrete contract is in
 [AGENTS.md](AGENTS.md#staff-web-push-notifications).
 
 ---

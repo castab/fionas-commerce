@@ -16,8 +16,13 @@ import java.util.UUID
 internal object WebPushPayloads {
     const val TEST_TITLE = "Fiona’s test notification"
     const val TEST_BODY = "Push notifications are working on this device."
-    const val INQUIRY_TITLE = "New catering inquiry"
-    const val INQUIRY_BODY = "Open Fiona’s admin to review it."
+
+    /** Every reminder shares one push Topic, so a newer one replaces an undelivered older one. */
+    const val REMINDER_TOPIC = "unanswered-inquiries"
+
+    fun reminderTitle(count: Int): String = if (count == 1) "1 inquiry needs to be answered!" else "$count inquiries need to be answered!"
+
+    fun reminderBody(count: Int): String = if (count == 1) "Open Fiona’s admin to answer it." else "Open Fiona’s admin to answer them."
 
     fun workItem(
         field: String,
@@ -31,7 +36,7 @@ internal object WebPushPayloads {
 
     fun browser(
         notification: StaffNotification,
-        inquiryPath: String,
+        reminderPath: String,
     ): String =
         buildJsonObject {
             put("version", JsonPrimitive(1))
@@ -43,11 +48,11 @@ internal object WebPushPayloads {
                     put("body", JsonPrimitive(TEST_BODY))
                     put("url", JsonNull)
                 }
-                StaffNotificationKind.NEW_INQUIRY -> {
-                    put("title", JsonPrimitive(INQUIRY_TITLE))
-                    put("body", JsonPrimitive(INQUIRY_BODY))
-                    val inquiry = checkNotNull(notification.inquiryId).value.toString()
-                    put("url", JsonPrimitive(inquiryPath.replace("{inquiryId}", inquiry)))
+                StaffNotificationKind.UNANSWERED_INQUIRIES -> {
+                    val count = checkNotNull(notification.inquiryCount)
+                    put("title", JsonPrimitive(reminderTitle(count)))
+                    put("body", JsonPrimitive(reminderBody(count)))
+                    put("url", JsonPrimitive(reminderPath))
                 }
             }
         }.toString()

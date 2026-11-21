@@ -1,7 +1,6 @@
 package io.github.castab.fionas.commerce.notification
 
 import io.github.castab.commerce.staff.UserId
-import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.net.URI
 import java.security.MessageDigest
 import java.time.Instant
@@ -210,7 +209,9 @@ enum class StaffNotificationKind(
     val wire: String,
 ) {
     TEST("test"),
-    NEW_INQUIRY("new_inquiry"),
+
+    /** The scheduled "N inquiries need to be answered" reminder; one job per schedule slot. */
+    UNANSWERED_INQUIRIES("unanswered_inquiries"),
 }
 
 enum class DeliveryState(
@@ -268,16 +269,21 @@ data class StaffPushSubscription(
     val active: Boolean get() = retiredAt == null
 }
 
+/**
+ * One notification job. A TEST has its requester, key and single target; an UNANSWERED_INQUIRIES
+ * reminder has the schedule slot it was raised for and the positive count it announces.
+ */
 data class StaffNotification(
     val id: StaffNotificationId,
     val kind: StaffNotificationKind,
     val requestedBy: UserId?,
     val key: TestNotificationKey?,
     val target: StaffPushSubscriptionId?,
-    val inquiryId: InquiryId?,
     val createdAt: Instant,
     val giveUpAt: Instant,
     val fannedOutAt: Instant?,
+    val scheduledFor: Instant? = null,
+    val inquiryCount: Int? = null,
 )
 
 data class StaffDelivery(

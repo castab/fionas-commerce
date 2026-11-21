@@ -171,6 +171,11 @@ class ArchitectureSpec :
             request.contains("inTransaction(TransactionIsolation.REPEATABLE_READ)") shouldBe true
             request.contains("inquiries.read(transaction, id)") shouldBe true
             request.contains("financial.read(transaction, inquiry.lifecycle.documentId)") shouldBe true
+            // The reminder count reads one snapshot, like the dashboard it mirrors.
+            val unanswered = File(mainSources, "staff/CountUnansweredInquiries.kt").codeWithoutComments()
+            Regex("inTransaction").findAll(unanswered).count() shouldBe 1
+            unanswered.contains("inTransaction(TransactionIsolation.REPEATABLE_READ)") shouldBe true
+            unanswered.contains("operational(transaction)") shouldBe true
             sources()
                 .containing(listOf("inTransaction"))
                 .shouldContainExactlyInAnyOrder(
@@ -191,6 +196,7 @@ class ArchitectureSpec :
                     "staff/ListStaffRequests.kt: inTransaction",
                     "staff/ReadStaffRequest.kt: inTransaction",
                     "staff/ReadStaffDashboard.kt: inTransaction",
+                    "staff/CountUnansweredInquiries.kt: inTransaction",
                     "financial/GetDepositRequirement.kt: inTransaction",
                     "financial/GetDepositRequirementHistory.kt: inTransaction",
                     "financial/SetDepositRequirement.kt: inTransaction",

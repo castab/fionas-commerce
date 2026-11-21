@@ -7,6 +7,7 @@ import io.github.castab.commerce.runtime.outbox.PublicationResult
 import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.fionas.commerce.events.NOTIFICATION_EVENT_PRODUCER
 import io.github.castab.fionas.commerce.events.validateInquiryEventContract
+import io.github.castab.fionas.commerce.financial.JdbiInquiryFinancialDocumentRepository
 import io.github.castab.fionas.commerce.http.PushDeviceListResponse
 import io.github.castab.fionas.commerce.http.PushDeviceResponse
 import io.github.castab.fionas.commerce.http.PushDeviceStateResponse
@@ -14,32 +15,38 @@ import io.github.castab.fionas.commerce.http.StaffNotificationConfigResponse
 import io.github.castab.fionas.commerce.http.StaffNotificationStatusResponse
 import io.github.castab.fionas.commerce.http.TestNotificationQueuedResponse
 import io.github.castab.fionas.commerce.http.TestNotificationResponse
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunication
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationId
+import io.github.castab.fionas.commerce.inquiry.InquiryCommunicationKind
+import io.github.castab.fionas.commerce.inquiry.InquiryId
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryCommunicationRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryFulfillmentRepository
+import io.github.castab.fionas.commerce.inquiry.JdbiInquiryRepository
+import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
+import io.github.castab.fionas.commerce.staff.CountUnansweredInquiries
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.testing.BrowserSubscription
 import io.github.castab.fionas.commerce.testing.FakePushSender
 import io.github.castab.fionas.commerce.testing.MutableClock
 import io.github.castab.fionas.commerce.testing.TEST_ORIGIN
 import io.github.castab.fionas.commerce.testing.TestApplication
-import io.github.castab.fionas.commerce.testing.acceptanceLines
-import io.github.castab.fionas.commerce.testing.asFionasWeb
+import io.github.castab.fionas.commerce.testing.adminId
 import io.github.castab.fionas.commerce.testing.createInquiry
-import io.github.castab.fionas.commerce.testing.createInquiryOperation
 import io.github.castab.fionas.commerce.testing.drainOutbox
-import io.github.castab.fionas.commerce.testing.inquiryBody
-import io.github.castab.fionas.commerce.testing.inquiryCommand
+import io.github.castab.fionas.commerce.testing.issueProposal
 import io.github.castab.fionas.commerce.testing.pendingOutbox
 import io.github.castab.fionas.commerce.testing.pushTransport
-import io.github.castab.fionas.commerce.testing.requestedServiceJson
 import io.github.castab.fionas.commerce.testing.staffMember
+import io.github.castab.fionas.commerce.testing.testClock
 import io.github.castab.fionas.commerce.testing.testWebPushConfiguration
 import io.github.castab.fionas.commerce.testing.withBearer
-import io.github.castab.fionas.commerce.testing.withSubmissionKey
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldNotContain
+import io.kotest.matchers.types.shouldBeInstanceOf
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
@@ -49,6 +56,8 @@ import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
 import java.time.Duration
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -498,19 +507,31 @@ private fun deliveryOf(
     notification: String,
 ) = app.database.strings("SELECT id::text FROM fionas.staff_notification_deliveries WHERE notification_id = '$notification'").single()
 
-class StaffInquiryNotificationsSpec :
+class UnansweredInquiryRemindersSpec :
     FunSpec({
-        val configuration = testWebPushConfiguration(inquiryNotifications = true)
+        val configuration = testWebPushConfiguration(UnansweredReminderSettings.DEFAULT)
         lateinit var app: TestApplication
         beforeSpec { app = TestApplication.create(webPush = configuration, webPushSender = FakePushSender()) }
         afterSpec { app.close() }
         beforeTest { app.drainOutbox(app.pushTransport(configuration, FakePushSender())) }
 
-        fun jobs() =
-            app.database
-                .strings("SELECT count(*)::text FROM fionas.staff_notifications WHERE kind = 'NEW_INQUIRY'")
-                .single()
-                .toInt()
+        val monday10am = Instant.parse("2026-11-16T18:00:00Z")
+
+        fun reminders(count: () -> Int) =
+            UnansweredInquiryReminders(app.transactor, JdbiStaffPushRepository(), app.context.outbox, count, testClock)
+
+        fun unanswered() =
+            CountUnansweredInquiries(
+                app.transactor,
+                ReadInquiryOperationalStates(
+                    app.transactor,
+                    JdbiInquiryRepository(),
+                    JdbiInquiryFinancialDocumentRepository(),
+                    app.context.financialLedger,
+                    JdbiInquiryFulfillmentRepository(),
+                ),
+                JdbiInquiryCommunicationRepository(),
+            )()
 
         fun enroll(
             cookie: String,
@@ -527,22 +548,19 @@ class StaffInquiryNotificationsSpec :
             return CommerceJson.asA(response.bodyString(), PushDeviceResponse.serializer()).subscriptionId
         }
 
-        fun deliveryStates(inquiry: String): Map<String, String> =
+        fun deliveryStates(notification: StaffNotificationId): Map<String, String> =
             app.database
                 .strings(
-                    "SELECT d.subscription_id::text || '=' || d.state || ':' || coalesce(d.outcome_reason, '') " +
-                        "FROM fionas.staff_notification_deliveries d JOIN fionas.staff_notifications n ON n.id = d.notification_id " +
-                        "WHERE n.inquiry_id = '$inquiry'",
+                    "SELECT subscription_id::text || '=' || state || ':' || coalesce(outcome_reason, '') " +
+                        "FROM fionas.staff_notification_deliveries WHERE notification_id = '${notification.value}'",
                 ).associate { it.substringBefore('=') to it.substringAfter('=') }
 
-        fun queuedCount(inquiry: String): Int {
-            val notification =
-                app.database.strings("SELECT id::text FROM fionas.staff_notifications WHERE inquiry_id = '$inquiry'").single()
+        fun queuedCount(notification: StaffNotificationId): Int {
             val payload =
                 app.database
                     .strings(
                         "SELECT payload::text FROM commerce.outbox_events WHERE producer_id = '$NOTIFICATION_EVENT_PRODUCER' " +
-                            "AND aggregate_id = '$notification' AND event_type = 'fionas.notification.queued'",
+                            "AND aggregate_id = '${notification.value}' AND event_type = 'fionas.notification.queued'",
                     ).single()
             validateInquiryEventContract(payload, "StaffNotificationQueuedV1")
             return Json
@@ -552,55 +570,112 @@ class StaffInquiryNotificationsSpec :
                 .jsonPrimitive.int
         }
 
-        test("a replayed submission creates one job; eligible devices get minimal copy, others nothing") {
+        fun retireAll() =
+            app.database.execute(
+                "UPDATE fionas.staff_push_subscriptions SET retired_at = now(), retirement = 'REVOKED', endpoint = NULL, " +
+                    "p256dh = NULL, auth = NULL WHERE retired_at IS NULL",
+            )
+
+        fun record(
+            inquiry: String,
+            kind: InquiryCommunicationKind,
+        ) = app.transactor.inTransaction { transaction ->
+            JdbiInquiryCommunicationRepository().append(
+                transaction,
+                InquiryCommunication(
+                    InquiryCommunicationId(UUID.randomUUID()),
+                    InquiryId(UUID.fromString(inquiry)),
+                    kind,
+                    testClock.instant().truncatedTo(ChronoUnit.MICROS),
+                    if (kind == InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED) null else app.adminId,
+                ),
+            )
+        }
+
+        test("new unanswered inquiries and waiting customer emails count; a reply, acknowledgement, quote or decline answers") {
+            val before = unanswered()
+            app.createInquiry()
+            val acknowledged = app.createInquiry()
+            app.adminPost("/inquiries/$acknowledged/communications/acknowledge", """{"throughRecordedOrder":0}""").status shouldBe
+                Status.NO_CONTENT
+            record(app.createInquiry(), InquiryCommunicationKind.STAFF_EMAIL_SENT)
+            app.issueProposal(InquiryId(UUID.fromString(app.createInquiry())))
+            val quotedWaiting = app.createInquiry()
+            app.issueProposal(InquiryId(UUID.fromString(quotedWaiting)))
+            record(quotedWaiting, InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED)
+            val repliedThenWaiting = app.createInquiry()
+            record(repliedThenWaiting, InquiryCommunicationKind.STAFF_EMAIL_SENT)
+            record(repliedThenWaiting, InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED)
+            val declined = app.createInquiry()
+            app.adminPost("/inquiries/$declined/decline", """{"expectedDocumentVersion":1,"reason":"Unavailable"}""").status shouldBe
+                Status.OK
+            record(declined, InquiryCommunicationKind.CUSTOMER_EMAIL_RECEIVED)
+            unanswered() shouldBe before + 3
+        }
+
+        test("a slot records one job with its count, and nothing at all when nothing awaits an answer") {
+            val before = app.database.count("fionas.staff_notifications")
+            reminders { 0 }.remind(monday10am) shouldBe ReminderOutcome.NothingUnanswered
+            app.database.count("fionas.staff_notifications") shouldBe before
+            app.pendingOutbox(WEBPUSH_PRODUCER) shouldBe 0
+
+            val queued = reminders { 3 }.remind(monday10am).shouldBeInstanceOf<ReminderOutcome.Queued>()
+            queued.count shouldBe 3
+            // A restart or a second instance at the same slot finds it raised; it never counts again.
+            reminders { error("must not count a raised slot") }.remind(monday10am) shouldBe
+                ReminderOutcome.AlreadyQueued(queued.notification)
+            app.database.count("fionas.staff_notifications") shouldBe before + 1
+            app.database.strings(
+                "SELECT kind || ' ' || (scheduled_for = '2026-11-16T18:00:00Z') || ' ' || inquiry_count " +
+                    "FROM fionas.staff_notifications WHERE id = '${queued.notification.value}'",
+            ) shouldBe listOf("UNANSWERED_INQUIRIES true 3")
+        }
+
+        test("readers' devices get the count, the admin path and one shared topic; never customer data") {
+            retireAll()
             val (_, reader) = app.staffMember(setOf(FionaPermissions.InquiriesRead))
             val (_, outsider) = app.staffMember()
             val readerDevice = enroll(reader)
             val readerSecond = enroll(reader)
             val outsiderDevice = enroll(outsider)
-            val key = UUID.randomUUID().toString()
-            val email = "push-${UUID.randomUUID()}@example.com"
+            val email = "reminder-${UUID.randomUUID()}@example.com"
+            app.createInquiry(email = email)
 
-            fun submit() =
-                app.http(
-                    Request(Method.POST, "/inquiries")
-                        .withSubmissionKey(key)
-                        .asFionasWeb(app)
-                        .header("Content-Type", "application/json")
-                        .body(inquiryBody(email, acceptanceLines(), requestedServiceJson())),
-                )
-            val before = jobs()
-            val first = submit()
-            first.status shouldBe Status.CREATED
-            submit().status shouldBe Status.CREATED
-            jobs() shouldBe before + 1
-            val inquiry = checkNotNull(first.header("Location")).substringAfterLast('/')
-
+            val many = reminders { 3 }.remind(monday10am.plus(Duration.ofDays(1))).shouldBeInstanceOf<ReminderOutcome.Queued>()
+            val one = reminders { 1 }.remind(monday10am.plus(Duration.ofDays(2))).shouldBeInstanceOf<ReminderOutcome.Queued>()
             val sender = FakePushSender()
             app.drainOutbox(app.pushTransport(configuration, sender))
-            queuedCount(inquiry) shouldBe 2
-            deliveryStates(inquiry).keys shouldBe setOf(readerDevice, readerSecond)
-            deliveryStates(inquiry).values.toSet() shouldBe setOf("PUSH_ACCEPTED:")
-            outsiderDevice shouldNotContainIn deliveryStates(inquiry).keys
-            sender.requests shouldHaveSize 2
-            sender.requests.forEach { request ->
-                request.urgentDelivery shouldBe true
-                val payload = request.payload
-                payload shouldNotContain email
-                payload shouldNotContain "Jane"
-                val json = Json.parseToJsonElement(payload).jsonObject
-                json["title"]!!.jsonPrimitive.content shouldBe "New catering inquiry"
-                json["kind"]!!.jsonPrimitive.content shouldBe "new_inquiry"
-                json["url"]!!.jsonPrimitive.content shouldBe "/requests/$inquiry"
-            }
+            queuedCount(many.notification) shouldBe 2
+            deliveryStates(many.notification).keys shouldBe setOf(readerDevice, readerSecond)
+            deliveryStates(many.notification).values.toSet() shouldBe setOf("PUSH_ACCEPTED:")
+            outsiderDevice shouldNotContainIn deliveryStates(many.notification).keys
+            deliveryStates(one.notification).keys shouldBe setOf(readerDevice, readerSecond)
+            sender.requests shouldHaveSize 4
+            val copy =
+                sender.requests.map { request ->
+                    request.urgentDelivery shouldBe true
+                    request.topic shouldBe "unanswered-inquiries"
+                    request.payload shouldNotContain email
+                    request.payload shouldNotContain "Jane"
+                    val json = Json.parseToJsonElement(request.payload).jsonObject
+                    json["kind"]!!.jsonPrimitive.content shouldBe "unanswered_inquiries"
+                    json["url"]!!.jsonPrimitive.content shouldBe "/"
+                    json["title"]!!.jsonPrimitive.content to json["body"]!!.jsonPrimitive.content
+                }
+            copy.toSet() shouldBe
+                setOf(
+                    "3 inquiries need to be answered!" to "Open Fiona’s admin to answer them.",
+                    "1 inquiry needs to be answered!" to "Open Fiona’s admin to answer it.",
+                )
         }
 
         test("one device's retry leaves the other's completed delivery alone") {
+            retireAll()
             val (_, reader) = app.staffMember(setOf(FionaPermissions.InquiriesRead))
             val flaky = BrowserSubscription()
             val flakyDevice = enroll(reader, flaky)
             val steadyDevice = enroll(reader)
-            val inquiry = app.createInquiry()
+            val reminder = reminders { 2 }.remind(monday10am.plus(Duration.ofDays(3))).shouldBeInstanceOf<ReminderOutcome.Queued>()
             val sender =
                 object : WebPushSender {
                     var flakyCalls = 0
@@ -619,26 +694,20 @@ class StaffInquiryNotificationsSpec :
                 app.database.strings(
                     "SELECT coalesce(completed_at::text, '') FROM fionas.staff_notification_deliveries WHERE subscription_id = '$steadyDevice'",
                 )
-            deliveryStates(inquiry)[steadyDevice] shouldBe "PUSH_ACCEPTED:"
-            deliveryStates(inquiry)[flakyDevice] shouldBe "RETRYING:transport_failure"
+            deliveryStates(reminder.notification)[steadyDevice] shouldBe "PUSH_ACCEPTED:"
+            deliveryStates(reminder.notification)[flakyDevice] shouldBe "RETRYING:transport_failure"
             app.drainOutbox(transport)
-            deliveryStates(inquiry)[flakyDevice] shouldBe "PUSH_ACCEPTED:"
+            deliveryStates(reminder.notification)[flakyDevice] shouldBe "PUSH_ACCEPTED:"
             app.database.strings(
                 "SELECT coalesce(completed_at::text, '') FROM fionas.staff_notification_deliveries WHERE subscription_id = '$steadyDevice'",
             ) shouldBe steadyCompleted
         }
 
-        fun retireAll() =
-            app.database.execute(
-                "UPDATE fionas.staff_push_subscriptions SET retired_at = now(), retirement = 'REVOKED', endpoint = NULL, " +
-                    "p256dh = NULL, auth = NULL WHERE retired_at IS NULL",
-            )
-
         test("eligibility is rechecked before dispatch, and a job without eligible devices completes without retry") {
             retireAll()
             val (readerId, reader) = app.staffMember(setOf(FionaPermissions.InquiriesRead))
             val device = enroll(reader)
-            val inquiry = app.createInquiry()
+            val reminder = reminders { 1 }.remind(monday10am.plus(Duration.ofDays(4))).shouldBeInstanceOf<ReminderOutcome.Queued>()
             val sender = FakePushSender()
             val transport = app.pushTransport(configuration, sender)
             // Fan out only: the delivery waits while the reader loses the permission.
@@ -649,36 +718,21 @@ class StaffInquiryNotificationsSpec :
             app.authorization.replaceRolePermissions(RoleKey("test.push-${readerId.value}"), emptySet())
             app.drainOutbox(transport)
             sender.requests shouldHaveSize 0
-            deliveryStates(inquiry)[device] shouldBe "SKIPPED:recipient_not_eligible"
+            deliveryStates(reminder.notification)[device] shouldBe "SKIPPED:recipient_not_eligible"
 
             // Nobody eligible is enrolled now: the next job fans out to zero deliveries and is done.
             retireAll()
-            val empty = app.createInquiry()
+            val empty = reminders { 1 }.remind(monday10am.plus(Duration.ofDays(7))).shouldBeInstanceOf<ReminderOutcome.Queued>()
             app.drainOutbox(transport) shouldBe listOf(PublicationResult.CONFIRMED)
-            queuedCount(empty) shouldBe 0
-            deliveryStates(empty) shouldBe emptyMap()
+            queuedCount(empty.notification) shouldBe 0
+            deliveryStates(empty.notification) shouldBe emptyMap()
             app.pendingOutbox(WEBPUSH_PRODUCER) shouldBe 0
         }
 
-        test("the job commits or rolls back with its inquiry, and the trigger off records nothing") {
-            val before = jobs()
-            val failing =
-                app.createInquiryOperation(notifyStaff = { transaction, inquiry ->
-                    StaffInquiryNotifications(JdbiStaffPushRepository(), app.context.outbox).enqueue(transaction, inquiry)
-                    error("fails after the job was recorded")
-                })
-            shouldThrow<IllegalStateException> { failing(app.inquiryCommand()) }
-            jobs() shouldBe before
-
-            TestApplication.create(webPush = testWebPushConfiguration(inquiryNotifications = false)).use { off ->
-                off.createInquiry()
-                off.database.count("fionas.staff_notifications") shouldBe 0
-                off.pendingOutbox(WEBPUSH_PRODUCER) shouldBe 0
-            }
-            TestApplication.create().use { disabled ->
-                disabled.createInquiry()
-                disabled.database.count("fionas.staff_notifications") shouldBe 0
-            }
+        test("accepting an inquiry records no notification job") {
+            val before = app.database.count("fionas.staff_notifications")
+            app.createInquiry()
+            app.database.count("fionas.staff_notifications") shouldBe before
         }
     })
 
