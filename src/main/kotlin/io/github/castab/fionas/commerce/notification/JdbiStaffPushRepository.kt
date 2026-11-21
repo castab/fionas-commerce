@@ -2,7 +2,6 @@ package io.github.castab.fionas.commerce.notification
 
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.staff.UserId
-import io.github.castab.fionas.commerce.inquiry.InquiryId
 import java.sql.ResultSet
 import java.time.Instant
 import java.time.OffsetDateTime
@@ -160,7 +159,7 @@ class JdbiStaffPushRepository {
 
     // ---- notifications -------------------------------------------------------------------------
 
-    /** False when the job already exists (the same inquiry, or the same caller and test key). */
+    /** False when the job already exists (the same caller and test key, or the same reminder slot). */
     fun insertNotification(
         transaction: Transaction,
         notification: StaffNotification,
@@ -168,18 +167,20 @@ class JdbiStaffPushRepository {
         transaction.handle
             .createUpdate(
                 "INSERT INTO fionas.staff_notifications (id, kind, requested_by, idempotency_key, target_subscription_id, " +
-                    "inquiry_id, created_at, give_up_at, fanned_out_at) VALUES (:id, :kind, CAST(:requestedBy AS uuid), " +
-                    "CAST(:key AS text), CAST(:target AS uuid), CAST(:inquiry AS uuid), :created, :giveUp, " +
-                    "CAST(:fannedOut AS timestamptz)) ON CONFLICT DO NOTHING",
+                    "created_at, give_up_at, fanned_out_at, scheduled_for, inquiry_count) VALUES (:id, :kind, " +
+                    "CAST(:requestedBy AS uuid), CAST(:key AS text), CAST(:target AS uuid), :created, :giveUp, " +
+                    "CAST(:fannedOut AS timestamptz), CAST(:scheduledFor AS timestamptz), CAST(:count AS integer)) " +
+                    "ON CONFLICT DO NOTHING",
             ).bind("id", notification.id.value)
             .bind("kind", notification.kind.name)
             .bindByType("requestedBy", notification.requestedBy?.value, UUID::class.java)
             .bindByType("key", notification.key?.value, String::class.java)
             .bindByType("target", notification.target?.value, UUID::class.java)
-            .bindByType("inquiry", notification.inquiryId?.value, UUID::class.java)
             .bind("created", notification.createdAt)
             .bind("giveUp", notification.giveUpAt)
             .bindByType("fannedOut", notification.fannedOutAt, Instant::class.java)
+            .bindByType("scheduledFor", notification.scheduledFor, Instant::class.java)
+            .bindByType("count", notification.inquiryCount, Int::class.javaObjectType)
             .execute() == 1
 
     fun findNotification(
@@ -190,6 +191,18 @@ class JdbiStaffPushRepository {
         transaction.handle
             .createQuery("SELECT * FROM fionas.staff_notifications WHERE id = :id" + if (forUpdate) " FOR UPDATE" else "")
             .bind("id", id.value)
+            .map { row, _ -> notification(row) }
+            .findOne()
+            .orElse(null)
+
+    /** The reminder raised for [slot], if any. */
+    fun findReminder(
+        transaction: Transaction,
+        slot: Instant,
+    ): StaffNotification? =
+        transaction.handle
+            .createQuery("SELECT * FROM fionas.staff_notifications WHERE scheduled_for = :slot")
+            .bind("slot", slot)
             .map { row, _ -> notification(row) }
             .findOne()
             .orElse(null)
@@ -329,10 +342,11 @@ class JdbiStaffPushRepository {
             row.getObject("requested_by", UUID::class.java)?.let(::UserId),
             row.getString("idempotency_key")?.let(::TestNotificationKey),
             row.getObject("target_subscription_id", UUID::class.java)?.let(::StaffPushSubscriptionId),
-            row.getObject("inquiry_id", UUID::class.java)?.let(::InquiryId),
             checkNotNull(row.instant("created_at")),
             checkNotNull(row.instant("give_up_at")),
             row.instant("fanned_out_at"),
+            row.instant("scheduled_for"),
+            row.getObject("inquiry_count", Int::class.javaObjectType),
         )
 
     private fun delivery(row: ResultSet) =

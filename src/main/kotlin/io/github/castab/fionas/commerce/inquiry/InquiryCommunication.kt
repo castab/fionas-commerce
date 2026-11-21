@@ -79,10 +79,14 @@ data class RecordedInquiryCommunication(
         get() = if (activity.kind.clearsCustomerAttention) activity.clearsThrough ?: recordedOrder else null
 }
 
-/** Clearing follows durable append order; attention age and meaningful email activity follow actual occurrence time. */
+/**
+ * Clearing follows durable append order; attention age and meaningful email activity follow actual occurrence time.
+ * [staffResponded] is whether any staff email or acknowledgement was ever recorded for the inquiry.
+ */
 data class InquiryCommunicationAttention(
     val unacknowledgedSince: Instant?,
     val latestEmailAt: Instant?,
+    val staffResponded: Boolean = false,
 ) {
     companion object {
         fun project(activity: Collection<RecordedInquiryCommunication>): InquiryCommunicationAttention {
@@ -95,6 +99,7 @@ data class InquiryCommunicationAttention(
             return InquiryCommunicationAttention(
                 outstanding.minOfOrNull { it.activity.occurredAt },
                 activity.filter { it.activity.kind.contributesToQuoteActivity }.maxOfOrNull { it.activity.occurredAt },
+                activity.any { it.activity.kind.clearsCustomerAttention },
             )
         }
     }

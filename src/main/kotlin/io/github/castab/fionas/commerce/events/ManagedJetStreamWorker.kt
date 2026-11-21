@@ -113,9 +113,8 @@ class ManagedJetStreamWorker(
 internal fun inquiryIntakeHandler(
     context: CommerceRuntimeContext,
     clock: Clock,
-    inquiryNotifications: Boolean = false,
 ): (ByteArray) -> Unit {
-    val createInquiry = createInquiryOperation(context, clock, inquiryNotifications)
+    val createInquiry = createInquiryOperation(context, clock)
     return { bytes ->
         val command = submittedCommand(bytes, INQUIRY_INTAKE_ORIGIN)
         createInquiry(command)
@@ -127,8 +126,7 @@ internal fun inquiryIntake(
     context: CommerceRuntimeContext,
     configuration: NatsIntakeConfiguration,
     clock: Clock,
-    inquiryNotifications: Boolean = false,
 ): ManagedJetStreamWorker {
     requireIntakeDatabaseBounds(context.configuration.database)
-    return ManagedJetStreamWorker(NatsIntakeTransport(configuration), inquiryIntakeHandler(context, clock, inquiryNotifications))
+    return ManagedJetStreamWorker(NatsIntakeTransport(configuration), inquiryIntakeHandler(context, clock))
 }

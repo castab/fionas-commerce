@@ -15,6 +15,7 @@ import io.github.castab.fionas.commerce.http.STAFF_SESSION_COOKIE
 import io.github.castab.fionas.commerce.notification.PushRecipients
 import io.github.castab.fionas.commerce.notification.PushRequest
 import io.github.castab.fionas.commerce.notification.PushResult
+import io.github.castab.fionas.commerce.notification.UnansweredReminderSettings
 import io.github.castab.fionas.commerce.notification.WEBPUSH_PRODUCER
 import io.github.castab.fionas.commerce.notification.WebPushConfiguration
 import io.github.castab.fionas.commerce.notification.WebPushDeliveryTransport
@@ -52,13 +53,13 @@ class MutableClock(
 private fun p256() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
 
 /** A freshly generated VAPID identity; never a deployment key. */
-fun testWebPushConfiguration(inquiryNotifications: Boolean = false): WebPushConfiguration {
+fun testWebPushConfiguration(unansweredReminders: UnansweredReminderSettings? = null): WebPushConfiguration {
     val pair = p256()
     return WebPushConfiguration(
         pair.private as ECPrivateKey,
         pair.public as ECPublicKey,
         "mailto:ops@fionas.test",
-        inquiryNotifications = inquiryNotifications,
+        unansweredReminders = unansweredReminders,
     )
 }
 

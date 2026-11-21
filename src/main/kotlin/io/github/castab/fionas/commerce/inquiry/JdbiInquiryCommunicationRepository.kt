@@ -111,7 +111,8 @@ class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
                            WHERE kind = 'CUSTOMER_EMAIL_RECEIVED'
                              AND (clearing_order IS NULL OR recorded_order > clearing_order)
                        ) AS unacknowledged_since,
-                       max(occurred_at) FILTER (WHERE kind IN ('CUSTOMER_EMAIL_RECEIVED', 'STAFF_EMAIL_SENT')) AS latest_email_at
+                       max(occurred_at) FILTER (WHERE kind IN ('CUSTOMER_EMAIL_RECEIVED', 'STAFF_EMAIL_SENT')) AS latest_email_at,
+                       bool_or(kind IN ('STAFF_EMAIL_SENT', 'STAFF_ACKNOWLEDGED')) AS staff_responded
                 FROM scoped GROUP BY inquiry_id
                 """.trimIndent(),
             ).bindArray("ids", UUID::class.java, inquiryIds.map { it.value })
@@ -120,6 +121,7 @@ class JdbiInquiryCommunicationRepository : InquiryCommunicationRepository {
                     InquiryCommunicationAttention(
                         row.getObject("unacknowledged_since", OffsetDateTime::class.java)?.toInstant(),
                         row.getObject("latest_email_at", OffsetDateTime::class.java)?.toInstant(),
+                        row.getBoolean("staff_responded"),
                     )
             }.list()
             .toMap()
