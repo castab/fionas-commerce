@@ -1668,7 +1668,7 @@ environment variables.
 | `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` | First administrator's nonblank display name; required with username and password | none |
 | `FIONAS_BOOTSTRAP_ADMIN_FIRST_NAME`, `FIONAS_BOOTSTRAP_ADMIN_LAST_NAME` | Optional profile fields | none |
 | `FIONAS_CONVERSATION_INTAKE_ENABLED`, `FIONAS_CONVERSATION_READ_ENABLED`, `FIONAS_CONVERSATION_SEND_ENABLED` | Provider conversation consumer, timeline message reads, staff replies; each with its settings in [docs/email-conversations.md](docs/email-conversations.md) | `false` |
-| `FIONAS_PUSH_ENABLED`, `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED`, `FIONAS_NOTIFICATION_EVENTS_ENABLED` | Staff Web Push (routes, test sends, dispatcher), the automatic new-inquiry trigger, and JetStream publication of notification events; each with its settings in [docs/staff-push-notifications.md](docs/staff-push-notifications.md) | `false` |
+| `FIONAS_PUSH_ENABLED`, `FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED`, `FIONAS_NOTIFICATION_EVENTS_ENABLED` | Staff Web Push (routes, test sends, dispatcher), the scheduled unanswered-inquiry reminder (`FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE`, default `0 10,14 * * MON-FRI` in `America/Los_Angeles`), and JetStream publication of notification events; each with its settings in [docs/staff-push-notifications.md](docs/staff-push-notifications.md) | `false` |
 | `LOG_LEVEL` | Level of the application's and runtime's own logs | `INFO` |
 
 Logging is Logback ([`logback.xml`](src/main/resources/logback.xml)): `key=value` lines
@@ -2030,9 +2030,10 @@ browser or installed PWA, sends a test, and tracks it from the HTTP `202` throug
 `fionas.events.notification.{queued,push_accepted,push_failed}.v1`, correlated by
 `notificationId`. Delivery work runs through the runtime outbox (producer
 `fionas-commerce.webpush`) with fenced attempts, Retry-After, bounded windows and restart
-recovery. `FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED=true` separately turns on a minimal
-"New catering inquiry" push to enrolled staff holding `fionas.inquiries.read`, one job per
-accepted inquiry. NATS `tls://` connections use the JVM truststore/keystore with hostname
+recovery. `FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED=true` separately turns on a scheduled
+reminder ("3 inquiries need to be answered!") to enrolled staff holding `fionas.inquiries.read`:
+at each cron slot (default 10 AM and 2 PM Pacific, weekdays) it counts inquiries with a waiting
+customer email or that nobody has answered yet, and sends nothing when the count is zero. NATS `tls://` connections use the JVM truststore/keystore with hostname
 verification. See [docs/staff-push-notifications.md](docs/staff-push-notifications.md) for
 configuration, NATS grants, the `fionas-admin` contract and the smoke checklist.
 

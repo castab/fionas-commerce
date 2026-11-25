@@ -643,7 +643,7 @@
         "payload": {
           "$ref": "#/components/schemas/StaffNotificationQueuedV1"
         },
-        "description": "Once per notification, in the transaction that queues its device deliveries. deliveryCount is 0 for a new-inquiry job with no eligible enrolled device; such a job is complete and never retried.",
+        "description": "Once per notification, in the transaction that queues its device deliveries. deliveryCount is 0 for a reminder job with no eligible enrolled device; such a job is complete and never retried.",
         "examples": [
           {
             "payload": {
@@ -809,7 +809,7 @@
               "data": {
                 "notificationId": "5e8f1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
                 "deliveryId": "6f9a2b3c-4d5e-4f6a-9b0c-1d2e3f4a5b6c",
-                "kind": "new_inquiry",
+                "kind": "unanswered_inquiries",
                 "attempts": 2,
                 "providerCode": 410,
                 "reason": "subscription_expired"
@@ -1794,7 +1794,7 @@
                 "type": "string",
                 "enum": [
                   "test",
-                  "new_inquiry"
+                  "unanswered_inquiries"
                 ]
               },
               "deliveryCount": {
@@ -1900,7 +1900,7 @@
                 "type": "string",
                 "enum": [
                   "test",
-                  "new_inquiry"
+                  "unanswered_inquiries"
                 ]
               },
               "attempts": {
@@ -2020,7 +2020,7 @@
                 "type": "string",
                 "enum": [
                   "test",
-                  "new_inquiry"
+                  "unanswered_inquiries"
                 ]
               },
               "attempts": {

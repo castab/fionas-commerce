@@ -96,11 +96,12 @@ import io.github.castab.fionas.commerce.inquiry.ReadInquiryOperationalStates
 import io.github.castab.fionas.commerce.inquiry.RecordInquiryCommunication
 import io.github.castab.fionas.commerce.notification.JdbiStaffPushRepository
 import io.github.castab.fionas.commerce.notification.JdkWebPushSender
-import io.github.castab.fionas.commerce.notification.StaffInquiryNotifications
 import io.github.castab.fionas.commerce.notification.StaffNotificationOperations
 import io.github.castab.fionas.commerce.notification.StaffPushDevices
 import io.github.castab.fionas.commerce.notification.StaffPushDispatcher
 import io.github.castab.fionas.commerce.notification.StaffTestNotifications
+import io.github.castab.fionas.commerce.notification.UnansweredInquiryReminders
+import io.github.castab.fionas.commerce.notification.UnansweredReminderScheduler
 import io.github.castab.fionas.commerce.notification.WebPushConfiguration
 import io.github.castab.fionas.commerce.notification.WebPushSender
 import io.github.castab.fionas.commerce.notification.webPushDeliveryTransport
@@ -111,6 +112,7 @@ import io.github.castab.fionas.commerce.payments.StripeGateway
 import io.github.castab.fionas.commerce.payments.StripeJavaGateway
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.BootstrapFirstAdmin
+import io.github.castab.fionas.commerce.staff.CountUnansweredInquiries
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
 import io.github.castab.fionas.commerce.staff.ListStaffRequests
@@ -198,7 +200,6 @@ fun fionaApplication(
     notificationEvents: NotificationEventsConfiguration = NotificationEventsConfiguration.fromEnvironment(),
 ): ApplicationContributions {
     val eventTransports = EventTransports(outboxPublisher, notificationEvents)
-    val inquiryNotifications = webPush?.inquiryNotifications == true
     var updates: StaffTimelineUpdates? = null
     var nativeUpdates: RoutingSseHandler? = null
     return ApplicationContributions(
@@ -229,7 +230,27 @@ fun fionaApplication(
                         )
                     }
                 }
-                intake?.let { configuration -> add { context -> inquiryIntake(context, configuration, clock, inquiryNotifications) } }
+                webPush?.unansweredReminders?.let { settings ->
+                    add { context ->
+                        val count =
+                            CountUnansweredInquiries(
+                                context.transactor,
+                                ReadInquiryOperationalStates(
+                                    context.transactor,
+                                    JdbiInquiryRepository(),
+                                    JdbiInquiryFinancialDocumentRepository(),
+                                    context.financialLedger,
+                                    JdbiInquiryFulfillmentRepository(),
+                                    JdbiInquiryDeclineRepository(),
+                                ),
+                                JdbiInquiryCommunicationRepository(),
+                            )
+                        val reminders =
+                            UnansweredInquiryReminders(context.transactor, JdbiStaffPushRepository(), context.outbox, count::invoke, clock)
+                        UnansweredReminderScheduler(settings.schedule, reminders::remind, clock)
+                    }
+                }
+                intake?.let { configuration -> add { context -> inquiryIntake(context, configuration, clock) } }
                 conversations?.let { configuration -> add { context -> conversationIntake(context, configuration) } }
             },
         routes = { context ->
@@ -436,7 +457,7 @@ fun fionaApplication(
                         communications,
                         eventCalendarZone,
                     )::invoke,
-                    createInquiry = createInquiryOperation(context, clock, inquiryNotifications)::invoke,
+                    createInquiry = createInquiryOperation(context, clock)::invoke,
                     listInquiries = ListInquiries(context.transactor, customers, inquiries)::invoke,
                     getInquiry = getInquiry::invoke,
                     acknowledgeInquiryCommunication = RecordInquiryCommunication(
@@ -551,19 +572,12 @@ fun fionaVersion(): String {
     return version
 }
 
-/**
- * Common composition seam for HTTP, managed intake and the operator recovery command. With
- * [inquiryNotifications] every accepted inquiry also records its staff push job in its own
- * transaction; devices are resolved and pushed later by the Web Push dispatcher.
- */
+/** Common composition seam for HTTP, managed intake and the operator recovery command. */
 internal fun createInquiryOperation(
     context: CommerceRuntimeContext,
     clock: Clock,
-    inquiryNotifications: Boolean = false,
-): CreateInquiry {
-    val notifications =
-        if (inquiryNotifications) StaffInquiryNotifications(JdbiStaffPushRepository(), context.outbox)::enqueue else null
-    return CreateInquiry(
+): CreateInquiry =
+    CreateInquiry(
         context.transactor,
         JdbiCustomerRepository(),
         JdbiInquiryRepository(),
@@ -575,6 +589,4 @@ internal fun createInquiryOperation(
             JdbiFinancialDocumentAuthorshipRepository(),
         ),
         context.outbox,
-        notifyStaff = notifications ?: { _, _ -> },
     )
-}

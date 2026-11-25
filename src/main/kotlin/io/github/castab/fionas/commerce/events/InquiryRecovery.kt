@@ -7,7 +7,6 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Mig
 import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.fionas.commerce.FIONA_MIGRATION_LOCATION
 import io.github.castab.fionas.commerce.FIONA_MIGRATION_SCHEMA
-import io.github.castab.fionas.commerce.notification.inquiryPushNotificationsEnabled
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.nats.client.Connection
 import io.nats.client.ErrorListener
@@ -102,7 +101,7 @@ object InquiryRecovery {
                                 migrations = ApplicationMigrations(FIONA_MIGRATION_SCHEMA, listOf(FIONA_MIGRATION_LOCATION)),
                                 permissionDefinitions = FionaPermissions.definitions,
                                 routes = { context ->
-                                    handle = inquiryIntakeHandler(context, Clock.systemUTC(), inquiryPushNotificationsEnabled())
+                                    handle = inquiryIntakeHandler(context, Clock.systemUTC())
                                     emptyList()
                                 },
                             ),

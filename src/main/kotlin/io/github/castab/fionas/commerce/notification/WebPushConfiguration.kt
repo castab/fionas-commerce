@@ -14,13 +14,38 @@ import java.security.spec.ECParameterSpec
 import java.security.spec.ECPoint
 import java.security.spec.ECPrivateKeySpec
 import java.security.spec.ECPublicKeySpec
+import java.time.DateTimeException
 import java.time.Duration
+import java.time.ZoneId
 import java.util.Base64
 
 /**
+ * The scheduled unanswered-inquiry reminder: when it runs ([schedule], a cron expression in its own
+ * time zone) and where a click on it leads in the admin ([path], relative).
+ */
+class UnansweredReminderSettings(
+    val schedule: CronSchedule,
+    val path: String = DEFAULT_PATH,
+) {
+    init {
+        require(PATH.matches(path)) { "FIONAS_PUSH_UNANSWERED_REMINDER_PATH must be a relative path starting with /" }
+    }
+
+    companion object {
+        const val DEFAULT_SCHEDULE = "0 10,14 * * MON-FRI"
+        val DEFAULT_ZONE: ZoneId = ZoneId.of("America/Los_Angeles")
+        const val DEFAULT_PATH = "/"
+        private val PATH = Regex("^/([A-Za-z0-9_.-][A-Za-z0-9/_.-]{0,199})?$")
+
+        val DEFAULT = UnansweredReminderSettings(CronSchedule.parse(DEFAULT_SCHEDULE, DEFAULT_ZONE))
+    }
+}
+
+/**
  * Staff Web Push settings. Null means the feature is disabled: no routes enroll or send, no
- * dispatcher runs and no provider is ever called. [inquiryNotifications] separately switches the
- * automatic new-inquiry trigger, so test sends can be verified first. Secrets never render.
+ * dispatcher runs and no provider is ever called. [unansweredReminders] separately switches the
+ * scheduled unanswered-inquiry reminder (null is off), so test sends can be verified first.
+ * Secrets never render.
  */
 class WebPushConfiguration(
     internal val vapidPrivateKey: ECPrivateKey,
@@ -29,9 +54,7 @@ class WebPushConfiguration(
     val subject: String,
     val allowedHosts: PushHostAllowList = PushHostAllowList.DEFAULT,
     val sendTimeout: Duration = Duration.ofMillis(DEFAULT_SEND_TIMEOUT_MS),
-    val inquiryNotifications: Boolean = false,
-    /** The relative admin destination of a new-inquiry notification; `{inquiryId}` is replaced. */
-    val inquiryPath: String = DEFAULT_INQUIRY_PATH,
+    val unansweredReminders: UnansweredReminderSettings? = null,
 ) {
     init {
         require(subject.startsWith("mailto:") && subject.length > 7 || isHttpsUrl(subject)) {
@@ -39,9 +62,6 @@ class WebPushConfiguration(
         }
         require(!sendTimeout.isNegative && sendTimeout.toMillis() in 1_000..10_000) {
             "FIONAS_PUSH_SEND_TIMEOUT_MS must be between 1000 and 10000"
-        }
-        require(INQUIRY_PATH.matches(inquiryPath) && "{inquiryId}" in inquiryPath) {
-            "FIONAS_PUSH_INQUIRY_PATH must be a relative path starting with / containing {inquiryId}"
         }
         require(pairMatches(vapidPrivateKey, vapidPublicKey)) { "The VAPID private and public keys are not a pair" }
     }
@@ -53,14 +73,16 @@ class WebPushConfiguration(
 
     companion object {
         const val DEFAULT_SEND_TIMEOUT_MS = 8_000L
-        const val DEFAULT_INQUIRY_PATH = "/requests/{inquiryId}"
-        private val INQUIRY_PATH = Regex("^/[A-Za-z0-9/_{}.-]{0,200}$")
 
         fun fromEnvironment(environment: Map<String, String> = System.getenv()): WebPushConfiguration? {
+            // The per-inquiry trigger was replaced by the scheduled reminder; never ignore a request for it.
+            require(!flag(environment, "FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED")) {
+                "FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED was removed; use FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED"
+            }
             val enabled = flag(environment, "FIONAS_PUSH_ENABLED")
-            val inquiries = flag(environment, "FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED")
+            val reminders = flag(environment, "FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED")
             if (!enabled) {
-                require(!inquiries) { "FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED requires FIONAS_PUSH_ENABLED=true" }
+                require(!reminders) { "FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED requires FIONAS_PUSH_ENABLED=true" }
                 return null
             }
             val private = secret(environment, "FIONAS_PUSH_VAPID_PRIVATE_KEY")
@@ -84,8 +106,31 @@ class WebPushConfiguration(
                 subject,
                 hosts,
                 Duration.ofMillis(timeout),
-                inquiries,
-                environment["FIONAS_PUSH_INQUIRY_PATH"]?.trim() ?: DEFAULT_INQUIRY_PATH,
+                if (reminders) reminderSettings(environment) else null,
+            )
+        }
+
+        private fun reminderSettings(environment: Map<String, String>): UnansweredReminderSettings {
+            val zone =
+                environment["FIONAS_PUSH_UNANSWERED_REMINDER_TIME_ZONE"]?.let {
+                    try {
+                        ZoneId.of(it.trim())
+                    } catch (_: DateTimeException) {
+                        throw IllegalArgumentException(
+                            "FIONAS_PUSH_UNANSWERED_REMINDER_TIME_ZONE must be a time zone such as America/Los_Angeles",
+                        )
+                    }
+                } ?: UnansweredReminderSettings.DEFAULT_ZONE
+            val expression = environment["FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE"] ?: UnansweredReminderSettings.DEFAULT_SCHEDULE
+            val schedule =
+                try {
+                    CronSchedule.parse(expression, zone)
+                } catch (failure: IllegalArgumentException) {
+                    throw IllegalArgumentException("FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE: ${failure.message}")
+                }
+            return UnansweredReminderSettings(
+                schedule,
+                environment["FIONAS_PUSH_UNANSWERED_REMINDER_PATH"]?.trim() ?: UnansweredReminderSettings.DEFAULT_PATH,
             )
         }
 
@@ -189,20 +234,4 @@ class WebPushConfiguration(
 
         internal fun base64Url(bytes: ByteArray): String = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
-}
-
-/**
- * Whether the new-inquiry trigger is on, reading only the two flags (no keys). The operator
- * recovery command uses it so a recovered inquiry records the same job a live one would.
- */
-fun inquiryPushNotificationsEnabled(environment: Map<String, String> = System.getenv()): Boolean {
-    fun flag(name: String) =
-        when (environment[name]) {
-            null, "false" -> false
-            "true" -> true
-            else -> error("$name must be true or false")
-        }
-    val inquiries = flag("FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED")
-    require(!inquiries || flag("FIONAS_PUSH_ENABLED")) { "FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED requires FIONAS_PUSH_ENABLED=true" }
-    return inquiries
 }

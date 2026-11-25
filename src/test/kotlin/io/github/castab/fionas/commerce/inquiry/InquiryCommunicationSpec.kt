@@ -67,7 +67,7 @@ class InquiryCommunicationSpec :
                 InquiryCommunicationAttention.project(listOf(inbound(monday), clearing)).unacknowledgedSince shouldBe null
                 InquiryCommunicationAttention.project(listOf(inbound(tuesday), clearing)).unacknowledgedSince shouldBe null
                 InquiryCommunicationAttention.project(listOf(inbound(monday, 3), clearing, inbound(tuesday))) shouldBe
-                    InquiryCommunicationAttention(monday, tuesday)
+                    InquiryCommunicationAttention(monday, tuesday, staffResponded = true)
             }
         }
         test("latest clearing wins and acknowledgement never advances meaningful email activity") {
@@ -77,13 +77,13 @@ class InquiryCommunicationSpec :
                     recorded(InquiryCommunicationKind.STAFF_EMAIL_SENT, tuesday, 2),
                     recorded(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, wednesday, 3),
                 ),
-            ) shouldBe InquiryCommunicationAttention(null, tuesday)
+            ) shouldBe InquiryCommunicationAttention(null, tuesday, staffResponded = true)
         }
         test("an explicit observed boundary clears only inbound recorded through it, however late the clearing fact") {
             val sent = InquiryCommunicationKind.STAFF_EMAIL_SENT
             val late = RecordedInquiryCommunication(fact(sent, wednesday).copy(clearsThrough = 1), 3)
             InquiryCommunicationAttention.project(listOf(inbound(monday), inbound(tuesday, 2), late)) shouldBe
-                InquiryCommunicationAttention(tuesday, wednesday)
+                InquiryCommunicationAttention(tuesday, wednesday, staffResponded = true)
             // Boundaries combine by maximum: an earlier boundary recorded later never reopens what was cleared.
             val acknowledged =
                 RecordedInquiryCommunication(fact(InquiryCommunicationKind.STAFF_ACKNOWLEDGED, wednesday).copy(clearsThrough = 2), 4)

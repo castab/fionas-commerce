@@ -45,6 +45,16 @@ data class DashboardAttentionPolicy(
             ?.takeIf { stage != InquiryStage.DECLINED }
             ?.let { StaffAttention(mapOf(StaffAttentionReason.CUSTOMER_COMMUNICATION_UNACKNOWLEDGED to it)) }
 
+    /**
+     * Whether staff still owe the customer an answer: an outstanding customer email ([needsReply]),
+     * or a REQUESTED inquiry that no staff email or acknowledgement has answered yet. Quoting or
+     * declining answers an inquiry. This is the population of the unanswered-inquiry reminder.
+     */
+    fun awaitingAnswer(
+        state: InquiryOperationalState,
+        communication: InquiryCommunicationAttention,
+    ): Boolean = needsReply(state, communication) != null || (state.needsQuote && !communication.staffResponded)
+
     fun needsQuote(
         state: InquiryOperationalState,
         createdAt: Instant,

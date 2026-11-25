@@ -124,7 +124,7 @@ Fiona owns, and persists in its own tables:
   orchestration and safe communication-purpose metadata (see [Financial emails](#financial-emails));
 - event and service details, and service locations (future);
 - staff Web Push device registrations, notification jobs, per-device delivery outcomes and the
-  new-inquiry trigger (see [Staff Web Push notifications](#staff-web-push-notifications));
+  scheduled unanswered-inquiry reminder (see [Staff Web Push notifications](#staff-web-push-notifications));
 - further relationships between these records and generic commerce facts (future), for
   example which lineage a booking produced.
 
@@ -897,10 +897,16 @@ after runtime-owned migrations.
 - **`V15__staff_push_notifications`** (additive) adds `staff_push_subscriptions` (endpoint,
   keys and SHA-256 with a partial unique index on the active endpoint hash, cleared on
   retirement), `staff_notifications` (TEST jobs unique per `(requested_by, idempotency_key)`,
-  NEW_INQUIRY jobs unique per `inquiry_id`) and `staff_notification_deliveries` (unique
+  NEW_INQUIRY jobs unique per `inquiry_id`, retired by V16) and `staff_notification_deliveries` (unique
   `(notification_id, subscription_id)`, `state`/`outcome_reason`, attempt token). Two USER FKs
   (`user_id`, `requested_by` → `commerce.users`) bring the published-runtime FK total to
   eighteen. No runtime DDL; the work queue is the runtime outbox.
+- **`V16__unanswered_inquiry_reminders`** (expand) adds nullable `staff_notifications.scheduled_for`
+  (unique) and `inquiry_count` (> 0), the UNANSWERED_INQUIRIES kind and a shape check requiring both
+  for it and neither for the others. It fails if any NEW_INQUIRY row exists (none was ever written:
+  the trigger was never enabled). NEW_INQUIRY and `inquiry_id` stay valid only so a pre-V16 binary
+  overlapping a deploy can still write; current code neither writes nor reads them, and a later
+  contract migration drops both. No runtime DDL or references.
 - **V12 financial email commands** adds `inquiry_financial_emails`, its command/history
   indexes and a Fiona-only timeline trigger. USER and exact runtime snapshot FKs bring the
   current published-runtime FK total to sixteen. No amount, body, address, delivery state
@@ -2072,7 +2078,7 @@ real repetition or a real requirement appears.
 Not in scope until a dedicated slice decides otherwise: allocation reversals,
 providers beyond the dedicated Stripe Checkout slice, caller/actor delegation, OAuth/OIDC,
 refresh tokens, self-service password resets, lifecycle event dispatch beyond InquiryPersisted v3 and InquiryDeclined v1
-(staff notification events are their own producer), notification kinds beyond test and new-inquiry pushes, customer push,
+(staff notification events are their own producer), notification kinds beyond test pushes and the unanswered-inquiry reminder, customer push,
 persisted financial projections, CQRS, separate Booking aggregates,
 Quote withdrawal, cancellation, archive, reopening (including of declined inquiries), decline reason taxonomies, unserve, zero-deposit booking, automatic emails (acknowledgement, Quote, Invoice), email attachments, arbitrary staff HTML, provider conversation state changes, provider event backfill and broader communication workflows,
 any product catalog, offerings binding, pricing engine, price preview or price validation in Fiona (they belong to `fionas-web`),
@@ -2407,10 +2413,10 @@ Operations, configuration, the `fionas-admin` contract and the smoke checklist a
   `PushKeys` requires a 65-byte uncompressed P-256 key and a 16-byte auth secret. Endpoints, keys
   and payloads never enter responses, events or logs; `toString` is redacted.
 - **Delivery is the runtime outbox.** Work items are runtime outbox records of producer
-  `fionas-commerce.webpush` (fan-out per NEW_INQUIRY job, one per delivery), carrying only Fiona
+  `fionas-commerce.webpush` (fan-out per reminder job, one per delivery), carrying only Fiona
   ids. `StaffPushDispatcher` runs a runtime `OutboxDispatcher` (batch 1, poll 1s, publish timeout
   15s, lease 60s, retry 5s–5m) over `WebPushDeliveryTransport`; Fiona adds no claim, lease,
-  scheduler or retry loop. Transaction A locks the delivery, share-locks the subscription,
+  delivery scheduler or retry loop. Transaction A locks the delivery, share-locks the subscription,
   rechecks it and the owner's eligibility (directory reads happen before, outside the
   transaction), honors `not_before`/`give_up_at`, and records an attempt token. The provider call
   runs outside any transaction with redirects disabled. Transaction B, fenced by the token,
@@ -2419,7 +2425,7 @@ Operations, configuration, the `fionas-admin` contract and the smoke checklist a
 - **Outcomes.** 2xx `PUSH_ACCEPTED`; 404/410 retires only the registration version used and is
   `PUSH_FAILED subscription_expired`; other 4xx/3xx `provider_rejected`; 429/5xx/connect failure
   `RETRYING` (Retry-After stored as `not_before`); timeout/lost response `RETRYING
-  provider_outcome_unknown` with `ever_uncertain`. At `give_up_at` (10 min test, 1 h inquiry) the
+  provider_outcome_unknown` with `ever_uncertain`. At `give_up_at` (10 min test, 1 h reminder) the
   delivery fails with `provider_outcome_unknown` if any attempt was uncertain, otherwise the last
   reason or `delivery_expired`. Revoked/expired devices and ineligible owners are `SKIPPED` with no
   event. Acceptance is never display; an uncertain retry may duplicate, under one notification id
@@ -2429,15 +2435,24 @@ Operations, configuration, the `fionas-admin` contract and the smoke checklist a
   revocation, another device is `409 IDEMPOTENCY_KEY_REUSED`, and a new key for an inactive device
   is `404`. The job, its single delivery, its work item and `notification.queued` commit together;
   the route answers `202` after commit.
-- **New inquiries.** `createInquiryOperation(context, clock, inquiryNotifications)` gives
-  `CreateInquiry` a `notifyStaff` hook called after the InquiryPersisted append in the same
-  transaction; it inserts one NEW_INQUIRY job (`ON CONFLICT (inquiry_id) DO NOTHING`) and a fan-out
-  work item. Replays return before it. HTTP, intake and the recovery CLI share it
-  (`FIONAS_PUSH_INQUIRY_NOTIFICATIONS_ENABLED`, which requires `FIONAS_PUSH_ENABLED`). Fan-out targets
-  active devices of ACTIVE users holding `fionas.inquiries.read`, appends `notification.queued`
-  with `deliveryCount` (possibly 0, which completes the job) and is idempotent through
-  `fanned_out_at`. Payloads carry only `version`, `notificationId`, `kind`, server copy and a
-  relative `url` (`FIONAS_PUSH_INQUIRY_PATH`); never customer data.
+- **Unanswered-inquiry reminders** (`FIONAS_PUSH_UNANSWERED_REMINDERS_ENABLED`, requires
+  `FIONAS_PUSH_ENABLED`) replaced the per-inquiry trigger; inquiry creation records no notification
+  job. `UnansweredReminderScheduler` (a `ManagedBackgroundService`, one virtual thread) owns only
+  *when*: at each slot of a five-field `CronSchedule` read in an explicit zone
+  (`FIONAS_PUSH_UNANSWERED_REMINDER_SCHEDULE`/`_TIME_ZONE`, default `0 10,14 * * MON-FRI`
+  America/Los_Angeles) it calls `UnansweredInquiryReminders.remind(slot)`. Slots up to
+  `REMINDER_GRACE` (30 min) late are raised; older ones are skipped and logged. `remind` returns
+  early when the slot's job exists, otherwise counts with `CountUnansweredInquiries` (its own
+  REPEATABLE_READ snapshot over `ReadInquiryOperationalStates` and `attentionFor`, applying
+  `DashboardAttentionPolicy.awaitingAnswer`: dashboard `needsReply`, or REQUESTED with no staff
+  email or acknowledgement ever recorded) and, for a positive count, inserts one
+  UNANSWERED_INQUIRIES job (`scheduled_for` unique, `inquiry_count > 0`, `ON CONFLICT DO NOTHING`
+  then re-read) with its fan-out work item in a READ COMMITTED transaction. Zero records nothing.
+  Fan-out targets active devices of ACTIVE users holding `fionas.inquiries.read`, appends
+  `notification.queued` with `deliveryCount` (possibly 0, which completes the job) and is
+  idempotent through `fanned_out_at`. Payloads carry only `version`, `notificationId`, `kind`,
+  server copy with the count and a relative `url` (`FIONAS_PUSH_UNANSWERED_REMINDER_PATH`, default
+  `/`); never customer data. Reminders share the push `Topic` `unanswered-inquiries`.
 - **Events.** `StaffNotificationEventLog` appends v1 events with producer
   `fionas-commerce.notifications`, aggregate `staff_notification` = notification id, to
   `<FIONAS_NOTIFICATION_EVENTS_SUBJECT_PREFIX>.notification.{queued,push_accepted,push_failed}.v1`

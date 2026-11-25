@@ -105,9 +105,9 @@ class MigrationLifecycleSpec :
                 // Independent histories: the runtime's additive outbox V2 and JSONB V3 needs no Fiona migration,
                 // and Fiona's additive V2 is the next integer of Fiona's own history.
                 database.history(FIONA_MIGRATION_SCHEMA).map { it.substringBefore(' ') } shouldContainExactly
-                    (1..15).map { it.toString() }
+                    (1..16).map { it.toString() }
                 database.history(FIONA_MIGRATION_SCHEMA).first() shouldContain "V1__fionas_baseline.sql"
-                database.history(FIONA_MIGRATION_SCHEMA).last() shouldContain "V15__staff_push_notifications.sql"
+                database.history(FIONA_MIGRATION_SCHEMA).last() shouldContain "V16__unanswered_inquiry_reminders.sql"
                 database.history("commerce").map { it.substringBefore(' ') } shouldContainExactly listOf("1", "2", "3")
                 database.history("commerce").first() shouldContain "V1__commerce_baseline.sql"
                 database.history("commerce").last() shouldContain "V3__outbox_jsonb_payload.sql"
