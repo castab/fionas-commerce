@@ -21,14 +21,33 @@ fun RouteMetaDsl.returningLoginRateLimit() {
     )
 }
 
-/** Per-process login buckets, using monotonic time and the connection IP, never forwarded headers. */
+/**
+ * Per-process credential-attempt buckets, using monotonic time and the connection IP, never
+ * forwarded headers. Each instance is one independent limit: a burst of [capacity] attempts,
+ * refilling one every [refillInterval]. Password login keeps the default (five, then one every
+ * five minutes); passkey ceremonies, whose options are fetched on every sign-in page view and
+ * which cannot be guessed, use their own more generous instance.
+ */
 class LoginRateLimit(
     private val nanoTime: () -> Long = System::nanoTime,
     private val maxIdentities: Int = 10_000,
+    val capacity: Int = DEFAULT_CAPACITY,
+    val refillInterval: Duration = DEFAULT_REFILL_INTERVAL,
 ) {
     init {
         require(maxIdentities > 0)
+        require(capacity > 0)
+        require(!refillInterval.isNegative && !refillInterval.isZero)
     }
+
+    private val refillNanos = refillInterval.toNanos()
+
+    /** The route description of this limit, for OpenAPI. */
+    val described: String
+        get() =
+            "Limited per connection IP to a burst of $capacity attempts, " +
+                "refilling one attempt every ${refillInterval.toSeconds()} seconds. " +
+                "All attempts count, including successful and malformed requests. 429 includes Retry-After in seconds."
 
     private class Bucket(
         var tokens: Int,
@@ -62,34 +81,38 @@ class LoginRateLimit(
     private fun retryAfter(identity: String): Long? {
         val now = nanoTime()
         if (now - cleanedAt >= CLEANUP_INTERVAL) {
-            buckets.entries.removeIf { now - it.value.lastSeen >= REFILL_INTERVAL * CAPACITY }
+            buckets.entries.removeIf { now - it.value.lastSeen >= refillNanos * capacity }
             cleanedAt = now
         }
         val bucket =
             buckets[identity] ?: if (buckets.size < maxIdentities) {
-                Bucket(CAPACITY, now, now).also { buckets[identity] = it }
+                Bucket(capacity, now, now).also { buckets[identity] = it }
             } else {
                 overflow ?: Bucket(0, now, now).also { overflow = it }
             }
         bucket.lastSeen = now
         val elapsed = now - bucket.refilledAt
-        val refills = elapsed / REFILL_INTERVAL
+        val refills = elapsed / refillNanos
         if (refills > 0) {
-            bucket.tokens = (bucket.tokens + refills.coerceAtMost(CAPACITY.toLong()).toInt()).coerceAtMost(CAPACITY)
-            bucket.refilledAt = if (bucket.tokens == CAPACITY) now else bucket.refilledAt + refills * REFILL_INTERVAL
+            bucket.tokens = (bucket.tokens + refills.coerceAtMost(capacity.toLong()).toInt()).coerceAtMost(capacity)
+            bucket.refilledAt = if (bucket.tokens == capacity) now else bucket.refilledAt + refills * refillNanos
         }
         if (bucket.tokens > 0) {
             bucket.tokens--
             return null
         }
-        val remaining = REFILL_INTERVAL - (now - bucket.refilledAt)
+        val remaining = refillNanos - (now - bucket.refilledAt)
         return (remaining + NANOS_PER_SECOND - 1) / NANOS_PER_SECOND
     }
 
     companion object {
-        private const val CAPACITY = 5
+        const val DEFAULT_CAPACITY = 5
+        val DEFAULT_REFILL_INTERVAL: Duration = Duration.ofMinutes(5)
         private const val NANOS_PER_SECOND = 1_000_000_000L
-        private val REFILL_INTERVAL = Duration.ofMinutes(5).toNanos()
         private val CLEANUP_INTERVAL = Duration.ofMinutes(1).toNanos()
+
+        /** Passkey ceremonies: a burst of 30, refilling one every ten seconds. */
+        fun forPasskeys(nanoTime: () -> Long = System::nanoTime) =
+            LoginRateLimit(nanoTime, capacity = 30, refillInterval = Duration.ofSeconds(10))
     }
 }

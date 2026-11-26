@@ -535,11 +535,34 @@ class OpenApiDocumentSpec :
                 Triple("/auth/me", "get", "getCurrentUser") to listOf("200", "401", "403", "500"),
                 Triple("/admin/users/{userId}/credentials/password", "put", "setStaffPassword") to
                     listOf("204", "400", "401", "403", "404", "422", "500"),
+                Triple("/auth/passkey/options", "post", "startPasskeySignIn") to listOf("200", "403", "429", "500", "503"),
+                Triple("/auth/passkey", "post", "finishPasskeySignIn") to listOf("204", "400", "401", "403", "404", "429", "500", "503"),
+                Triple("/staff/account", "get", "getStaffAccount") to listOf("200", "401", "403", "500"),
+                Triple("/staff/passkeys", "get", "listStaffPasskeys") to listOf("200", "401", "403", "500", "503"),
+                Triple("/staff/passkeys/registration/options", "post", "startPasskeyRegistration") to
+                    listOf("200", "401", "403", "409", "500", "503"),
+                Triple("/staff/passkeys", "post", "registerStaffPasskey") to
+                    listOf("201", "400", "401", "403", "409", "422", "500", "503"),
+                Triple("/staff/passkeys/{passkeyId}", "patch", "renameStaffPasskey") to
+                    listOf("200", "400", "401", "403", "404", "422", "500", "503"),
+                Triple("/staff/passkeys/{passkeyId}", "delete", "removeStaffPasskey") to
+                    listOf("200", "400", "401", "403", "404", "500", "503"),
+                Triple("/staff/credentials/password", "put", "changeOwnPassword") to
+                    listOf("204", "400", "401", "403", "422", "429", "500"),
             )
 
         // Each Fiona operation's tag.
         val tags =
             mapOf(
+                "startPasskeySignIn" to "Authentication",
+                "finishPasskeySignIn" to "Authentication",
+                "getStaffAccount" to "Staff account",
+                "listStaffPasskeys" to "Staff account",
+                "startPasskeyRegistration" to "Staff account",
+                "registerStaffPasskey" to "Staff account",
+                "renameStaffPasskey" to "Staff account",
+                "removeStaffPasskey" to "Staff account",
+                "changeOwnPassword" to "Staff account",
                 "getStaffNotificationConfig" to "Staff notifications",
                 "enrollStaffPushSubscription" to "Staff notifications",
                 "listStaffPushSubscriptions" to "Staff notifications",
@@ -643,6 +666,29 @@ class OpenApiDocumentSpec :
         // The schemas Fiona itself describes; every other one is commerce-runtime's.
         val fionaSchemas =
             listOf(
+                "PasskeyRelyingPartyJson",
+                "PasskeyUserJson",
+                "PasskeyAlgorithmJson",
+                "PasskeyDescriptorJson",
+                "PasskeyAuthenticatorSelectionJson",
+                "PasskeyCreationExtensionsJson",
+                "PasskeyCreationOptionsJson",
+                "PasskeyRequestOptionsJson",
+                "PasskeyRegistrationOptionsResponse",
+                "PasskeySignInOptionsResponse",
+                "PasskeyAttestationResponseJson",
+                "PasskeyCredPropsJson",
+                "PasskeyRegistrationExtensionResultsJson",
+                "PasskeyRegistrationCredentialJson",
+                "PasskeyAssertionResponseJson",
+                "PasskeyAssertionCredentialJson",
+                "PasskeySignInRequest",
+                "RegisterPasskeyRequest",
+                "RenamePasskeyRequest",
+                "PasskeyResponse",
+                "PasskeyListResponse",
+                "StaffAccountResponse",
+                "ChangeOwnPasswordRequest",
                 "StaffNotificationConfigResponse",
                 "EnrollPushSubscriptionRequest",
                 "PushSubscriptionRequest",
@@ -821,6 +867,7 @@ class OpenApiDocumentSpec :
                 listOf(
                     "Customer payments",
                     "Staff notifications",
+                    "Staff account",
                     "Staff dashboard",
                     "Staff requests",
                     "Staff proposals",
@@ -885,6 +932,14 @@ class OpenApiDocumentSpec :
                 "revokeStaffPushSubscription",
                 "sendStaffTestNotification",
                 "getStaffTestNotification",
+                // A staff member's own passkeys and password belong to that USER.
+                "getStaffAccount",
+                "listStaffPasskeys",
+                "startPasskeyRegistration",
+                "registerStaffPasskey",
+                "renameStaffPasskey",
+                "removeStaffPasskey",
+                "changeOwnPassword",
             )
 
         test("line amounts document precise unit rates with settlement-exact subtotals and minor-unit tax") {
@@ -925,7 +980,9 @@ class OpenApiDocumentSpec :
                     requirements(path, method) shouldBe
                         when (operationId) {
                             // Public: credentials obtain a session, so none is required.
-                            "login", "readCustomerPaymentSummary", "createCustomerCheckoutSession", "receiveStripeWebhook" -> emptyList()
+                            "login", "startPasskeySignIn", "finishPasskeySignIn",
+                            "readCustomerPaymentSummary", "createCustomerCheckoutSession", "receiveStripeWebhook",
+                            -> emptyList()
                             // Logout revokes browser sessions only and is idempotent cleanup without one:
                             // staffSession OR anonymous ({}). A service token is never advertised for it.
                             "logout" -> listOf(setOf("staffSession"), emptySet())
@@ -1085,6 +1142,17 @@ class OpenApiDocumentSpec :
                         .map { Triple(it.first, it.second, "503") }
                         .toSet(),
                 "push_endpoint_in_use" to setOf(Triple("/staff/notifications/subscriptions", "post", "409")),
+                "passkeys_disabled" to
+                    operations.keys
+                        .filter { it.third in setOf("startPasskeySignIn", "finishPasskeySignIn") || it.first.startsWith("/staff/passkeys") }
+                        .map { Triple(it.first, it.second, "503") }
+                        .toSet(),
+                "reauthentication_required" to
+                    setOf(
+                        Triple("/staff/passkeys/registration/options", "post", "403"),
+                        Triple("/staff/passkeys/{passkeyId}", "delete", "403"),
+                    ),
+                "current_password_incorrect" to setOf(Triple("/staff/credentials/password", "put", "403")),
             )
 
         test("documents every error with commerce-runtime's one reusable error body and its code") {
@@ -1095,7 +1163,13 @@ class OpenApiDocumentSpec :
                     content.text("schema", "\$ref") shouldBe
                         "#/components/schemas/" + if (code == "validation_failed") "ValidationErrorResponse" else "ErrorResponse"
                     if (code == "rate_limited") {
-                        (path to method) shouldBe ("/auth/login" to "post")
+                        (path to method) shouldBeIn
+                            setOf(
+                                "/auth/login" to "post",
+                                "/auth/passkey/options" to "post",
+                                "/auth/passkey" to "post",
+                                "/staff/credentials/password" to "put",
+                            )
                         status shouldBe "429"
                     } else if (code == "IDEMPOTENCY_KEY_REUSED") {
                         (path to method) shouldBeIn setOf("/inquiries" to "post", "/staff/notifications/test" to "post")

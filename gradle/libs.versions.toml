@@ -1,10 +1,10 @@
 [versions]
 # The commerce artifacts this application is built on. commerce-runtime exposes the
 # matching commerce-domain version transitively, so the domain is not declared separately.
-commerce = "0.0.27"
+commerce = "0.0.28"
 
 # http4k arrives with commerce-runtime; the contract/OpenAPI modules Fiona adds on top must
-# be exactly the version commerce-runtime 0.0.27 is built against, never a newer one (Gradle
+# be exactly the version commerce-runtime 0.0.28 is built against, never a newer one (Gradle
 # would silently upgrade the runtime's http4k-core to match). Change it only together with
 # the commerce version. ArchitectureSpec fails if two http4k versions meet on the classpath.
 http4k = "6.58.0.0"
@@ -25,6 +25,10 @@ stripe = "34.1.0"
 # Web Push VAPID signing and RFC 8291 payload encryption with JDK crypto only (no Bouncy
 # Castle); Fiona sends the prepared request with its own redirect-free java.net.http client.
 zerodep-web-push = "2.1.5"
+# Staff passkeys: WebAuthn registration and assertion verification. Fiona renders and reads
+# every WebAuthn JSON itself with kotlinx.serialization and hands this library only bytes;
+# its Jackson and CBOR dependencies stay internal to it (see ArchitectureSpec).
+yubico-webauthn = "2.10.1"
 
 [libraries]
 commerce-runtime = { module = "io.github.castab:commerce-runtime", version.ref = "commerce" }
@@ -36,6 +40,7 @@ argon2-jvm = { module = "de.mkammerer:argon2-jvm", version.ref = "argon2" }
 jnats = { module = "io.nats:jnats", version.ref = "jnats" }
 stripe-java = { module = "com.stripe:stripe-java", version.ref = "stripe" }
 zerodep-web-push = { module = "com.zerodeplibs:zerodep-web-push-java", version.ref = "zerodep-web-push" }
+yubico-webauthn-server-core = { module = "com.yubico:webauthn-server-core", version.ref = "yubico-webauthn" }
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
 

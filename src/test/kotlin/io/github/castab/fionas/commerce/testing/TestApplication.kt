@@ -26,6 +26,7 @@ import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.SERVICE_TOKEN_PATH
 import io.github.castab.fionas.commerce.notification.WebPushConfiguration
 import io.github.castab.fionas.commerce.notification.WebPushSender
+import io.github.castab.fionas.commerce.passkey.WebAuthnConfiguration
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.SecretPassword
@@ -167,6 +168,10 @@ class TestApplication private constructor(
             webPush: WebPushConfiguration? = null,
             webPushSender: WebPushSender? = null,
             notificationEvents: NotificationEventsConfiguration = NotificationEventsConfiguration(),
+            webAuthn: WebAuthnConfiguration? = null,
+            passkeyRateLimit: LoginRateLimit = LoginRateLimit.forPasskeys(),
+            passwordRateLimit: LoginRateLimit = LoginRateLimit(),
+            sessionClock: Clock = Clock.systemUTC(),
             database: TestDatabase = TestDatabase.create(),
         ): TestApplication {
             try {
@@ -188,6 +193,10 @@ class TestApplication private constructor(
                         webPush = webPush,
                         webPushSender = webPushSender,
                         notificationEvents = notificationEvents,
+                        webAuthn = webAuthn,
+                        passkeyRateLimit = passkeyRateLimit,
+                        passwordRateLimit = passwordRateLimit,
+                        sessionClock = sessionClock,
                     )
                 var context: CommerceRuntimeContext? = null
                 val runtime =

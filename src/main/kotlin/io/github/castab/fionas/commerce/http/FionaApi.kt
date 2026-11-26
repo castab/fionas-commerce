@@ -8,6 +8,7 @@ import io.github.castab.commerce.runtime.financial.DepositRequirementVersion
 import io.github.castab.commerce.runtime.financial.FinancialLineageView
 import io.github.castab.commerce.runtime.financial.PaymentHistory
 import io.github.castab.commerce.runtime.http.AccessControl
+import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.serviceauth.ServiceAuthenticationHttpCapability
 import io.github.castab.commerce.runtime.session.IssuedSession
 import io.github.castab.commerce.runtime.session.SessionCookie
@@ -94,6 +95,8 @@ class FionaOperations(
     val payments: PaymentOperations? = null,
     /** Staff Web Push; null when the feature is disabled. */
     val notifications: StaffNotificationOperations? = null,
+    /** The signed-in staff member's own passkeys and password. */
+    val account: StaffAccountOperations = StaffAccountOperations.UNCONFIGURED,
     val previewFinancialEmail: (FinancialEmailIntent, UserId) -> FinancialEmailPreview,
     val sendFinancialEmail: (SendFinancialEmail) -> FinancialEmailResult,
     val prepareStaffTimelineUpdates: (InquiryId) -> Boolean,
@@ -147,6 +150,12 @@ class FionaAuthRoutes(
     val access: AccessControl,
     val origin: Filter,
     val loginRateLimit: LoginRateLimit = LoginRateLimit(),
+    /** Passkey sign-in's own limit: its options are fetched on every sign-in page view. */
+    val passkeyRateLimit: LoginRateLimit = LoginRateLimit.forPasskeys(),
+    /** Changing one's own password verifies the current one, so it is limited like a login, separately. */
+    val passwordRateLimit: LoginRateLimit = LoginRateLimit(),
+    /** "Sudo mode" for adding and removing passkeys. */
+    val recentAuthentication: RecentAuthentication = RecentAuthentication(sessions, cookie),
 )
 
 /**
@@ -199,11 +208,34 @@ fun fionaApiRoutes(
         recordStandalonePaymentRoute(operations.recordStandalonePayment, auth.access),
         allocatePaymentRoute(operations.allocatePayment, auth.access),
         recordRefundRoute(operations.recordRefund, auth.access),
-        loginRoute(operations.login, auth.cookie, auth.access, auth.origin, auth.loginRateLimit),
+        loginRoute(operations.login, auth.cookie, auth.access, auth.origin, auth.loginRateLimit, auth.sessions),
         logoutRoute(auth.sessions, auth.cookie, auth.access, auth.origin),
         currentUserRoute(operations.currentUser, operations.currentPermissions, auth.access),
         setStaffPasswordRoute(operations.setStaffPassword, auth.access),
-    ) + paymentRoutes(operations.payments, auth.access) + staffNotificationRoutes(operations.notifications, auth.access)
+    ) + paymentRoutes(operations.payments, auth.access) + staffNotificationRoutes(operations.notifications, auth.access) +
+        passkeySignInRoutes(
+            operations.account.passkeys,
+            { id -> issueSession(auth.sessions, id) },
+            auth.sessions,
+            auth.cookie,
+            auth.access,
+            auth.origin,
+            auth.passkeyRateLimit,
+        ) +
+        staffAccountRoutes(operations.account, auth.access, auth.recentAuthentication, auth.cookie, auth.passwordRateLimit)
+
+/** A session for a user whose credential just verified; null when the user was disabled or removed meanwhile. */
+private fun issueSession(
+    sessions: SessionManager,
+    userId: UserId,
+): IssuedSession? =
+    try {
+        sessions.create(userId)
+    } catch (_: CommerceFailure.NotFound) {
+        null
+    } catch (_: CommerceFailure.Conflict) {
+        null
+    }
 
 /**
  * The Fiona API: one http4k contract of [fionaApiRoutes] and the contract routes of the

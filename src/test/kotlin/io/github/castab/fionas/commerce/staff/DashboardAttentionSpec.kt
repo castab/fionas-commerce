@@ -27,6 +27,7 @@ import io.github.castab.fionas.commerce.testing.proposalId
 import io.github.castab.fionas.commerce.testing.testClock
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldNotContain
 import io.kotest.matchers.shouldBe
 import org.http4k.core.Status
 import java.math.BigDecimal
@@ -256,7 +257,12 @@ class DashboardAttentionSpec :
                         UUID.fromString(document(id)),
                     )!!.value}"}""",
                 ).status shouldBe Status.CREATED
-            read(sentAt.plus(Duration.ofDays(10))).workQueue.needsResolution.items shouldBe emptyList()
+            // Booking removes the quote's attention. The fixture's event date is fixed while the quote's times follow
+            // the wall clock, so ten days later the BOOKED inquiry may separately await service; only QUOTE_STALE is asserted.
+            read(sentAt.plus(Duration.ofDays(10)))
+                .workQueue.needsResolution.items
+                .filter { it.inquiryId == id }
+                .flatMap { it.reasons } shouldNotContain StaffAttentionReason.QUOTE_STALE
         }
 
         test("event attention begins after scheduled day in explicit event calendar zone, including DST, and only for BOOKED") {

@@ -2,6 +2,7 @@ package io.github.castab.fionas.commerce.testing
 
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.session.IssuedSession
+import io.github.castab.commerce.runtime.session.PrincipalSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.runtime.session.SessionToken
@@ -25,6 +26,8 @@ val metadataAuth =
                 ): IssuedSession = error("not called")
 
                 override fun resolve(token: SessionToken): PrincipalId? = error("not called")
+
+                override fun describe(token: SessionToken): PrincipalSession? = error("not called")
 
                 override fun revoke(token: SessionToken): Unit = error("not called")
 

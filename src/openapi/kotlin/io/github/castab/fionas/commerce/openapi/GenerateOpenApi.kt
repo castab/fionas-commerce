@@ -21,6 +21,7 @@ import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokens
 import io.github.castab.commerce.runtime.serviceauth.ServiceCredentialSecret
 import io.github.castab.commerce.runtime.serviceauth.ServiceCredentials
 import io.github.castab.commerce.runtime.session.IssuedSession
+import io.github.castab.commerce.runtime.session.PrincipalSession
 import io.github.castab.commerce.runtime.session.SessionCookie
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.runtime.session.SessionToken
@@ -111,6 +112,8 @@ private val notInvokedSessions =
         ): IssuedSession = error("Rendering never creates a session")
 
         override fun resolve(token: SessionToken): PrincipalId? = error("Rendering never resolves a session")
+
+        override fun describe(token: SessionToken): PrincipalSession? = error("Rendering never describes a session")
 
         override fun revoke(token: SessionToken): Unit = error("Rendering never revokes a session")
 

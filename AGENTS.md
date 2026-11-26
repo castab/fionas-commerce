@@ -947,9 +947,10 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
                  → AccessControl → context.authorization.permissionResolver → handler
 ```
 
-- Fiona owns only `fionas.user_credentials`: `user_id` references
-  `commerce.users(principal_id)`, plus an Argon2id hash and change timestamp. It owns no
-  user, role, assignment, or session table.
+- Fiona owns `fionas.user_credentials` (`user_id` references `commerce.users(principal_id)`,
+  plus an Argon2id hash and change timestamp) and the staff passkey tables
+  (`fionas.staff_webauthn_user_handles`, `fionas.staff_passkeys`, `fionas.webauthn_ceremonies`).
+  It owns no user, role, assignment, or session table, and no table name contains "session".
 - The runtime normalizes usernames and enforces uniqueness in its directory.
 - Passwords are Argon2id hashes encoded by `argon2-jvm`. Raw passwords enter only the
   login/bootstrap credential path and are never logged or persisted. Wrong username,
@@ -1007,8 +1008,31 @@ later request    → sessionAuthentication(...) → authenticatedPrincipal
   cookie-authenticated methods require a matching `Origin` and fail closed if none is
   configured. Fiona's CSRF policy is separate from the reusable runtime session filter. A
   token-only request carries no cookie and is never rejected for lacking an `Origin`.
+- **Staff passkeys** live in the `passkey` package, the only code that may import
+  `com.yubico` (ArchitectureSpec). The Yubico library verifies; Fiona owns the policy (user
+  verification and discoverable credentials required, no attestation, Ed25519/ES256/RS256,
+  exact `FIONAS_WEBAUTHN_ORIGINS`, single-use five-minute challenges, 20 passkeys per user, a
+  64-byte random user handle) and renders and reads every WebAuthn JSON with kotlinx. Hand
+  the library bytes and its builders only; never its `parse*Json`/`to*Json` helpers, which are
+  Jackson. Jackson reaches the classpath only transitively through Yubico and nothing in
+  Fiona may name it. Never return a public key, challenge or ceremony secret, and never log
+  one. Passkey sign-in ends in `context.sessions.create`, exactly like password login; it
+  never mints its own session or token. Relying party ids are per admin host, never a parent
+  domain.
+- **Sudo mode.** Starting a passkey registration and removing a passkey require a session
+  signed in within `RecentAuthentication.window` (ten minutes), judged from
+  `SessionManager.describe(token).createdAt` with the runtime's session clock; otherwise
+  `403 reauthentication_required`. Re-authentication is a new sign-in (password or passkey),
+  never a Fiona-stored "step-up" flag: Fiona persists no session state. Every sign-in that
+  presents a session cookie revokes that session after issuing the new one.
+- **Self-service password change** (`PUT /staff/credentials/password`) verifies the current
+  password, applies the shared length policy (`MIN_PASSWORD_LENGTH`..`MAX_PASSWORD_LENGTH`, no
+  composition rules), rejects reuse of the current password, and in one transaction stores
+  the hash, `revokeAll`s the user's sessions and issues a fresh one. It has its own
+  `LoginRateLimit` instance; passkey ceremonies have another (`LoginRateLimit.forPasskeys`).
 - Caller/actor delegation, user impersonation by a BFF, OAuth/OIDC, refresh tokens, and
-  signing-key rotation are not part of this slice.
+  signing-key rotation are not part of this slice. Self-service password *reset* (forgotten
+  password) remains out of scope: an administrator resets it.
 - `GET /auth/me` returns sorted effective `permissions` directly from
   `context.authorization.permissionResolver.permissionsFor`, alongside profile and roles.
   It requires only an active human session, never `commerce.role.read`. Grants and role
@@ -2111,9 +2135,12 @@ real Fiona requirement → Fiona implementation → missing reusable seam become
   → minimal upstream change → new commerce release → Fiona consumes it
 ```
 
-### Known upstream gaps (last audited at commerce 0.0.27)
+### Known upstream gaps (last audited at commerce 0.0.28)
 
-The application consumes commerce-runtime 0.0.27, with matching commerce-domain transitively.
+The application consumes commerce-runtime 0.0.28, with matching commerce-domain transitively.
+Version 0.0.28 adds `SessionManager.describe(token)`, the active session under `resolve`'s rules,
+whose `createdAt` is its authentication time; Fiona's staff passkey "sudo mode" uses it (closing
+the "Fiona cannot tell when a session signed in" gap without persisting any session state).
 Version 0.0.24 adds runtime-owned transactional outbox persistence, sequencing, leases,
 retry coordination, backlog diagnostics and managed background-service lifecycle. Fiona
 consumes those capabilities for InquiryPersisted v3; it owns no delivery persistence or scheduler.
@@ -2162,7 +2189,7 @@ unchanged http4k version; it never supplies its own server or framed HTTP stream
 - **Capability routes need a composed runtime.** The administration and service-token
   capabilities take a `CommerceRuntimeContext`, whose constructor is `internal`, and only
   `commerceRuntime(...)`, which needs a database, creates one. The generator (`src/openapi`,
-  never the deployable jar) builds a rendering-only context reflectively against the 0.0.27
+  never the deployable jar) builds a rendering-only context reflectively against the 0.0.28
   constructor, including its outbox, with a transactor that opens no connection and a reflectively assembled
   `FinancialLedger` and authorization directory that refuse every call. This is provisional:
   commerce-runtime may eventually need a first-class contract composition seam.

@@ -64,6 +64,8 @@ dependencies {
     implementation(libs.argon2.jvm)
     implementation(libs.stripe.java)
     implementation(libs.zerodep.web.push)
+    // Staff passkey (WebAuthn) verification, confined to the passkey package.
+    implementation(libs.yubico.webauthn.server.core)
     implementation(libs.jnats) {
         // The runtime already supplies bcprov-jdk18on. NATS' LTS artifact defines the
         // same classes under another module name; including both breaks jar uniqueness.

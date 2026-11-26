@@ -2,8 +2,8 @@
 
 The commerce backend of Fiona's Ice Cream and its catering business: a concrete Kotlin/JVM
 application built on the reusable
-[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.27/runtime) and
-[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.27/domain)
+[`commerce-runtime`](https://github.com/castab/commerce-domain/tree/v0.0.28/runtime) and
+[`commerce-domain`](https://github.com/castab/commerce-domain/tree/v0.0.28/domain)
 artifacts.
 
 > **Status: early slices.** Fiona records inquiries and their customers, owns which inquiry
@@ -69,8 +69,8 @@ fionas-web (separate) the customer catalog, its pricing, and the staff UI; calls
                        a SERVICE for submissions and on behalf of a verified staff session
 ```
 
-`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.27`, which brings
-`commerce-domain:0.0.27` with it. It contributes its migration schema and location,
+`fionas-commerce` depends on `io.github.castab:commerce-runtime:0.0.28`, which brings
+`commerce-domain:0.0.28` with it. It contributes its migration schema and location,
 permissions, and routes to the runtime through `ApplicationContributions`, and every write
 goes through the runtime's shared `Transactor`:
 
@@ -268,6 +268,12 @@ Runtime satisfaction arithmetic remains authoritative; Fiona does not persist it
 | `POST /auth/logout` | Revokes the staff browser session and clears the cookie, including on repeated logout or a stale cookie. Session-only: a request authenticated only by a service access token is `403`, and no token is revoked. |
 | `GET /auth/me` | Returns the active human staff profile, current role keys, and sorted effective live `permissions`; requires no role-administration permission. |
 | `PUT /admin/users/{userId}/credentials/password` | Sets a runtime user's Fiona password; requires `fionas.credentials.manage` and trusted Origin. |
+| `POST /auth/passkey/options` | Anonymous; a one-time, five-minute challenge for a discoverable passkey sign-in (also passkey autofill). Trusted Origin; its own per-IP limit (burst 30, one refill every 10 seconds). `503 passkeys_disabled` when not configured. |
+| `POST /auth/passkey` | Anonymous; verifies the passkey's answer and sets the same session cookie as password login. `401` for every verification failure, `404` for a passkey that is not registered here. Trusted Origin; same limit as the options. |
+| `GET /staff/account` | Any staff USER: when this session signed in, until when sensitive changes need no new sign-in, whether passkeys are enabled and how many the caller has. |
+| `GET /staff/passkeys`, `PATCH /staff/passkeys/{passkeyId}` | Any staff USER: list or rename **their own** passkeys. Another member's ids are `404`. |
+| `POST /staff/passkeys/registration/options`, `POST /staff/passkeys`, `DELETE /staff/passkeys/{passkeyId}` | Any staff USER: add or remove their own passkey. Starting a registration and removing need a sign-in within ten minutes, else `403 reauthentication_required`. |
+| `PUT /staff/credentials/password` | Any staff USER: change their own password with the current one; signs out every session and sets a fresh cookie. `403 current_password_incorrect`; its own per-IP limit. |
 | `POST /auth/service/token` | commerce-runtime's endpoint, mounted by Fiona: public; a SERVICE principal exchanges `{"serviceId","secret"}` for a short-lived bearer access token. `401` for every authentication failure, `400` for a malformed body. `Cache-Control: no-store`. |
 
 The runtime administration capability is mounted at `/admin/access`: it exposes users,
@@ -534,9 +540,54 @@ exists. Remove the bootstrap password from the environment after provisioning. L
 startups never overwrite a credential. No default password exists.
 
 An administrator can create a user with `POST /admin/access/users`, then set its password
-with `PUT /admin/users/{userId}/credentials/password`. The password must have at least 12
-characters. The response contains no credential material. Setting a password does not
-revoke existing sessions; there is no self-service password change in this API.
+with `PUT /admin/users/{userId}/credentials/password`. The password must have 12 to 256
+characters; length is the only rule. The response contains no credential material. An
+administrator setting a password does not revoke existing sessions.
+
+A staff member changes their own password with `PUT /staff/credentials/password`
+(`{"currentPassword","newPassword"}`). The current password is the change's re-authentication;
+the new one follows the same length rule and must differ. One transaction stores the hash,
+revokes every session of the user (other devices are signed out) and issues a fresh session
+cookie for this browser. A wrong current password is `403 current_password_incorrect`. The
+route has its own per-IP limit (five, then one every five minutes), separate from login.
+
+Signing in again, by password or passkey, while presenting a session cookie revokes that
+presented session once the new one is issued, so re-authentication never leaves the old
+session alive.
+
+### Staff passkeys
+
+Staff may sign in with a passkey (WebAuthn discoverable credential) instead of their password;
+the password stays as the fallback. Passkeys are enabled by setting all of
+`FIONAS_WEBAUTHN_RP_ID`, `FIONAS_WEBAUTHN_RP_NAME` and `FIONAS_WEBAUTHN_ORIGINS`; none
+disables them and a partial set fails startup. The relying party id is the admin host
+itself (`admin.fionasicecream.com`, `admin-dev.fionasicecream.com`, `localhost`), never a
+parent domain, so each environment's passkeys stay with its own database. Each origin must be
+https (or http on localhost), on that host, and also in `FIONAS_TRUSTED_ORIGINS`.
+
+```text
+POST /auth/passkey/options → ceremony (32-byte challenge, five minutes, single use)
+browser navigator.credentials.get() (autofill or button)
+POST /auth/passkey → Yubico verification → UserId → context.sessions.create(...) → cookie
+```
+
+Policy: user verification and discoverable credentials are required, no attestation is
+requested, algorithms are Ed25519, ES256 and RS256, the signed `clientDataJSON.origin` must be
+one of the configured origins exactly, and a signature counter that goes backwards (when not
+zero) is rejected. The WebAuthn user handle is 64 random bytes per user, never the user id or
+username. At most 20 passkeys per user. Verification is `com.yubico:webauthn-server-core`,
+confined to the `passkey` package and fed only bytes: Fiona renders and reads all WebAuthn
+JSON with kotlinx.serialization. `fionas.staff_passkeys` stores the credential id, COSE public
+key, counter, AAGUID, transports and backup flags; public keys are never returned. Every
+ceremony is spent on first use, verified or not. Logs carry `event=passkey_registered`,
+`passkey_removed`, `passkey_authenticated` and `passkey_*_rejected` with user and passkey ids,
+never key material or challenges.
+
+Adding and removing a passkey need a sign-in within the last ten minutes ("sudo mode"):
+commerce-runtime's `SessionManager.describe` gives the session's creation time, which is its
+authentication time because sessions never extend. Otherwise the route answers
+`403 reauthentication_required`, and the client signs in again (password or passkey) and
+retries.
 
 Set `FIONAS_TRUSTED_ORIGINS` to the exact frontend origin (or a comma-separated list),
 for example `https://shop.example.com`. Login and every unsafe request carrying Fiona's
@@ -1663,6 +1714,7 @@ environment variables.
 | `SERVICE_TOKENS_LIFETIME_MINUTES` | Access token lifetime (1–60) | `15` (runtime default) |
 | `FIONAS_EVENT_TIME_ZONE` | IANA zone interpreting event LocalDate boundaries, independent of UTC server Clock; invalid values fail startup | `America/Los_Angeles` |
 | `FIONAS_TRUSTED_ORIGINS` | Comma-separated exact browser origins for login and cookie-authenticated mutations | none; browser login is denied until configured |
+| `FIONAS_WEBAUTHN_RP_ID`, `FIONAS_WEBAUTHN_RP_NAME`, `FIONAS_WEBAUTHN_ORIGINS` | Staff passkeys: the admin host as relying party id, the name passkey managers show (for example `Fiona's Admin`), and the comma-separated exact admin origins (each also in `FIONAS_TRUSTED_ORIGINS`). All three or none; see [Staff passkeys](#staff-passkeys) | none; passkeys disabled |
 | `FIONAS_BOOTSTRAP_ADMIN_USERNAME` | First administrator's username; required with password and display name | none |
 | `FIONAS_BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password, at least 12 characters; remove after provisioning | none |
 | `FIONAS_BOOTSTRAP_ADMIN_DISPLAY_NAME` | First administrator's nonblank display name; required with username and password | none |
@@ -1680,7 +1732,7 @@ Commerce 0.0.24 adds runtime-owned `V2__transactional_outbox.sql` after its unch
 Commerce 0.0.25 adds `V3__outbox_jsonb_payload.sql`, converting valid historical JSON objects
 from text to JSONB without changing their business meaning or destination; invalid/non-object
 history fails migration and needs an explicit operator decision.
-Commerce 0.0.26 and 0.0.27 add no runtime migration. These additive migrations upgrade current V1/V2
+Commerce 0.0.26, 0.0.27 and 0.0.28 add no runtime migration. These additive migrations upgrade current V1/V2
 databases normally. Fiona's additive `V2__inquiry_declines.sql` likewise only creates
 `fionas.inquiry_declines`, and `V3__internal_line_authorship.sql` only extends
 `fionas.financial_document_authorship` for INTERNAL origins; both upgrade a deployed database
