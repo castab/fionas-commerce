@@ -22,8 +22,9 @@ fun RouteMetaDsl.returningLoginRateLimit() {
 }
 
 /**
- * Per-process credential-attempt buckets, using monotonic time and the connection IP, never
- * forwarded headers. Each instance is one independent limit: a burst of [capacity] attempts,
+ * Per-process credential-attempt buckets, using monotonic time and the client address that
+ * [clientAddress] resolves: the connection IP by default, never forwarded headers unless the
+ * deployment declares Cloudflare as its only ingress ([ClientAddressSource.CLOUDFLARE]). Each instance is one independent limit: a burst of [capacity] attempts,
  * refilling one every [refillInterval]. Password login keeps the default (five, then one every
  * five minutes); passkey ceremonies, whose options are fetched on every sign-in page view and
  * which cannot be guessed, use their own more generous instance.
@@ -33,6 +34,7 @@ class LoginRateLimit(
     private val maxIdentities: Int = 10_000,
     val capacity: Int = DEFAULT_CAPACITY,
     val refillInterval: Duration = DEFAULT_REFILL_INTERVAL,
+    private val clientAddress: ClientAddressSource = ClientAddressSource.CONNECTION,
 ) {
     init {
         require(maxIdentities > 0)
@@ -45,7 +47,7 @@ class LoginRateLimit(
     /** The route description of this limit, for OpenAPI. */
     val described: String
         get() =
-            "Limited per connection IP to a burst of $capacity attempts, " +
+            "Limited per client address (see FIONAS_CLIENT_IP_SOURCE) to a burst of $capacity attempts, " +
                 "refilling one attempt every ${refillInterval.toSeconds()} seconds. " +
                 "All attempts count, including successful and malformed requests. 429 includes Retry-After in seconds."
 
@@ -64,7 +66,7 @@ class LoginRateLimit(
     val filter: Filter =
         Filter { next ->
             { request ->
-                val retryAfter = retryAfter(request.source?.address?.takeIf(String::isNotBlank) ?: "unknown")
+                val retryAfter = retryAfter(clientAddress.of(request))
                 if (retryAfter == null) {
                     next(request)
                 } else {
@@ -112,7 +114,9 @@ class LoginRateLimit(
         private val CLEANUP_INTERVAL = Duration.ofMinutes(1).toNanos()
 
         /** Passkey ceremonies: a burst of 30, refilling one every ten seconds. */
-        fun forPasskeys(nanoTime: () -> Long = System::nanoTime) =
-            LoginRateLimit(nanoTime, capacity = 30, refillInterval = Duration.ofSeconds(10))
+        fun forPasskeys(
+            nanoTime: () -> Long = System::nanoTime,
+            clientAddress: ClientAddressSource = ClientAddressSource.CONNECTION,
+        ) = LoginRateLimit(nanoTime, capacity = 30, refillInterval = Duration.ofSeconds(10), clientAddress = clientAddress)
     }
 }
