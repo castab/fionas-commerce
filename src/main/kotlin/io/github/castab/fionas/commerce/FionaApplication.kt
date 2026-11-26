@@ -11,6 +11,7 @@ import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokenAuthenticator
 import io.github.castab.commerce.runtime.session.SessionAuthenticator
 import io.github.castab.commerce.runtime.session.SessionCookie
+import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.fionas.commerce.conversation.ConversationAvailability
 import io.github.castab.fionas.commerce.conversation.ConversationEstablishment
 import io.github.castab.fionas.commerce.conversation.ConversationRead
@@ -71,7 +72,9 @@ import io.github.castab.fionas.commerce.http.BrowserOrigin
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.LoginRateLimit
+import io.github.castab.fionas.commerce.http.RecentAuthentication
 import io.github.castab.fionas.commerce.http.STAFF_SESSION_COOKIE
+import io.github.castab.fionas.commerce.http.StaffAccountOperations
 import io.github.castab.fionas.commerce.http.StaffTimelineUpdates
 import io.github.castab.fionas.commerce.http.apiDocs
 import io.github.castab.fionas.commerce.http.authorizationTag
@@ -105,6 +108,11 @@ import io.github.castab.fionas.commerce.notification.UnansweredReminderScheduler
 import io.github.castab.fionas.commerce.notification.WebPushConfiguration
 import io.github.castab.fionas.commerce.notification.WebPushSender
 import io.github.castab.fionas.commerce.notification.webPushDeliveryTransport
+import io.github.castab.fionas.commerce.passkey.JdbiPasskeyRepository
+import io.github.castab.fionas.commerce.passkey.JdbiWebAuthnCeremonyRepository
+import io.github.castab.fionas.commerce.passkey.PasskeyAccount
+import io.github.castab.fionas.commerce.passkey.StaffPasskeys
+import io.github.castab.fionas.commerce.passkey.WebAuthnConfiguration
 import io.github.castab.fionas.commerce.payments.CustomerPayments
 import io.github.castab.fionas.commerce.payments.PaymentOperations
 import io.github.castab.fionas.commerce.payments.StripeConfiguration
@@ -112,6 +120,7 @@ import io.github.castab.fionas.commerce.payments.StripeGateway
 import io.github.castab.fionas.commerce.payments.StripeJavaGateway
 import io.github.castab.fionas.commerce.staff.BootstrapAdmin
 import io.github.castab.fionas.commerce.staff.BootstrapFirstAdmin
+import io.github.castab.fionas.commerce.staff.ChangeOwnPassword
 import io.github.castab.fionas.commerce.staff.CountUnansweredInquiries
 import io.github.castab.fionas.commerce.staff.FionaPermissions
 import io.github.castab.fionas.commerce.staff.JdbiCredentialRepository
@@ -198,7 +207,13 @@ fun fionaApplication(
     webPush: WebPushConfiguration? = WebPushConfiguration.fromEnvironment(),
     webPushSender: WebPushSender? = null,
     notificationEvents: NotificationEventsConfiguration = NotificationEventsConfiguration.fromEnvironment(),
+    webAuthn: WebAuthnConfiguration? = WebAuthnConfiguration.fromEnvironment(),
+    passkeyRateLimit: LoginRateLimit = LoginRateLimit.forPasskeys(),
+    passwordRateLimit: LoginRateLimit = LoginRateLimit(),
+    /** The clock commerce-runtime's sessions use (the system clock); "sudo mode" compares session times with it. */
+    sessionClock: Clock = Clock.systemUTC(),
 ): ApplicationContributions {
+    webAuthn?.requireTrusted(trustedOrigins)
     val eventTransports = EventTransports(outboxPublisher, notificationEvents)
     var updates: StaffTimelineUpdates? = null
     var nativeUpdates: RoutingSseHandler? = null
@@ -276,7 +291,17 @@ fun fionaApplication(
                 )
             val access = AccessControl(origin.filter.then(authenticate), context.authorization)
             nativeUpdates = nativeStaffTimelineUpdatesRoute(prepareUpdates, access) { checkNotNull(updates) }
-            val auth = FionaAuthRoutes(context.sessions, cookie, access, origin.filter, loginRateLimit)
+            val auth =
+                FionaAuthRoutes(
+                    context.sessions,
+                    cookie,
+                    access,
+                    origin.filter,
+                    loginRateLimit,
+                    passkeyRateLimit,
+                    passwordRateLimit,
+                    RecentAuthentication(context.sessions, cookie, sessionClock),
+                )
             // Generic financial persistence is commerce-runtime's ledger; Fiona stores only its context.
             val ledger = context.financialLedger
             val documentOwners = JdbiInquiryFinancialDocumentRepository()
@@ -390,6 +415,20 @@ fun fionaApplication(
             val operations =
                 FionaOperations(
                     notifications = notifications,
+                    account =
+                        StaffAccountOperations(
+                            passkeys =
+                                webAuthn?.let {
+                                    StaffPasskeys(it, context.transactor, JdbiPasskeyRepository(), JdbiWebAuthnCeremonyRepository(), clock)
+                                },
+                            account = { id ->
+                                context.authorization
+                                    .getUser(id)
+                                    ?.takeIf { it.status == PrincipalStatus.ACTIVE }
+                                    ?.let { PasskeyAccount(it.id, it.username, it.displayName) }
+                            },
+                            changePassword = ChangeOwnPassword(context.transactor, credentials, hasher, context.sessions, clock)::invoke,
+                        ),
                     previewFinancialEmail = financialEmails::preview,
                     sendFinancialEmail = financialEmails::send,
                     payments =

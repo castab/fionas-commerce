@@ -116,6 +116,8 @@ class ArchitectureSpec :
                 FinancialDocumentAuthorshipRepository::class.java,
                 io.github.castab.fionas.commerce.payments.JdbiPaymentAccessRepository::class.java,
                 io.github.castab.fionas.commerce.payments.JdbiStripeAttemptRepository::class.java,
+                io.github.castab.fionas.commerce.passkey.JdbiPasskeyRepository::class.java,
+                io.github.castab.fionas.commerce.passkey.JdbiWebAuthnCeremonyRepository::class.java,
             ).forEach { repository ->
                 repository.declaredMethods
                     .filter {
@@ -143,6 +145,8 @@ class ArchitectureSpec :
                 JdbiFinancialDocumentAuthorshipRepository::class.java,
                 io.github.castab.fionas.commerce.payments.JdbiPaymentAccessRepository::class.java,
                 io.github.castab.fionas.commerce.payments.JdbiStripeAttemptRepository::class.java,
+                io.github.castab.fionas.commerce.passkey.JdbiPasskeyRepository::class.java,
+                io.github.castab.fionas.commerce.passkey.JdbiWebAuthnCeremonyRepository::class.java,
             ).forEach { repository ->
                 repository.declaredFields.map { it.type.name }.shouldBeEmpty()
                 repository.declaredConstructors.single().parameterCount shouldBe 0
@@ -193,6 +197,7 @@ class ArchitectureSpec :
                     "inquiry/DeclineInquiry.kt: inTransaction",
                     "inquiry/ListInquiries.kt: inTransaction",
                     "staff/StaffAuthentication.kt: inTransaction",
+                    "passkey/StaffPasskeys.kt: inTransaction",
                     "staff/ListStaffRequests.kt: inTransaction",
                     "staff/ReadStaffRequest.kt: inTransaction",
                     "staff/ReadStaffDashboard.kt: inTransaction",
@@ -388,13 +393,13 @@ class ArchitectureSpec :
                 .shouldBeEmpty()
         }
 
-        test("commerce runtime and transitive domain resolve at the adopted 0.0.27 release") {
+        test("commerce runtime and transitive domain resolve at the adopted 0.0.28 release") {
             listOf(
                 io.github.castab.commerce.runtime.financial.FinancialLedger::class.java to "commerce-runtime",
                 io.github.castab.commerce.financial.Money::class.java to "commerce-domain",
             ).forEach { (type, artifact) ->
                 type.protectionDomain.codeSource.location.path
-                    .substringAfterLast('/') shouldBe "$artifact-0.0.27.jar"
+                    .substringAfterLast('/') shouldBe "$artifact-0.0.28.jar"
             }
             File("gradle/libs.versions.toml").readText().contains("http4k = \"6.58.0.0\"") shouldBe true
         }
@@ -551,6 +556,20 @@ class ArchitectureSpec :
         test("kotlinx.serialization is the only JSON: no Jackson renders or reads anything") {
             sources().containing(listOf("org.http4k.format.Jackson", "com.fasterxml")).shouldBeEmpty()
             File("build.gradle.kts").readText().contains("jackson") shouldBe false
+        }
+
+        test("only the passkey package uses the WebAuthn library, with bytes and builders, never its Jackson JSON") {
+            // Jackson reaches the classpath only transitively through com.yubico:webauthn-server-core.
+            sources { it.parentFile.name != "passkey" }.containing(listOf("com.yubico")).shouldBeEmpty()
+            sources()
+                .containing(
+                    listOf(
+                        "parseRegistrationResponseJson",
+                        "parseAssertionResponseJson",
+                        "toCredentialsCreateJson",
+                        "toCredentialsGetJson",
+                    ),
+                ).shouldBeEmpty()
         }
 
         test("runtime is the sole session authority and Fiona persists no sessions") {

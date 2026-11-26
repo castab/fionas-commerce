@@ -65,7 +65,7 @@ data class SetStaffPasswordRequest(
 private val loginBody = jsonBody(LoginRequest.serializer())
 private val currentUserBody = jsonBody(CurrentUserResponse.serializer())
 private val setPasswordBody = jsonBody(SetStaffPasswordRequest.serializer())
-private val authTag = Tag("Authentication", "Staff browser sessions and service access tokens.")
+internal val authTag = Tag("Authentication", "Staff browser sessions and service access tokens.")
 
 /**
  * The name of Fiona's staff browser session cookie: the one `SessionCookie` Fiona composes and
@@ -138,11 +138,13 @@ fun loginRoute(
     access: AccessControl,
     origin: Filter,
     rateLimit: LoginRateLimit,
+    sessions: SessionManager,
 ): ContractRoute =
     "/auth/login" meta {
         operationId = "login"
         summary = "Log in as a Fiona staff user"
         description = "Verifies a staff password and sets a Secure, HttpOnly, host-only session cookie. Requires a trusted Origin. " +
+            "A session cookie the request already carried is revoked once the new one is issued (signing in again replaces it). " +
             "Limited per connection IP to a burst of five attempts, refilling one attempt every five minutes. " +
             "All attempts count, including successful and malformed requests. 429 includes Retry-After in seconds."
         tags += authTag
@@ -159,6 +161,7 @@ fun loginRoute(
             val issued =
                 login(body.username, SecretPassword.of(body.password))
                     ?: return@then errorResponse(ErrorCategory.UNAUTHENTICATED, "Invalid credentials")
+            retirePresentedSession(request, cookie, sessions)
             Response(Status.NO_CONTENT).cookie(cookie.issue(issued))
         }
 
@@ -305,7 +308,11 @@ fun setStaffPasswordRoute(
         returningError(ErrorCategory.MALFORMED_REQUEST, "the request or user ID is malformed.", "Malformed request")
         principalAccess(FionaPermissions.CredentialsManage, UNTRUSTED_ORIGIN)
         returningError(ErrorCategory.NOT_FOUND, "the target user does not exist.", "User does not exist")
-        returningError(ErrorCategory.VALIDATION_FAILED, "the password is too short.", "Password must have at least 12 characters")
+        returningError(
+            ErrorCategory.VALIDATION_FAILED,
+            "the password is too short or too long.",
+            "Password must have at least 12 characters",
+        )
         returningError(ErrorCategory.INTERNAL_FAILURE, "an unexpected failure.", INTERNAL_FAILURE)
     } bindContract Method.PUT to { id: String, _: String, _: String ->
         access.requirePermission(FionaPermissions.CredentialsManage).then { request: Request ->

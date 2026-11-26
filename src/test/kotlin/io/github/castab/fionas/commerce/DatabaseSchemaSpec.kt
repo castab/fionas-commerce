@@ -69,6 +69,9 @@ class DatabaseSchemaSpec :
                     "staff_push_subscriptions",
                     "staff_notifications",
                     "staff_notification_deliveries",
+                    "staff_webauthn_user_handles",
+                    "staff_passkeys",
+                    "webauthn_ceremonies",
                 )
         }
 

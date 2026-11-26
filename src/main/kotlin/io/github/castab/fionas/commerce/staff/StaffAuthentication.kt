@@ -16,9 +16,12 @@ import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
+import io.github.oshai.kotlinlogging.KotlinLogging
 import java.time.Clock
 import java.time.temporal.ChronoUnit
 import java.util.UUID
+
+private val logger = KotlinLogging.logger {}
 
 /** A mutable secret confined to credential handling. Close it to erase its character buffer. */
 class SecretPassword private constructor(
@@ -327,11 +330,64 @@ class SetStaffPassword(
     ) {
         password.use { secret ->
             if (authorization.getUser(userId) == null) throw CommerceFailure.NotFound("User does not exist")
-            secret.withCharacters {
-                if (it.size < 12) throw CommerceFailure.ValidationFailed("Password must have at least 12 characters")
-            }
+            requirePasswordPolicy(secret)
             val hash = passwords.hash(secret)
             transactor.inTransaction { credentials.setPassword(it, userId, hash, clock.instant().truncatedTo(ChronoUnit.MICROS)) }
         }
     }
+}
+
+/** The fewest characters a staff password may have. Length is the only rule: no composition rules (NIST SP 800-63B). */
+const val MIN_PASSWORD_LENGTH = 12
+
+/** The most characters a staff password may have, so one request cannot make hashing arbitrarily expensive. */
+const val MAX_PASSWORD_LENGTH = 256
+
+const val PASSWORD_TOO_SHORT = "Password must have at least $MIN_PASSWORD_LENGTH characters"
+const val PASSWORD_TOO_LONG = "Password must have at most $MAX_PASSWORD_LENGTH characters"
+
+internal fun requirePasswordPolicy(password: SecretPassword) =
+    password.withCharacters {
+        if (it.size < MIN_PASSWORD_LENGTH) throw CommerceFailure.ValidationFailed(PASSWORD_TOO_SHORT)
+        if (it.size > MAX_PASSWORD_LENGTH) throw CommerceFailure.ValidationFailed(PASSWORD_TOO_LONG)
+    }
+
+/** The current password given to change one's own password is wrong. */
+class CurrentPasswordIncorrect : RuntimeException("The current password is incorrect")
+
+/**
+ * A staff member changes their own password: the current password proves it is them (it is
+ * the change's re-authentication), the new one must satisfy the policy and differ from it.
+ * In one transaction the new hash is stored, every session of the user is revoked (other
+ * devices are signed out) and a fresh session is issued for this browser.
+ */
+class ChangeOwnPassword(
+    private val transactor: Transactor,
+    private val credentials: CredentialRepository,
+    private val passwords: PasswordHasher,
+    private val sessions: SessionManager,
+    private val clock: Clock,
+) {
+    fun invoke(
+        userId: UserId,
+        current: SecretPassword,
+        new: SecretPassword,
+    ): IssuedSession =
+        current.use { currentSecret ->
+            new.use { newSecret ->
+                val hash = transactor.inTransaction { credentials.passwordHash(it, userId) } ?: throw CurrentPasswordIncorrect()
+                if (!passwords.verify(hash, currentSecret)) throw CurrentPasswordIncorrect()
+                requirePasswordPolicy(newSecret)
+                if (passwords.verify(hash, newSecret)) {
+                    throw CommerceFailure.ValidationFailed("The new password must differ from the current one")
+                }
+                val newHash = passwords.hash(newSecret)
+                transactor
+                    .inTransaction { transaction ->
+                        credentials.setPassword(transaction, userId, newHash, clock.instant().truncatedTo(ChronoUnit.MICROS))
+                        sessions.revokeAll(transaction, userId)
+                        sessions.create(transaction, userId)
+                    }.also { logger.info { "event=staff_password_changed user=${userId.value}" } }
+            }
+        }
 }
