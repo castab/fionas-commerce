@@ -479,7 +479,7 @@ revokes browser sessions and nothing else, so a request authenticated only by a 
 Service access tokens are never revoked by logout; they expire, and disabling the service suspends them.
 No raw session token is sent in JSON.
 
-Login stays anonymous and is limited in memory per connection source IP: a burst of five
+Login stays anonymous and is limited in memory per client address: a burst of five
 attempts, then one attempt refilled every five minutes, up to five. Successful, malformed,
 and rejected attempts all count. Exhaustion returns `429` with `Retry-After` in whole
 seconds (rounded up), `Cache-Control: no-store`, and
@@ -487,8 +487,23 @@ seconds (rounded up), `Cache-Control: no-store`, and
 Each process has its own buckets and restart clears them. The synchronized map retains
 at most 10,000 IPs, removes idle fully replenished entries, and conservatively shares a
 depleted overflow bucket for new IPs when full. Missing source addresses share one bucket.
-Forwarded, X-Forwarded-For, and X-Real-IP headers are ignored. Behind a proxy, clients share
-the proxy connection's bucket; a trusted-proxy identity policy requires a separate decision.
+IPv6 clients are counted per /64 network, so rotating addresses inside one subscriber's block
+gains nothing; IPv4 clients per address.
+
+The client address comes from `FIONAS_CLIENT_IP_SOURCE`:
+
+- `connection` (default): the TCP peer. Forwarded, X-Forwarded-For, X-Real-IP and
+  CF-Connecting-IP headers are ignored, so behind a proxy every client shares the proxy
+  connection's bucket, and anyone can spend the attempts everyone else needs.
+- `cloudflare`: Cloudflare's `CF-Connecting-IP` header, so each real client has its own bucket.
+  Set it **only** where clients can reach the application exclusively through Cloudflare (for
+  example a Cloudflare Tunnel with no published port), because anyone who can connect directly
+  can send any value. A missing, repeated or malformed header (not a single IP literal; never
+  resolved as a host name) falls back to the connection address, so it cannot open a new bucket.
+  Other forwarding headers stay ignored.
+
+The same source keys the passkey and own-password-change limits. A server-side frontend that
+calls the API for its users (the admin BFF) is one client either way: its users share its bucket.
 
 The runtime directory normalizes usernames and stores the profile and status in
 `commerce.users`. Fiona's `fionas.user_credentials` holds only the Argon2id hash and
@@ -1714,6 +1729,7 @@ environment variables.
 | `SERVICE_TOKENS_LIFETIME_MINUTES` | Access token lifetime (1–60) | `15` (runtime default) |
 | `FIONAS_EVENT_TIME_ZONE` | IANA zone interpreting event LocalDate boundaries, independent of UTC server Clock; invalid values fail startup | `America/Los_Angeles` |
 | `FIONAS_TRUSTED_ORIGINS` | Comma-separated exact browser origins for login and cookie-authenticated mutations | none; browser login is denied until configured |
+| `FIONAS_CLIENT_IP_SOURCE` | Client address the sign-in limits count: `connection` (TCP peer) or `cloudflare` (`CF-Connecting-IP`, only when Cloudflare is the sole ingress); see [Staff authentication](#staff-authentication) | `connection` |
 | `FIONAS_WEBAUTHN_RP_ID`, `FIONAS_WEBAUTHN_RP_NAME`, `FIONAS_WEBAUTHN_ORIGINS` | Staff passkeys: the admin host as relying party id, the name passkey managers show (for example `Fiona's Admin`), and the comma-separated exact admin origins (each also in `FIONAS_TRUSTED_ORIGINS`). All three or none; see [Staff passkeys](#staff-passkeys) | none; passkeys disabled |
 | `FIONAS_BOOTSTRAP_ADMIN_USERNAME` | First administrator's username; required with password and display name | none |
 | `FIONAS_BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password, at least 12 characters; remove after provisioning | none |

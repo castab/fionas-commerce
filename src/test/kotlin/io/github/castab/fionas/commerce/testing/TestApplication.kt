@@ -22,6 +22,7 @@ import io.github.castab.fionas.commerce.conversation.ConversationReadConfigurati
 import io.github.castab.fionas.commerce.conversation.ConversationSendConfiguration
 import io.github.castab.fionas.commerce.events.NotificationEventsConfiguration
 import io.github.castab.fionas.commerce.fionaApplication
+import io.github.castab.fionas.commerce.http.ClientAddressSource
 import io.github.castab.fionas.commerce.http.LoginRateLimit
 import io.github.castab.fionas.commerce.http.SERVICE_TOKEN_PATH
 import io.github.castab.fionas.commerce.notification.WebPushConfiguration
@@ -157,7 +158,7 @@ class TestApplication private constructor(
             clock: Clock = testClock,
             bootstrap: BootstrapAdmin? =
                 BootstrapAdmin("admin", "Test Administrator", null, null, SecretPassword.of("test-admin-password")),
-            loginRateLimit: LoginRateLimit = LoginRateLimit(),
+            loginRateLimit: LoginRateLimit? = null,
             trustedOrigins: Set<String> = setOf(TEST_ORIGIN),
             eventCalendarZone: ZoneId = FIONA_DEFAULT_EVENT_CALENDAR_ZONE,
             conversationReads: ConversationReadConfiguration? = null,
@@ -169,9 +170,10 @@ class TestApplication private constructor(
             webPushSender: WebPushSender? = null,
             notificationEvents: NotificationEventsConfiguration = NotificationEventsConfiguration(),
             webAuthn: WebAuthnConfiguration? = null,
-            passkeyRateLimit: LoginRateLimit = LoginRateLimit.forPasskeys(),
-            passwordRateLimit: LoginRateLimit = LoginRateLimit(),
+            passkeyRateLimit: LoginRateLimit? = null,
+            passwordRateLimit: LoginRateLimit? = null,
             sessionClock: Clock = Clock.systemUTC(),
+            clientAddressSource: ClientAddressSource = ClientAddressSource.CONNECTION,
             database: TestDatabase = TestDatabase.create(),
         ): TestApplication {
             try {
@@ -197,6 +199,7 @@ class TestApplication private constructor(
                         passkeyRateLimit = passkeyRateLimit,
                         passwordRateLimit = passwordRateLimit,
                         sessionClock = sessionClock,
+                        clientAddressSource = clientAddressSource,
                     )
                 var context: CommerceRuntimeContext? = null
                 val runtime =

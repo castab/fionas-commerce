@@ -69,6 +69,7 @@ import io.github.castab.fionas.commerce.financial.SetDepositRequirement
 import io.github.castab.fionas.commerce.financial.WithdrawDepositRequirement
 import io.github.castab.fionas.commerce.financialemail.FinancialEmails
 import io.github.castab.fionas.commerce.http.BrowserOrigin
+import io.github.castab.fionas.commerce.http.ClientAddressSource
 import io.github.castab.fionas.commerce.http.FionaAuthRoutes
 import io.github.castab.fionas.commerce.http.FionaOperations
 import io.github.castab.fionas.commerce.http.LoginRateLimit
@@ -192,7 +193,7 @@ fun fionaApplication(
             ?.filter(String::isNotBlank)
             ?.toSet()
             ?: emptySet(),
-    loginRateLimit: LoginRateLimit = LoginRateLimit(),
+    loginRateLimit: LoginRateLimit? = null,
     eventCalendarZone: ZoneId = fionaEventCalendarZone(),
     outboxPublisher: NatsOutboxConfiguration? = NatsOutboxConfiguration.fromEnvironment(),
     intake: NatsIntakeConfiguration? = NatsIntakeConfiguration.fromEnvironment(),
@@ -208,12 +209,18 @@ fun fionaApplication(
     webPushSender: WebPushSender? = null,
     notificationEvents: NotificationEventsConfiguration = NotificationEventsConfiguration.fromEnvironment(),
     webAuthn: WebAuthnConfiguration? = WebAuthnConfiguration.fromEnvironment(),
-    passkeyRateLimit: LoginRateLimit = LoginRateLimit.forPasskeys(),
-    passwordRateLimit: LoginRateLimit = LoginRateLimit(),
+    passkeyRateLimit: LoginRateLimit? = null,
+    passwordRateLimit: LoginRateLimit? = null,
     /** The clock commerce-runtime's sessions use (the system clock); "sudo mode" compares session times with it. */
     sessionClock: Clock = Clock.systemUTC(),
+    /** Which client address the sign-in limits count (FIONAS_CLIENT_IP_SOURCE); see [ClientAddressSource]. */
+    clientAddressSource: ClientAddressSource = ClientAddressSource.fromEnvironment(),
 ): ApplicationContributions {
     webAuthn?.requireTrusted(trustedOrigins)
+    // One instance of each limit for the whole application, all keyed by the same client address.
+    val loginLimit = loginRateLimit ?: LoginRateLimit(clientAddress = clientAddressSource)
+    val passkeyLimit = passkeyRateLimit ?: LoginRateLimit.forPasskeys(clientAddress = clientAddressSource)
+    val passwordLimit = passwordRateLimit ?: LoginRateLimit(clientAddress = clientAddressSource)
     val eventTransports = EventTransports(outboxPublisher, notificationEvents)
     var updates: StaffTimelineUpdates? = null
     var nativeUpdates: RoutingSseHandler? = null
@@ -297,9 +304,9 @@ fun fionaApplication(
                     cookie,
                     access,
                     origin.filter,
-                    loginRateLimit,
-                    passkeyRateLimit,
-                    passwordRateLimit,
+                    loginLimit,
+                    passkeyLimit,
+                    passwordLimit,
                     RecentAuthentication(context.sessions, cookie, sessionClock),
                 )
             // Generic financial persistence is commerce-runtime's ledger; Fiona stores only its context.

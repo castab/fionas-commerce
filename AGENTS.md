@@ -733,10 +733,14 @@ Also:
   granting exactly `fionas.inquiries.create`, assigns it, and issues a credential through
   `/admin/access`; rotation is create B, deploy B, verify, revoke A.
 - Anonymous `POST /auth/login` uses one synchronized in-memory limiter per process,
-  capacity five, one token per five minutes, keyed by connection source IP. All attempts
+  capacity five, one token per five minutes, keyed by `ClientAddressSource`. All attempts
   count before origin/body/password checks, including success; success never resets it.
-  Monotonic time drives refill. Do not trust forwarded headers without an explicit proxy
-  policy; a proxy currently shares its connection-IP bucket. Missing source shares a bucket.
+  Monotonic time drives refill. The client address is the connection IP unless the deployment
+  sets `FIONAS_CLIENT_IP_SOURCE=cloudflare`, which trusts only `CF-Connecting-IP`, and only as a
+  single IP literal (never DNS); anything else falls back to the connection IP. Never trust
+  another forwarding header, never trust one without that explicit setting, and never let a
+  header create a bucket out of a malformed value. IPv6 is bucketed per /64. Missing source
+  shares a bucket. The login, passkey and own-password limits use the same source.
 - Retain at most 10,000 identities; prune fully replenished idle entries and use a depleted
   shared overflow bucket for new IPs at the bound, never evict depleted identities.
   Restart resets buckets; replicas do not share them. Exhaustion returns 429, Retry-After

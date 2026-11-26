@@ -145,7 +145,8 @@ fun loginRoute(
         summary = "Log in as a Fiona staff user"
         description = "Verifies a staff password and sets a Secure, HttpOnly, host-only session cookie. Requires a trusted Origin. " +
             "A session cookie the request already carried is revoked once the new one is issued (signing in again replaces it). " +
-            "Limited per connection IP to a burst of five attempts, refilling one attempt every five minutes. " +
+            "Limited per client address (the connection IP, or Cloudflare's CF-Connecting-IP when FIONAS_CLIENT_IP_SOURCE=cloudflare) " +
+            "to a burst of five attempts, refilling one attempt every five minutes. " +
             "All attempts count, including successful and malformed requests. 429 includes Retry-After in seconds."
         tags += authTag
         receiving(loginBody to LoginRequest("brayan", "password"))
